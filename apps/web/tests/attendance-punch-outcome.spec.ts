@@ -19,7 +19,9 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { createNetworkUnavailableError } from '../src/utils/networkErrors'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -73,6 +75,17 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
+/** Punch button release (fix/attendance-punch-button-release, 2026-08-21): a promise this test
+ * controls the settlement of, for simulating an in-flight HTTP call (punch POST or a post-punch
+ * refresh task) that has not yet resolved. */
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     candidate => candidate.textContent?.trim() === label
@@ -83,7 +96,16 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
 
 /** Minimal default mock: every non-punch endpoint returns an empty-but-ok payload so mount + refreshAll() never throw. */
 function installBaselineMock(): void {
-  vi.mocked(apiFetch).mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url.includes('/api/attendance/rules/me')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { runtimeRule: { timezone: 'Asia/Shanghai' } },
+      })
+    }
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
 }
 
 describe('Punch outcome clarity (pure)', () => {
@@ -100,6 +122,20 @@ describe('Punch outcome clarity (pure)', () => {
     expect(checkOut.kind).toBe('recorded')
     expect(checkOut.message).toBe('Check out recorded.')
     expect(checkOut.shouldRefreshRequests).toBe(false)
+  })
+
+  it('builds punch payloads from the effective rule timezone, never a browser fallback', () => {
+    expect(buildPunchBasePayload('check_in', ' Asia/Shanghai ', '')).toEqual({
+      eventType: 'check_in',
+      timezone: 'Asia/Shanghai',
+    })
+    expect(buildPunchBasePayload('check_out', null, ' org-9 ')).toEqual({
+      eventType: 'check_out',
+      orgId: 'org-9',
+    })
+    expect(buildPunchBasePayload('check_in', 'Invalid/Zone', null)).toEqual({
+      eventType: 'check_in',
+    })
   })
 
   it('classifies pendingApproval:true as pendingApproval and never says "recorded"', () => {
@@ -214,12 +250,18 @@ describe('Attendance punch outcome clarity (mount)', () => {
     const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
     let punchPosted = false
     let requestsCallsAfterPunch = 0
+    // Refresh identity (P3-5 gate hardening, 2026-08-21): a G1 pendingApproval
+    // punch writes no attendance fact — refreshAll()'s full overview data set
+    // (summary/records) must NOT be touched, only the requests list. Pins
+    // WHICH refresh function ran, not just "some refresh happened".
+    let summaryOrRecordsCallsAfterPunch = 0
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
         expect((init as RequestInit | undefined)?.method).toBe('POST')
         const body = JSON.parse(String((init as RequestInit).body))
         expect(Object.keys(body).sort()).toEqual(['eventType', 'timezone'])
+        expect(body.timezone).toBe('Asia/Shanghai')
         expect(body).not.toHaveProperty('location')
         expect(body).not.toHaveProperty('meta')
         punchPosted = true
@@ -230,6 +272,9 @@ describe('Attendance punch outcome clarity (mount)', () => {
       }
       if (url.includes('/api/attendance/requests?') && punchPosted) {
         requestsCallsAfterPunch += 1
+      }
+      if (punchPosted && (url.includes('/api/attendance/summary?') || url.includes('/api/attendance/records?'))) {
+        summaryOrRecordsCallsAfterPunch += 1
       }
       if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
       return defaultImpl(input, init)
@@ -246,6 +291,9 @@ describe('Attendance punch outcome clarity (mount)', () => {
     expect(pageText).toContain('Outdoor punch submitted for approval; it will count once approved.')
     expect(pageText.toLowerCase()).not.toContain('check in recorded')
     expect(requestsCallsAfterPunch).toBeGreaterThan(0)
+    // The G1 branch calls loadRequests() only — refreshAll()'s full overview
+    // set must stay untouched (a silent identity swap would light this up).
+    expect(summaryOrRecordsCallsAfterPunch).toBe(0)
   })
 
   it('G2: OUTDOOR_NOTE_REQUIRED shows an inline note input; retry POSTs the exact payload then succeeds', async () => {
@@ -620,5 +668,259 @@ describe('Attendance punch outcome clarity (mount)', () => {
 
     expect(container!.textContent).toContain('Check in recorded.')
     expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeNull()
+  })
+
+  // Punch button release (fix/attendance-punch-button-release, 2026-08-21): `punching` used to
+  // stay true until AFTER the post-punch refreshAll() settled (10 overview tasks + the 2-step
+  // loadSelfAttendanceRules — up to 11 requests, no apiFetch timeout), so the button showed
+  // "Working..." for as long as that refresh took even though the POST itself had long returned.
+  // `punching` now covers only the punch POST; a separate `refreshingAfterPunch` counter drives a
+  // non-blocking "Updating..." indicator for the refresh instead.
+  it('button release: punching clears and the button re-enables once the punch POST settles, even while the post-punch refreshAll() is still pending', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        // Every call refreshAll() makes after the punch POST resolved never settles — proves
+        // `punching` does not wait on any of them.
+        return new Promise<Response>(() => {})
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const checkIn = findButton(container!, 'Check In')
+    checkIn.click()
+    await flushUi(10)
+
+    // (a) — the discriminating assertion: the outcome is shown, the button is enabled and back
+    // to its idle label, while the refresh (deliberately never-resolving here) is still pending.
+    expect(container!.textContent).toContain('Check in recorded.')
+    expect(checkIn.disabled).toBe(false)
+    expect(checkIn.textContent?.trim()).toBe('Check In')
+    const indicator = container!.querySelector('[data-testid="attendance-refreshing-indicator"]')
+    expect(indicator).toBeTruthy()
+    expect(indicator!.textContent?.trim()).toBe('Updating...')
+  })
+
+  it('positive control: the button is disabled (and shows "Working...") while the punch POST itself is in flight, and a second click in that window issues no second POST', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    const deferredPunch = createDeferred<Response>()
+    let punchCallCount = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchCallCount += 1
+        return deferredPunch.promise
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // Capture the element reference before clicking: Vue patches the existing button node in
+    // place when its disabled/label state changes, so this reference stays valid across
+    // re-renders — looking it up again by label would fail once the label flips to "Working...".
+    const checkIn = findButton(container!, 'Check In')
+    checkIn.click()
+    await flushUi(2)
+
+    expect(punchCallCount).toBe(1)
+    expect(checkIn.disabled).toBe(true)
+    expect(checkIn.textContent?.trim()).toBe('Working...')
+
+    // (d) — a second click while the POST is still pending must not fire a second POST: the
+    // button is disabled in the actual DOM, and (like real browsers) jsdom does not dispatch a
+    // click event from `.click()` on a disabled button, so the handler never re-runs.
+    checkIn.click()
+    await flushUi(2)
+    expect(punchCallCount).toBe(1)
+
+    deferredPunch.resolve(jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } }))
+    await flushUi(10)
+
+    expect(checkIn.disabled).toBe(false)
+    expect(punchCallCount).toBe(1)
+  })
+
+  it('the refresh indicator clears once the post-punch refresh actually completes', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    const deferredRefresh = createDeferred<Response>()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        return deferredRefresh.promise
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(10)
+
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // (c) — resolving every pending refresh call clears the indicator.
+    deferredRefresh.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(10)
+
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
+  })
+
+  // Refresh identity (P3-5 gate hardening, 2026-08-21): every other spec here proves "some
+  // refresh happened" via the indicator or a never-resolving mock, but none of them pin WHICH
+  // refresh function ran. A silent swap of refreshAll() -> loadRequests() in the non-G1 branch
+  // (e.g. an accidental copy/paste) would still show the "Updating..." indicator and still keep
+  // this whole file green. This test pins the actual URL set instead.
+  it('refresh identity: a normal (non-G1) punch refresh hits the full overview data set (summary + records + requests), not just the requests list', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    const callsAfterPunch: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        // Record the URL, then never resolve — every task refreshAll() kicks off has already
+        // fired (and been recorded) by the time flushUi() below returns, without racing which
+        // task happens to settle first.
+        callsAfterPunch.push(url)
+        return new Promise<Response>(() => {})
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(10)
+
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/summary?'))).toBe(true)
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/records?'))).toBe(true)
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/requests?'))).toBe(true)
+  })
+
+  // P3-4 (optional gate hardening, 2026-08-21): refreshingAfterPunchCount is a counter, not a
+  // boolean, specifically so two overlapping post-punch refreshes don't let the earlier one's
+  // completion clear the indicator while the later one is still running. This constructs that
+  // overlap directly instead of asserting on the counter's internal value.
+  it('counter semantics: two overlapping post-punch refreshes keep the indicator visible until BOTH settle', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let phase: 'before' | 'afterFirstPunch' | 'afterSecondPunch' = 'before'
+    const deferredA = createDeferred<Response>()
+    const deferredB = createDeferred<Response>()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        const nextEventType = phase === 'before' ? 'check_in' : 'check_out'
+        if (phase === 'before') phase = 'afterFirstPunch'
+        else if (phase === 'afterFirstPunch') phase = 'afterSecondPunch'
+        return jsonResponse(200, { ok: true, data: { id: `event-${nextEventType}`, eventType: nextEventType } })
+      }
+      if (phase === 'afterFirstPunch') return deferredA.promise
+      if (phase === 'afterSecondPunch') return deferredB.promise
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // Punch #1 (Check In): its POST resolves immediately; its refreshAll() tasks all hang on
+    // deferredA. Indicator now on (count 0 -> 1).
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Punch #2 (Check Out), fired while punch #1's refresh is still pending — reachable because
+    // `punching` only covered punch #1's own POST, which already settled. Its own POST resolves
+    // immediately (matched by the punch-endpoint branch before the phase check); its refreshAll()
+    // tasks all hang on deferredB. Indicator stays on (count 1 -> 2).
+    findButton(container!, 'Check Out').click()
+    await flushUi(6)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Settle ONLY punch #1's refresh (count 2 -> 1). A plain boolean would clear here, since
+    // punch #1's own `runPostPunchRefresh` call would set it false in its own `finally`
+    // regardless of punch #2's refresh still running — the discriminating assertion.
+    deferredA.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(8)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Settle punch #2's refresh too (count 1 -> 0) — only now does the indicator clear.
+    deferredB.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(8)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
+  })
+
+  // F4-B regression (apps/web/src/utils/api.ts now rewrites transport failures).
+  // WHY HERE: classifyStatusError() reads `err.code` first and otherwise infers a code
+  // from ENGLISH keywords in the message; localizeRuntimeErrorMessage() then DROPS any
+  // Latin-only message under a zh UI and shows the caller's generic fallback instead.
+  // A zh-localized transport message therefore has exactly two ways to degrade —
+  // an empty/generic banner, or the raw browser literal — and both are pinned below.
+  // The error object is built by the REAL utils/networkErrors factory, i.e. the same
+  // object apiFetch throws in production; nothing here is a look-alike.
+  it('F4-B: a transport failure surfaces neutral zh copy with its code, and never auto re-POSTs the punch', async () => {
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
+
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchAttempts = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchAttempts += 1
+        throw createNetworkUnavailableError(new TypeError('Failed to fetch'))
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, '上班打卡').click()
+    await flushUi(6)
+
+    const pageText = container!.textContent ?? ''
+    // P5: apiFetch rejected without any response, so the panel must render the
+    // no-response sentence, NOT the gateway one (that swap is the 2026-09-14 incident).
+    expect(pageText).toContain('无法连接服务器（未收到任何响应），请检查网络或稍后重试')
+    expect(pageText).not.toContain('服务暂时不可用，请稍后重试')
+    // The browser literal must not reach the panel, and the copy must not collapse
+    // into the bare generic fallback (what a Latin-only message would have produced).
+    expect(pageText).not.toContain('Failed to fetch')
+    expect(pageText).not.toContain('NetworkError')
+    // A punch is non-idempotent: the panel must not fire a second POST on its own.
+    expect(punchAttempts).toBe(1)
   })
 })

@@ -12,6 +12,11 @@ const {
   createK3WiseWebApiAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
 const {
+  __internals: auditInternals,
+  K3_WISE_CALL_AUDIT_OPERATIONS,
+  getK3WiseCallAuditSnapshot,
+} = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-call-audit.cjs'))
+const {
   createK3WiseSqlServerChannel,
   createK3WiseSqlServerChannelFactory,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-channel.cjs'))
@@ -201,6 +206,24 @@ function createK3FetchMock() {
     if (parsed.pathname === '/K3API/Material/Audit') {
       return jsonResponse(200, { success: true, audited: body.Number })
     }
+    // BOM write mechanics mirror Material's (same Save/Submit/Audit shape), keyed on
+    // FParentItemNumber (the BOM keyField) instead of FNumber — BOM is NOT behind the
+    // material profile guard, so these back the "pure write-mechanics" cases migrated off
+    // material (tri-state autoSubmit/autoAudit, Submit-after-Save ordering, etc).
+    if (parsed.pathname === '/K3API/BOM/Save') {
+      const record = body.Model || body.Data
+      const parentKey = record.FParentItemNumber
+      if (parentKey === 'BAD') {
+        return jsonResponse(200, { success: false, message: 'invalid bom' })
+      }
+      return jsonResponse(200, { success: true, externalId: `item-${parentKey}`, billNo: parentKey })
+    }
+    if (parsed.pathname === '/K3API/BOM/Submit') {
+      return jsonResponse(200, { success: true, submitted: body.Number })
+    }
+    if (parsed.pathname === '/K3API/BOM/Audit') {
+      return jsonResponse(200, { success: true, audited: body.Number })
+    }
     return jsonResponse(404, { success: false, message: 'not found' })
   }
   return { calls, fetchImpl }
@@ -209,6 +232,7 @@ function createK3FetchMock() {
 function createK3WebApiSystem(overrides = {}) {
   return {
     id: 'k3_webapi_1',
+    tenantId: 'tenant_1',
     name: 'K3 WISE WebAPI',
     kind: 'erp:k3-wise-webapi',
     role: 'target',
@@ -495,30 +519,61 @@ async function testK3WebApiAdapter() {
     documentType: 'material',
   })
 
-  const preview = await adapter.previewUpsert({
-    object: 'material',
+  // [MIGRATED off material, review P2-D1] This case tested the OBJECT-AGNOSTIC previewUpsert
+  // mechanism: schema projection dropping client-only fields not in the schema (sourceId,
+  // revision, the idempotency key), Token redaction in the preview query, and
+  // metadata.autoSubmit/autoAudit passthrough from config. None of that is material business
+  // logic — it is the same generic code path BOM goes through. Now that material previewUpsert
+  // requires the named customer profile (guard below), a profile-less material call like this
+  // one would be refused before it could exercise the mechanism at all, so — same precedent as
+  // the write-mechanics cases already migrated off material onto BOM (see the BOM comment
+  // above) — this moved to BOM, which is not behind the profile guard. Assertions below are the
+  // actual previewUpsert output for BOM (verified by running, not guessed).
+  const bomPreview = await adapter.previewUpsert({
+    object: 'bom',
     records: [
       {
-        FNumber: 'MAT-PREVIEW-001',
-        FName: 'Preview bolt',
+        FParentItemNumber: 'BOM-PREVIEW-001',
+        FChildItemNumber: 'MAT-001',
+        FQty: 2,
+        FUnitID: 'PCS',
+        FEntryID: 1,
         sourceId: 'plm-1',
         revision: 'A',
-        _integration_idempotency_key: 'tenant:k3:MAT-PREVIEW-001',
+        _integration_idempotency_key: 'tenant:k3:BOM-PREVIEW-001',
       },
     ],
-    keyFields: ['FNumber'],
+    keyFields: ['FParentItemNumber'],
   })
-  assert.deepEqual(preview.records[0].body, {
+  assert.deepEqual(bomPreview.records[0].body, {
     Data: {
-      FNumber: 'MAT-PREVIEW-001',
-      FName: 'Preview bolt',
+      FParentItemNumber: 'BOM-PREVIEW-001',
+      FChildItemNumber: 'MAT-001',
+      FQty: 2,
+      FUnitID: 'PCS',
+      FEntryID: 1,
     },
-  })
-  assert.equal(preview.records[0].query.Token, '<redacted>')
-  assert.equal(preview.metadata.autoSubmit, true)
-  assert.equal(preview.metadata.autoAudit, true)
+  }, 'preview schema projection drops client-only fields not declared in the BOM schema')
+  assert.equal(bomPreview.records[0].query.Token, '<redacted>')
+  assert.equal(bomPreview.metadata.autoSubmit, true)
+  assert.equal(bomPreview.metadata.autoAudit, true)
 
-  const referencePreview = await adapter.previewUpsert({
+  // [KEPT on material, now PROFILED, review P2-D1] This case tests material-specific
+  // reference-field projection (k3Template `type: 'reference'` fields: an object value like
+  // {FNumber,FName} passes through verbatim; a scalar value is wrapped {[identifier]: value}) —
+  // genuine material business semantics (G3), not generic mechanism, so it stays on material.
+  // The profile guard now requires the named customer profile before material previewUpsert
+  // will even run, so this uses a DEDICATED profiled adapter — `profileSystem()` (defined below,
+  // reused here for the same customer-profile config the M1 Save suite exercises) — rather than
+  // the shared `adapter` above, which is deliberately kept profile-less to back the guard
+  // rejection case right below it. The customer profile's schema differs from the generic
+  // default template it replaces: FBaseUnitID is intentionally NOT declared in the profile (see
+  // k3-wise-document-templates.cjs) — the projected body below has no FBaseUnitID key, and
+  // metadata.k3Template is undefined (k3Template is a profile-forbidden overlay key, deleted by
+  // the same sweep that pins savePath/readPath). Both confirmed by actually running this, not
+  // assumed.
+  const profiledPreviewAdapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+  const referencePreview = await profiledPreviewAdapter.previewUpsert({
     object: 'material',
     records: [
       {
@@ -536,38 +591,70 @@ async function testK3WebApiAdapter() {
       FNumber: 'MAT-REF-001',
       FName: 'Reference material',
       FUnitGroupID: { FNumber: 'UG-PCS', FName: 'Pieces' },
-      FBaseUnitID: { FNumber: 'PCS' },
       FAcctID: { FNumber: '1405' },
     },
-  }, 'material reference fields preserve object values and wrap scalar values')
+  }, 'material reference fields preserve object values, wrap scalar values, and the profile schema drops FBaseUnitID')
+  assert.equal(referencePreview.metadata.k3Template, undefined, 'k3Template is a profile-forbidden overlay key — deleted in preview metadata too')
 
-  const upsert = await adapter.upsert({
+  // RATIFIED GUARD (owner, 20260805): a material upsert with no named customer profile must
+  // be refused before any network call — login itself never fires. Legacy/unprofiled configs
+  // hit this the first time they try to write.
+  const callsBeforeGuardRejection = calls.length
+  const guardRejection = await adapter.upsert({
     object: 'material',
-    records: [
-      { FNumber: 'MAT-001', FName: 'Bolt' },
-      { FNumber: 'BAD', FName: 'Broken' },
-    ],
+    records: [{ FNumber: 'MAT-001', FName: 'Bolt' }],
     keyFields: ['FNumber'],
-  })
-  assert.equal(upsert.written, 1)
-  assert.equal(upsert.failed, 1)
-  assert.equal(upsert.results[0].key, 'MAT-001')
-  assert.equal(upsert.results[0].externalId, 'item-MAT-001')
-  assert.equal(upsert.results[0].billNo, 'MAT-001')
-  assert.equal(upsert.results[0].responseMessage, 'K3 WISE save succeeded')
-  assert.equal(upsert.errors[0].code, 'K3_WISE_SAVE_FAILED')
-  assert.equal(upsert.metadata.autoSubmit, true)
-  assert.equal(upsert.metadata.autoAudit, true)
+  }).catch((error) => error)
+  assert.ok(guardRejection instanceof AdapterValidationError, 'unprofiled material upsert is refused')
+  assert.equal(guardRejection.details.code, 'K3_WISE_MATERIAL_PROFILE_REQUIRED')
+  assert.equal(calls.length, callsBeforeGuardRejection, 'unprofiled material upsert makes zero K3 calls (not even login)')
 
-  const saveCalls = calls.filter((call) => call.pathname === '/K3API/Material/Save')
-  const submitCalls = calls.filter((call) => call.pathname === '/K3API/Material/Submit')
-  const auditCalls = calls.filter((call) => call.pathname === '/K3API/Material/Audit')
-  assert.equal(saveCalls.length, 2)
-  assert.equal(submitCalls.length, 1, 'submit runs only after successful save')
-  assert.equal(auditCalls.length, 1, 'audit runs only after successful save')
-  assert.equal(saveCalls[0].options.headers['X-K3-Session'], 'k3-session-1')
-  assert.deepEqual(saveCalls[0].body, { Data: { FNumber: 'MAT-001', FName: 'Bolt' } })
-  assert.deepEqual(submitCalls[0].body, { Number: 'MAT-001' })
+  // NEW GUARD CASE (review P2-D1): previewUpsert must refuse an unprofiled material exactly like
+  // upsert does, and just as fast — before ANY network call, not even login. This is the
+  // preview-side twin of the RATIFIED GUARD case just above. It runs against the SAME
+  // profile-less `adapter` used for that case (the reference-projection case above deliberately
+  // used a SEPARATE, profiled adapter instance to arm the guard — it cannot stand in for this
+  // negative case, which needs the guard UNarmed).
+  const callsBeforePreviewGuardRejection = calls.length
+  const previewGuardRejection = await adapter.previewUpsert({
+    object: 'material',
+    records: [{ FNumber: 'MAT-002', FName: 'Bolt 2' }],
+    keyFields: ['FNumber'],
+  }).catch((error) => error)
+  assert.ok(previewGuardRejection instanceof AdapterValidationError, 'unprofiled material previewUpsert is refused')
+  assert.equal(previewGuardRejection.details.code, 'K3_WISE_MATERIAL_PROFILE_REQUIRED')
+  assert.equal(
+    calls.length,
+    callsBeforePreviewGuardRejection,
+    'unprofiled material previewUpsert makes zero K3 calls (refusal precedes any network activity)',
+  )
+
+  // CONVERTED (G-4, go-live gate: K3 Save/Submit/Audit external write-back is permanently
+  // banned). This block drove a BOM upsert to exercise the write mechanics — tri-state
+  // autoSubmit/autoAudit, Submit-after-Save ordering, session header, body assembly. The ban is
+  // CONNECTOR-WIDE, not material-only (BOM write was already off by owner boundary), so the whole
+  // lifecycle-write leg of the adapter is now unreachable and none of those wire-observable facts
+  // can be produced any more. What replaces it is the fact that actually matters after G-4: the
+  // call is refused, and nothing at all reaches K3.
+  //
+  // The body-assembly half of the old coverage is NOT lost — it survives on the preview leg,
+  // asserted a few lines above for this same BOM object (`bomPreview.records[0].body`), which
+  // composes through the identical `buildSaveBody`.
+  const callsBeforeBomWrite = calls.length
+  const bomWriteRefusal = await adapter.upsert({
+    object: 'bom',
+    records: [
+      { FParentItemNumber: 'BOM-001', FChildItemNumber: 'MAT-001', FQty: 1, FUnitID: 'PCS', FEntryID: 1 },
+      { FParentItemNumber: 'BAD', FChildItemNumber: 'MAT-002', FQty: 1, FUnitID: 'PCS', FEntryID: 2 },
+    ],
+    keyFields: ['FParentItemNumber'],
+  }).catch((error) => error)
+  assert.ok(bomWriteRefusal instanceof AdapterValidationError, 'G-4: BOM upsert is refused, not written')
+  assert.equal(bomWriteRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.length, callsBeforeBomWrite, 'G-4: 0 login calls (the refusal precedes login)')
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/BOM/Save').length, 0, 'G-4: 0 Save calls')
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/BOM/Submit').length, 0, 'G-4: 0 Submit calls')
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/BOM/Audit').length, 0, 'G-4: 0 Audit calls')
 
   const targetOnlyRead = await adapter.read({ object: 'material' }).catch((error) => error)
   assert.ok(targetOnlyRead instanceof UnsupportedAdapterOperationError, 'K3 WebAPI target rejects read')
@@ -781,7 +868,15 @@ async function testK3WebApiAdapter() {
 }
 
 async function testK3WebApiMaterialDetailReadSmoke() {
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/GetDetail', 'read'), 'materialGetDetail')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/GetList', 'read'), 'materialGetList')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Save.ashx', 'lifecycle-write'), 'materialSave')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Submit', 'lifecycle-write'), 'materialSubmit')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Material/Audit', 'lifecycle-write'), 'materialAudit')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/BOM/Save', 'lifecycle-write'), 'otherLifecycleWrite')
+  assert.equal(auditInternals.classifyK3WiseCall('/K3API/Token/Create', 'read'), 'otherRead')
   const { calls, fetchImpl } = createK3FetchMock()
+  const auditBefore = getK3WiseCallAuditSnapshot({ tenantId: 'tenant_1' })
   const adapter = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
       config: {
@@ -842,6 +937,25 @@ async function testK3WebApiMaterialDetailReadSmoke() {
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'read smoke must not Save')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'read smoke must not Submit')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'read smoke must not Audit')
+
+  const auditAfter = getK3WiseCallAuditSnapshot({ tenantId: 'tenant_1' })
+  assert.match(auditAfter.processEpoch, /^[0-9a-f]{32}$/)
+  assert.equal(auditAfter.processEpoch, auditBefore.processEpoch, 'same-process snapshots carry the same epoch')
+  assert.deepEqual(
+    Object.keys(auditAfter.counts),
+    [...K3_WISE_CALL_AUDIT_OPERATIONS],
+    'the operational evidence uses a closed values-free key set',
+  )
+  assert.equal(auditAfter.counts.materialGetDetail - auditBefore.counts.materialGetDetail, 1)
+  assert.equal(auditAfter.counts.materialSave - auditBefore.counts.materialSave, 0)
+  assert.equal(auditAfter.counts.materialSubmit - auditBefore.counts.materialSubmit, 0)
+  assert.equal(auditAfter.counts.materialAudit - auditBefore.counts.materialAudit, 0)
+  const auditText = JSON.stringify(auditAfter)
+  for (const forbidden of ['MAT-GATE-001', 'k3.example.test', 'k3-session-1', 'k3-token-1']) {
+    assert.equal(auditText.includes(forbidden), false, `call-audit snapshot must not expose ${forbidden}`)
+  }
+  const otherTenantAudit = getK3WiseCallAuditSnapshot({ tenantId: 'tenant_other' })
+  assert.ok(Object.values(otherTenantAudit.counts).every((count) => count === 0), 'another tenant sees an isolated partition')
 
   const missingKey = await adapter.read({ object: 'material' }).catch((error) => error)
   assert.ok(missingKey instanceof AdapterValidationError, 'Material read requires a concrete FNumber/template key')
@@ -1417,6 +1531,7 @@ async function testK3WebApiAuthorityCodeToken() {
         tokenPath: '/K3API/Token/Create',
         autoSubmit: false,
         autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
     }),
     fetchImpl,
@@ -1426,118 +1541,171 @@ async function testK3WebApiAuthorityCodeToken() {
   assert.equal(connection.ok, true, 'authorityCode token testConnection succeeds')
   assert.equal(connection.authenticated, true, 'query-token auth counts as authenticated')
 
-  const upsert = await adapter.upsert({
+  // CONVERTED (G-4). The authorityCode token was previously proven to be CACHED across
+  // testConnection and a subsequent write — the write is what re-used the token. The write leg
+  // is now permanently refused before login, so no second token acquisition can be triggered
+  // from it, and the caching property is asserted on the surface that still exists: two
+  // consecutive testConnection calls must still share ONE Token/Create.
+  const tokensAfterFirstConnection = calls.filter((call) => call.pathname === '/K3API/Token/Create').length
+  assert.equal(tokensAfterFirstConnection, 1, 'testConnection acquires exactly one authorityCode token')
+  await adapter.testConnection({ skipHealth: true })
+  assert.equal(
+    calls.filter((call) => call.pathname === '/K3API/Token/Create').length,
+    1,
+    'the authorityCode token is CACHED — a second testConnection does not re-acquire it',
+  )
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/Token/Create')[0].query.authorityCode, 'auth-code-1')
+
+  const callsBeforeTokenWrite = calls.length
+  const tokenWriteRefusal = await adapter.upsert({
+    object: 'material',
+    records: [{ FNumber: 'MAT-TOKEN-001', FName: 'Token material' }],
+    keyFields: ['FNumber'],
+  }).catch((error) => error)
+  assert.ok(tokenWriteRefusal instanceof AdapterValidationError, 'G-4: a token-authenticated write is refused too')
+  assert.equal(tokenWriteRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.length, callsBeforeTokenWrite, 'G-4: 0 further calls — no token refresh, no login')
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/Material/Save').length, 0, 'G-4: 0 Save calls')
+
+  // The Save body / query composition the old assertions read off the wire is still proven, on
+  // the preview leg, which builds both through the same code the Save leg used.
+  const tokenPreview = await adapter.previewUpsert({
     object: 'material',
     records: [{ FNumber: 'MAT-TOKEN-001', FName: 'Token material' }],
     keyFields: ['FNumber'],
   })
-
-  const tokenCalls = calls.filter((call) => call.pathname === '/K3API/Token/Create')
-  const saveCalls = calls.filter((call) => call.pathname === '/K3API/Material/Save')
-  assert.equal(tokenCalls.length, 1, 'authorityCode token is cached across testConnection and upsert')
-  assert.equal(tokenCalls[0].query.authorityCode, 'auth-code-1')
-  assert.equal(saveCalls.length, 1)
-  assert.equal(saveCalls[0].query.Token, 'k3-token-1', 'K3 API token is sent as query parameter')
-  assert.deepEqual(saveCalls[0].body, { Data: { FNumber: 'MAT-TOKEN-001', FName: 'Token material' } })
-  assert.equal(upsert.written, 1)
-  assert.equal(upsert.results[0].externalId, 'item-MAT-TOKEN-001')
-  assert.equal(upsert.results[0].billNo, 'MAT-TOKEN-001')
+  assert.deepEqual(tokenPreview.records[0].body, { Data: { FNumber: 'MAT-TOKEN-001', FName: 'Token material' } })
+  assert.equal(tokenPreview.records[0].query.Token, '<redacted>', 'the token rides the query param, redacted in preview')
 }
 
 async function testK3WebApiSaveBusinessEvidence() {
-  const { fetchImpl } = createK3FetchMock()
+  const { calls, fetchImpl } = createK3FetchMock()
   const adapter = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
       config: {
         baseUrl: 'https://k3.example.test',
         autoSubmit: false,
         autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
       },
     }),
     fetchImpl,
   })
 
-  const upsert = await adapter.upsert({
+  // CONVERTED (G-4). This used to drive two real Save batches and read the row-level
+  // business-response parsing off the returned `results`/`errors`/`metadata.businessResponses`.
+  // The Save leg is permanently refused now, so the ONLY honest way to keep the parsing coverage
+  // is to feed the very same K3 envelopes (copied from this file's own fetch mock above, so the
+  // fixtures cannot drift apart) straight into the exported parsers the Save leg called.
+  //
+  // STATED EXACTLY — what this conversion keeps and what it drops:
+  //   KEPT  the row-level success gate (an envelope that says "Successful" while its row says
+  //         FStatus:false is a FAILURE), the failure-message extraction, and the externalId
+  //         extraction — all three via the module's existing `__internals` surface.
+  //   DROPS (a) the `metadata.businessResponses` per-attempt AGGREGATION assertions, built by
+  //         `createBusinessResponseSummary`; (b) the row failure-code mapping, via
+  //         `responseFailureCode`. NEITHER function is on the module's test surface, and both
+  //         only ever described a batch of Saves — with no Save possible they describe nothing.
+  //         Deliberately NOT re-derived by adding new production exports: widening a production
+  //         surface to keep testing permanently-dead code is the wrong trade. The closed-token
+  //         disposition a K3 row failure surfaces upward is separately pinned, on live code, in
+  //         k3-wise-c6-write-profile.test.cjs.
+  const saveConfig = {}
+  const envelopes = {
+    ROWOK: { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: true, FItemID: 1001, FNumber: 'ROWOK' }] },
+    ROWFAIL: { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: false, FItemID: 0, FMessage: 'unit group parameter invalid' }] },
+    STATUS201: { StatusCode: 201, Message: 'Faild', Data: [{ FStatus: false, FItemID: 0, FMessage: 'required unit missing' }] },
+    AMBIGUOUSFAIL: { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: false, FItemID: 0 }] },
+    CHINESENEGFAIL: { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: false, FItemID: 0, FMessage: '操作不成功' }] },
+  }
+  assert.equal(webApiInternals.saveBusinessSuccess(envelopes.ROWOK, saveConfig), true, 'a genuinely positive row is a success')
+  assert.equal(webApiInternals.saveBusinessSuccess(envelopes.ROWFAIL, saveConfig), false, 'FStatus:false is a failure')
+  assert.equal(webApiInternals.saveBusinessSuccess(envelopes.STATUS201, saveConfig), false, 'a non-2xx envelope is a failure')
+  assert.equal(
+    webApiInternals.saveBusinessSuccess(envelopes.AMBIGUOUSFAIL, saveConfig),
+    false,
+    'ROW-LEVEL SUCCESS GATE: "Successful" at the envelope must not override FStatus:false on the row',
+  )
+  assert.equal(webApiInternals.saveBusinessSuccess(envelopes.CHINESENEGFAIL, saveConfig), false, 'a Chinese negated success row is a failure')
+  assert.equal(webApiInternals.responseExternalId(envelopes.ROWOK, saveConfig), 1001, 'positive FItemID is surfaced as external id')
+  assert.match(webApiInternals.responseFailureMessage(envelopes.ROWFAIL, saveConfig, null), /unit group/i)
+  assert.match(webApiInternals.responseFailureMessage(envelopes.STATUS201, saveConfig, null), /required unit/i)
+  assert.equal(webApiInternals.responseFailureMessage(envelopes.CHINESENEGFAIL, saveConfig, null), '操作不成功')
+  assert.match(
+    webApiInternals.responseFailureMessage(envelopes.AMBIGUOUSFAIL, saveConfig, { failedRowCount: 1 }),
+    /row-level success gate.*failedRowCount=1/,
+    'a row failure with no message falls back to the gate wording plus values-free counts',
+  )
+
+  // And the write leg those envelopes would have travelled on: permanently refused, zero calls.
+  const callsBeforeEvidenceWrite = calls.length
+  const evidenceRefusal = await adapter.upsert({
     object: 'material',
     records: [
       { FNumber: 'ROWOK', FName: 'Positive row' },
       { FNumber: 'ROWFAIL', FName: 'Business row fail' },
       { FNumber: 'STATUS201', FName: 'Envelope fail' },
-      { FNumber: 'AMBIGUOUSFAIL', FName: 'Envelope-success row fail' },
-      { FNumber: 'CHINESENEGFAIL', FName: 'Chinese negated success row fail' },
     ],
     keyFields: ['FNumber'],
-  })
-
-  assert.equal(upsert.written, 1, 'only K3 business-positive row counts as written')
-  assert.equal(upsert.failed, 4, 'K3 row-level failures are counted as failed')
-  assert.equal(upsert.results[0].externalId, 1001, 'positive FItemID is surfaced as external id')
-  assert.equal(upsert.results[0].responseSummary.success, true)
-  assert.equal(upsert.results[0].responseSummary.externalIdPresent, true)
-  assert.equal(upsert.errors[0].code, 'K3_WISE_SAVE_FAILED')
-  assert.match(upsert.errors[0].message, /unit group/i)
-  assert.equal(upsert.errors[0].responseSummary.success, false)
-  assert.equal(upsert.errors[0].responseSummary.failedRowCount, 1)
-  assert.equal(upsert.errors[1].code, 'K3_WISE_SAVE_FAILED')
-  assert.match(upsert.errors[1].message, /required unit/i)
-  assert.equal(upsert.errors[2].code, 'K3_WISE_SAVE_FAILED')
-  assert.notEqual(upsert.errors[2].message, 'Successful')
-  assert.match(upsert.errors[2].message, /row-level success gate/i)
-  assert.match(upsert.errors[2].message, /failedRowCount=1/)
-  assert.equal(upsert.errors[2].diagnostic.validationMessage, upsert.errors[2].message)
-  assert.equal(upsert.errors[3].code, 'K3_WISE_SAVE_FAILED')
-  assert.equal(upsert.errors[3].message, '操作不成功')
-  assert.equal(upsert.errors[3].diagnostic.validationMessage, '操作不成功')
-  assert.equal(upsert.metadata.businessResponses.length, 5)
-  assert.deepEqual(
-    upsert.metadata.businessResponses.map((summary) => summary.success),
-    [true, false, false, false, false],
-    'business response summaries preserve one entry per attempted save',
-  )
+  }).catch((error) => error)
+  assert.ok(evidenceRefusal instanceof AdapterValidationError, 'G-4: refused')
+  assert.equal(evidenceRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.length, callsBeforeEvidenceWrite, 'G-4: 0 login calls')
+  assert.equal(calls.filter((call) => call.pathname === '/K3API/Material/Save').length, 0, 'G-4: 0 Save calls')
 }
 
 // Keystone (M1 fix): a customer K3 that nests the per-row payload under Data[0].Data
 // must have its success/message/id parsed from the nested object, not the bare wrapper.
 // Pre-fix this was a parse-induced false-negative (a real success read as failed).
 async function testK3WebApiNestedDataSaveParse() {
-  const { fetchImpl } = createK3FetchMock()
+  const { calls, fetchImpl } = createK3FetchMock()
   const adapter = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
-      config: { baseUrl: 'https://k3.example.test', autoSubmit: false, autoAudit: false },
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+        objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+      },
     }),
     fetchImpl,
   })
 
-  const upsert = await adapter.upsert({
+  // CONVERTED (G-4), same disposition and same reasoning as testK3WebApiSaveBusinessEvidence
+  // above: the KEYSTONE property here is a PARSE property (a customer K3 that nests the per-row
+  // payload one level deeper must have success/message/id read from the nested object, not the
+  // bare wrapper — pre-fix a real success was read as a failure). That property lives entirely in
+  // the exported parsers and is reproduced against the identical envelopes the fetch mock above
+  // returns, so the keystone regression stays covered without a Save.
+  const nestedConfig = {}
+  const nestedOk = { StatusCode: 200, Message: 'Successful', Data: [{ FNumber: 'NESTEDOK', Data: { FStatus: true, FItemID: 2002, FNumber: 'NESTEDOK' } }] }
+  const nestedFail = { StatusCode: 200, Message: 'Successful', Data: [{ FNumber: 'NESTEDFAIL', Data: { FStatus: false, FItemID: 0, FMessage: 'nested unit group parameter invalid' } }] }
+  const flatOk = { StatusCode: 200, Message: 'Successful', Data: [{ FStatus: true, FItemID: 1001, FNumber: 'ROWOK' }] }
+
+  assert.equal(webApiInternals.saveBusinessSuccess(nestedOk, nestedConfig), true, 'nested Data[0].Data success is recognized (pre-fix: false-negative)')
+  assert.equal(webApiInternals.saveBusinessSuccess(nestedFail, nestedConfig), false, 'nested Data[0].Data failure is recognized')
+  assert.equal(webApiInternals.responseExternalId(nestedOk, nestedConfig), 2002, 'externalId resolved from Data[0].Data.FItemID')
+  assert.match(
+    webApiInternals.responseFailureMessage(nestedFail, nestedConfig, null),
+    /nested unit group/i,
+    'nested failure message comes from Data[0].Data.FMessage, not the envelope fallback',
+  )
+  // Regression: flat Data[0].X rows are unchanged by the unwrap.
+  assert.equal(webApiInternals.saveBusinessSuccess(flatOk, nestedConfig), true, 'flat Data[0].X success still recognized')
+  assert.equal(webApiInternals.responseExternalId(flatOk, nestedConfig), 1001, 'flat externalId unchanged')
+
+  // The Save leg that would have carried those envelopes: permanently refused, zero calls.
+  const nestedRefusal = await adapter.upsert({
     object: 'material',
     records: [
       { FNumber: 'NESTEDOK', FName: 'Nested success row' },
       { FNumber: 'NESTEDFAIL', FName: 'Nested failure row' },
     ],
     keyFields: ['FNumber'],
-  })
-
-  // Nested Data[0].Data success is recognized (pre-fix: false-negative → written 0).
-  assert.equal(upsert.written, 1, 'nested Data[0].Data success row counts as written')
-  assert.equal(upsert.failed, 1, 'nested Data[0].Data failure row counts as failed')
-  assert.equal(upsert.results[0].key, 'NESTEDOK')
-  assert.equal(upsert.results[0].externalId, 2002, 'externalId resolved from Data[0].Data.FItemID')
-  assert.equal(upsert.results[0].responseSummary.success, true)
-  assert.equal(upsert.results[0].responseSummary.externalIdPresent, true)
-  // Nested failure: message resolved from Data[0].Data.FMessage, not the envelope fallback.
-  assert.equal(upsert.errors[0].code, 'K3_WISE_SAVE_FAILED')
-  assert.match(upsert.errors[0].message, /nested unit group/i)
-  assert.equal(upsert.errors[0].responseSummary.success, false)
-  assert.equal(upsert.errors[0].responseSummary.failedRowCount, 1)
-
-  // Regression: flat Data[0].X rows are unchanged by the unwrap.
-  const flat = await adapter.upsert({
-    object: 'material',
-    records: [{ FNumber: 'ROWOK', FName: 'Flat success row' }],
-    keyFields: ['FNumber'],
-  })
-  assert.equal(flat.written, 1, 'flat Data[0].X success still recognized')
-  assert.equal(flat.results[0].externalId, 1001, 'flat externalId unchanged')
+  }).catch((error) => error)
+  assert.ok(nestedRefusal instanceof AdapterValidationError, 'G-4: refused')
+  assert.equal(nestedRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.length, 0, 'G-4: 0 login calls, 0 Save calls — nothing at all reached K3')
 }
 
 // Customer-profiled Material Save: base-data shaping (G3), fail-closed placeholder guard,
@@ -1555,32 +1723,37 @@ function profileSystem() {
 
 async function testK3WebApiCustomerProfile() {
   // ----- base-data object shaping (G3): numbered -> {FNumber}, enum/category -> {FID} -----
+  // CONVERTED (G-4): read off the composed body instead of off the wire. Same `buildSaveBody`,
+  // same merged objectConfig — the shaping rule under test is untouched.
   {
     const { calls, fetchImpl } = createK3FetchMock()
     const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
-    const upsert = await adapter.upsert({
+    const preview = await adapter.previewUpsert({
       object: 'material',
       records: [{ FNumber: 'SHAPE01', FName: 'Shaped', FUnitGroupID: '10', FErpClsID: '1001' }],
       keyFields: ['FNumber'],
     })
-    assert.equal(upsert.written, 1, 'profile save succeeds')
-    const saveCall = calls.find((call) => call.pathname === '/K3API/Material/Save')
-    assert.deepEqual(saveCall.body.Data.FUnitGroupID, { FNumber: '10' }, 'numbered base data wrapped {FNumber}')
-    assert.deepEqual(saveCall.body.Data.FErpClsID, { FID: '1001' }, 'enum/category wrapped {FID}')
+    const composed = preview.records[0]
+    assert.deepEqual(composed.body.Data.FUnitGroupID, { FNumber: '10' }, 'numbered base data wrapped {FNumber}')
+    assert.deepEqual(composed.body.Data.FErpClsID, { FID: '1001' }, 'enum/category wrapped {FID}')
+    assert.match(composed.path, /\/Material\/Save$/, 'and it is composed for the profile Save endpoint')
+    assert.equal(calls.length, 0, 'composition touches no network')
   }
 
   // ----- fail-closed placeholder: unreplaced <fill-outside-git> never reaches K3 -----
+  // CONVERTED (G-4): the guard is `buildSaveBody`'s and is reached through the preview leg. The
+  // throw propagates instead of being collected per-row, because the collecting caller (`upsert`)
+  // is now permanently fenced off. The zero-Save fact is asserted the same way as before.
   {
     const { calls, fetchImpl } = createK3FetchMock()
     const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
-    const upsert = await adapter.upsert({
+    const placeholderRefusal = await adapter.previewUpsert({
       object: 'material',
       records: [{ FNumber: 'PH01', FName: 'Has placeholder', FUnitGroupID: '<fill-outside-git>' }],
       keyFields: ['FNumber'],
-    })
-    assert.equal(upsert.written, 0, 'placeholder row is not written')
-    assert.equal(upsert.failed, 1)
-    assert.equal(upsert.errors[0].code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED')
+    }).catch((error) => error)
+    assert.ok(placeholderRefusal instanceof AdapterValidationError, 'placeholder row fails closed')
+    assert.equal(placeholderRefusal.details.code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED')
     assert.equal(
       calls.some((call) => call.pathname === '/K3API/Material/Save'),
       false,
@@ -1588,47 +1761,57 @@ async function testK3WebApiCustomerProfile() {
     )
   }
 
-  // ----- save-only locks: profile (no submit/audit path) + auto flags false -> no Submit/Audit -----
+  // ----- save-only locks -> no Submit/Audit -----
+  // CONVERTED (G-4). This used to prove "Save attempted, Submit/Audit not". The Save is now
+  // permanently refused as well, so the assertion strengthens from "no Submit/Audit" to "no
+  // lifecycle-write call of ANY kind, login included".
   {
     const { calls, fetchImpl } = createK3FetchMock()
     const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
-    await adapter.upsert({
+    const saveOnlyRefusal = await adapter.upsert({
       object: 'material',
       records: [{ FNumber: 'NESTEDOK', FName: 'Save only' }],
       keyFields: ['FNumber'],
-    })
-    assert.ok(calls.some((call) => call.pathname === '/K3API/Material/Save'), 'save attempted')
+    }).catch((error) => error)
+    assert.equal(saveOnlyRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+    assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'no Save call')
     assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'no Submit call')
     assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'no Audit call')
+    assert.equal(calls.length, 0, 'not even a login')
   }
 
   // ----- conservative redacted row diagnostics (G5 / R-REDACT) -----
+  // CONVERTED (G-4): `buildRowSaveDiagnostic` is the unit under test and is on the module's
+  // existing test surface, so it is driven DIRECTLY with the same row/key/message triples the
+  // (now refused) Save-failure path used to hand it. Every redaction assertion is preserved
+  // verbatim; only the transport that used to produce the inputs is gone.
   {
-    const { fetchImpl } = createK3FetchMock()
-    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
-    const upsert = await adapter.upsert({
-      object: 'material',
-      records: [
-        { FNumber: 'SECRETFAIL', FName: 'a', sourceId: 'plm-code-9' },
-        { FNumber: 'SECRETFAIL', FName: 'b', sourceId: '550e8400-e29b-41d4-a716-446655440000' },
-      ],
-      keyFields: ['FNumber'],
+    const rawMessage = 'save failed: postgres://k3user:s3cretpw@db.internal/erp rejected the request'
+    const diag = webApiInternals.buildRowSaveDiagnostic({
+      status: 'failed',
+      record: { FNumber: 'SECRETFAIL', FName: 'a', sourceId: 'plm-code-9' },
+      key: 'SECRETFAIL',
+      rawMessage,
+      code: 'K3_WISE_SAVE_FAILED',
     })
-    assert.equal(upsert.failed, 2)
-    const diag = upsert.errors[0].diagnostic
     assert.deepEqual(Object.keys(diag).sort(), ['responseCode', 'rowKeys', 'rowStatus', 'validationMessage'])
     assert.equal(diag.rowStatus, 'failed')
     assert.match(diag.rowKeys.k3Key, /^sha12:[0-9a-f]{12}$/, 'K3 key is hashed, never raw')
     assert.match(diag.rowKeys.sourceId, /^sha12:/, 'non-UUID sourceId is hashed')
     // Second row: a confirmed internal UUID sourceId is kept in full.
-    assert.equal(upsert.errors[1].diagnostic.rowKeys.sourceId, '550e8400-e29b-41d4-a716-446655440000')
+    const uuidDiag = webApiInternals.buildRowSaveDiagnostic({
+      status: 'failed',
+      record: { FNumber: 'SECRETFAIL', FName: 'b', sourceId: '550e8400-e29b-41d4-a716-446655440000' },
+      key: 'SECRETFAIL',
+      rawMessage,
+      code: 'K3_WISE_SAVE_FAILED',
+    })
+    assert.equal(uuidDiag.rowKeys.sourceId, '550e8400-e29b-41d4-a716-446655440000')
     // Secret-shaped value in the K3 message is scrubbed; benign text survives.
     const serialized = JSON.stringify(diag)
     assert.equal(serialized.includes('SECRETFAIL'), false, 'raw FNumber absent from diagnostic')
     assert.equal(serialized.includes('s3cretpw'), false, 'secret scrubbed from validation message')
     assert.match(diag.validationMessage, /save failed/i, 'benign diagnostic text survives')
-    // The surfaced error.message is also scrubbed.
-    assert.equal(upsert.errors[0].message.includes('s3cretpw'), false, 'error.message scrubbed too')
     assert.ok(diag.validationMessage, 'validationMessage is populated when the error has a message')
   }
 
@@ -1652,26 +1835,67 @@ async function testK3WebApiCustomerProfile() {
       }),
       fetchImpl,
     })
-    const upsert = await adapter.upsert({
+    // CONVERTED (G-4), and this is the Submit/Audit REGRESSION PIN — the one that must not be
+    // allowed to weaken. Three enablement attempts are stacked in the config/overlay above and a
+    // fourth on the request below: config.autoSubmit/autoAudit true, overlay submitPath/auditPath
+    // re-injected, and request options autoSubmit/autoAudit true.
+    //
+    // The pin now has TWO live halves, because the half it used to have — reading
+    // `upsert.metadata.autoSubmit === false` off a successful Save — sits behind the permanent
+    // fence and is no longer observable. Stated plainly rather than quietly dropped:
+    //
+    //   (1) STRUCTURAL, still live: the profiled object config REFUSES the overlay-injected
+    //       submit/audit endpoints outright (they are forbidden overlay keys), so the endpoints
+    //       do not exist to be called. Weakening that sweep turns this red.
+    //   (2) BEHAVIOURAL, still live: `previewUpsert` — what a human actually approves — mirrors
+    //       the save-only auto-flag hard lock and must report both flags false against all four
+    //       enablement attempts. Weakening `previewUpsert`'s `previewSaveOnly ? false : …` turns
+    //       this red.
+    //
+    //   (3) And the write itself is refused with ZERO Submit/Audit calls, which is now the
+    //       strongest form of the original claim.
+    const effective = webApiInternals.normalizeObjects({
+      autoSubmit: true,
+      autoAudit: true,
+      objects: {
+        material: {
+          profile: 'material-k3wise-customer-profile-v1',
+          submitPath: '/K3API/Material/Submit',
+          auditPath: '/K3API/Material/Audit',
+        },
+      },
+    }).material
+    assert.equal(effective.submitPath, undefined, 'HARD LOCK (1): an overlay cannot re-inject a Submit endpoint')
+    assert.equal(effective.auditPath, undefined, 'HARD LOCK (1): an overlay cannot re-inject an Audit endpoint')
+    assert.equal(effective.lifecycle, 'save-only', 'the save-only lifecycle marker is profile-pinned')
+
+    const hardLockPreview = await adapter.previewUpsert({
       object: 'material',
       records: [{ FNumber: 'NESTEDOK', FName: 'Hard lock' }],
       keyFields: ['FNumber'],
       options: { autoSubmit: true, autoAudit: true }, // request tries too
     })
-    assert.equal(upsert.written, 1, 'save still succeeds under the hard lock')
+    assert.equal(hardLockPreview.metadata.autoSubmit, false, 'HARD LOCK (2): autoSubmit forced false (config+request+overlay all tried)')
+    assert.equal(hardLockPreview.metadata.autoAudit, false, 'HARD LOCK (2): autoAudit forced false (config+request+overlay all tried)')
+
+    const hardLockRefusal = await adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'NESTEDOK', FName: 'Hard lock' }],
+      keyFields: ['FNumber'],
+      options: { autoSubmit: true, autoAudit: true }, // request tries too
+    }).catch((error) => error)
+    assert.equal(hardLockRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'HARD LOCK (3): the write is refused outright')
     assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'Submit refused (config+request+overlay)')
     assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'Audit refused (config+request+overlay)')
-    assert.equal(upsert.metadata.saveOnly, true)
-    assert.equal(upsert.metadata.autoSubmit, false, 'autoSubmit forced false in metadata')
-    assert.equal(upsert.metadata.autoAudit, false, 'autoAudit forced false in metadata')
-    assert.equal(upsert.metadata.autoFlagsRefused, true, 'refusal is observable in metadata')
+    assert.equal(calls.length, 0, 'and no login either')
   }
 
   // ----- object-value passthrough fidelity: two-field {FNumber,FName}/{FID,FName} preserved -----
   {
     const { calls, fetchImpl } = createK3FetchMock()
     const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
-    await adapter.upsert({
+    // CONVERTED (G-4): read off the composed body instead of off the wire — same composer.
+    const passthrough = await adapter.previewUpsert({
       object: 'material',
       records: [{
         FNumber: 'OBJ01',
@@ -1681,9 +1905,10 @@ async function testK3WebApiCustomerProfile() {
       }],
       keyFields: ['FNumber'],
     })
-    const saveCall = calls.find((call) => call.pathname === '/K3API/Material/Save')
-    assert.deepEqual(saveCall.body.Data.FUnitGroupID, { FNumber: '10', FName: 'Each' }, 'two-field {FNumber,FName} preserved verbatim')
-    assert.deepEqual(saveCall.body.Data.FErpClsID, { FID: '1001', FName: 'Raw materials' }, 'two-field {FID,FName} preserved verbatim')
+    const composedBody = passthrough.records[0].body
+    assert.deepEqual(composedBody.Data.FUnitGroupID, { FNumber: '10', FName: 'Each' }, 'two-field {FNumber,FName} preserved verbatim')
+    assert.deepEqual(composedBody.Data.FErpClsID, { FID: '1001', FName: 'Raw materials' }, 'two-field {FID,FName} preserved verbatim')
+    assert.equal(calls.length, 0, 'composition touches no network')
   }
 
   // ----- fail-closed: a present-but-empty / non-string profile must throw, not fall back -----
@@ -1769,17 +1994,33 @@ async function testK3SqlServerChannel() {
   assert.deepEqual(selectCall.input.columns, ['FItemID', 'FNumber', 'FName'])
   assert.deepEqual(selectCall.input.filters, { FUseStatus: '1' })
 
-  const staged = await adapter.upsert({
+  // ===== E4 / G-4 PARITY (20260901) — CONVERTED, not deleted ==========================
+  // This block used to assert a SUCCESSFUL middle-table write: `staged.written === 1`,
+  // `metadata.mode === 'sqlserver-middle-table'`, and an `insertMany` landing on
+  // `dbo.integration_material_stage`. `erp:k3-wise-sqlserver` is now the SECOND subject of the
+  // permanent K3 external-write ban, so that write is refused at every configuration. The
+  // assertions are INVERTED in place rather than removed, so the exact call that used to succeed
+  // is the one now witnessed refused — and the `insertMany` that used to be found is now
+  // required to be absent.
+  const stagedRefusal = await adapter.upsert({
     object: 'material_stage',
     records: [
       { FNumber: 'MAT-002', FName: 'Nut' },
     ],
     keyFields: ['FNumber'],
-  })
-  assert.equal(staged.written, 1)
-  assert.equal(staged.metadata.mode, 'sqlserver-middle-table')
-  const insertCall = executorCalls.find((call) => call.method === 'insertMany')
-  assert.equal(insertCall.input.table, 'dbo.integration_material_stage')
+  }).catch((error) => error)
+  assert.ok(stagedRefusal instanceof AdapterValidationError, 'the middle-table write is refused')
+  assert.equal(stagedRefusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(stagedRefusal.status, 403)
+  assert.equal(stagedRefusal.details.targetKind, 'erp:k3-wise-sqlserver')
+  assert.equal(
+    executorCalls.some((call) => call.method === 'insertMany'),
+    false,
+    'the executor is never reached — insertMany = 0',
+  )
+  // And the READ path on the very same adapter instance is untouched: `select` above did run.
+  // Without this, "insertMany = 0" could equally mean the whole channel is dead.
+  assert.ok(executorCalls.some((call) => call.method === 'select'), 'reads still reach the executor')
 
   const directWriteAdapter = createK3WiseSqlServerChannel({
     system: createSqlSystem({
@@ -1797,7 +2038,9 @@ async function testK3SqlServerChannel() {
     object: 'material',
     records: [{ FNumber: 'MAT-003' }],
   }).catch((error) => error)
-  assert.ok(directWrite instanceof UnsupportedAdapterOperationError, 'direct K3 table write is blocked')
+  // Was: UnsupportedAdapterOperationError from the middle-table rule. That rule is now dead code
+  // behind the fence, and the refusal a caller sees is the permanent one.
+  assert.equal(directWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'direct K3 table write is permanently refused')
 
   const missingExecutor = createK3WiseSqlServerChannel({ system: createSqlSystem() })
   const missingExecutorStatus = await missingExecutor.testConnection()
@@ -1842,6 +2085,9 @@ async function testK3SqlServerChannel() {
     records: [{ FNumber: 'MAT-READ-ONLY' }],
   }).catch((error) => error)
   assert.ok(readOnlyWrite instanceof AdapterValidationError, 'readTables must not authorize middle-table writes')
+  // The refusal is now the permanent one, which lands BEFORE the allowlist is consulted. The
+  // allowlist rule itself is still exercised on the read side just below (`writeOnlyRead`).
+  assert.equal(readOnlyWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
 
   const writeOnlyScoped = createK3WiseSqlServerChannel({
     system: createSqlSystem({
@@ -1918,7 +2164,12 @@ async function testK3SqlServerChannel() {
     records: [{ FNumber: 'MAT-SHOULD-NOT-WRITE' }],
     keyFields: ['FNumber'],
   }).catch((error) => error)
-  assert.equal(runtimeWrite.code, 'SQLSERVER_WRITE_EXECUTOR_DISABLED', 'built-in runtime executor remains read-only')
+  // Was: SQLSERVER_WRITE_EXECUTOR_DISABLED — the read-only DEFAULT executor's own refusal, which
+  // is precisely the posture E4 parity replaced. That code was a property of which executor
+  // happened to be injected; this one is a property of the kind. The read-only executor still
+  // refuses on its own (asserted directly in the parity suite), but it is no longer what a
+  // caller hits first, and no longer what the guarantee rests on.
+  assert.equal(runtimeWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'the permanent fence answers before the executor')
 
   const { driver: failingDriver } = createFakeMssqlDriver({ failConnect: new Error('login failed password=secret-that-must-not-leak for readonly_user') })
   const failingExecutor = createK3WiseSqlServerReadOnlyExecutor({ driver: failingDriver })
@@ -1948,11 +2199,20 @@ async function testK3WebApiAutoFlagCoercion() {
     return { adapter, calls }
   }
 
+  // BOM is unaffected by the material profile guard and shares material's write mechanism
+  // (Save/Submit/Audit) — used here because this scenario set is about generic tri-state
+  // autoSubmit/autoAudit resolution, not material semantics.
+  //
+  // CONVERTED (G-4): this helper drove `upsert` and read `metadata.autoSubmit/autoAudit`. `upsert`
+  // is permanently refused now, so it reads them off `previewUpsert` instead. Every scenario below
+  // is UNCHANGED and every one still exercises the same code: for a non-save-only object the
+  // preview leg resolves both flags through the very same `resolveAutoFlag(request.options.X,
+  // config.X, 'X')` calls — including the two invalid-value throws (scenarios H and I).
   async function upsertOne(adapter, options = {}) {
-    return adapter.upsert({
-      object: 'material',
-      records: [{ FNumber: 'MAT-COERCE-001', FName: 'Coercion test bolt' }],
-      keyFields: ['FNumber'],
+    return adapter.previewUpsert({
+      object: 'bom',
+      records: [{ FParentItemNumber: 'BOM-COERCE-001', FChildItemNumber: 'MAT-COERCE-002', FQty: 1, FUnitID: 'PCS', FEntryID: 1 }],
+      keyFields: ['FParentItemNumber'],
       options,
     })
   }
@@ -1979,10 +2239,21 @@ async function testK3WebApiAutoFlagCoercion() {
     const upsert = await upsertOne(adapter, { autoSubmit: 'false', autoAudit: '否' })
     assert.equal(upsert.metadata.autoSubmit, false, 'request.options.autoSubmit="false" overrides config true')
     assert.equal(upsert.metadata.autoAudit, false, 'request.options.autoAudit="否" overrides config true')
-    const submitCalls = calls.filter((call) => call.pathname === '/K3API/Material/Submit')
-    const auditCalls = calls.filter((call) => call.pathname === '/K3API/Material/Audit')
+    const submitCalls = calls.filter((call) => call.pathname === '/K3API/BOM/Submit')
+    const auditCalls = calls.filter((call) => call.pathname === '/K3API/BOM/Audit')
     assert.equal(submitCalls.length, 0, 'Submit must NOT fire when operator hand-edited "false"')
     assert.equal(auditCalls.length, 0, 'Audit must NOT fire when operator hand-edited "否"')
+    // G-4: and the write leg those flags would have driven is refused outright, so the
+    // "must not fire" claim above is now structural rather than conditional on the coercion.
+    const coercionRefusal = await adapter.upsert({
+      object: 'bom',
+      records: [{ FParentItemNumber: 'BOM-COERCE-001', FChildItemNumber: 'MAT-COERCE-002', FQty: 1, FUnitID: 'PCS', FEntryID: 1 }],
+      keyFields: ['FParentItemNumber'],
+      options: { autoSubmit: 'true', autoAudit: 'true' },
+    }).catch((error) => error)
+    assert.equal(coercionRefusal.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      'even a request that coerces BOTH flags to true cannot reach a write')
+    assert.equal(calls.length, 0, 'G-4: 0 login, 0 Save, 0 Submit, 0 Audit')
   }
 
   // ----- Scenario D: request override "true" enables when config is false -----

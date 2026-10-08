@@ -7413,6 +7413,98 @@ describe('DirectoryManagementView', () => {
       }
     })
 
+    // B1 rework (owner P2 on #4498): the backend now ends a freeze-aborted run as
+    // status='aborted' with error_message NULL. The old terminal branch was a BLOCKLIST
+    // ("not running, not failed, no errorMessage ⇒ 后台同步已完成"), so this deliberate
+    // abort — nothing synced, the source is frozen by an active org transfer — was shown
+    // to the admin as SUCCESS. Nobody retries a success, and the message never self-corrects.
+    it('stops polling at terminal aborted and says the sync was ABORTED by an active org transfer — never the success line', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        // Exactly what markSyncAbortedByFreeze leaves behind: 'aborted', errorMessage NULL,
+        // no stats (the apply rolled back). The abortReason/transferId live in the run's
+        // `meta`, which the /runs payload this view reads does not carry.
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('aborted'),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('aborted')]))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+
+        // The surfaced message tells the operator (a) it was aborted, (b) why — an active org
+        // transfer froze the source, (c) that nothing was written, (d) the resolution.
+        expect(container?.textContent).toContain('后台同步已中止（运行 run-bg-1）')
+        expect(container?.textContent).toContain('正被进行中的组织迁移冻结')
+        expect(container?.textContent).toContain('未写入任何数据')
+        expect(container?.textContent).toContain('请先完成或取消该迁移')
+        // THE REGRESSION ITSELF: an aborted run must never render as a completed one.
+        expect(container?.textContent).not.toContain('后台同步已完成')
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // B1 rework fail-safe: the success branch is an ALLOWLIST on 'completed'. Any terminal
+    // status this build does not recognise — a future backend state, a typo, a replayed old
+    // row — must fall through to the "cannot confirm" line, never to 后台同步已完成.
+    it('an UNRECOGNISED terminal status must not take the success branch (fail-safe default)', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        // Deliberately a status no branch knows about, carrying the exact shape the old
+        // blocklist treated as success: not running, not failed, errorMessage NULL.
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('quarantined_by_future_backend'),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('quarantined_by_future_backend')]))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+
+        // Non-vacuous: assert the fail-safe line is actually surfaced, not merely that the
+        // success line is absent (an empty status would satisfy absence alone).
+        expect(container?.textContent).toContain('后台同步以未识别的终态结束（运行 run-bg-1，状态 quarantined_by_future_backend）')
+        expect(container?.textContent).toContain('无法确认是否成功')
+        expect(container?.textContent).not.toContain('后台同步已完成')
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('clears the poll timer on unmount — no fetch ever fires after the view is gone', async () => {
       vi.useFakeTimers()
       try {

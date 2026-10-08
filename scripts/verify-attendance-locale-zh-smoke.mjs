@@ -1,6 +1,7 @@
 import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import path from 'path'
+import { fileURLToPath, pathToFileURL } from 'url'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBase = resolveApiBase(process.env.API_BASE || '')
@@ -489,6 +490,40 @@ async function verifyZhShellTabs(page, options = {}) {
   return result
 }
 
+// A10 (A-class batch 2, 2026-08-22): the overview tab's date/org/user history filters (the row
+// this probe waits on next) moved inside a collapsed-by-default <details data-attendance-history-filters>
+// disclosure in #4501 (8112810cd2, 2026-07-21) — AttendanceEmployeeWorkspace.vue's `#historyFilters`
+// slot host. A human opens it by clicking its visible, labelled <summary> ("日期 / 组织 / 用户筛选");
+// this probe never did, so every run since has timed out waiting for a locator that resolves to a
+// hidden element (see `Attendance Locale zh Smoke (Prod)`, red on every run since 2026-07-23).
+// Fix the probe, not the product: the <details> default-open state is a product decision the owner
+// has not made, so this only opens the disclosure — it does not touch AttendanceEmployeeWorkspace.vue.
+//
+// Exported (GATE-5097 P2-2): so it can be unit-tested behaviourally against a stub `page`, not
+// just pinned as source text. `run()` below is guarded to fire only when this file is executed
+// directly (see the bottom of the file) so importing this export never launches a real browser.
+export async function expandHistoryFilters(page, timeout = timeoutMs) {
+  const details = page.locator('[data-attendance-history-filters]')
+  await details.waitFor({ timeout })
+  const summary = details.locator('summary').first()
+  // GATE-5097 NIT-3: this is a ZH-LOCALE smoke. Opening the disclosure by its data attribute
+  // alone would keep working even if the summary's accessible zh label regressed to English or
+  // went blank — the exact class of regression this script exists to catch, and the one thing it
+  // was NOT checking here (elsewhere it already asserts by name, e.g.
+  // `page.getByRole('heading', { name: '考勤', exact: true })`). Assert the label before clicking.
+  const summaryText = ((await summary.textContent()) || '').trim()
+  if (!summaryText.includes('日期')) {
+    throw new Error(
+      `Expected the history-filters <summary> to carry its zh label ("日期 / 组织 / 用户筛选"), got: ${JSON.stringify(summaryText)}`,
+    )
+  }
+  const isOpen = await details.evaluate((node) => node.hasAttribute('open'))
+  if (isOpen) return
+  await summary.click()
+  const opened = await details.evaluate((node) => node.hasAttribute('open'))
+  if (!opened) throw new Error('Expected [data-attendance-history-filters] to be open after clicking its summary')
+}
+
 async function writeSummaryJson(filePath, summary) {
   await fs.writeFile(filePath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
 }
@@ -581,6 +616,7 @@ async function run() {
       throw new Error(`Expected locale select value zh-CN, got ${localeValue || '<empty>'}`)
     }
 
+    await expandHistoryFilters(page)
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
 
@@ -743,8 +779,16 @@ async function run() {
   }
 }
 
-run().catch((error) => {
-  const message = (error && error.message) || String(error)
-  console.error(`[attendance-locale-zh-smoke] FAIL: ${message}`)
-  process.exitCode = 1
-})
+// GATE-5097 P2-2: guard self-execution so importing this module (e.g. from a unit test) never
+// launches a real browser — same pattern already used by scripts/verify-attendance-admin-smoke.mjs
+// (`currentFile === invokedFile`, comparing resolved file:// URLs so relative-path invocation
+// still matches).
+const currentFile = pathToFileURL(fileURLToPath(import.meta.url)).href
+const invokedFile = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''
+if (currentFile === invokedFile) {
+  run().catch((error) => {
+    const message = (error && error.message) || String(error)
+    console.error(`[attendance-locale-zh-smoke] FAIL: ${message}`)
+    process.exitCode = 1
+  })
+}

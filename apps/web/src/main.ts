@@ -19,14 +19,29 @@ import './styles/calendar-source-palette.css'
 // approval/workflow surface set so the no-static-style= gate has a home.
 import './styles/form-layout-utilities.css'
 import App from './App.vue'
-import { useAuth } from './composables/useAuth'
+import { probeDeleteTransport } from './utils/delete-fallback'
+import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
-import { isRoutePermitted } from './router/routeAccess'
+import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'
 import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
+import { apiFetch } from './utils/api'
+
+/**
+ * Once per page session, right after the first authenticated session bootstrap succeeds (login
+ * lands here through the post-login redirect; a reload lands here on its first guarded route):
+ * learn whether HTTP DELETE reaches the server, and — only if it does not — whether the POST+override
+ * tunnel is actually honoured here (utils/delete-fallback.ts exercises BOTH legs). Fire-and-forget: the
+ * probe never throws and navigation must not wait on it. `bypassDeleteFallback` keeps the probe's
+ * native leg a literal DELETE (otherwise apiFetch's own fallback would mask the very failure being
+ * measured); the tunnel leg is already a POST, which that flag does not touch.
+ */
+function scheduleDeleteTransportProbe(): void {
+  void probeDeleteTransport((url, init) => apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+}
 
 const router = createRouter({
   // Use the Vite base (import.meta.env.BASE_URL, set from `base` in vite.config) so router URLs
@@ -95,6 +110,7 @@ router.beforeEach(async (to, _from, next) => {
           : { path: ROUTE_PATHS.LOGIN, query: { redirect } }
       )
     }
+    scheduleDeleteTransportProbe()
 
     const currentUser = auth.getCurrentUser()
     const mustChangePassword = requiresPasswordChange(currentUser)
@@ -122,43 +138,14 @@ router.beforeEach(async (to, _from, next) => {
     }
     await flags.loadProductFeatures()
 
-    const required = to.meta?.requiredFeature
-    const requiredFeature =
-      required === 'attendance'
-      || required === 'workflow'
-      || required === 'attendanceAdmin'
-      || required === 'attendanceImport'
-      || required === 'plm'
-        ? required
-        : null
-
-    if (requiredFeature && !flags.hasFeature(requiredFeature)) {
-      return next(flags.resolveHomePath())
-    }
-
-    if (!isRoutePermitted(to.meta, (permission) => auth.hasPermission(permission))) {
-      return next(flags.resolveHomePath())
-    }
-
-    if (flags.isAttendanceFocused()) {
-      const allowed = new Set<string>([
-        '/attendance',
-        '/p/plugin-attendance/attendance',
-        '/settings',
-      ])
-      const path = String(to.path || '')
-      if (!allowed.has(path)) {
-        return next('/attendance')
-      }
-    }
-
-    if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
-      const path = String(to.path || '')
-      const allowedPrefixes = ['/plm', '/workflows', '/approvals', '/integrations']
-      const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
-      if (!allowed) {
-        return next('/plm')
-      }
+    // Feature / permission / focus-mode decisions live in the PURE policy module (round-12: pinned
+    // by behavior tests + a thin structural delegation pin; do not re-inline decision logic here).
+    const decision = resolveRouteGuardDecision(
+      buildRouteGuardInput(to),
+      buildRouteGuardContext({ auth, flags }),
+    )
+    if (decision.action === 'redirect') {
+      return next(decision.target)
     }
   } catch {
     // If guard fails (network/offline), don't block navigation.
@@ -168,6 +155,11 @@ router.beforeEach(async (to, _from, next) => {
 })
 
 async function bootstrap(): Promise<void> {
+  // Once per document, before the first view mounts: re-reads the user's permissions from the
+  // server when the window regains focus (rate-limited to the server's own RBAC cache TTL), so a
+  // tab left open picks up a newly granted permission without a reload. Deliberately here and not
+  // in a component: a component can mount many times, and this must install exactly one listener.
+  installPermissionSnapshotRefresh()
   const app = createApp(App)
   app.use(ElementPlus)
   app.use(createPinia())

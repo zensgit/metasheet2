@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 // Gate B — server-side amount total-check end-to-end (design-lock #3161). Proves what the Gate A unit
 // tests can't: the mapping ROUND-TRIPS through form_schema (create → publish → createApproval) and the
@@ -21,6 +21,7 @@ async function canListen(): Promise<boolean> {
   })
 }
 async function token(baseUrl: string, userId: string): Promise<string> {
+  await grantApprovalWriteForIntegrationActor(userId)
   const r = await fetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
   return ((await r.json()) as { token: string }).token
 }

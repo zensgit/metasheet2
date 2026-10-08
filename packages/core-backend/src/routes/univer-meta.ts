@@ -4,14 +4,12 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
-import { db as kyselyDb } from '../db/db'
 import { eventBus } from '../integration/events/event-bus'
 import {
   deriveFieldPermissions,
   deriveRecordPermissions,
   deriveViewPermissions,
   type FieldPermissionScope,
-  type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
   isFieldWriteForbidden,
@@ -21,10 +19,11 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
-import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import { dateTimeMinuteKey, formatDateOnlyValue, formatDateTimeValue } from '../multitable/date-time-wall-clock'
+import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
-  normalizePermissionCodes,
   resolveRequestAccess,
   type MultitableCapabilities,
   type ResolvedRequestAccess,
@@ -34,7 +33,6 @@ import {
   MANAGED_SHEET_PERMISSION_CODES,
   PUBLIC_FORM_CAPABILITIES,
   applyContextSheetSchemaWriteGrant,
-  applySheetPermissionScope,
   buildRowActionOverrides,
   canReadWithSheetGrant,
   deriveCapabilityOrigin,
@@ -59,24 +57,137 @@ import {
   loadViewPermissionScopeMap,
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
+  resolveBaseReadableForAccess,
+  resolveCopyTargetWritable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
+  resolveSheetCapabilitiesForAccess,
   resolveSheetReadableCapabilities,
+  SHEET_ADMIN_PERMISSION_CODES,
+  SHEET_READ_PERMISSION_CODES,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
-  type MultitableSheetAccessLevel,
   type MultitableSheetPermissionCandidate,
-  type MultitableSheetPermissionEntry,
-  type MultitableSheetPermissionSubjectType,
   type SheetPermissionScope,
 } from '../multitable/permission-service'
-import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
+import {
+  isRecoveryAuthorityBusyError,
+  resolveDatabaseRecoverySheetAuthority,
+  resolveRecoverySheetAuthority,
+} from '../multitable/recovery-authorization-stability'
+import {
+  createRecoveryAuthorizationStabilizer,
+  createRecoveryPlanAuthorization,
+} from '../multitable/recovery-plan-authorization'
+import { bindRecoveryArchiveWorkerAuthorization, bindRecoveryArchiveScopeAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveManualContinuation, bindRecoveryArchiveManualObjectUpload, bindRecoveryArchiveManualManifestUpload } from '../multitable/recovery-archive-manual-continuation'
+import { bindRecoveryArchiveManualFinalization } from '../multitable/recovery-archive-manual-finalization'
+import { bindRecoveryArchiveManualCommand } from '../multitable/recovery-archive-manual-command'
+import { bindRecoveryArchiveManualAdmission, bindRecoveryArchiveManualSourceRecheck, type RecoveryArchiveManualAdmissionPolicy } from '../multitable/recovery-archive-manual-admission'
+import type { RecoveryArchivePreparedUploadInput } from '../multitable/recovery-archive-prepared-upload'
+import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
+import type { RecoveryArchiveDerivedWork } from '../multitable/recovery-archive-derived-effects'
+import {
+  acquireTrustCheckpointActivationLease,
+  assertTrustCheckpointActivationAuthority,
+  assertTrustCheckpointSheetAllowlisted,
+  assertTrustCheckpointSheetExists,
+  TrustCheckpointActivationForbiddenError,
+  TrustCheckpointAuthorityBusyError,
+  TrustCheckpointAuthorityUnavailableError,
+  TrustCheckpointSheetMissingError,
+  TrustCheckpointSheetNotAllowlistedError,
+  TRUST_CHECKPOINT_AUTHORITY_BUSY_CODE,
+  TRUST_CHECKPOINT_AUTHORITY_BUSY_MESSAGE,
+  TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_CODE,
+  TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_MESSAGE,
+  TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE,
+  TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE,
+} from '../multitable/trust-checkpoint-activation-authz'
+import { createPersonMemberResolver, escapeLikeTerm, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
+import {
+  lockRecordLinkAuthorityRowsOnQuery,
+  resolveSheetCapabilitiesForUserOnQuery,
+} from '../services/approval-record-link-txn-auth'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
-import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+// The `operator:` provenance stamp for the two field_permission writers below. It lives with the
+// stock-preparation port because that port is the only reader that has to tell an operator's row
+// from a pack's — but the stamp itself is about THIS route owning what it writes.
+import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
+import {
+  SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+  SYSTEM_PEOPLE_SHEET_KIND,
+  isHiddenSystemSheet,
+  isSystemPeopleSheetDescription,
+} from '../multitable/system-sheet-predicate'
+// #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
+// bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
+import {
+  PEOPLE_SHEET_READ_MAX_ITEMS,
+  boundCursorRead,
+  boundEnumeratedRows,
+  boundPageMeta,
+  boundReadWindow,
+  boundRecordSummaryPage,
+  refuseBoundedSheetBulkRead,
+  resolvePeopleSheetReadBound,
+} from '../multitable/people-sheet-read-bound'
+import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
+import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
+import {
+  isElearningProjectionBaseIdCandidate,
+  isElearningProjectionSheetIdCandidate,
+} from '../multitable/elearning-projection-constants'
+import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
+import { APPROVAL_PROJECTION_BASE_ID } from '../multitable/approval-projection-constants'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity, hashFieldRetypeConvertPlan, mintFieldRetypeConvertPreviewIdentity, readFieldRetypeConvertPreviewIdentity } from '../multitable/restore-preview-identity'
+import {
+  checkExactAnchorRecoveryTrust,
+  enforceSheetRecoverySizeCeiling,
+  executeExactAnchorRecoveryApply,
+  httpForPreviewFailure,
+  mapApplyRefusal,
+  mapParseRefusal,
+  mapSizeCeilingFailure,
+  parseRecoveryAnchorRequest,
+  previewExactAnchorRecovery,
+  mapRecoveryTrustRefusal,
+  type ExactAnchorBody,
+} from '../multitable/exact-anchor-recovery-route'
+import {
+  type ExactAnchorAppliedMutation,
+  type ExactAnchorLinkInvalidation,
+} from '../multitable/exact-anchor-recovery-execute'
+import {
+  listRecoveryArchiveCatalog,
+  readRecoveryArchiveCatalogEntry,
+  type RecoveryArchiveCatalogQuery,
+  type RecoveryArchiveCatalogTransaction,
+} from '../multitable/recovery-archive-catalog'
+import {
+  previewRecoveryArchive,
+  RecoveryArchivePreviewError,
+  type RecoveryArchivePreviewRuntime,
+} from '../multitable/recovery-archive-preview'
+import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
+import { isUndefinedColumnError } from '../utils/database-errors'
+import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
+import {
+  cancelRecoveryArchiveRestoreJob,
+  listRecoveryArchiveRestoreJobs,
+  pruneEligibleRecoveryTokenBurns,
+  readRecoveryArchiveRestoreJobStatus,
+  resumeRecoveryArchiveRestoreJob,
+  type RecoveryArchiveRestoreJobQuery,
+  type RecoveryArchiveRestoreJobTransaction,
+} from '../multitable/recovery-archive-restore-jobs'
+import {
+  registerRecoveryArchiveRestoreOwnerRoutes,
+  type RecoveryArchiveRestoreOwnerContextResolution,
+} from './recovery-archive-restore-owner'
+import { isRetryableLiveLinkDatabaseConflict } from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -88,6 +199,20 @@ import {
   fieldDeleteDiff,
   fieldDeleteDiffWithSequence,
 } from '../multitable/config-revision-recorder'
+import { checkDisplayNameHygiene } from '../multitable/display-name-hygiene'
+import {
+  SHEET_DELETED_CODE,
+  SHEET_DELETED_MESSAGE,
+  SHEET_NOT_FOUND_MESSAGE,
+  SheetNotLiveError,
+  assertSheetLive,
+  assertSheetLiveForUpdate,
+  assertSheetsLiveForUpdate,
+  describeLivenessLookupError,
+  loadSheetLiveness,
+  type SheetLiveness,
+} from '../multitable/sheet-liveness'
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   isTombstoneCaptureEnabled,
   countFieldDeleteCaptureRows,
@@ -151,7 +276,27 @@ import {
   getMultitableTemplate,
   installMultitableTemplate,
   listMultitableTemplates,
+  type MultitableTemplate,
 } from '../multitable/template-library'
+// #5861 —— 「使用模板」的安装去重(同一意图在窗口内只落一个 Base)。
+import {
+  TemplateInstallLedgerUnavailableError,
+  runDeduplicatedTemplateInstall,
+  type TemplateInstallQueryFn,
+  type TemplateInstallScope,
+} from '../multitable/template-install-dedupe'
+import {
+  CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+  CUSTOM_TEMPLATE_ID_PREFIX,
+  createCustomTemplate,
+  extractTemplateSheets,
+  getCustomTemplate,
+  isCustomTemplateId,
+  isUndefinedTableError as isCustomTemplateTableMissing,
+  listCustomTemplates,
+  normalizeCustomTemplateVisibility,
+  softDeleteCustomTemplate,
+} from '../multitable/custom-template-store'
 import { Logger } from '../core/logger'
 import {
   queryRecordsWithCursor,
@@ -180,6 +325,47 @@ import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, withLayer2VisibilityKeys, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
+import { assertLosslessFieldRetype, FieldRetypeNotLosslessError, FIELD_RETYPE_NOT_LOSSLESS_CODE } from '../multitable/field-retype-whitelist'
+import {
+  canonicalFieldRetypeConvertPlanInput,
+  classifyFieldRetypeConvertPair,
+  FIELD_RETYPE_CONVERT_CONFIRM,
+  FIELD_RETYPE_CONVERT_DISABLED_CODE,
+  FIELD_RETYPE_CONVERT_NOT_SUPPORTED_CODE,
+  FIELD_RETYPE_TRUST_REQUIRED_CODE,
+  isFieldRetypeConvertEnabled,
+  planFieldRetypeConvert,
+  toFieldRetypeConvertPreviewResponse,
+  type FieldRetypeConvertScopeReason,
+  type FieldRetypeConvertTargetType,
+} from '../multitable/field-retype-convert'
+import {
+  countFieldRetypeConvertScanRows,
+  loadFieldRetypeConvertLiveCells,
+  loadFieldRetypeConvertTrashCells,
+  resolveFieldRetypeConvertManagedSheetReason,
+} from '../multitable/field-retype-convert-preview'
+import {
+  checkFieldRetypeConvertClaims,
+  executeFieldRetypeConvert,
+  FIELD_RETYPE_CONFIRM_REQUIRED_CODE,
+  FIELD_RETYPE_UNDO_CONFIRM,
+  fieldRetypeConversionRestoreRefusal,
+  fieldRetypeConvertIdentityInvalid,
+  fieldRetypeConvertNotSupported,
+  isFieldRetypeConversionRevision,
+  revertWritesFieldTypeOrProperty,
+  undoFieldRetypeConvert,
+  type FieldRetypeConvertFailure,
+  type FieldRetypeConvertQuery,
+} from '../multitable/field-retype-convert-execute'
+import {
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE,
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE,
+  judgeFieldRetypeConvertGates,
+  type FieldRetypeConvertGateRefusal,
+} from '../multitable/field-retype-convert-gates'
+import { isLegacyWriteImpliesManageSchemaEnabled } from '../multitable/manage-schema-permission'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
@@ -191,11 +377,15 @@ import {
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
   preflightDingTalkAutomationCreate,
-  preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from '../multitable/automation-producer-emit'
+import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent } from '../multitable/recovery-mutation-events'
+import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
+import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -233,13 +423,31 @@ import {
 import {
   acquireCanonicalSheetFence,
   assertNoActiveWriterBlock,
-  claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
-  PIT_RECOVERY_LOCK_NS,
-  setRecoveryWriterState,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterFieldLinkDropFencePlan,
+  enterFieldLinkRestoreFencePlan,
+  enterLinkWriterFencePlan,
+  enterSheetLinkDeleteFencePlan,
+  LinkWriterFencePlanChangedError,
+  prepareFieldLinkDropFencePlan,
+  prepareFieldLinkRestoreFencePlan,
+  prepareLinkWriterFencePlan,
+  prepareSheetLinkDeleteFencePlan,
+  type FieldLinkRestoreFencePlan,
+} from '../multitable/link-writer-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  DerivedMergeTargetRetypedError,
+  FieldSchemaChangedError,
+} from '../multitable/field-schema-fence-recheck'
+import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
+import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
+import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
@@ -247,16 +455,6 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
 import { mintOperation, sealOperation } from '../multitable/operation-ledger'
-import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
-import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
-
-// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
-function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
-  const code = (err as { code?: string } | null)?.code
-  const msg = err instanceof Error ? err.message : String(err)
-  if (code === '42703') return msg.includes(columnName)
-  return msg.includes(`column "${columnName}" does not exist`)
-}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -276,6 +474,7 @@ import {
   subscribeRecord,
   unsubscribeRecord,
 } from '../multitable/record-subscription-service'
+import { notifyRecordSubscribersBestEffort } from '../multitable/record-subscription-service'
 import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
@@ -472,12 +671,26 @@ type UniverMetaViewConfig = {
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-const DEFAULT_BASE_ID = 'base_legacy'
-const DEFAULT_BASE_NAME = 'Migrated Base'
-// W0-1 C4 fence: `PIT_RECOVERY_LOCK_NS` (recovery-only advisory lock namespace, paired with
-// `hashtext(sheetId)` as the per-sheet key) now lives in `canonical-sheet-fence.ts` — single source of
-// truth shared by reset-execute AND revert-execute (see that module's RECOVERY-VS-RECOVERY doc section).
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
+// SYSTEM_PEOPLE_SHEET_KIND (server-owned `meta_sheets.system_kind` of the People sheet) lives in
+// ../multitable/system-sheet-predicate next to the #5825 list-visibility predicate.
+/** Values-free refusal for a client create that asks for the reserved People sentinel description (#5807). */
+const RESERVED_SHEET_DESCRIPTION_MESSAGE = 'This description is reserved for a system-managed sheet'
+/**
+ * #5839: the VIEW half of the export route's existence refusal, values-free by the same rule as
+ * `SHEET_NOT_FOUND_MESSAGE` (multitable/sheet-liveness.ts) — it never echoes the requested view id.
+ *
+ * A NAME rather than a bare literal because nothing else can hold it there: the sheet-liveness closure
+ * guard's `EXISTENCE_PROBE` matches `meta_sheets` reads only, so a view probe drifting back above the
+ * 403 (or back to the id-bearing message) is invisible to it. The pin is behavioural —
+ * tests/unit/multitable-sheet-existence-oracle-b3.test.ts asserts this exact body on the export route,
+ * and asserts it arrives only for a caller who already passed canRead + canExport.
+ *
+ * Deliberately NOT applied to `DELETE /views/:viewId`, whose id-bearing `View not found: <id>` is
+ * pinned by tests/integration/multitable-view-config.api.test.ts and sits behind that route's own
+ * authority check.
+ */
+const EXPORT_VIEW_NOT_FOUND_MESSAGE = 'View not found'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
 // history-exclusion predicate); imported at the top of this file.
@@ -571,6 +784,17 @@ type PeopleSheetPreset = {
     description: string | null
   }
   fieldProperty: Record<string, unknown>
+  /**
+   * #5807 — internal only, never serialized: ids of the EXISTING People rows this call rewrote with an
+   * UPDATE (rows it inserted are not listed — a fresh id has no Yjs state). The prepare route purges
+   * their Yjs state after the transaction commits.
+   */
+  rewrittenRecordIds: string[]
+}
+
+type PeopleSheetProvisionPlan = {
+  peopleSheetRow: any | null
+  peopleSheetId: string
 }
 
 type PublicFormAccessMode = 'public' | 'dingtalk' | 'dingtalk_granted'
@@ -685,6 +909,7 @@ function buildPublicFormToken(): string {
 
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
+  if (isElearningProjectionSheetIdCandidate(view.sheetId)) return false
   const publicForm = getPublicFormConfig(view)
   if (!publicForm || publicForm.enabled !== true) return false
   const configuredToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
@@ -692,6 +917,13 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+function canManageFormShareForSheet(
+  capabilities: { canManageViews: boolean },
+  sheetId: string,
+): boolean {
+  return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)
 }
 
 async function loadPublicFormAllowedSubjectSummaries(
@@ -1000,8 +1232,10 @@ function normalizeJsonArray(value: unknown): string[] {
   return []
 }
 
-function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]): T[] {
-  return rows.filter((row) => !isSystemPeopleSheetDescription(row.description))
+// #5825: rows should carry `system_kind` (read column-tolerantly: `to_jsonb(<row>) ->> 'system_kind'`) so a
+// People sheet whose description was edited is still hidden. Visibility only — never a trust decision.
+function filterVisibleSheetRows<T extends { description?: unknown; system_kind?: unknown }>(rows: T[]): T[] {
+  return rows.filter((row) => !isHiddenSystemSheet(row))
 }
 
 type LinkFieldConfig = {
@@ -1142,6 +1376,44 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
     ...(foreignSheetId ? { foreignSheetId } : {}),
     ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
+}
+
+/**
+ * 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): for each lookup field in `fields` whose TARGET field
+ * (on the foreign sheet) is a date-time, the zone its values are shown in — the target's own rule: a dateTime
+ * field's explicit non-'UTC' zone else the instance business timezone; createdTime / modifiedTime → the business
+ * timezone. Other lookups are absent (their cells keep the raw projection). The foreign sheet is resolved as
+ * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
+ * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
+ * values themselves were already masked by applyLookupRollup).
+ */
+async function resolveLookupDateTimeTargetZones(
+  query: QueryFn,
+  fields: UniverMetaField[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<Map<string, string>> {
+  const zones = new Map<string, string>()
+  const lookups = fields
+    .filter((field) => field.type === 'lookup')
+    .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
+    .filter((entry): entry is { fieldId: string; cfg: LookupFieldConfig } => entry.cfg !== null)
+  if (lookups.length === 0) return zones
+  const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg] as const))
+  const foreignFieldsBySheet = new Map<string, Array<{ id: string; type: string; property?: unknown }>>()
+  for (const { fieldId, cfg } of lookups) {
+    const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (!foreignSheetId) continue
+    let foreignFields = foreignFieldsBySheet.get(foreignSheetId)
+    if (!foreignFields) {
+      foreignFields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+      foreignFieldsBySheet.set(foreignSheetId, foreignFields)
+    }
+    const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
+    if (!target) continue
+    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+  }
+  return zones
 }
 
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
@@ -1410,7 +1682,7 @@ export function expressionHasRelationAggregationButNotSole(expression: string): 
 // extractor misses (the link arg is a string literal, not a {fld} ref). Registering it makes a link-field
 // edit recompute the aggregation; the criteria's {fld} value ref is caught by the normal extractor. The
 // FOREIGN target/criteria deps are handled parse-side by the taint (read mask) + fan-out paths.
-function extractRelationAggregationLinkFieldId(expression: string): string | null {
+export function extractRelationAggregationLinkFieldId(expression: string): string | null {
   const e = expression.startsWith('=') ? expression.slice(1) : expression
   return parseRelationAggregationCall(e.trim())?.linkFieldId ?? null
 }
@@ -1438,13 +1710,14 @@ function resolveRelationCriteriaValue(valueExpr: string, recordData: Record<stri
 // aggregate, or a fail-LOUD sentinel: #PERM! (boundary made it unknowable for this actor), #LIMIT! (a §5
 // cap was hit), #ERROR! (misconfig / operator-incompatible criteria). NEVER a silent null on a boundary.
 async function resolveRelationAggregation(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   recordId: string,
   recordData: Record<string, unknown>,
   call: RelationAggregationCall,
   fields: UniverMetaField[],
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<number | string | boolean | null | unknown[]> {
   const linkField = fields.find((f) => f.id === call.linkFieldId && f.type === 'link')
   const linkCfg = linkField ? parseLinkFieldConfig(linkField.property) : null
@@ -1459,7 +1732,7 @@ async function resolveRelationAggregation(
   if (linkIds.length > MAX_RELATION_SCAN_RECORDS) return REL_AGG_LIMIT_SENTINEL
 
   // Sheet-level read gate.
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId])
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId], authorityAccess)
   if (!readableForeignSheetIds.has(foreignSheetId)) return REL_AGG_PERM_SENTINEL
 
   // Foreign-FIELD readability — cross-base flows through the SAME per-field gate as lookup/rollup, not a
@@ -1471,12 +1744,13 @@ async function resolveRelationAggregation(
   // criteria over an unreadable field is a side-channel — the match count would leak it).
   const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId])
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId], authorityAccess)
   if (shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false)) return REL_AGG_PERM_SENTINEL
   if (shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)) return REL_AGG_PERM_SENTINEL
 
   // Materialize the foreign records, excluding row-level-denied ones (absent → never matched/counted).
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRes = await query(
     'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
     [foreignSheetId, linkIds],
@@ -1809,6 +2083,43 @@ async function validateLinkFieldConfig(
 }
 
 /**
+ * 关联字段缺目标表 —— 创建/更新侧 fail-closed（2026-09-10）。
+ *
+ * 历史行为是 fail-OPEN：`sanitizeFieldPropertyByType` 的 link 分支在 foreignSheetId 为空时直接把这个键
+ * 省略掉，而 §2a.2 的墙 `validateLinkFieldConfig` 在 `parseLinkFieldConfig` 返回 null 时也 return null
+ * （"不完整草稿不校验"），它的两个调用点还额外用 `linkForeignKeyInPayload` 收窄。结果：
+ * `POST /fields {type:'link'}` 不带 property、或 `PATCH {type:'link'}` 从别的类型转过来，都能落一个没有
+ * 目标表的 link 字段。这种字段在 `GET /fields/:fieldId/link-options` 上必然 400，用户点"选择关联记录"
+ * 只能看到一句原始报错。
+ *
+ * 这里是写入口的收紧（只收不放）：结果状态是 link 且不含任何 foreign 别名（foreignSheetId /
+ * foreignDatasheetId / datasheetId，统一经 `parseLinkFieldConfig` 归一）就拒绝落库。错误码稳定
+ * （`LINK_FIELD_FOREIGN_SHEET_REQUIRED`），message 不拼任何 id（values-free），前端按码翻人话。
+ *
+ * 历史 person 链接字段（type='link' + refKind:'user'）由 `ensurePeopleSheetPreset` 生成，property 永远
+ * 带 foreignSheetId（指向 People 表），所以这道门对它无影响。
+ */
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE = 'LINK_FIELD_FOREIGN_SHEET_REQUIRED'
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE = '关联字段必须先选择要关联的目标数据表'
+/** 读取侧（link-options）对"已有坏字段"的稳定码 —— message 同样 values-free，不回显 fieldId。 */
+const LINK_FIELD_FOREIGN_SHEET_MISSING_CODE = 'LINK_FIELD_FOREIGN_SHEET_MISSING'
+const LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE = '该关联字段还没有设置要关联哪张数据表'
+
+class LinkForeignSheetRequiredError extends Error {
+  constructor() {
+    super(LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE)
+    this.name = 'LinkForeignSheetRequiredError'
+  }
+}
+
+/** 结果状态若是"没有目标表的 link 字段"就抛 —— 由 POST /fields 与 PATCH /fields/:fieldId 两个写口调用。 */
+function assertLinkFieldForeignSheetPresent(type: UniverMetaField['type'], property: unknown): void {
+  if (type !== 'link') return
+  if (parseLinkFieldConfig(property)) return
+  throw new LinkForeignSheetRequiredError()
+}
+
+/**
  * ②a §2a.4-c — sheet-create TOCTOU close. The §2a.2 wall (`validateLinkFieldConfig`) can only compare
  * bases when BOTH sheets exist; a link created against a not-yet-existent foreign sheet id slips through
  * (the wall no-ops). The hole is closed from the OTHER side: when a sheet is created with a caller-chosen
@@ -2035,27 +2346,18 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return msg.includes(`relation "${tableName}" does not exist`)
 }
 
-const OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS = [
-  'column r.description does not exist',
-  'column "r"."description" does not exist',
-  'column roles.description does not exist',
-  'column "roles"."description" does not exist',
-  'column g.name does not exist',
-  'column g.description does not exist',
-  'column "g"."name" does not exist',
-  'column "g"."description" does not exist',
-  'column platform_member_groups.name does not exist',
-  'column platform_member_groups.description does not exist',
-  'column "platform_member_groups"."name" does not exist',
-  'column "platform_member_groups"."description" does not exist',
-]
-
+// 权限主体水合的可选目录降级:只针对 platform_member_groups(成员组目录)。
+// roles 一律不参与 —— roles 表没有 description 列,主查询也已不再引用它。
+// 判定以 SQLSTATE 为主:42P01 缺表 / 42703 缺列,message 只用来核对标识符,
+// 这样中文 locale(222 测试机 lc_messages=Chinese)下也不会漏判。
 function isOptionalPermissionSubjectHydrationError(err: unknown): boolean {
   if (isUndefinedTableError(err, 'platform_member_groups')) return true
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  if (code !== '42703') return false
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message.toLowerCase() : ''
-  return OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
+  return (
+    isUndefinedColumnError(err, 'g.name') ||
+    isUndefinedColumnError(err, 'g.description') ||
+    isUndefinedColumnError(err, 'platform_member_groups.name') ||
+    isUndefinedColumnError(err, 'platform_member_groups.description')
+  )
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -2705,13 +3007,21 @@ async function loadLinkValuesByRecord(
   if (forwardFields.length > 0) {
     const fieldIds = forwardFields.map((l) => l.fieldId)
     const linkRes = await query(
-      // repair-on-read: foreign_record_id has NO FK, so an inbound edge to a since-deleted record dangles
-      // (sheet-delete / direct-SQL / legacy). Filter dangling edges so a deleted foreign record never surfaces
-      // as a ghost link id. (deleteRecord already drops both directions in-txn; this defends the slip-throughs.)
+      // Repair-on-read remains required for historical dangling rows admitted by the target FK's
+      // NOT VALID rollout. New writes are FK-checked, but legacy ghosts must never reach a read.
+      //
+      // The sheet join carries the SOFT-DELETE half: `DELETE /sheets/:sheetId` no longer destroys the
+      // sheet's records (so a restore can be complete), so "the target sheet is gone" is now a
+      // `deleted_at` fact rather than an absent row. Filtering here keeps the observable read
+      // behaviour identical to the old hard-delete cascade — a source sheet shows no link into a
+      // deleted sheet — while the edge itself survives for the restore.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = foreign_record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = foreign_record_id AND s.deleted_at IS NULL)`,
       [fieldIds, recordIds],
     )
     for (const raw of linkRes.rows as any[]) {
@@ -2736,10 +3046,15 @@ async function loadLinkValuesByRecord(
       // repair-on-read (symmetry / defense-in-depth): the mirror value is the SOURCE record_id, which is
       // FK-cascade-protected (record_id REFERENCES meta_records ON DELETE CASCADE) so a ghost source is not
       // expected today — but filter it too so NO read path can ever surface a deleted record id.
+      // The sheet join mirrors the forward side's soft-delete filter: a source record whose SHEET was
+      // deleted must not surface through the reverse projection either.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
        WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])
-         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = record_id)`,
+         AND EXISTS (
+           SELECT 1 FROM meta_records r
+             JOIN meta_sheets s ON s.id = r.sheet_id
+            WHERE r.id = record_id AND s.deleted_at IS NULL)`,
       [forwardIds, recordIds],
     )
     for (const raw of reverseRes.rows as any[]) {
@@ -2839,7 +3154,7 @@ async function recalculateFormulaFields(
   // §2a.3 B1: `req` is the WRITING actor — needed to resolve write-side formula taint so a
   // foreign-field-denied writer never recomputes (and persists) a permission-degraded formula
   // value into shared meta_records.data. See the taint skip below.
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: UniverMetaField[],
@@ -2862,6 +3177,8 @@ async function recalculateFormulaFields(
   // Everything downstream (taint skip, relation-agg/pure split, per-record materialization) is
   // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
   explicitFormulaFieldIds?: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   if (updatedRecordIds.length === 0) return []
   if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
@@ -2922,7 +3239,8 @@ async function recalculateFormulaFields(
   // whose deps (transitively) reach a lookup/rollup masked for THIS writer, leaving the previously
   // stored AUTHORIZED value untouched — symmetric to the export/aggregate/read taint sinks. An
   // authorized writer (nothing masked) gets an empty tainted set → recompute is unchanged.
-  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds)
+  const taintedForWriter = await resolveTaintedFormulaFieldIds(req, query, sheetId, dependentFormulaFieldIds, authorityAccess)
+  if (requireComplete && taintedForWriter.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
   for (const id of taintedForWriter) dependentFormulaFieldIds.delete(id)
   if (dependentFormulaFieldIds.size === 0) return []
 
@@ -2945,6 +3263,11 @@ async function recalculateFormulaFields(
   )
 
   const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
+  // W0-1 L4-cov follow-up: once a durable recovery writer-block refuses one relation-agg
+  // materialization on this sheet, skip the remaining records' relation-agg compute+write round
+  // trips too (the block is sheet-scoped; pure-formula materialization keeps its own engine-side
+  // fence posture per record).
+  let derivedWriteBlocked = false
   for (const recordId of updatedRecordIds) {
     const hydrated = hydratedDataByRecord?.get(recordId)
     const formulaData: Record<string, unknown> = {}
@@ -2952,30 +3275,47 @@ async function recalculateFormulaFields(
       const nextData = hydrated
         ? await multitableFormulaEngine.recalculateRecordFromData(query, sheetId, recordId, hydrated, fields, pureFormulaFieldIds)
         : await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields, pureFormulaFieldIds)
+      if (requireComplete && !nextData) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
       if (nextData) {
         for (const fieldId of pureFormulaFieldIds) {
           if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
         }
       }
     }
-    if (relationAggByField.size > 0 || cliffFieldIds.size > 0) {
+    if ((relationAggByField.size > 0 || cliffFieldIds.size > 0) && !derivedWriteBlocked) {
       const recData = hydrated ?? (await loadRecordDataById(query, sheetId, recordId))
       if (recData) {
         const updates: Record<string, unknown> = {}
         for (const [fieldId, call] of relationAggByField) {
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
         for (const fieldId of cliffFieldIds) {
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the relation-agg materialization joins the
+        // canonical fence via the SHARED derived-write seam (flag-gated; flag-OFF = byte-identical legacy
+        // write on the caller's query). A durable recovery block on this sheet is an EXPECTED operational
+        // condition, not an error — the primary user write (if any) already committed, so refusal here
+        // must NOT fail the request or kill the remaining post-commit steps: skip the materialization AND
+        // its echo (the DB did not change; receivers only consume invalidation ids and refetch — carrying
+        // a value the DB refused would display data that reverts on reload), latch the sheet so remaining
+        // records skip their compute+fence round trips. Values-free log. Any OTHER error keeps today's
+        // propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
-          // revision-exempt: relation-aggregation same-record materialization, no version bump — derived value.
-          await query(
-            'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
-            [JSON.stringify(updates), recordId, sheetId],
-          )
-          Object.assign(formulaData, updates)
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            Object.assign(formulaData, updates)
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+              derivedWriteBlocked = true
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+            } else {
+              throw err
+            }
+          }
         }
       }
     }
@@ -3036,6 +3376,64 @@ export async function recalculateFormulaFieldsForActor(
     updatedRecordIds,
     changedFieldIds,
     hydratedDataByRecord,
+  )
+}
+
+/**
+ * Copy-sheet S1 (ADR §3 / §7.2 step 7): recompute EVERY formula field of a freshly copied sheet for the
+ * given (chunk of) new record ids, after the copy transaction COMMITTED. Same chokepoint as the
+ * expression-change bulk recompute (`explicitFormulaFieldIds` = all formula fields, `changedFieldIds`
+ * `[]`), same writer-taint discipline under the copier's actor context — a field the copier may not read
+ * is skipped, never persisted degraded. Exported for `routes/multitable-copy-sheet.ts`.
+ */
+export async function recalculateAllFormulaFieldsForActor(
+  actorId: string | null,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  recordIds: string[],
+  opts: {
+    /**
+     * Copy-sheet (ADR #6094 §7.2 step 7, DATA-7): hydrate same-record lookup/rollup for these rows under THIS
+     * actor's read authority before evaluating, so a formula-over-lookup sees the real lookup value instead of
+     * the absent-on-reload 0 (RWS Step 4 / recalcNewRecordFormulas parity). Skipped when the sheet has no
+     * lookup/rollup field (no extra statements).
+     */
+    hydrateLookupRollupFor?: ResolvedRequestAccess
+  } = {},
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
+  if (formulaFieldIds.size === 0 || recordIds.length === 0) return []
+  let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+  const hasLookupRollup = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
+  if (opts.hydrateLookupRollupFor && hasLookupRollup) {
+    const recordRes = await query(
+      'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, recordIds],
+    )
+    const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+      id: String(row.id),
+      version: Number(row.version ?? 0),
+      data: normalizeJson(row.data),
+    })) as UniverMetaRecord[]
+    if (rows.length > 0) {
+      const relationalLinkFields = fields
+        .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+        .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
+      const linkValuesByRecord = await loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+      await applyLookupRollup(undefined, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, opts.hydrateLookupRollupFor)
+      hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+    }
+  }
+  return recalculateFormulaFields(
+    buildWriterTaintContext(actorId),
+    query,
+    sheetId,
+    fields,
+    recordIds,
+    [],
+    hydratedDataByRecord,
+    formulaFieldIds,
   )
 }
 
@@ -3116,22 +3514,26 @@ async function recalcNewRecordFormulas(
 type ForeignFieldReadability = { readableFieldIds: Set<string>; crossBase: boolean }
 
 async function resolveForeignFieldReadability(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceBaseId: string | null,
   foreignSheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Map<string, ForeignFieldReadability>> {
   const out = new Map<string, ForeignFieldReadability>()
   const unique = Array.from(new Set(Array.from(foreignSheetIds).filter(Boolean)))
   if (unique.length === 0) return out
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   for (const foreignSheetId of unique) {
     const [foreignSheet, foreignFields, capabilities, fieldScopeMap] = await Promise.all([
       loadSheetRowShared(query, foreignSheetId),
       loadFieldsForSheetShared(query, foreignSheetId),
       // Capabilities don't affect field VISIBILITY (only readOnly), but resolve them so the
       // foreign-sheet derivation matches the export/view path exactly.
-      resolveSheetReadableCapabilities(req, query, foreignSheetId).then((r) => r.capabilities),
+      (authorityAccess || !req
+        ? resolveSheetCapabilitiesForAccess(query, foreignSheetId, access)
+        : resolveSheetReadableCapabilities(req, query, foreignSheetId)).then((r) => r.capabilities),
       access.userId ? loadFieldPermissionScopeMap(query, foreignSheetId, access.userId) : Promise.resolve(new Map<string, FieldPermissionScope>()),
     ])
     let readableFieldIds = computeAllowedFieldIds(foreignFields as UniverMetaField[], capabilities, fieldScopeMap)
@@ -3146,7 +3548,9 @@ async function resolveForeignFieldReadability(
     // foreign base is unreadable by definition (can't opt in / can't grant) → mask (also crash-safe:
     // resolveBaseReadable would throw on null).
     if (crossBase) {
-      const baseReadable = foreignBaseId != null && (await resolveBaseReadable(req, query, foreignBaseId))
+      const baseReadable = foreignBaseId != null && (authorityAccess || !req
+        ? await resolveBaseReadableForAccess(query, foreignBaseId, access)
+        : await resolveBaseReadable(req, query, foreignBaseId))
       if (!baseReadable) {
         readableFieldIds = new Set<string>()
       }
@@ -3200,10 +3604,11 @@ function shouldMaskForeignField(
  * taint-skipped) recompute output and never raw stored formula values.
  */
 async function resolveTaintedFormulaFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   candidateFormulaFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   if (candidateFormulaFieldIds.size === 0) return new Set()
 
@@ -3260,6 +3665,18 @@ async function resolveTaintedFormulaFieldIds(
     dependsOnByField.set(fieldId, set)
   }
 
+  // Recompute also discovers dependencies from authoritative expressions when the index is stale.
+  // Taint must include the same edges or masked hydration could overwrite a stored authorized value.
+  for (const field of fields) {
+    if (field.type !== 'formula') continue
+    const expression = formulaExpressionOf(field)
+    if (!expression) continue
+    const refs = multitableFormulaEngine.extractFieldReferences(expression)
+    const deps = dependsOnByField.get(field.id) ?? new Set<string>()
+    for (const ref of refs) deps.add(ref)
+    dependsOnByField.set(field.id, deps)
+  }
+
   // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
   const sourceSheet = await loadSheetRowShared(query, sheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
@@ -3271,7 +3688,7 @@ async function resolveTaintedFormulaFieldIds(
   for (const { foreignSheetId } of relAggByField.values()) {
     if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
   }
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds)
+  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds, authorityAccess)
 
   // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
   const maskedComputedFieldIds = new Set<string>()
@@ -3353,11 +3770,12 @@ async function resolveTaintedFormulaFieldIds(
  * `filterRecordDataByFieldIds` call over stored record data is reachable without it.
  */
 async function maskStoredRecordFieldIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
   fields: Array<{ id: string; type: string }> | undefined,
   baseAllowedFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const candidateFormulaIds = fields
     ? new Set(
@@ -3366,7 +3784,7 @@ async function maskStoredRecordFieldIds(
           .map((field) => field.id),
       )
     : new Set(baseAllowedFieldIds)
-  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds)
+  const tainted = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateFormulaIds, authorityAccess)
   if (tainted.size === 0) return new Set(baseAllowedFieldIds)
   const masked = new Set(baseAllowedFieldIds)
   for (const id of tainted) masked.delete(id)
@@ -3405,13 +3823,14 @@ async function resolveDisplayFieldTaint(
 }
 
 async function applyLookupRollup(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sourceSheetId: string,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
   linkValuesByRecord: Map<string, Map<string, string[]>>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<void> {
   const lookupFieldIds = fields.filter((f) => f.type === 'lookup').map((f) => f.id)
   const rollupFieldIds = fields.filter((f) => f.type === 'rollup').map((f) => f.id)
@@ -3469,7 +3888,7 @@ async function applyLookupRollup(
     }
   }
 
-  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys(), authorityAccess)
 
   // §2a.3 — resolve foreign-FIELD-level readability + cross-base for every readable foreign sheet
   // (one scope-map load per foreign sheet, batched — never per record). Source base_id is needed
@@ -3481,6 +3900,7 @@ async function applyLookupRollup(
     query,
     sourceBaseId,
     Array.from(foreignIdsBySheet.keys()).filter((id) => readableForeignSheetIds.has(id)),
+    authorityAccess,
   )
 
   // #18 row-level read-deny (cross-record): when a FOREIGN sheet opts in (its
@@ -3490,7 +3910,8 @@ async function applyLookupRollup(
   // lookup values AND never counted by rollup — so a rollup count equals the count of READABLE foreign
   // records, never the true total (no cardinality leak). Resolved once per read; flag-OFF on the foreign
   // sheet → no exclusion → byte-identical; admins bypass.
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
@@ -3665,13 +4086,15 @@ function mergeComputedRecords(
 }
 
 async function computeDependentLookupRollupRecords(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   // A-full (design #2410): the edited (source) sheet + its changed field ids gate which related
   // lookup/rollup fields count as "affected" for the one-hop formula recompute below.
   sourceSheetId: string,
   updatedRecordIds: string[],
   changedFieldIds: string[],
+  authorityAccess?: ResolvedRequestAccess,
+  requireComplete = false,
 ): Promise<RelatedComputedRecord[]> {
   if (updatedRecordIds.length === 0) return []
 
@@ -3732,13 +4155,24 @@ async function computeDependentLookupRollupRecords(
     const relatedSheet = await loadSheetRowShared(query, sheetId)
     const relatedBaseId = relatedSheet?.baseId ?? null
     if (baseIdsAreCrossBase(sourceBaseId, relatedBaseId)) {
-      const baseReadable = relatedBaseId != null && (await resolveBaseReadable(req, query, relatedBaseId))
-      if (!baseReadable) continue
+      const baseReadable = relatedBaseId != null && (authorityAccess
+        ? await resolveBaseReadableForAccess(query, relatedBaseId, authorityAccess)
+        : req ? await resolveBaseReadable(req, query, relatedBaseId) : false)
+      if (!baseReadable) {
+        if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+        continue
+      }
     }
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
-    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
-    if (!access.userId || !capabilities.canRead) continue
+    if (!authorityAccess && !req) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+    const { access, capabilities } = authorityAccess
+      ? await resolveSheetCapabilitiesForAccess(query, sheetId, authorityAccess)
+      : await resolveSheetReadableCapabilities(req!, query, sheetId)
+    if (!access.userId || !capabilities.canRead) {
+      if (requireComplete) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+      continue
+    }
     const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
     allowedFieldIdsBySheet.set(sheetId, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
   }
@@ -3766,7 +4200,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, authorityAccess)
 
     // A-full (design #2410): one-hop formula recompute on the related records. A related
     // lookup/rollup is "affected" only when it resolves to the edited source sheet, its
@@ -3839,6 +4273,9 @@ async function computeDependentLookupRollupRecords(
         Array.from(affectedFieldIdsByRecord.keys()),
         Array.from(affectedComputedFieldIds),
         hydratedDataByRecord,
+        undefined,
+        authorityAccess,
+        requireComplete,
       )
       formulaDataByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
     }
@@ -3852,7 +4289,8 @@ async function computeDependentLookupRollupRecords(
     if (relAggAffectedByRecord.size > 0) {
       const candidateRel = new Set<string>()
       for (const s of relAggAffectedByRecord.values()) for (const id of s) candidateRel.add(id)
-      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel)
+      const taintedRel = await resolveTaintedFormulaFieldIds(req, query, sheetId, candidateRel, authorityAccess)
+      if (requireComplete && taintedRel.size > 0) throw new Error('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
       for (const [recordId, fieldIds] of relAggAffectedByRecord) {
         const recData = rows.find((r) => r.id === recordId)?.data ?? (await loadRecordDataById(query, sheetId, recordId))
         if (!recData) continue
@@ -3863,13 +4301,30 @@ async function computeDependentLookupRollupRecords(
           const expr = f ? formulaExpressionOf(f) : null
           const call = expr ? parseRelationAggregationCall(expr) : null
           if (!call) continue
-          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields)
+          updates[fieldId] = await resolveRelationAggregation(req, query, sheetId, recordId, recData, call, fields, authorityAccess)
         }
+        // W0-1 L4-cov follow-up (post-merge review of #4438): the fan-out materialization joins the
+        // canonical fence via the SHARED derived-write seam, keyed on the DEPENDENT sheet being written
+        // (this loop's `sheetId` — NOT `sourceSheetId`; the primary write's fence covered only the source
+        // sheet, so a recovery block here is the COMMON refusal case, not a race). Refusal is expected
+        // during a recovery on this dependent sheet: skip this sheet's remaining materializations and
+        // their echo/invalidation ids (the DB did not change ⇒ nothing to invalidate), let OTHER
+        // dependent sheets and the rest of the post-commit pipeline continue. Values-free log. Any other
+        // error keeps today's propagation semantics.
         if (Object.keys(updates).length > 0) {
-          // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
-          // revision-exempt: relation-aggregation fan-out materialization, no version bump — derived value.
-          await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
-          formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          try {
+            await applyFencedDerivedDataMerge(query as unknown as DerivedMergeQueryFn, sheetId, recordId, updates)
+            formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
+          } catch (err) {
+            if (err instanceof SheetWriterBlockedError) {
+              if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] fan-out relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              break
+            }
+            throw err
+          }
         }
       }
     }
@@ -3949,6 +4404,45 @@ export function evaluateMetaFilterCondition(
 
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
+
+  // 客户反馈 2026-09-24 #4c (PR #6083 review S2): dateTime compares INSTANTS, not strings. Before this the
+  // type fell through to the string branch below, so `is` compared the stored ISO text against whatever the
+  // user typed (never equal) and greater/less hit the catch-all `return true` (matched every row). The filter
+  // value is parsed with the same rule as a cell edit: a zone-less wall clock (`2026-09-24 09:00`) is the
+  // instance BUSINESS timezone (the web sends an absolute instant when a field carries its own explicit
+  // zone, so per-field zones are honoured by the web's conversion; an API caller's zone-less text is
+  // business time). Both sides are floored to the MINUTE — the displayed precision — so a cell stored as
+  // 09:00:30 `is` 09:00. Relative-date operators stay `date`-only (day math is UTC there, see
+  // evaluateRelativeDateOp); an unknown operator keeps the pre-existing match-all catch-all.
+  if (effectiveType === 'dateTime') {
+    const businessZone = resolveMultitableBusinessTimezone()
+    const left = dateTimeMinuteKey(cellValue, businessZone)
+    const right = dateTimeMinuteKey(value, businessZone)
+    if (opNorm === 'is' || opNorm === 'equal') return left !== null && right !== null && left === right
+    if (opNorm === 'isnot' || opNorm === 'notequal') return left !== right
+    if (opNorm === 'greater' || opNorm === 'isgreater') return left !== null && right !== null && left > right
+    if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
+    if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
+    if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    if (opNorm === 'between') {
+      const arr = Array.isArray(condition.value) ? condition.value : []
+      if (arr.length < 2) return true
+      const a = dateTimeMinuteKey(arr[0], businessZone); const b = dateTimeMinuteKey(arr[1], businessZone)
+      if (a === null || b === null) return true
+      if (left === null) return false
+      return left >= Math.min(a, b) && left <= Math.max(a, b)
+    }
+    // contains / doesNotContain: mirror the string branch, but against the DISPLAYED wall-clock text
+    // (`2026-09-24 09:00`), never the raw stored ISO — the person is matching what the grid shows. A cell
+    // that is not a date-time keeps its raw text. Empty needle = inactive (match all), like the string branch.
+    if (opNorm === 'contains' || opNorm === 'doesnotcontain') {
+      const shown = (formatDateTimeValue(cellValue, businessZone) ?? toComparableString(cellValue)).trim().toLowerCase()
+      const needle = toComparableString(value).trim().toLowerCase()
+      if (needle === '') return true
+      return opNorm === 'contains' ? shown.includes(needle) : !shown.includes(needle)
+    }
+    return true
+  }
 
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
@@ -4118,10 +4612,21 @@ function toDashboardMetricNumber(value: unknown): number | null {
   return toComparableNumber(value)
 }
 
-function getDbNotReadyMessage(err: unknown): string | null {
+export function getDbNotReadyMessage(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err ?? '')
-  const relationMissing = msg.includes('relation') && msg.includes('does not exist')
-  const columnMissing = msg.includes('column') && msg.includes('does not exist')
+  // SQLSTATE 为主信号:42P01 缺表 / 42703 缺列。中文 locale 下 PG 的散文被翻译成
+  // 「关系 "x" 不存在」/「字段 x 不存在」,英文整句匹配会漏判 → 原来会退化成 500。
+  // 只有在错误完全没有 code 时(手工构造的错误)才回落到散文,并同时认中文译文。
+  const code = typeof (err as { code?: unknown } | null | undefined)?.code === 'string'
+    ? (err as { code: string }).code
+    : null
+  const relationMissing = code !== null
+    ? code === '42P01'
+    : (msg.includes('relation') && msg.includes('does not exist')) || (msg.includes('关系') && msg.includes('不存在'))
+  const columnMissing = code !== null
+    ? code === '42703'
+    : (msg.includes('column') && msg.includes('does not exist'))
+      || ((msg.includes('字段') || msg.includes('列')) && msg.includes('不存在'))
   if (!relationMissing && !columnMissing) return null
 
   if (
@@ -4188,12 +4693,36 @@ function invalidateFieldCache(sheetId: string): void {
   metaFieldCache.delete(sheetId)
 }
 
+/**
+ * Drop the two caches that carry a sheet's DISPLAY NAMES — its field list (`loadSheetFields`) and its
+ * summary (`loadSheetSummary`) — after a rename committed OUTSIDE this router. Both caches are
+ * process-lifetime maps with no TTL, so without this a relabel written through the plugin
+ * provisioning surface (multitable/object-display-name-relabel.ts) would keep serving the old names
+ * to GET /view until something unrelated happened to invalidate them. Call it only after the write's
+ * transaction has committed; calling it without a write is harmless (the next read re-fills).
+ */
+export function invalidateSheetDisplayNameCaches(sheetId: string): void {
+  invalidateFieldCache(sheetId)
+  invalidateSheetSummaryCache(sheetId)
+}
+
 function invalidateViewConfigCache(viewId?: string): void {
   if (typeof viewId === 'string' && viewId.trim().length > 0) {
     metaViewConfigCache.delete(viewId.trim())
     return
   }
   metaViewConfigCache.clear()
+}
+
+/**
+ * Copy-sheet S1 (ADR §7.2 step 7): the SAME three cache drops `DELETE /sheets/:sheetId` performs, for a
+ * sheet that was just created by the copy route in another module. Exported for
+ * `routes/multitable-copy-sheet.ts`; the three caches stay module-private.
+ */
+export function invalidateSheetCachesAfterCopy(sheetId: string): void {
+  invalidateSheetSummaryCache(sheetId)
+  invalidateFieldCache(sheetId)
+  invalidateViewConfigCache()
 }
 
 async function loadSheetSummary(
@@ -4245,8 +4774,190 @@ async function tryResolveView(
   )
 }
 
-function sendForbidden(res: Response, message = 'Insufficient permissions') {
-  return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
+// `sendForbidden` / `sendSheetNotLive` USED TO BE DEFINED HERE, module-private, and were hand-copied
+// into every new sheet-addressed route (routes/automation.ts most recently, #5779). Both now come
+// from multitable/sheet-refusals.ts so the copies cannot drift: the refusal SHAPE is a client
+// contract (clients switch on `error.code`), not a per-file detail. Call sites are unchanged.
+
+/**
+ * The SAME liveness refusal as `sendSheetNotLive`, for the handlers that cannot touch `res`.
+ *
+ * The record_permissions PUT/DELETE run their whole decision inside `pool.transaction` and return a
+ * typed OUTCOME object; the response is written only after COMMIT (a body written inside the
+ * callback survives a rollback). So they need the refusal as a VALUE, not as a send. The codes and
+ * messages come from `multitable/sheet-liveness.ts` — the same two bodies `sendSheetNotLive` emits,
+ * so the wire shape cannot drift from every other sheet-addressed route.
+ *
+ * Values-free by construction: no sheet id is taken, so none can be echoed back.
+ */
+function sheetNotLiveOutcome(
+  liveness: SheetLiveness,
+): { kind: 'error'; status: number; code: string; message: string } {
+  if (liveness === 'deleted') {
+    return { kind: 'error', status: 404, code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE }
+  }
+  return { kind: 'error', status: 404, code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE }
+}
+
+// ── F21: display-name rename (sheet + base) ────────────────────────────────────
+// The delivery contract (§12/§15 of the multitable application model) says display names are the
+// CUSTOMER'S to change. Until this slice no route could write `meta_sheets.name` or `meta_bases.name`
+// at all, so the live deployment's sheet/base renames had to be done by direct DB UPDATE — an ops
+// action a customer cannot take (first-deployment fault F21, hit twice).
+//
+// AUTHORITY: renaming is SCHEMA authority, not record-write authority (#5357). Both routes therefore
+// gate on `canManageFields` (= isAdminRole || multitable:manage-schema, plus the owner-gated legacy
+// transition switch) — the SAME tier that renames a FIELD. A `multitable:write` operator who may fill
+// every cell may NOT rename the table it lives in.
+//
+// SAFETY: a display rename is inert for every consumer — readiness, dry-run counts and the managed-table
+// provisioning ensure all address fields/objects by stable ids, never by display name.
+
+const DISPLAY_NAME_MIN_LENGTH = 1
+const DISPLAY_NAME_MAX_LENGTH = 255
+
+/** Values-free: states what WOULD be accepted, never echoes what was sent. */
+const INVALID_DISPLAY_NAME_MESSAGE =
+  `This endpoint accepts only { name }: a string of ${DISPLAY_NAME_MIN_LENGTH}-${DISPLAY_NAME_MAX_LENGTH} characters after trimming.`
+
+/** Values-free: names the authority that WOULD be accepted, so a refusal is actionable. */
+/**
+ * 自定义模板的租户维度 —— 只认 JWT 校验挂上的 req.authenticatedTenantId。
+ *
+ * 故意**不**回落 req.user.tenantId:无租户声明的 token 上,那个字段可能来自调用方
+ * 可控的 x-tenant-id 兼容头(见 routes/data-sources.ts 的同名口径),用它定租户
+ * 等于把租户交给请求方自选。没有可信租户时返回 null,而 null 在 SQL 里用
+ * `IS NOT DISTINCT FROM` 匹配,只会匹到同样没有租户的行 —— 不会跨到任何具体租户。
+ */
+export function resolveTemplateTenantId(req: Request): string | null {
+  const tenantId = req.authenticatedTenantId
+  return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : null
+}
+
+/**
+ * 「把这张 Base 存为模板」的授权口径 —— 与 PATCH /bases/:id(改名)同一档,而不是
+ * POST /bases(建空 Base)那一档。理由:存模板是把别人也在用的表结构做成可复制的组织资产,
+ * 属于 schema 权威(canManageFields = 管理员角色或 multitable:manage-schema),
+ * 光有 multitable:write(写记录)不够。删除自定义模板同档。
+ */
+const SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE =
+  'Saving a base as a template requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+const CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE =
+  'Custom template storage is not migrated yet (meta_multitable_custom_templates missing). Run `pnpm --filter @metasheet/core-backend migrate`.'
+
+const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
+  'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+const SHEET_DELETE_FORBIDDEN_MESSAGE =
+  'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.'
+
+const ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE =
+  'E-learning statistics projection identities are system-managed read models.'
+
+function sendElearningProjectionIdentityForbidden(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'FORBIDDEN',
+      message: ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
+
+// B3: a plugin system base (`base_<plugin>_...`, owner/workspace NULL) is created by the plugin
+// through `ensureSystemBase`, which FAILS CLOSED on a pre-existing owned row. Without this
+// reservation any `multitable:write` holder could squat the derived id via `POST /bases` (owner
+// = themselves) and wedge the plugin's ensure into a permanent 409. Same precedent as the
+// e-learning projection identities above; only a CALLER-CHOSEN id can ever match (server-minted
+// `base_<uuid>` ids have no second `_`).
+export const PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE =
+  'Plugin system base identities (base_<plugin>_...) are reserved; omit id or choose another.'
+
+function sendPluginSystemBaseIdentityForbidden(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'FORBIDDEN',
+      message: PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
+
+/**
+ * Authority to DESTROY or RESURRECT a whole sheet.
+ *
+ * Deliberately NOT plain `capabilities.canManageFields`. That capability is post-scope-grant, and
+ * `applyContextSheetSchemaWriteGrant` sets it for any sheet-scoped grant with `canRead && canWrite`
+ * — so gating on it would hand sheet DELETE to a scoped `spreadsheet:write` holder, who is NOT a
+ * sheet admin (`SHEET_ADMIN_PERMISSION_CODES` excludes `spreadsheet:write`) and who was refused by
+ * the old `canManageSheetAccess` branch. On the takeover deployment roles are assigned PER SHEET, so
+ * that population is real: shop-floor writers on their own sheet. Editing a sheet's fields is not
+ * the authority to delete the sheet.
+ *
+ * So the rule is GLOBAL schema authority, or sheet ADMIN on this specific sheet:
+ *   - `deriveCapabilities(...)` on the GLOBAL permissions (pre-scope-grant) = admin role or
+ *     `multitable:manage-schema`, honouring the #5357 transition switch;
+ *   - OR `sheetScope.canAdmin` — exactly the holders the old scoped branch admitted.
+ *
+ * This keeps #5357's residual where #5357 left it (field-level), instead of silently widening it to
+ * whole-sheet delete + restore.
+ */
+function hasSheetLifecycleAuthority(
+  access: { permissions: string[]; isAdminRole: boolean },
+  sheetScope: { canAdmin?: boolean } | null | undefined,
+): boolean {
+  if (deriveCapabilities(access.permissions, access.isAdminRole).canManageFields) return true
+  return sheetScope?.canAdmin === true
+}
+
+/**
+ * Strict `{ name }` parse. `.strict()` is deliberate: silently ignoring an extra property would tell
+ * the caller a change landed when it did not. The trim runs BEFORE the length check, so a
+ * whitespace-only name is refused (zod's `.min(1)` alone would accept `'   '`).
+ */
+function parseDisplayRenamePayload(body: unknown): { ok: true; name: string } | { ok: false } {
+  const parsed = z.object({ name: z.string() }).strict().safeParse(body)
+  if (!parsed.success) return { ok: false }
+  const name = parsed.data.name.trim()
+  if (name.length < DISPLAY_NAME_MIN_LENGTH || name.length > DISPLAY_NAME_MAX_LENGTH) return { ok: false }
+  return { ok: true, name }
+}
+
+function sendInvalidDisplayName(res: Response) {
+  return res.status(400).json({
+    ok: false,
+    error: { code: 'INVALID_NAME', message: INVALID_DISPLAY_NAME_MESSAGE },
+  })
+}
+
+/**
+ * MOJIBAKE GATE — shared by EVERY display-name write on this router (field create, field rename,
+ * sheet rename, base rename). Returns a sent 400 when the name cannot be stored, or `null` when the
+ * caller should proceed.
+ *
+ * A live deployment stored two field names full of U+FFFD because a Windows-shell curl mangled the
+ * CJK bytes before they reached the wire; the grid then rendered ����, and only a direct DB UPDATE
+ * could repair it. The decoder's own "bytes were lost" marker is not a name, so it is REFUSED rather
+ * than normalized or stripped (fail-closed). The refusal names the offending code points and their
+ * positions and never echoes the submitted text — see multitable/display-name-hygiene.ts.
+ *
+ * `name` must already be TRIMMED by the caller; trimming is unchanged by this gate.
+ */
+export function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
+  const refusal = checkDisplayNameHygiene(name)
+  if (!refusal) return null
+  return res.status(400).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
+}
+
+function sendRecoveryAuthorityBusy(res: Response) {
+  return res.status(409).json({
+    ok: false,
+    error: {
+      code: 'RECOVERY_AUTHORITY_BUSY',
+      message: 'Recovery is stabilizing permissions; retry this change.',
+    },
+  })
 }
 
 export async function requireRecordReadable(
@@ -4260,6 +4971,39 @@ export async function requireRecordReadable(
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
 } | { status: number; body: unknown }> {
+  // ORDER (#5830): authority, then sheet liveness, then the record. The capability lookup is the FIRST
+  // thing this gate does. A caller it refuses (401/403) on a sheet id gets that same refusal whether the
+  // sheet is live or soft-deleted (a soft delete only sets meta_sheets.deleted_at, which no capability
+  // input reads) and whether the record exists or not; no record row is read on their behalf. Only a
+  // caller who may read this sheet is told that it is gone (404) or that the record is not on it (404).
+  // Every route that relies on this gate alone inherits the order.
+  // NOT promised: that an ABSENT id answers like an existing one. An absent id has no sheet-bound
+  // permission input, so global RBAC alone decides it; where such an input narrows an existing sheet
+  // (the approval-projection base in permission-service.ts), a caller refused there with 403 gets 404
+  // for an absent id. That holds for every route that resolves sheet capabilities, not just this gate.
+  // A caller who passes this gate but is then refused by the ROUTE (no edit / submit capability) may
+  // read the sheet, so it is told a deleted sheet is gone, as every read route tells it.
+  const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    return { status: 401, body: { error: 'Authentication required' } }
+  }
+  if (!capabilities.canRead) {
+    return {
+      status: 403,
+      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+    }
+  }
+  // Soft delete: the record row survives a sheet delete, so the record check below cannot stand in for
+  // "this sheet is still a thing". Guarding HERE covers every record-addressed caller of this helper at
+  // once (subscriptions, record history, duplicate's source read, restore previews) rather than leaving
+  // each to remember. The absent-sheet body is the shared values-free one (sheet-refusals.ts), because
+  // with the record check no longer ahead of it this is the answer an absent sheet actually gets.
+  if (sheetLiveness !== 'live') {
+    return sheetLiveness === 'deleted'
+      ? { status: 404, body: { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } } }
+      : { status: 404, body: { ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } } }
+  }
+
   const recordCheck = await query(
     'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [recordId, sheetId],
@@ -4268,17 +5012,6 @@ export async function requireRecordReadable(
     return {
       status: 404,
       body: { ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } },
-    }
-  }
-
-  const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
-  if (!access.userId) {
-    return { status: 401, body: { error: 'Authentication required' } }
-  }
-  if (!capabilities.canRead) {
-    return {
-      status: 403,
-      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
     }
   }
 
@@ -4358,6 +5091,19 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
  * (`createRecordWriteHelpers(req, pool)`); every helper receives its query
  * function per-call from RecordWriteService, so the pool is not consumed here.
  */
+export function createRecoveryComputedHelpers(authorityAccess: ResolvedRequestAccess, requireComplete = false): Pick<RecordWriteHelpers,
+  'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields'> {
+  if (!authorityAccess.userId) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+  return {
+    applyLookupRollup: (query, sheetId, fields, rows, links, values) =>
+      applyLookupRollup(undefined, query, sheetId, fields, rows, links, values, authorityAccess),
+    computeDependentLookupRollupRecords: (query, sheetId, ids, changed) =>
+      computeDependentLookupRollupRecords(undefined, query, sheetId, ids, changed, authorityAccess, requireComplete),
+    recalculateFormulaFields: (query, sheetId, fields, ids, changed, hydrated) =>
+      recalculateFormulaFields(undefined, query, sheetId, fields, ids, changed, hydrated, undefined, authorityAccess, requireComplete),
+  }
+}
+
 export function createRecordWriteHelpers(req: Request, _pool?: { query: QueryFn }): RecordWriteHelpers {
   return {
     normalizeLinkIds,
@@ -4490,6 +5236,29 @@ async function loadAllowedFieldIds(query: QueryFn, sheetId: string | null | unde
 async function loadRevealedFieldIds(query: QueryFn, sheetId: string, capabilities: MultitableCapabilities): Promise<Set<string>> {
   const fields = await loadFieldsForSheet(query, sheetId)
   return computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
+}
+
+/**
+ * The record READ path's field mask, as ONE named export.
+ *
+ * It is the exact chain every stored-record read already uses: `loadAllowedFieldIds` (visible property
+ * fields ∧ the per-subject `field_permissions` scope) then `maskStoredRecordFieldIds` (the §2a.3
+ * formula-taint chokepoint). Exported so a NEW read surface outside this module — the record-level
+ * approval drift response (`routes/multitable-record-approvals.ts`), which returns changed FIELD IDS —
+ * masks with the same set instead of growing a second, drifting implementation.
+ *
+ * FAIL CLOSED: no user / no sheet → EMPTY set (loadAllowedFieldIds' own posture), i.e. every field id
+ * masked, never "empty map ⇒ no denials ⇒ show all".
+ */
+export async function loadReadableRecordFieldIds(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  userId: string | null | undefined,
+  capabilities: MultitableCapabilities,
+): Promise<Set<string>> {
+  const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
+  return maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
 }
 
 /**
@@ -4963,7 +5732,7 @@ function toSummaryDisplay(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function getAttachmentStorageService(): StorageServiceImpl {
+export function getAttachmentStorageService(): StorageServiceImpl {
   if (!multitableAttachmentStorage) {
     const baseUrl = process.env.ATTACHMENT_STORAGE_BASE_URL || 'http://localhost:8900/files'
     multitableAttachmentStorage = StorageServiceImpl.createLocalService(ATTACHMENT_PATH, baseUrl)
@@ -4976,12 +5745,33 @@ function getRequestActorId(req: Request): string | null {
   return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
 }
 
-const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
-const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
-const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
-const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
+/**
+ * P2 durable-delivery P1#2d (producer family 5) — wrap the live in-transaction `query` of a
+ * `pool.transaction` as the produce-seam's `TransactionalQueryable`. Call it ONLY with the query handle of
+ * the SAME transaction the source write runs in: the seam's xid probe (`assertInTransaction`) rejects a
+ * pool / autocommit handle at runtime, so a mis-wired call fails loud instead of half-committing an outbox
+ * row.
+ */
+function asProducerTxnQueryable(
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>,
+): TransactionalQueryable {
+  return {
+    isTransaction: true,
+    query: async (sql, params) => {
+      const r = await query(sql, params)
+      return { rows: r.rows, rowCount: r.rowCount ?? null }
+    },
+  }
+}
 
-function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
+// Exported (copy-sheet S1): routes/multitable-copy-sheet.ts records the copied permission / view rows with the
+// SAME snapshot shapes + key lists the authoring PUT routes below use, so Time Machine reads one vocabulary.
+export const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
+export const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
+export const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
+export const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
+
+export function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
   return `${scope}:${JSON.stringify(parts)}`
 }
 
@@ -5001,7 +5791,7 @@ function viewConfigSnapshotFromRow(row: any): Record<string, unknown> {
   }
 }
 
-function viewConfigSnapshot(view: {
+export function viewConfigSnapshot(view: {
   name: string
   type: string
   filterInfo?: Record<string, unknown>
@@ -5021,7 +5811,7 @@ function viewConfigSnapshot(view: {
   }
 }
 
-function fieldPermissionSnapshot(args: {
+export function fieldPermissionSnapshot(args: {
   fieldId: string
   subjectType: string
   subjectId: string
@@ -5037,7 +5827,7 @@ function fieldPermissionSnapshot(args: {
   }
 }
 
-function viewPermissionSnapshot(args: {
+export function viewPermissionSnapshot(args: {
   viewId: string
   subjectType: string
   subjectId: string
@@ -5051,7 +5841,7 @@ function viewPermissionSnapshot(args: {
   }
 }
 
-function sheetPermissionSnapshot(args: {
+export function sheetPermissionSnapshot(args: {
   subjectType: string
   subjectId: string
   accessLevel: string
@@ -5074,6 +5864,27 @@ function isImageMimeType(mimeType: string | null | undefined): boolean {
 
 const serializeAttachmentRow = serializeAttachmentRowShared
 
+/**
+ * Copy-sheet S1 provenance (ADR CS-14 / §6): `copiedFrom: { kind, at, sheetId? } | null` from the three
+ * column-tolerant `to_jsonb(...) ->> '...'` reads (`copied_from_kind` / `copied_at` / `copied_from_sheet_id`).
+ * `kind` ∈ 'user' | 'plugin-managed' drives the「快照副本」/「不随 PLM 刷新」badges; `sheetId` is included ONLY
+ * when the caller passed `includeSourceSheetId` (= the caller proved the actor can read the source sheet) —
+ * the source id is never handed to someone who may not read that sheet. Null for a non-copy (or a database
+ * that has not run the provenance migration: the tolerant read answers NULL there).
+ */
+export function serializeCopiedFrom(
+  row: { copied_from_kind?: unknown; copied_at?: unknown; copied_from_sheet_id?: unknown } | null | undefined,
+  includeSourceSheetId = false,
+): { kind: string; at: string | null; sheetId?: string } | null {
+  const kind = typeof row?.copied_from_kind === 'string' && row.copied_from_kind.length > 0 ? row.copied_from_kind : null
+  if (!kind) return null
+  const at = typeof row?.copied_at === 'string' && row.copied_at.length > 0 ? row.copied_at : null
+  const sheetId = includeSourceSheetId && typeof row?.copied_from_sheet_id === 'string' && row.copied_from_sheet_id.length > 0
+    ? row.copied_from_sheet_id
+    : undefined
+  return { kind, at, ...(sheetId ? { sheetId } : {}) }
+}
+
 function serializeBaseRow(row: any): UniverMetaBase {
   return {
     id: String(row.id),
@@ -5087,17 +5898,116 @@ function serializeBaseRow(row: any): UniverMetaBase {
 
 const ensureLegacyBase = ensureLegacyBaseShared
 
-async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
+/*
+ * People system sheet (legacy link-backed person fields) — what #5807 does and does NOT close.
+ *
+ * The sheet is created / re-synced ONLY by `POST /person-fields/prepare` (gate: canManageFields). Each
+ * sync adds a row for every ACTIVE user that has none; a user can still end up with more than one row
+ * (two concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row), and rows are
+ * never removed. Readers get it through the generic read paths with no special gate (e.g.
+ * `/records-summary` returns a displayMap for every matching record, whatever `limit` is).
+ *
+ * CLOSED going forward:
+ *   - the sync no longer writes the `Email` or `Avatar URL` cells, and `Name` no longer falls back to the
+ *     email (it falls back to the user id, which the `User ID` column already holds);
+ *   - an explicit re-sync rewrites EVERY row of an active user in the sheet it targets that still carries
+ *     an `Email` / `Avatar URL` key (or a stale `User ID` / `Name`), removing only those two keys and
+ *     setting the two synced ones — any other key on the row is kept; a second re-sync writes nothing;
+ *   - `POST /sheets` refuses the reserved sentinel description (a sweep of every `INSERT INTO meta_sheets`
+ *     found no other route that takes a sheet description from the client: `PATCH /sheets/:id` is
+ *     name-only, template installs and plugin descriptors use server-defined descriptions, and "save as
+ *     template" stores sheet descriptions as null);
+ *   - the sync prefers the server-owned `system_kind` sheet over a sentinel-only one in the same base;
+ *   - after the sync transaction commits, the prepare route purges the Yjs state of exactly the rows it
+ *     rewrote (only when the Yjs path is wired in this process; best-effort — a failed purge is logged,
+ *     the request still succeeds, and a later re-sync does not retry it because the row is clean by then).
+ * NOT closed — each of these keeps old email / avatar values (and an email-valued `Name`) until an
+ * owner-approved scrub (no migration here). This is the list known today, not a proven-complete one:
+ *   - rows in a base nobody re-syncs;
+ *   - rows the re-sync never matches to an active user: deactivated or deleted users, rows without a
+ *     string `User ID`;
+ *   - every People sheet other than the ONE live sheet the plan picks (`system_kind` first, else the
+ *     oldest sentinel sheet): soft-deleted People sheets (restorable via `POST /sheets/:sheetId/restore`,
+ *     which the delete guard deliberately does not cover), a second live People sheet in the same base
+ *     (e.g. two concurrent first syncs), and sentinel-only sheets shadowed by a `system_kind` sheet;
+ *   - copies outside the live row: `meta_record_revisions` snapshots / patches of People rows written by
+ *     earlier record edits (readable through `GET /sheets/:sheetId/records/:recordId/history`), formula
+ *     values stored in other sheets that were computed from a lookup of People `Email`, snapshots,
+ *     recovery archives and exported files;
+ *   - values under a column the sync does not resolve by name. The sync finds its four columns by their
+ *     CURRENT trimmed name (first by `order`, then id), but cell values are keyed by field id, so it never
+ *     touches: a renamed `Email` / `Avatar URL` column (a new column of that name is created and only
+ *     that one's key is removed); a second column with the same name; a renamed `User ID` column (no row
+ *     matches any user any more, so every old row is left as it is and a new row is inserted per user);
+ *     a deleted column — field delete strips the values from live rows, but with tombstone capture on
+ *     they are kept in `meta_field_value_tombstones`, and a field undelete (`recreateFieldFromConfig`)
+ *     writes them back under the old id. A scrub must pick the columns by field id / field history, never
+ *     by current name;
+ *   - `meta_records_trash` rows (deleted People rows keep their full `data` and can be restored) and
+ *     `meta_field_value_tombstones` rows;
+ *   - Yjs copies (`meta_record_yjs_states` / `meta_record_yjs_updates`) of every row this sync does NOT
+ *     rewrite — rows of deactivated / deleted users, rows in other, soft-deleted or shadowed People
+ *     sheets — and of rewritten rows whose purge failed, or that were rewritten by a process with no Yjs
+ *     path wired (no purge runs there; Yjs state persisted while it was wired stays).
+ * Other NOT closed:
+ *   - after a re-sync, anything that reads the `Email` / `Avatar URL` cells of a rewritten row gets ''
+ *     (lookups / rollups / formulas over a legacy person link, API-token `/records-summary` reads with
+ *     that display field, and the web importer's email match for legacy person fields until its
+ *     fallback ships — name and User ID still match);
+ *   - the four column definitions stay (the `Email` / `Avatar URL` columns are simply left empty);
+ *   - user names and user ids stay readable, all of them in one request, by any reader of this sheet —
+ *     the read gate needs an owner decision on who may read it (#5807 stays open for that);
+ *   - the roster is not tenant-scoped: the `users` read below has no tenant predicate, so a sync mirrors
+ *     every active user of the deployment into the People sheet of whichever base it targets;
+ *   - sentinel-only sheets are NOT stamped with `system_kind` (owner: the user-writable sentinel is never
+ *     a trust source).
+ */
+async function planPeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetProvisionPlan> {
+  const peopleSheetRow = await selectPeopleSheetRow(query, baseId)
+  const peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+  return { peopleSheetRow, peopleSheetId }
+}
+
+/**
+ * The ONE rule for "which sheet is the People directory of this base" - shared by the People sync
+ * (`planPeopleSheetPreset`) and `GET /people-search`, so the search reads the sheet the sync maintains
+ * and not a shadowed or forged sentinel-only sheet. Returns the live row, or null when the base has none.
+ */
+async function selectPeopleSheetRow(query: QueryFn, baseId: string): Promise<any | null> {
+  // `system_kind` is read column-tolerantly (same form as history-integrity-precheck.ts): before the
+  // zzzz20260715180000 migration has run the column is absent, the expression yields NULL, and the pick
+  // below degrades to the sentinel-only lookup this function used before — no sheet can carry
+  // `system_kind` in that window anyway — instead of a 42703 on every re-sync.
   const existingSheets = await query(
-    `SELECT id, base_id, name, description
-     FROM meta_sheets
+    `SELECT id, base_id, name, description, (to_jsonb(s) ->> 'system_kind') AS system_kind
+     FROM meta_sheets s
      WHERE base_id = $1 AND deleted_at IS NULL
      ORDER BY created_at ASC`,
     [baseId],
   )
 
-  let peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
-  let peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+  // Prefer the sheet the server itself provisioned (`system_kind`, non-forgeable) over an older sheet
+  // that merely carries the user-writable sentinel description; the sentinel stays only as the
+  // fallback for People sheets provisioned before `system_kind` existed (never backfilled).
+  const candidateRows = existingSheets.rows as any[]
+  return (
+    candidateRows.find((row) => row.system_kind === SYSTEM_PEOPLE_SHEET_KIND) ??
+    candidateRows.find((row) => isSystemPeopleSheetDescription(row.description)) ??
+    null
+  )
+}
+
+async function ensurePeopleSheetPreset(
+  query: QueryFn,
+  baseId: string,
+  plan: PeopleSheetProvisionPlan,
+): Promise<PeopleSheetPreset> {
+  let { peopleSheetRow } = plan
+  const { peopleSheetId } = plan
+  // D-H1: people-directory provisioning writes meta_sheets / meta_fields / meta_records.
+  // The route resolves the target before opening this writer transaction, so this canonical fence is
+  // the transaction's first statement and precedes every source read/write. Flag-off ⇒ no-op.
+  await fenceWriterEntry(query, peopleSheetId)
 
   if (!peopleSheetRow) {
     await query(
@@ -5145,22 +6055,24 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
   const userIdFieldId = await ensureField('User ID', 0)
   const nameFieldId = await ensureField('Name', 1)
+  // #5807: the `Email` / `Avatar URL` columns are still ensured (dropping them would drag in the field
+  // delete / history paths) but the sync no longer writes either cell — see the block comment above
+  // `planPeopleSheetPreset`. Their ids are only used to recognise rows that still carry old values.
   const emailFieldId = await ensureField('Email', 2)
   const avatarFieldId = await ensureField('Avatar URL', 3)
 
-  let userRows: Array<{ id: string; email: string; name: string | null; avatar_url: string | null }> = []
+  // Only what the sync writes is read: no email, no avatar.
+  let userRows: Array<{ id: string; name: string | null }> = []
   try {
     const result = await query(
-      `SELECT id, email, name, avatar_url
+      `SELECT id, name
        FROM users
        WHERE is_active = TRUE
        ORDER BY created_at ASC, id ASC`,
     )
     userRows = (result.rows as any[]).map((row) => ({
       id: String(row.id),
-      email: String(row.email),
       name: typeof row.name === 'string' ? row.name : null,
-      avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null,
     }))
   } catch (err: any) {
     if (!(typeof err?.code === 'string' && err.code === '42P01')) {
@@ -5168,29 +6080,36 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
     }
   }
 
+  const rewrittenRecordIds: string[] = []
   if (userRows.length > 0) {
     const existingRecords = await query(
       'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
       [peopleSheetId],
     )
-    const recordByUserId = new Map<string, { id: string; data: Record<string, unknown> }>()
+    // Every row of this sheet, grouped by the user id it mirrors. A user can own more than one row (two
+    // concurrent first syncs, or `POST /records/:recordId/duplicate` on a People row); each of them is
+    // compared and, if stale, rewritten below — not just the newest one.
+    const recordsByUserId = new Map<string, Array<{ id: string; data: Record<string, unknown> }>>()
     for (const row of existingRecords.rows as any[]) {
       const data = normalizeJson(row.data)
       const userId = typeof data[userIdFieldId] === 'string' ? String(data[userIdFieldId]) : ''
       if (userId) {
-        recordByUserId.set(userId, { id: String(row.id), data })
+        const rows = recordsByUserId.get(userId)
+        if (rows) rows.push({ id: String(row.id), data })
+        else recordsByUserId.set(userId, [{ id: String(row.id), data }])
       }
     }
+    const retiredFieldIds = [emailFieldId, avatarFieldId]
 
     for (const user of userRows) {
+      // A user without a name shows as their id — a value this row already exposes in `User ID` — never
+      // as their email (#5807).
       const nextData = {
         [userIdFieldId]: user.id,
-        [nameFieldId]: user.name?.trim() || user.email,
-        [emailFieldId]: user.email,
-        [avatarFieldId]: user.avatar_url ?? '',
+        [nameFieldId]: user.name?.trim() || user.id,
       }
-      const existing = recordByUserId.get(user.id)
-      if (!existing) {
+      const existingRows = recordsByUserId.get(user.id)
+      if (!existingRows) {
         // revision-exempt: internal people-directory sync (INSERT) — system sheet, mirror of `users`, regenerable.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version)
@@ -5200,21 +6119,34 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
         continue
       }
 
-      const changed =
-        existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
-        existing.data[nameFieldId] !== nextData[nameFieldId] ||
-        existing.data[emailFieldId] !== nextData[emailFieldId] ||
-        existing.data[avatarFieldId] !== nextData[avatarFieldId]
+      for (const existing of existingRows) {
+        // A row written before #5807 still carries an `Email` / `Avatar URL` key (Avatar is '' when unset):
+        // count that as a change so this explicit re-sync rewrites the row once, without them.
+        const carriesRetiredCell = retiredFieldIds.some((fieldId) =>
+          Object.prototype.hasOwnProperty.call(existing.data, fieldId),
+        )
+        const changed =
+          existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
+          existing.data[nameFieldId] !== nextData[nameFieldId] ||
+          carriesRetiredCell
+        if (!changed) continue
 
-      if (changed) {
+        // The rewrite removes ONLY the two retired keys and sets the two synced ones; every other key on
+        // the row (a column someone added through the API, a stored formula / auto-number value) is kept.
+        // A row whose stored `data` is not a JSON object (e.g. a JSON-encoded string, which normalizeJson
+        // above still parses) cannot take `-`, so it is replaced wholesale, as every rewrite used to be.
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
         // revision-exempt: internal people-directory sync (UPDATE) — system sheet, not a user-content edit.
         await query(
           `UPDATE meta_records
-           SET data = $1::jsonb, version = version + 1, updated_at = now()
+           SET data = (CASE WHEN jsonb_typeof(data) = 'object' THEN data - $3::text[] ELSE '{}'::jsonb END) || $1::jsonb,
+               version = version + 1, updated_at = now()
            WHERE id = $2`,
-          [JSON.stringify(nextData), existing.id],
+          [JSON.stringify(nextData), existing.id, retiredFieldIds],
         )
+        // A persisted Y.Doc of this row would still hold the old Email / Avatar / Name and win over the
+        // rewritten `data` on the next open; the route purges it after COMMIT (never from in here).
+        rewrittenRecordIds.push(existing.id)
       }
     }
   }
@@ -5231,6 +6163,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
       limitSingleRecord: true,
       refKind: 'user',
     },
+    rewrittenRecordIds,
   }
 }
 
@@ -5261,6 +6194,47 @@ async function normalizeFieldWriteInput(
 
 const loadSheetRow = loadSheetRowShared
 const loadFieldsForSheet = loadFieldsForSheetShared
+
+/**
+ * #5781 — disclosure bounds for GET /sheets/:sheetId/person-fields/:fieldId/directory.
+ *
+ * Ceiling: the SAME 50 the sibling /permission-candidates clamps to (it now reads this constant through
+ * the PERMISSION_CANDIDATES_MAX_ITEMS alias below), so the roster-shaped reads of this file share one
+ * per-request volume.
+ *
+ * Minimum term length: 1. The sibling has NO minimum (its `q` is optional), so there is nothing to
+ * copy; 1 is the smallest bound that removes the picker's AUTOMATIC "open the picker, get the deployment
+ * roster" request (it does not stop a deliberate one-character term from matching everyone — see
+ * residual (1) on the route) while keeping every search the picker can actually issue —
+ * MetaPersonPicker debounces and re-queries on EVERY keystroke, so a minimum of 2+ would make a
+ * legitimate 1-character search (common for CJK surnames) silently answer nothing.
+ */
+// #5807: the literal `50` now lives in multitable/people-sheet-read-bound.ts (the People-sheet read
+// window) and this is an ALIAS of it, so the roster-shaped reads of this file and the People sheet's
+// own enumerating reads share ONE number by construction rather than by two literals that agree today.
+//
+// WARNING — raising this is a SECURITY decision, not a UX one. It was a candidate-list ceiling (how
+// many people the picker offers); since the alias it is ALSO the People sheet's read window, so
+// bumping it to make a picker show more people widens what a bare `multitable:read` can take from the
+// roster in one request. Change the window at its definition, deliberately, or give the picker its own
+// literal again — but do not raise this one by reflex.
+export const PERSON_DIRECTORY_MAX_ITEMS = PEOPLE_SHEET_READ_MAX_ITEMS
+export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
+
+/**
+ * #5795 follow-up — the SAME two bounds, applied to GET /sheets/:sheetId/form-share-candidates (it reads
+ * the same listSheetPermissionCandidates roster). Aliases rather than new numbers, so the three
+ * roster-shaped reads of THIS file (person directory, form-share candidates, /permission-candidates via
+ * PERMISSION_CANDIDATES_MAX_ITEMS below) share one ceiling by construction; the form-share route already
+ * clamped to 50 before this. The comment @-mention reads live in another module
+ * (services/comment-mention-bounds.ts) with their own literals — equal today and pinned equal by
+ * tests/unit/multitable-form-share-candidates-bounded.test.ts, not tied by construction.
+ */
+export const FORM_SHARE_CANDIDATES_MAX_ITEMS = PERSON_DIRECTORY_MAX_ITEMS
+export const FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH = PERSON_DIRECTORY_MIN_QUERY_LENGTH
+/** Ceiling of GET /sheets/:sheetId/permission-candidates (previously a literal `Math.min(50, ...)`;
+ *  its `q` stays optional — that route is gated on canManageSheetAccess and is not term-bounded). */
+export const PERMISSION_CANDIDATES_MAX_ITEMS = PERSON_DIRECTORY_MAX_ITEMS
 
 async function ensureAttachmentIdsExist(
   query: QueryFn,
@@ -5644,6 +6618,85 @@ async function resolveMetaSheetId(
   return { sheetId: viewId, view: null }
 }
 
+/**
+ * `resolveMetaSheetId` + the ONE refusal its `ConflictError` deserves (#5946).
+ *
+ * The resolver throws `ConflictError` when a request names BOTH a `sheetId` and a `viewId` and the
+ * view resolves to a DIFFERENT sheet. Ten routes call it, and on main the class was answered two
+ * wrong ways: SEVEN handlers had no branch for it and fell through to their generic hardcoded 500
+ * (values-free, but the wrong class — a caller cannot tell a bad address from a broken server, and
+ * every such request is logged as a server fault); THREE caught it and answered `409 CONFLICT` with
+ * `err.message`, which pastes the requested `viewId` AND `sheetId` back onto the wire.
+ *
+ * Both are replaced, here and once, by the SAME values-free 404 `sendSheetNotLive(res, 'absent')`
+ * emits: the address this request carries does not name a live sheet this route can act on. Echoing
+ * is impossible by construction rather than by care — the wrapper hands `sendSheetNotLive` no value
+ * (that helper takes no id and no error; multitable/sheet-refusals.ts), and `err` never reaches the
+ * response.
+ *
+ * WHY the ABSENT body specifically, and not a new code: the refusal must stay INDISTINGUISHABLE
+ * across the three sheet states. A mismatch answered one way for a LIVE sheet and another for a
+ * soft-deleted or absent one would re-open the #5839 existence oracle from the VIEW side — the
+ * difference here turns on `view.sheetId !== sheetId` ALONE, never on the named sheet's liveness.
+ * Pinned by the `resolveMetaSheetId` cell of tests/unit/multitable-sheet-existence-oracle-b5.test.ts
+ * and, for all ten routes, by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts.
+ *
+ * It replaces ONLY what happens when the resolution THROWS. The wrapper sits exactly where the call
+ * sat, so each handler's own 401 → 403 → liveness-404 order is untouched, and `ValidationError`
+ * (neither id supplied) still propagates to that handler's catch and maps as before.
+ *
+ * ORDER IS NOT ITS BUSINESS — and on GET /context that matters. #5948 deliberately moved that
+ * handler's `sheetId`+`viewId` pairing check BEHIND its #5936 authority gate, so a caller the gate
+ * refuses gets the same 403 whatever viewId it holds and `meta_views` is not consulted for it. This
+ * wrapper is attached to the POST-gate call only; the pre-gate `sheetId: null` resolution above the
+ * gate stays raw (it cannot throw ConflictError — there is no sheetId to compare against — and
+ * wrapping it would put a 404 in front of the gate and re-open the door #5948 closed). That one raw
+ * call is the single allow-listed exception in
+ * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, which also pins where it sits.
+ *
+ * WHY IT TAKES THE PROMISE instead of the resolver's arguments — stated as MEASURED, not as
+ * reasoned. The univer-meta sheet-liveness closure guard classifies a handler as sheet-addressed
+ * by four predicates (tests/unit/multitable-sheet-liveness-closure.guard.test.ts,
+ * `addressesASheet`), and for GET /context exactly ONE of them fires: the literal
+ * `resolveMetaSheetId` in its body. Its path has no `:sheetId`; it does not call
+ * `requireRecordReadable`; and the gate #5948 added calls `resolveSheetCapabilitiesForAccess`,
+ * which that guard's `\bresolveSheetCapabilities\b` does NOT match (the boundary fails before
+ * `ForAccess`).
+ *
+ * What an args-shaped wrapper would actually cost — `addressesASheet` replayed over this whole
+ * file with every `orRefuseSheetViewMismatch(res, resolveMetaSheetId(` rewritten to a
+ * name-swallowing `resolveMetaSheetIdOrRefuse(res, `:
+ *   - pre-#5948 tree (2435c92ec): 105 handlers, in scope 83 -> 82, LOST ["GET /context"];
+ *   - this tree, #5948 merged:    105 handlers, in scope 83 -> 83, LOST [].
+ * The difference IS #5948. Its reorder left GET /context a PRE-gate BARE `resolveMetaSheetId`
+ * call (line 8744 below, the allow-listed one), and that call alone now keeps the token inside
+ * the handler body. So the claim here is NOT that an args-shaped wrapper would still drop GET
+ * /context out of that scope today — measured, it would not. It is that the classification must
+ * not DEPEND on this wrapper's shape: the Promise form keeps the resolver's name at all ten call
+ * sites, so /context's membership holds whether or not that pre-gate call survives a later
+ * refactor, and no rewrite here can quietly shrink the guard's in-scope population. Asserted, not
+ * asserted-in-prose, by the closure-scope cell of the spec above, which pins how many times the
+ * token occurs in that handler's CODE and which of those occurrences is the pre-gate call.
+ *
+ * Returns `null` AFTER the response has been sent: every call site must `return` on null. A raw
+ * `resolveMetaSheetId(` that is NOT wrapped like this is refused by the structural cells of
+ * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, so an 11th 500 cannot be reintroduced.
+ */
+async function orRefuseSheetViewMismatch(
+  res: Response,
+  resolution: Promise<{ sheetId: string; view: UniverMetaViewConfig | null }>,
+): Promise<{ sheetId: string; view: UniverMetaViewConfig | null } | null> {
+  try {
+    return await resolution
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      sendSheetNotLive(res, 'absent')
+      return null
+    }
+    throw err
+  }
+}
+
 function normalizeRecordCreateContextId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
@@ -5694,7 +6747,9 @@ export function extractMultitableRecordCreateContextFromUrl(value: unknown): { s
 async function createSeededSheet(args: { sheetId: string; name: string; description?: string | null; query?: QueryFn }): Promise<void> {
   const pool = poolManager.get()
 
-  const fields = [
+  // 显式标注成宽类型（而不是让 TS 从字面量推出一个窄联合），这样下面那条 link 守卫的 `field.type ===
+  // 'link'` 是一条真判断，模板被改回 link 时守卫才拦得住，而不是被 TS 判成"永假比较"。
+  const fields: Array<{ id: string; name: string; type: UniverMetaField['type']; order: number; property: Record<string, unknown> }> = [
     { id: buildId('fld'), name: '产品名称', type: 'string' as const, order: 1, property: {} },
     { id: buildId('fld'), name: '数量', type: 'number' as const, order: 2, property: {} },
     { id: buildId('fld'), name: '单价', type: 'number' as const, order: 3, property: {} },
@@ -5713,7 +6768,13 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         ],
       },
     },
-    { id: buildId('fld'), name: '关联', type: 'link' as const, order: 6, property: {} },
+    // 2026-09-10：这一列过去是 `type: 'link'` + `property: {}` —— 即"link 但没有目标表"，而且它经下面的
+    // 裸 SQL 落库，既不过 `normalizeFieldWriteInput` 也不过写口的 `assertLinkFieldForeignSheetPresent`。
+    // 于是每张 seed 出来的数据表（POST /sheets {seed:true}、GET /view?seed=true，前端建表默认就传 seed）
+    // 都自带一个点「选择关联记录」必 400 的坏字段 —— 这是用户报告里坏字段的主产源。种子记录在这一列里
+    // 放的本来就是 'PLM#6' 这种外部单号文本（不是记录 id），所以按它实际承载的语义降为 string：不猜目标
+    // 表、不凭空建第二张表，示例数据原样可读。真想要关联就在「管理字段」里新建 link 并选目标表。
+    { id: buildId('fld'), name: '关联', type: 'string' as const, order: 6, property: {} },
   ]
 
   const byName = new Map(fields.map(f => [f.name, f.id] as const))
@@ -5788,6 +6849,9 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
   ]
 
   const run = async (query: QueryFn) => {
+    // D-H1: GET /view?seed=true and POST /sheets?seed=true write meta_sheets / meta_fields / meta_records.
+    // Fence-before-check in THIS transaction (the route's txn, or the helper's own txn). Flag-off ⇒ no-op.
+    await fenceWriterEntry(query, args.sheetId)
     const baseId = await ensureLegacyBase(query)
 
     // ②a §2a.4-c TOCTOU close — CENTRALIZED chokepoint. `createSeededSheet` is the sheet-create sink for
@@ -5818,6 +6882,12 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     )
 
     for (const field of fields) {
+      // 种子是裸 SQL 写口，绕开了 POST/PATCH /fields 上的 `assertLinkFieldForeignSheetPresent`。把同一条
+      // 规则挂在这里，模板将来再被改回"link 但没目标表"时当场炸（fail-closed），而不是静默给每张新表种
+      // 一个坏字段。语义与写口一致：只看结果状态，经 `parseLinkFieldConfig` 归一三个 foreign 别名。
+      if (field.type === 'link' && !parseLinkFieldConfig(field.property)) {
+        throw new LinkForeignSheetRequiredError()
+      }
       await query(
         `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
          VALUES ($1, $2, $3, $4, $5::jsonb, $6)
@@ -5920,6 +6990,47 @@ type PatchFailurePayload = {
   code: string
   message: string
   serverVersion?: number
+}
+
+type WriterFenceConflictPayload = {
+  statusCode: 409
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED' | 'FIELD_SCHEMA_CHANGED'
+  message: string
+}
+
+function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload | null {
+  if (err instanceof SheetWriterBlockedError) {
+    return {
+      statusCode: 409,
+      code: 'RECOVERY_IN_PROGRESS',
+      message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+    }
+  }
+  if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  // Field retype slice 3a: a touched field changed type / options while the write waited on the fence.
+  if (err instanceof FieldSchemaChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  return null
+}
+
+function sendWriterFenceConflict(res: Response, err: unknown): Response | null {
+  const failure = serializeWriterFenceConflict(err)
+  if (!failure) return null
+  return res.status(failure.statusCode).json({
+    ok: false,
+    error: { code: failure.code, message: failure.message },
+  })
 }
 
 function serializePatchFailure(recordId: string, err: unknown): PatchFailurePayload | null {
@@ -6372,15 +7483,24 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ *
+ * The three axes only look for RESTRICTIONS; none of them asks whether the actor may read the sheet at all. That is
+ * the precondition below: `capabilities.canRead`, the sheet's resolved read plane. It is NOT implied by every
+ * capability a caller may have gated on before reaching here — `canManageFields` holds on `multitable:manage-schema`
+ * alone (manage-schema-permission.ts) while `canRead` needs read/write/admin (access.ts `deriveCapabilities`), so
+ * without it a schema manager who cannot read the sheet passed as "full read" on any unrestricted sheet (the lossy
+ * config-restore retype-revert preview/execute, which gate on `canManageFields`). Checked FIRST and with no DB
+ * access, so a refused actor causes no row-level/field/taint read either. Config-derived like the three axes.
  */
-async function hasFullTableReadAccess(
-  req: Request,
+export async function hasFullTableReadAccess(
+  req: Request | undefined,
   query: QueryFn,
   sheetId: string,
-  access: { userId: string | null; isAdminRole: boolean },
+  access: ResolvedRequestAccess,
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!capabilities.canRead) return false // no read plane on this sheet → no full read (see above)
   if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
   const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
   const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
@@ -6388,8 +7508,351 @@ async function hasFullTableReadAccess(
   const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
   if (scoped.size !== unscoped.size) return false
   for (const id of unscoped) if (!scoped.has(id)) return false
-  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped)
+  // Keep the adjudicated snapshot through foreign-field/base checks; never reconstruct JWT claims.
+  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped, access)
   return masked.size === scoped.size
+}
+
+/**
+ * 字段类型转换 —— 门 ③ ④ ⑤ 的**应答**。判定在 multitable/field-retype-convert-gates.ts（只此一处），这里只把判定结果
+ * 翻成 HTTP：③ ⇒ 403 FORBIDDEN，④ ⇒ 404（SHEET_DELETED / NOT_FOUND），⑤ ⇒ 403 FULL_TABLE_READ_REQUIRED。
+ * 事务外的拒绝与事务内（数据库重新解析之后）的拒绝都从这里发出，字节相同。
+ */
+function sendFieldRetypeConvertGateRefusal(res: Response, refusal: FieldRetypeConvertGateRefusal): Response {
+  if (refusal.kind === 'forbidden') return sendForbidden(res)
+  if (refusal.kind === 'not_live') return sendSheetNotLive(res, refusal.sheetLiveness)
+  return res.status(403).json({
+    ok: false,
+    error: { code: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE, message: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE },
+  })
+}
+
+/**
+ * 字段类型转换 —— 三个端点（预览 / 执行 / 撤销）**共用**的门 ③ ④ ⑤。一个函数，三处调用，没有第二份。
+ *
+ * 它自己解析本表的能力与存活，交给 `judgeFieldRetypeConvertGates` 判（③ canManageFields → ④ 存活 → ⑤ canRead **且**
+ * 全表读），不过就**自己应答**并返回 null；调用方只需要 `if (!gate) return`。⑤ 里的 `canRead` 不能省：
+ * `canManageFields` 单凭 `multitable:manage-schema` 即可为真，与读权无关。`hasFullTableReadAccess` 自 #6147 起自己也先查
+ * `canRead`，但门 ⑤ **不依赖**它的内部检查——显式的那一条留作纵深防御，由单测钉住（传入恒真的回调）。
+ *
+ * 凭的是**请求里**的能力（凭证带权限 claim 时不问库）。对预览这就是全部；执行与撤销另在事务内、栅栏之后用
+ * `authorizeFieldRetypeConvertInTransaction` 从数据库重新判一次。
+ */
+async function gateFieldRetypeConvert(
+  req: Request,
+  res: Response,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities } | null> {
+  const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+  const refusal = await judgeFieldRetypeConvertGates({
+    capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, access, capabilities),
+  })
+  if (refusal) {
+    sendFieldRetypeConvertGateRefusal(res, refusal)
+    return null
+  }
+  return { access, capabilities }
+}
+
+/**
+ * 执行 / 撤销事务内的权限复核（ADR 增补 B）：栅栏之后，用**事务自己的** `query`，从数据库重新解析请求者此刻的能力，
+ * 再过同一个判定。能力取「请求 claim ∩ 数据库」（`resolveRecoverySheetAuthority`，与精确锚点恢复同一个解析器）：
+ * 库里已收回的权限不会因为凭证还没过期而留着，凭证里没有的权限也不会因为库里有而多出来。存活同样在事务内重读。
+ */
+async function authorizeFieldRetypeConvertInTransaction(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<FieldRetypeConvertGateRefusal | null> {
+  const authority = await resolveRecoverySheetAuthority(req, query, sheetId)
+  const sheetLiveness = await loadSheetLiveness(query, sheetId)
+  return judgeFieldRetypeConvertGates({
+    capabilities: authority.capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, authority.access, authority.capabilities),
+  })
+}
+
+/** One APPLIED revert's internal post-commit facts; patch never serializes into HTTP. */
+type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
+
+/**
+ * Post-commit recovery side effects (best-effort, non-fatal — a committed recovery must never turn into
+ * an HTTP 500 here): RecordWriteService-parity formula/related recompute over the recovered source rows
+ * (derived values are NOT restored history — they are recomputed AFTER the source commit), then
+ * source-sheet true-delta realtime (+ recomputed formula keys; the shared publisher strips patch values
+ * before broadcast), subscriber notifications, and related-sheet PURE-INVALIDATION fan-out (fieldIds +
+ * recordIds only, no recordPatches). Returns the Yjs record-id set to invalidate.
+ */
+const runRecoveryPostCommitSideEffects = async (
+  query: QueryFn,
+  sheetId: string,
+  actorId: string,
+  appliedReverts: AppliedRevertFact[],
+  linkInvalidations: ExactAnchorLinkInvalidation[],
+  helpers: Pick<RecordWriteHelpers, 'applyLookupRollup' | 'computeDependentLookupRollupRecords' | 'recalculateFormulaFields' | 'loadLinkValuesByRecord'>,
+): Promise<{ yjsRecordIds: string[] }> => {
+  const formulaByRecord = new Map<string, Record<string, unknown>>()
+  let relatedRecords: RelatedComputedRecord[] = []
+  try {
+    const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+    const recordIds = appliedReverts.map((r) => r.recordId)
+    const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
+    if (changedFieldIds.length > 0 && recordIds.length > 0) {
+      // RWS Step 4 parity: hydrate the recovered source rows BEFORE formula recompute so a
+      // formula-over-lookup sees the real lookup value (load rows → link values → applyLookupRollup →
+      // snapshot hydrated data → related recompute → recalculateFormulaFields(hydrated)).
+      const recordRes = await query(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [sheetId, recordIds],
+      )
+      const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        data: normalizeJson(row.data),
+      })) as UniverMetaRecord[]
+
+      let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+      if (rows.length > 0) {
+        const relationalLinkFields = fields
+          .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+          .filter((v): v is { fieldId: string; cfg: NonNullable<ReturnType<typeof parseLinkFieldConfig>> } => !!v && !!v.cfg)
+        const linkValuesByRecord = await helpers.loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+        await helpers.applyLookupRollup(query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord)
+        hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+      }
+
+      relatedRecords = await helpers.computeDependentLookupRollupRecords(query, sheetId, recordIds, changedFieldIds)
+
+      const formulaRecords = await helpers.recalculateFormulaFields(query, sheetId, fields, recordIds, changedFieldIds, hydratedDataByRecord)
+      for (const fr of formulaRecords) formulaByRecord.set(fr.recordId, fr.data)
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery post-commit formula/related recompute failed (non-fatal):', err)
+  }
+
+  // Source-sheet realtime: true-delta patches + recomputed formula keys. The shared publisher strips
+  // recordPatches before broadcast — receivers refetch under their own mask (RWS parity).
+  if (appliedReverts.length > 0) {
+    try {
+      const formulaFieldIds = [...new Set([...formulaByRecord.values()].flatMap((d) => Object.keys(d)))]
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: appliedReverts.map((r) => r.recordId),
+        fieldIds: [...new Set([...appliedReverts.flatMap((r) => r.fieldIds), ...formulaFieldIds])],
+        recordPatches: appliedReverts.map((r) => ({
+          recordId: r.recordId,
+          version: r.version,
+          patch: { ...r.patch, ...(formulaByRecord.get(r.recordId) ?? {}) },
+        })),
+      })
+    } catch (err) {
+      console.warn('[univer-meta] recovery post-commit realtime publish failed (non-fatal):', err)
+    }
+  }
+
+  for (const r of appliedReverts) {
+    await notifyRecordSubscribersBestEffort(
+      query,
+      { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
+      'exact-anchor-recovery',
+    )
+  }
+
+  // Related-sheet fan-out is PURE INVALIDATION (no recordPatches / no snapshots — RWS FOL-1 parity).
+  const affectedRelatedBySheet = new Map<string, { recordIds: string[]; fieldIds: Set<string> }>()
+  for (const record of relatedRecords) {
+    if (!Array.isArray(record.affectedFieldIds) || record.affectedFieldIds.length === 0) continue
+    let group = affectedRelatedBySheet.get(record.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(record.sheetId, group)
+    }
+    group.recordIds.push(record.recordId)
+    for (const fieldId of record.affectedFieldIds) group.fieldIds.add(fieldId)
+  }
+  // Link-table invalidations are collected from the authoritative edge mutation INSIDE the recovery
+  // transaction. They cover two-way mirror targets changed by a forward-link revert and surviving
+  // source records whose inbound edge to a Reset-deleted target disappeared. IDs only; receivers refetch
+  // under their own masks, matching RecordWriteService's mirror/FOL invalidation contract.
+  for (const invalidation of linkInvalidations) {
+    let group = affectedRelatedBySheet.get(invalidation.sheetId)
+    if (!group) {
+      group = { recordIds: [], fieldIds: new Set<string>() }
+      affectedRelatedBySheet.set(invalidation.sheetId, group)
+    }
+    const seen = new Set(group.recordIds)
+    for (const recordId of invalidation.recordIds) {
+      if (seen.has(recordId)) continue
+      seen.add(recordId)
+      group.recordIds.push(recordId)
+    }
+    for (const fieldId of invalidation.fieldIds) group.fieldIds.add(fieldId)
+  }
+  try {
+    for (const [relatedSheetId, group] of affectedRelatedBySheet.entries()) {
+      publishMultitableSheetRealtime({
+        spreadsheetId: relatedSheetId,
+        ...(relatedSheetId === sheetId ? { actorId } : {}),
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: group.recordIds,
+        fieldIds: [...group.fieldIds],
+      })
+    }
+  } catch (err) {
+    console.warn('[univer-meta] recovery related-sheet invalidation publish failed (non-fatal):', err)
+  }
+
+  const yjsRecordIds = [
+    ...appliedReverts.map((r) => r.recordId),
+    ...[...affectedRelatedBySheet.values()].flatMap((g) => g.recordIds),
+  ]
+  return { yjsRecordIds: [...new Set(yjsRecordIds)] }
+}
+
+/** Internal reservation admission uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualAdmission(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'], policy: RecoveryArchiveManualAdmissionPolicy,
+) {
+  return bindRecoveryArchiveManualAdmission(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), policy)
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualSourceRecheck(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualSourceRecheck(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualContinuation(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualContinuation(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+export function createRecoveryArchiveManualObjectUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  input: Parameters<typeof bindRecoveryArchiveManualObjectUpload>[2],
+) {
+  return bindRecoveryArchiveManualObjectUpload(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), input)
+}
+
+export function createRecoveryArchiveManualManifestUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  input: Parameters<typeof bindRecoveryArchiveManualManifestUpload>[2],
+) {
+  return bindRecoveryArchiveManualManifestUpload(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), input)
+}
+
+export function createRecoveryArchiveManualFinalization(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualFinalization(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+export function createRecoveryArchiveManualCommand(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'], runtime: RecoveryArchivePreviewRuntime,
+  policy?: RecoveryArchiveManualAdmissionPolicy,
+) {
+  return bindRecoveryArchiveManualCommand(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey))
+}
+
+/** Production worker authorization uses the same conservative read policy as HTTP recovery. */
+export function createRecoveryArchiveWorkerAuthorization() {
+  return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
+    hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities)
+  ))
+}
+
+/** Requestless terminal recomputation; callers cannot supply a permissive authorization adapter. */
+export function createRecoveryArchiveDerivedProcessor(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query' | 'transaction'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  return async (work: RecoveryArchiveDerivedWork): Promise<boolean> => {
+    let notifications: Array<{ sheetId: string; recordIds: string[]; fieldIds: string[] }> = []
+    const completed = await runRecoveryArchiveDerivedTransaction(database.transaction, work, query =>
+      bindRecoveryArchiveDerivedProcessor({
+        query,
+        authorize: candidate => authorization.recheckAuthority(query, candidate.identity),
+        resolveAuthority: async (sheetId, identity) => {
+          const scope = await query(`SELECT sheet.base_id FROM public.meta_sheets sheet
+            JOIN public.meta_bases base ON base.id=sheet.base_id
+            WHERE sheet.id=$1 AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL`, [sheetId])
+          if (scope.rows.length !== 1) return null
+          const baseId = (scope.rows[0] as { base_id: string }).base_id
+          if (sheetId === identity.sheetId && baseId !== identity.baseId) return null
+          const authority = await resolveDatabaseRecoverySheetAuthority(query, sheetId, identity.actorId)
+          if (!authority.capabilities.canRead ||
+            (baseIdsAreCrossBase(identity.baseId, baseId) && !(await resolveBaseReadableForAccess(query, baseId, authority.access))) ||
+            !(await hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities))) return null
+          return authority
+        },
+        helpers: authority => ({
+          ...createRecoveryComputedHelpers(authority.access, true),
+          loadLinkValuesByRecord, parseLinkFieldConfig, normalizeJson,
+        }),
+        invalidate: async groups => { notifications = groups },
+      })(work))
+    if (completed) {
+      for (const group of notifications) publishMultitableSheetRealtime({
+        spreadsheetId: group.sheetId, source: 'multitable', kind: 'record-updated',
+        recordIds: group.recordIds, fieldIds: group.fieldIds,
+      })
+      const ids = [...new Set(notifications.flatMap(group => group.recordIds))]
+      if (yjsInvalidator && ids.length) await yjsInvalidator(ids)
+    }
+    return completed
+  }
+}
+
+/** Canonical background callbacks; this factory accepts no caller-supplied authorization policy. */
+export function createRecoveryArchiveWorkerCallbacks(database: Pick<RecoveryArchiveRouterDatabaseRuntime, 'query' | 'transaction'>) {
+  const authorization = createRecoveryArchiveWorkerAuthorization()
+  const events = createRecoveryArchiveWorkerRecordEvents(eventBus)
+  const apply: RecoveryArchiveWorkerApplyCallbacks = {
+    ...authorization.apply,
+    onMutationApplied: events.onMutationApplied,
+    afterCommit: async (identity, mutations) => {
+      await events.afterCommit!(identity, mutations)
+      const reverted = mutations.filter((m): m is Extract<ExactAnchorAppliedMutation, { kind: 'revert' }> => m.kind === 'revert')
+      const deleted = mutations.filter(m => m.kind === 'delete').map(m => m.recordId)
+      const invalidations = mutations.flatMap(m => m.linkInvalidations)
+      let yjsIds = [...mutations.map(m => m.recordId), ...invalidations.flatMap(i => i.recordIds)]
+      if (await authorization.recheckAuthority(database.query, identity)) {
+        const authority = await resolveDatabaseRecoverySheetAuthority(database.query, identity.sheetId, identity.actorId)
+        const side = await runRecoveryPostCommitSideEffects(
+          database.query, identity.sheetId, identity.actorId,
+          reverted.map(m => ({ recordId: m.recordId, version: m.version, fieldIds: m.changedFieldIds, patch: m.patch, revisionId: m.revisionId })),
+          invalidations,
+          { ...createRecoveryComputedHelpers(authority.access), loadLinkValuesByRecord },
+        )
+        yjsIds = [...yjsIds, ...side.yjsRecordIds]
+      } else {
+        // The write committed before revocation. Invalidate IDs without reading or computing values.
+        for (const target of [{ sheetId: identity.sheetId, recordIds: reverted.map(m => m.recordId), fieldIds: [] as string[] }, ...invalidations]) {
+          if (target.recordIds.length) publishMultitableSheetRealtime({ spreadsheetId: target.sheetId, source: 'multitable', kind: 'record-updated', recordIds: target.recordIds, fieldIds: target.fieldIds })
+        }
+      }
+      if (deleted.length) publishMultitableSheetRealtime({ spreadsheetId: identity.sheetId, actorId: identity.actorId, source: 'multitable', kind: 'record-deleted', recordIds: deleted })
+      if (yjsInvalidator && yjsIds.length) await yjsInvalidator([...new Set(yjsIds)])
+    },
+  }
+  return { recheckAuthority: authorization.recheckAuthority, apply, processDerivedWork: createRecoveryArchiveDerivedProcessor(database) }
 }
 
 /**
@@ -6508,6 +7971,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   /** The field-delete revision's own id (`rev.id` at the undelete-execute call site) — scopes which
    * tombstone rows (if any) belong to THIS delete cycle, not a stray earlier/later capture for the same id. */
   deleteRevisionId?: string | null
+  linkFencePlan?: FieldLinkRestoreFencePlan | null
 }): Promise<void> {
   const { sheetId, fieldId, before, actorId } = opts
   const name = String(before.name ?? '')
@@ -6540,6 +8004,11 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   // →undelete cycle can never rehydrate from the WRONG cycle's captures.
   const deleteRevisionId = opts.deleteRevisionId ?? null
   if (deleteRevisionId) {
+    // W0 L6: this config-restore branch already holds the canonical sheet fence at its caller. Mint one
+    // record-history operation for every record revision produced by this field rehydration so the restored
+    // state becomes a selectable exact anchor. With the fence flag OFF the ledger is inert and the legacy
+    // write shape stays unchanged; with it ON, schema absence fails the enclosing transaction closed.
+    const operation = await mintOperation(query, sheetId)
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
@@ -6599,6 +8068,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         patch: { [fieldId]: row.rehydrated_value as unknown },
         snapshot: normalizeJson(row.data),
         batchId: recordBatchId,
+        ledger: operation,
       }))
       await recordRecordRevisionsBatch(query, revisionInputs)
     }
@@ -6607,6 +8077,13 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
     // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
     // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
+    const linkFenceGuard = opts.linkFencePlan
+      ? `AND r1.sheet_id = $3
+         AND r2.sheet_id = ANY($4::text[])`
+      : ''
+    const linkFenceParams = opts.linkFencePlan
+      ? [deleteRevisionId, fieldId, opts.linkFencePlan.sourceSheetId, opts.linkFencePlan.allowedTargetSheetIds]
+      : [deleteRevisionId, fieldId]
     await query(
       `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
        SELECT t.field_id, t.record_id, t.foreign_record_id
@@ -6614,13 +8091,14 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
        JOIN meta_records r1 ON r1.id = t.record_id
        JOIN meta_records r2 ON r2.id = t.foreign_record_id
        WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         ${linkFenceGuard}
          AND NOT EXISTS (
            SELECT 1 FROM meta_links ml
            WHERE ml.field_id = t.field_id
              AND ml.record_id = t.record_id
              AND ml.foreign_record_id = t.foreign_record_id
          )`,
-      [deleteRevisionId, fieldId],
+      linkFenceParams,
     )
     // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
     const lastValue = (before as { lastValue?: unknown }).lastValue
@@ -6632,6 +8110,10 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
         [fieldId, sheetId, lastValue],
       )
     }
+    // Seal after every record/link/sequence write. A zero-row rehydration tracks no events and therefore
+    // intentionally produces no record anchor; otherwise the deferred FK + endpoint validation make an
+    // unsealed or miscounted operation fail the whole field-undelete transaction at COMMIT.
+    await sealOperation(query, operation)
   }
 }
 
@@ -6687,7 +8169,9 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (scope === 'field') {
     const [fieldId, subjectType, subjectId] = parts
     if (!target) await query('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])
-    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true])
+    // Stamped for the same reason as the forward authoring write above: a restored grant is an
+    // operator decision too, and leaving it unattributed would make it retirable by a pack reconcile.
+    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only, created_by = EXCLUDED.created_by', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true, operatorFieldPermissionCreatedBy(actorId)])
   } else if (scope === 'view') {
     const [viewId, subjectType, subjectId] = parts
     await query('DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])
@@ -6704,8 +8188,34 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
 }
 
-export function univerMetaRouter(): Router {
+export interface UniverMetaRouterOptions {
+  readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
+  readonly recoveryArchiveDatabaseRuntime?: RecoveryArchiveRouterDatabaseRuntime
+  readonly recoveryArchiveAuditedReplayHorizonMs?: number
+  readonly recoveryArchiveAsyncResumeHorizonMs?: number
+  readonly recoveryArchiveManualPolicy?: RecoveryArchiveManualAdmissionPolicy
+}
+
+export interface RecoveryArchiveRouterDatabaseRuntime {
+  readonly transaction: RecoveryArchiveRestoreJobTransaction
+  readonly query: RecoveryArchiveRestoreJobQuery
+  readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
+}
+
+export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
   const router = Router()
+  const injectedRecoveryArchiveDatabase = options.recoveryArchiveDatabaseRuntime
+  if (
+    (options.recoveryArchiveRuntime || injectedRecoveryArchiveDatabase) &&
+    (
+      !options.recoveryArchiveRuntime ||
+      !injectedRecoveryArchiveDatabase ||
+      options.recoveryArchiveRuntime.transactionDepth !==
+        injectedRecoveryArchiveDatabase.transactionDepthProbe
+    )
+  ) {
+    throw new Error('RECOVERY_ARCHIVE_ROUTER_DATABASE_RUNTIME_MISMATCH')
+  }
 
   router.get('/bases', async (req: Request, res: Response) => {
     try {
@@ -6723,7 +8233,7 @@ export function univerMetaRouter(): Router {
       )
       const visibleSheetRows = filterVisibleSheetRows((
         await pool.query(
-          'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
         )
       ).rows as any[])
       const readableSheetRows = await filterReadableSheetRowsForAccess(
@@ -6751,6 +8261,111 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.get('/bases/:baseId/trash', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    const parsed = z.object({
+      limit: z.string().max(3).regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().max(100)).optional(),
+      cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    }).safeParse(req.query)
+    let afterId: string | null = null
+    if (!baseId || baseId.length > 50 || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+    }
+    if (parsed.data.cursor) {
+      try {
+        const decoded = z.tuple([z.literal(1), z.literal(baseId), z.string().min(1).max(50)])
+          .parse(JSON.parse(Buffer.from(parsed.data.cursor, 'base64url').toString('utf8')))
+        if (Buffer.from(JSON.stringify(decoded)).toString('base64url') !== parsed.data.cursor) throw new Error('Invalid cursor')
+        afterId = decoded[2]
+      } catch {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid trash pagination' } })
+      }
+    }
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      if (isElearningProjectionBaseIdCandidate(baseId) || baseId === APPROVAL_PROJECTION_BASE_ID) return sendForbidden(res)
+      const globalCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const limit = parsed.data.limit ?? 20
+      const data = await pool.transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        // Pre-filter BEFORE LIMIT. Mirror the shared scope loader's user > group > role
+        // precedence, using its permission-code sets; confirm each result with restore's resolver.
+        // Match ECMAScript trim(), including BOM/NBSP, not PostgreSQL's locale-dependent space class.
+        const trimCharacters = '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+        const eligibleSheets = `
+          FROM meta_sheets s
+          JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL
+          LEFT JOIN LATERAL (
+            SELECT array_agg(btrim(sp.perm_code, $9::text)) AS codes
+            FROM spreadsheet_permissions sp
+            WHERE sp.sheet_id = s.id
+              AND btrim(sp.perm_code, $9::text) <> '' AND (
+              (sp.subject_type = 'user' AND sp.subject_id = $2)
+              OR (sp.subject_type = 'member-group' AND EXISTS (
+                SELECT 1 FROM platform_member_group_members gm
+                WHERE gm.user_id = $2 AND gm.group_id::text = sp.subject_id
+              ))
+              OR (sp.subject_type = 'role' AND EXISTS (
+                SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = sp.subject_id
+              ))
+            )
+            GROUP BY sp.subject_type
+            ORDER BY CASE sp.subject_type WHEN 'user' THEN 0 WHEN 'member-group' THEN 1 ELSE 2 END
+            LIMIT 1
+          ) grants ON true
+          WHERE s.base_id = $1
+            AND s.system_kind IS NULL
+            AND s.id !~ '^sht_el_stats_[a-f0-9]{32}$'
+            AND btrim(coalesce(s.description, ''), $9::text) <> $8
+            AND NOT EXISTS (SELECT 1 FROM plugin_multitable_object_registry pr WHERE pr.sheet_id = s.id)
+            AND ($3::boolean OR grants.codes && $7::text[])
+            AND ($4::boolean OR grants.codes && $6::text[] OR (grants.codes IS NULL AND $5::boolean))`
+        const params = [baseId, access.userId, globalCapabilities.canManageFields,
+          access.isAdminRole, globalCapabilities.canRead, [...SHEET_READ_PERMISSION_CODES],
+          [...SHEET_ADMIN_PERMISSION_CODES], SYSTEM_PEOPLE_SHEET_DESCRIPTION, trimCharacters]
+        const admission = await query(`SELECT s.id ${eligibleSheets} ORDER BY s.id ASC LIMIT 1`, params)
+        const proof = admission.rows[0] as { id: string } | undefined
+        if (proof) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, proof.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+        } else if (!globalCapabilities.canManageFields || !(await resolveBaseReadable(req, query, baseId))) {
+          // Missing, deleted and inaccessible bases have the same refusal. Ownership never
+          // grants lifecycle authority, but an authorized empty base can have an empty bin.
+          return null
+        }
+        const result = await query(
+          `SELECT s.id, s.base_id, s.name, s.description,
+                  to_char(s.deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at
+           ${eligibleSheets}
+             AND s.deleted_at IS NOT NULL AND ($10::text IS NULL OR s.id > $10)
+           ORDER BY s.id ASC LIMIT $11`,
+          [...params, afterId, limit + 1],
+        )
+        const sheets: Array<{ id: string; baseId: string; name: string; description: string | null; deletedAt: string }> = []
+        for (const row of result.rows as Array<{ id: string; base_id: string; name: string; description: string | null; deleted_at: string }>) {
+          const resolved = await resolveSheetCapabilitiesForAccess(query, row.id, access)
+          if (!resolved.capabilities.canRead || !hasSheetLifecycleAuthority(resolved.access, resolved.sheetScope)) return null
+          sheets.push({ id: row.id, baseId: row.base_id, name: row.name, description: row.description, deletedAt: row.deleted_at })
+        }
+        const hasMore = sheets.length > limit
+        sheets.splice(limit)
+        // Stable ID keyset: no JavaScript Date conversion or deletion-time precision loss.
+        const nextCursor = hasMore
+          ? Buffer.from(JSON.stringify([1, baseId, sheets[sheets.length - 1].id])).toString('base64url')
+          : null
+        return { sheets, nextCursor }
+      })
+      if (!data) return sendForbidden(res)
+      return res.json({ ok: true, data })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list deleted sheets' } })
+    }
+  })
+
   router.post('/bases', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
       id: z.string().min(1).max(50).optional(),
@@ -6768,6 +8383,12 @@ export function univerMetaRouter(): Router {
 
     const baseId = parsed.data.id ?? buildId('base').slice(0, 50)
     const ownerId = parsed.data.ownerId ?? req.user?.id?.toString() ?? null
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
+    if (isPluginSystemBaseIdCandidate(baseId)) {
+      return sendPluginSystemBaseIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -6796,8 +8417,331 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
-    return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
+  /**
+   * F21 (base half) — rename a base's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE — TIGHTER THAN CREATE. `POST /bases` above is `rbacGuard('multitable','write')`, so any
+   * operator can create a base of their own. Renaming an EXISTING base is a change to something other
+   * people already depend on, so it takes SCHEMA authority (`canManageFields` = admin role or
+   * `multitable:manage-schema`) — the same tier that renames a field or a sheet. Base authority is
+   * GLOBAL (there is no per-base capability resolution the way `resolveSheetCapabilities` resolves a
+   * sheet), so the authority check runs BEFORE the existence check: an actor without schema authority
+   * is not told whether a given base id exists.
+   */
+  router.patch('/bases/:baseId', async (req: Request, res: Response) => {
+    const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+    if (!baseId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+
+      const updated = await pool.query(
+        `UPDATE meta_bases
+         SET name = $2
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING id, name, icon, color, owner_id, workspace_id`,
+        [baseId, parsed.name],
+      )
+      const row = (updated as any).rows?.[0]
+      if (!row) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      return res.json({ ok: true, data: { base: serializeBaseRow(row) } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename base failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename base' } })
+    }
+  })
+
+  /**
+   * 模板列表 = 内置常量表(只读,来自 template-library.ts 的 TEMPLATE_LIBRARY)
+   *          + 本租户里**这个人看得见的**自定义模板(共享给租户的 + 他自己建的私有模板)。
+   *
+   * 降级口径:内置模板本来零 DB 依赖。自定义模板读失败(表还没迁移 / 库没起来 / 其它)时
+   * 不能把整个模板中心打成 500 —— 回内置模板并显式带上 customTemplatesUnavailable:true,
+   * 前端(MultitableTemplateCenterView 的 template-custom-unavailable 提示条)据此明说
+   * 「自定义模板暂不可用」,而不是假装用户没建过模板。
+   * 注意方向:这个回退只让**读**的结果更少,写入口(POST/DELETE)没有任何对应回退。
+   */
+  router.get('/templates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+    const builtin = listMultitableTemplates()
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      const custom = await listCustomTemplates(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        access.userId,
+      )
+      return res.json({ ok: true, data: { templates: [...custom, ...builtin] } })
+    } catch (err) {
+      if (!isCustomTemplateTableMissing(err)) {
+        console.error('[univer-meta] list custom templates failed:', err)
+      }
+      return res.json({ ok: true, data: { templates: builtin, customTemplatesUnavailable: true } })
+    }
+  })
+
+  /**
+   * 「把这张 Base 存为模板」(09-10 测试反馈第 8 条:模板中心只能用、不能建)。
+   *
+   * VALUES-FREE,按构造证明:本路由只 SELECT meta_bases / meta_sheets / meta_fields /
+   * meta_views 四张**结构**表,一次都不碰 meta_records;抽取由纯函数 extractTemplateSheets
+   * 完成(property 白名单、视图只留结构位、所有 id 重编号成模板内局部 id),
+   * 所以模板 JSON 里既没有记录值,也没有源库的 sheet/field/view id。
+   *
+   * 可见性(抽取侧):源 Base 的表要先过 filterReadableSheetRowsForAccess —— 与 GET /bases
+   * 同一个可读过滤器。看不见的表不会被抽进模板;一张都看不见就按「Base 不存在」回 404
+   * (不告诉调用方这个 id 是否存在)。
+   *
+   * 可见性(发布侧):模板默认 private —— 只有建它的人看得见。理由是抽取侧的闸只保证
+   * 「建模板的人读得到这些表」,并不保证租户里**别人**读得到:管理员一路放行
+   * (filterReadableSheetRowsForAccess 对 isAdminRole 直接全量通过),他把带「内部成本」表的
+   * Base 存成模板后,若默认全租户可见,表名与全部字段名就绕过表级权限漏给了每个只读用户。
+   * 要当组织资产用,建模板的人显式传 visibility:'tenant'(前端是一个默认不勾的复选框)。
+   *
+   * 粒度(F7「从表一键存为模板」):可选的 `sheetIds` / `fieldIds` 把范围**收窄**到用户在工作台
+   * 里点名的那张数据表与勾选的那几列。两者都只做交集,一条可见性/授权闸都不替换 ——
+   * 传了也照样过 filterVisibleSheetRows → filterReadableSheetRowsForAccess,读不到的表/字段
+   * 不会因为被点名就进模板。省略两者 = 改动前的整 Base 行为,逐字不变;而**显式传空**
+   * (`sheetIds: []` / `fieldIds: []`,或归一后什么都不剩的一批空白 id)= 零匹配,直接 400,
+   * 不会退化成「不限」。
+   */
+  router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      baseId: z.string().min(1).max(50),
+      name: z.string().min(1).max(255).optional(),
+      description: z.string().max(500).optional(),
+      category: z.string().min(1).max(64).optional(),
+      icon: z.string().min(1).max(64).optional(),
+      color: z.string().min(1).max(32).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+      // 省略 = private。只有显式的 'tenant' 才会把模板发布给整个租户。
+      visibility: z.enum(['private', 'tenant']).optional(),
+      // F7「从表一键存为模板」:两个**只收窄不放宽**的可选选择器,省略 = 今天的整 Base 行为。
+      // 上限与既有口径同量(表 50 = 下面那条 SQL 的 LIMIT 50;字段 500 = 字段读上限),
+      // 超限由 zod 直接回 400 而不是静默截断(截断会让用户以为存全了)。
+      sheetIds: z.array(z.string().min(1).max(50)).max(50).optional(),
+      fieldIds: z.array(z.string().min(1).max(100)).max(500).optional(),
+    })
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const baseId = parsed.data.baseId.trim()
+    // null = 不限(整 Base,= 改动前的行为)。这两个选择器只能把范围**收窄**:
+    // 它们不参与任何可见性判定,过滤器 filterVisibleSheetRows → filterReadableSheetRowsForAccess
+    // 一个都不少地照跑,所以「给了 fieldIds 就跳过可读性过滤」这条捷径在这里不存在。
+    const requestedSheetIds = parsed.data.sheetIds
+      ? Array.from(new Set(parsed.data.sheetIds.map((id) => id.trim()).filter((id) => id.length > 0)))
+      : null
+    const requestedFieldIds = parsed.data.fieldIds
+      ? new Set(parsed.data.fieldIds.map((id) => id.trim()).filter((id) => id.length > 0))
+      : null
+    // 口径:**省略 = 不限(整 Base);给了键就是显式收窄,空选择 = 零匹配,不是「不限」。**
+    // `[]`(以及只写了空白、归一后什么都不剩的一批 id)在这里 fail-closed 回 400,而不是
+    // 悄悄退回整 Base:把空集合当「不限」意味着一个「我一列都没选」的请求会被放大成
+    // 「把这个 Base 的所有表所有列都抽进模板」—— 收窄选择器只能收窄,绝不能反向放宽读面。
+    // 400 只由调用方自己的入参形状决定,不透露 baseId 存不存在(与 zod 的 400 同层、同在
+    // 任何 DB 查询之前),所以也不构成存在性探测面。
+    if (requestedSheetIds?.length === 0 || requestedFieldIds?.size === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'sheetIds/fieldIds must contain at least one non-blank id when provided; an empty selection is not "no limit"',
+        },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const baseResult = await pool.query(
+        'SELECT id, name, icon, color FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+        [baseId],
+      )
+      const baseRow = (baseResult as any).rows?.[0]
+      if (!baseRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+
+      // sheetIds **下推进 WHERE**,不能在 LIMIT 之后过滤:Base 里表多于 50 张时,按 created_at
+      // 排在第 51 位的表会先被 LIMIT 截掉,事后再过滤等于把用户明确点名的那张表误判成「不存在」
+      // (回 404)。收窄语义由 `base_id = $1` 保住:别的 Base / 别的租户的 sheetId 一张都匹配不到。
+      const sheetResult = await pool.query(
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
+         FROM meta_sheets
+         WHERE base_id = $1 AND deleted_at IS NULL
+           AND ($2::text[] IS NULL OR id = ANY($2::text[]))
+         ORDER BY created_at ASC
+         LIMIT 50`,
+        [baseId, requestedSheetIds],
+      )
+      const visibleSheetRows = filterVisibleSheetRows(((sheetResult as any).rows ?? []) as any[])
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row: any) => ({
+          id: String(row.id),
+          name: typeof row.name === 'string' ? row.name : '',
+          description: typeof row.description === 'string' ? row.description : null,
+        })),
+        access,
+        capabilities,
+      )
+      if (readableSheetRows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      const sheetIds = readableSheetRows.map((row) => row.id)
+
+      const fieldResult = await pool.query(
+        'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
+        [sheetIds],
+      )
+      // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
+      // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底。
+      // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
+      // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
+      // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
+      // template-library.ts 给每个视图传一个按模板顺序递增的微秒偏移,created_at = 数据库
+      // now() + 偏移(provisioning.ts createView 的可选 createdAtOffsetMicros;其它调用方不传,
+      // 偏移为 0,等于原来的 DB 默认值 now()),装回去的视图顺序才会等于存下来的模板顺序,
+      // 这条 ORDER BY 重新读出来时才对得上。
+      // 已知残留(第二轮对抗评审 S-1,不做回填迁移):#6091 之前从模板装出来的 Base,视图
+      // created_at 全部打平,这里会按 id 排;/context(工作台标签顺序)刻意保持 created_at ASC
+      // 不加 id,所以这类老 Base 存模板时的视图顺序可能与用户看到的标签顺序不同。
+      const viewResult = await pool.query(
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
+        [sheetIds],
+      )
+
+      // fieldIds 的交集必须在 extractTemplateSheets **之前**做:抽取器只把 `fieldLocalIds` 里有的
+      // 源字段映射进视图的 groupBy/date/title/hidden(custom-template-store.ts),所以被剔掉的字段
+      // 在模板视图里自动消失、不留悬空引用。挪到抽取之后过滤,视图里就会留下指向已删字段的局部 id。
+      // 只做交集:传进来的 id 若不属于可读表的字段,什么也拿不到 —— 这里永远不可能放宽读面。
+      const fieldRows = ((fieldResult as any).rows ?? []) as any[]
+      const scopedFieldRows = requestedFieldIds
+        ? fieldRows.filter((row: any) => requestedFieldIds.has(String(row.id)))
+        : fieldRows
+
+      const extracted = extractTemplateSheets({
+        sheets: readableSheetRows.map((row) => ({ id: row.id, name: row.name, description: row.description })),
+        fields: scopedFieldRows,
+        views: ((viewResult as any).rows ?? []) as any[],
+      })
+      if (extracted.sheets.length === 0) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'This base has no readable table with fields to save as a template' },
+        })
+      }
+
+      const template = await createCustomTemplate({
+        query: (sql, params) => pool.query(sql, params),
+        id: `${CUSTOM_TEMPLATE_ID_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 24)}`,
+        tenantId: resolveTemplateTenantId(req),
+        workspaceId: parsed.data.workspaceId?.trim() ?? null,
+        name: (parsed.data.name?.trim() || String(baseRow.name ?? '').trim() || 'Untitled template').slice(0, 255),
+        description: (parsed.data.description ?? '').trim().slice(0, 500),
+        category: parsed.data.category?.trim() || CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+        icon: parsed.data.icon?.trim() || (typeof baseRow.icon === 'string' && baseRow.icon ? baseRow.icon : 'table'),
+        color: parsed.data.color?.trim() || (typeof baseRow.color === 'string' && baseRow.color ? baseRow.color : '#2563eb'),
+        sheets: extracted.sheets,
+        createdBy: access.userId,
+        visibility: normalizeCustomTemplateVisibility(parsed.data.visibility),
+      })
+
+      templateInstallLogger.info('[multitable.template.save-as]', {
+        templateId: template.id,
+        ok: true,
+        userId: access.userId,
+        sheetCount: extracted.sheets.length,
+        // 只记数量,不记 id / 名字 —— 日志面不是元数据读面。
+        scopedSheets: requestedSheetIds?.length ?? null,
+        scopedFields: requestedFieldIds?.size ?? null,
+        visibility: template.visibility,
+      })
+      return res.status(201).json({ ok: true, data: { template, warnings: extracted.warnings } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] save base as template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save base as template' } })
+    }
+  })
+
+  /**
+   * 删除自定义模板(软删)。内置模板不可删 —— 它们是常量表里的代码,不是数据。
+   * 与创建同档鉴权;租户维度写在 SQL 里,别的租户即使猜到 id 也只会拿到 404。
+   */
+  router.delete('/templates/:templateId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+    if (!isCustomTemplateId(templateId)) {
+      return sendForbidden(res, 'Built-in templates cannot be deleted')
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const deleted = await softDeleteCustomTemplate(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        templateId,
+        access.userId,
+      )
+      if (!deleted) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'NOT_FOUND', message: new MultitableTemplateNotFoundError(templateId).message },
+        })
+      }
+      templateInstallLogger.info('[multitable.template.delete]', { templateId, ok: true, userId: access.userId })
+      return res.json({ ok: true, data: { templateId } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete custom template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete template' } })
+    }
   })
 
   router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
@@ -6827,23 +8771,114 @@ export function univerMetaRouter(): Router {
       }
       userId = access.userId
 
-      const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
+      // 自定义模板(mtpl_ 前缀)存在 DB 里:按本租户查出来再交给同一套安装机器。
+      // 查不到 —— 别的租户的模板、已软删的模板、不存在的 id —— 一律走内置模板那条
+      // 404(NotFound),不区分「不存在」和「不是你的」。
+      let resolvedTemplate: MultitableTemplate | undefined
+      if (isCustomTemplateId(templateId)) {
+        const found = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          access.userId,
+        )
+        if (!found) throw new MultitableTemplateNotFoundError(templateId)
+        resolvedTemplate = found
+      }
+
+      // #5861:安装去重。同一次「安装意图」= (租户, 用户, 模板, 工作区, 请求的 Base 名),
+      // 窗口内(默认 5 分钟)重复安装**不新建**,而是原样重放第一次那条 201 —— 用户拿回的
+      // 就是他刚才想要的那个 Base。租户只取 resolveTemplateTenantId(req)(JWT 的
+      // authenticatedTenantId),不是可被 x-tenant-id 兼容头改写的 req.user.tenantId;
+      // 用户只取鉴权解析出的 access.userId。并发互斥来自安装事务里的
+      // pg_try_advisory_xact_lock(有界等待)+ 账本主键,不是「先查后插」;重放前还会核对
+      // 那次安装的 Base 与每一张表都还 live(见 template-install-dedupe.ts)。
+      const installScope: TemplateInstallScope = {
+        tenantId: resolveTemplateTenantId(req),
+        actorId: access.userId,
+        templateId,
+        workspaceId: parsed.data.workspaceId ?? null,
+        baseName: parsed.data.baseName?.trim() || null,
+      }
+      const runInstall = (query: unknown) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
+        template: resolvedTemplate,
         baseName: parsed.data.baseName,
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
         idGenerator: (prefix) => buildId(prefix).slice(0, 50),
-      }))
-
-      templateInstallLogger.info('[multitable.template.install]', {
-        templateId,
-        ok: true,
-        userId,
-        baseId: result.base.id,
-        sheetId: result.sheets[0]?.id ?? null,
       })
-      return res.status(201).json({ ok: true, data: result })
+
+      let outcome: { replayed: boolean; baseId: string; body: unknown; lockHeld: boolean }
+      // 重放时这里保持 null:那条 201 的 sheetId 已经在第一次安装时记过一次日志了。
+      let freshSheetId: string | null = null
+      // 账本表缺失(42P01)走的是下面那条 fail-open 支路 —— 那条路上的 lockHeld=false
+      // 表示「这次压根没经过去重」,不是「锁没抢到」,所以不能让它触发抢锁失败的 warn。
+      let ledgerUnavailable = false
+      try {
+        outcome = await pool.transaction(async ({ query }) => runDeduplicatedTemplateInstall({
+          query: query as unknown as TemplateInstallQueryFn,
+          scope: installScope,
+          install: async () => {
+            const result = await runInstall(query)
+            freshSheetId = result.sheets[0]?.id ?? null
+            // sheetIds 是**全部**新建的表:重放前逐个核对 live,少一张就不重放、真的再装。
+            return {
+              baseId: result.base.id,
+              sheetIds: result.sheets.map((sheet) => sheet.id),
+              body: { ok: true, data: result },
+            }
+          },
+        }))
+      } catch (err) {
+        // 账本表还没迁移 → 退回**改动前**的行为(照常安装,只是不去重),而不是让
+        // 「使用模板」整个挂掉。此路径上一个事务已经回滚,什么都没写。
+        if (!(err instanceof TemplateInstallLedgerUnavailableError)) throw err
+        ledgerUnavailable = true
+        // 消息故意不带稳定的 `[multitable.template.install]` token —— 下面那条
+        // 结构化 info 事件才是事件面,否则 SOP 的事件名 grep 会把一次安装数成两次。
+        templateInstallLogger.warn('Template install dedupe ledger unavailable; installed without dedupe', {
+          templateId,
+          userId,
+        })
+        const result = await pool.transaction(async ({ query }) => runInstall(query))
+        freshSheetId = result.sheets[0]?.id ?? null
+        outcome = { replayed: false, baseId: result.base.id, body: { ok: true, data: result }, lockHeld: false }
+      }
+
+      if (!ledgerUnavailable && !outcome.lockHeld && !outcome.replayed) {
+        // 有界等待内没拿到咨询锁 —— 这一次只剩账本主键兜底(并发下可能多出一个 Base,
+        // 即改动前的行为),但绝不把一次重复点击变成 500。不带稳定 token,不进 SOP 事件面。
+        templateInstallLogger.warn('Template install dedupe lock not acquired within the bounded wait; installed with primary-key fallback only', {
+          templateId,
+          userId,
+        })
+      }
+      if (outcome.replayed) {
+        // 重放**不写一行**,所以它不是一次安装:走一个**不同的** token,否则 H 系列 SOP 的
+        // `grep -F '[multitable.template.install]' | grep '"ok":true' | uniq -c` 会把一次
+        // 4 连点数成 4 次安装 —— 那正是用来验证 #5861 是否修好的那个计数
+        // (docs/operations/multitable-h-series-observation-sop-20260519.md §5/§6)。
+        // 与 dry-run 同一个先例:不同动作 = 不同 token。
+        templateInstallLogger.info('[multitable.template.install.replayed]', {
+          templateId,
+          ok: true,
+          userId,
+          baseId: outcome.baseId,
+        })
+        // 重放的 body 与第一次逐字节相同(客户端契约不变);只有这个响应头能看出是重放。
+        res.set('Idempotent-Replayed', 'true')
+      } else {
+        templateInstallLogger.info('[multitable.template.install]', {
+          templateId,
+          ok: true,
+          userId,
+          baseId: outcome.baseId,
+          sheetId: freshSheetId,
+        })
+      }
+      return res.status(201).json(outcome.body)
     } catch (err) {
       let statusCode: number
       let errorCode: string
@@ -6852,6 +8887,10 @@ export function univerMetaRouter(): Router {
         statusCode = 404
         errorCode = 'NOT_FOUND'
         message = err.message
+      } else if (isCustomTemplateTableMissing(err)) {
+        statusCode = 503
+        errorCode = 'DB_NOT_READY'
+        message = CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE
       } else if (err instanceof MultitableTemplateConflictError) {
         statusCode = 409
         errorCode = 'CONFLICT'
@@ -6922,7 +8961,28 @@ export function univerMetaRouter(): Router {
       req.user?.userId?.toString() ??
       null
 
-    const template = getMultitableTemplate(templateId)
+    // 自定义模板同样支持 dry-run:多一条**只读** SELECT(按租户查模板行),
+    // 零写不变量原样成立。查不到就落到下面与内置模板同一个 404。
+    let template = getMultitableTemplate(templateId)
+    if (!template && isCustomTemplateId(templateId)) {
+      try {
+        const pool = poolManager.get()
+        template = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          userId ?? '',
+        )
+      } catch (err) {
+        if (isCustomTemplateTableMissing(err)) {
+          return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+        }
+        const hint = getDbNotReadyMessage(err)
+        if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+        console.error('[univer-meta] resolve custom template failed:', err)
+        return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to dry-run template' } })
+      }
+    }
     if (!template) {
       templateInstallLogger.info('[multitable.template.dry-run]', {
         templateId,
@@ -7016,17 +9076,96 @@ export function univerMetaRouter(): Router {
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
-      if (resolvedSheetId || viewId) {
+      // A viewId WITHOUT a sheetId is the ONLY resolution that must happen before the gate below:
+      // there is no other way to learn which sheet the request addresses. It reads `meta_views` and
+      // never a sheet row, so it says nothing about the three sheet states the gate hides. The
+      // sheetId+viewId PAIRING check is deliberately deferred to AFTER the gate — see below.
+      //
+      // #5946 — this one call is DELIBERATELY NOT wrapped in `orRefuseSheetViewMismatch`, and is the
+      // single entry of that wrapper's allow-list (RAW_RESOLVER_ALLOW_LIST in
+      // tests/unit/multitable-sheet-view-mismatch-refusal.test.ts). Two reasons, both load-bearing:
+      //   * it passes `sheetId: null`, and `resolveMetaSheetId` throws ConflictError only on the
+      //     `view.sheetId !== sheetId` comparison, which is unreachable when there is no sheetId to
+      //     compare against — there is no refusal here to improve;
+      //   * wrapping it would put a 404 refusal IN FRONT of the #5936 authority gate below, handing
+      //     a caller with no capability a way to tell an existing foreign view from a missing one
+      //     and scan a held viewId against candidate sheet ids. That is the exact door #5948 closed.
+      if (!resolvedSheetId && viewId) {
         const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
-          sheetId: resolvedSheetId,
-          viewId: viewId || undefined,
+          sheetId: null,
+          viewId,
         })
         resolvedSheetId = resolved.sheetId
       }
 
+      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order, on the one univer-meta handler
+      // the closure guard could not see. The aliased sheet-row read below filters `s.deleted_at IS
+      // NULL` and used to answer `404 … Sheet not found: <id>` BEFORE this handler's first
+      // `sendForbidden` (which sits after the base-wide sheet-list load), so a signed-in caller
+      // /context was going to refuse anyway learned which of three things a sheet id was — live
+      // (403), soft-deleted (404) or never real (404) — with the id echoed back. The guard's
+      // EXISTENCE_PROBE recognised only the single-line `FROM meta_sheets WHERE id = $1 AND
+      // deleted_at IS NULL` form, so this handler was silently absent from its ledger; the probe now
+      // recognises the aliased, multi-line form too.
+      //
+      // ORDER ONLY — this gate NARROWS nothing and WIDENS nothing:
+      //   * the 403 predicate is the SAME `canReadWithSheetGrant(baseCapabilities, scope, isAdmin)`
+      //     the readable-rows filter below applies, evaluated against THIS sheet's scope, so every
+      //     caller that reached 200 before still reaches it;
+      //   * the membership check further down (`readableSheetRows.some(...)`, which additionally
+      //     requires the sheet to be listed under its base and not to be a hidden system sheet) is
+      //     untouched and still runs — this gate stands in FRONT of it, never instead of it.
+      // Deliberately NOT gated on `resolveSheetCapabilitiesForAccess`'s own `capabilities.canRead`:
+      // that additionally applies the approval-/e-learning-projection fences, which /context has
+      // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
+      // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
+      // would be an unrelated behaviour change riding along inside an ordering fix.
+      //
+      // COST, disclosed rather than discovered: this is the Workbench's main load path, and the gate
+      // adds 2 DB round trips for an admin (liveness + this sheet's scope map) and 3 for a non-admin
+      // (+ the approval-projection membership lookup). One of them — loadSheetPermissionScopeMap for
+      // THIS sheet — is issued again ~20 lines below with the same parameters, where the map is
+      // loaded for the whole base sheet list. Seeding that later map from `sheetScope` would remove
+      // the duplicate, but it would also change the parameters of a query sibling specs assert on;
+      // left as a named residual rather than folded into an ordering fix.
+      if (resolvedSheetId) {
+        const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
+          pool.query.bind(pool),
+          resolvedSheetId,
+          access,
+        )
+        if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      }
+
+      // #5936 (refutation round) — the sheetId+viewId PAIRING check, now BEHIND the gate. It used to
+      // run with the resolution above, and `resolveMetaSheetId` throws ConflictError when the view
+      // EXISTS but belongs to another sheet; this handler's catch maps that to 500. So a caller with
+      // no capability at all could tell an existing foreign view (500) from a non-existent one (403),
+      // and scan a held viewId against candidate sheet ids for the view→sheet binding — a
+      // pre-authority door of the same family as the row read below, on the same handler. Run here,
+      // every caller the gate refuses gets the SAME 403 whatever the viewId is, and `meta_views` is
+      // not even consulted for them.
+      //
+      // #5946 closes the residual #5948 named on its last line: a caller that PASSES the gate used
+      // to see the ConflictError mapped to 500 with the handler's generic body. It now answers the
+      // same values-free absent-sheet 404 the other nine routes answer. The ORDER above is
+      // untouched — this refusal still sits BEHIND the gate, so the refused caller's answer is
+      // byte-identical whatever the viewId is, and `meta_views` is still not consulted for them.
+      if (sheetId && viewId) {
+        const paired = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, { sheetId, viewId }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!paired) return
+        // The pairing is confirmed, not re-derived: `resolvedSheetId` is already `sheetId` here.
+      }
+
       const sheetRowResult = resolvedSheetId
         ? await pool.query(
-          `SELECT s.id, s.base_id, s.name, s.description, b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
+          `SELECT s.id, s.base_id, s.name, s.description, (to_jsonb(s) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(s) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(s) ->> 'copied_at') AS copied_at,
+                  (to_jsonb(s) ->> 'copied_from_sheet_id') AS copied_from_sheet_id,
+                  b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
                   b.color AS base_color, b.owner_id AS base_owner_id, b.workspace_id AS base_workspace_id
            FROM meta_sheets s
            LEFT JOIN meta_bases b ON b.id = s.base_id
@@ -7037,7 +9176,15 @@ export function univerMetaRouter(): Router {
 
       const sheetRow = (sheetRowResult as any).rows?.[0]
       if (resolvedSheetId && !sheetRow) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${resolvedSheetId}` } })
+        // Reachable only if the sheet went away BETWEEN the liveness gate above and this read. The
+        // row read filters `s.deleted_at IS NULL`, so its MISS cannot tell soft-deleted from absent:
+        // re-read liveness (one query, on the race path only) so a sheet that is merely in the
+        // recycle bin still answers SHEET_DELETED and the client keeps the restore affordance that
+        // distinct code exists for (multitable/sheet-liveness.ts). Values-free either way
+        // (multitable/sheet-refusals.ts) — the id echo that made this line the oracle #5936 reports
+        // is gone in both branches.
+        const racedLiveness = await loadSheetLiveness(pool.query.bind(pool), resolvedSheetId)
+        return sendSheetNotLive(res, racedLiveness === 'live' ? 'absent' : racedLiveness)
       }
 
       if (!resolvedBaseId) {
@@ -7056,7 +9203,9 @@ export function univerMetaRouter(): Router {
       const baseRow = (baseRowResult as any).rows?.[0]
       const sheetListResult = resolvedBaseId
         ? await pool.query(
-          `SELECT id, base_id, name, description
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
            FROM meta_sheets
            WHERE base_id = $1 AND deleted_at IS NULL
            ORDER BY created_at ASC`,
@@ -7103,12 +9252,22 @@ export function univerMetaRouter(): Router {
         access.isAdminRole,
       )
       const selectedSheet =
-        (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
+        (!isHiddenSystemSheet(sheetRow) ? sheetRow : null) ??
         readableSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
         null
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
+          // S-1 (second adversarial review of #6091): `ORDER BY created_at ASC` EXACTLY, with NO
+          // `, id` tie-breaker. Bases installed from a template before #6091 have every view on ONE
+          // timestamp (installMultitableTemplate ran inside one transaction on the DB default
+          // now()); an `id` tie-break would make the sha1 view id (stableChildId) their effective
+          // sort key and reshuffle the tabs / flip the default view (views[0]) of bases that already
+          // exist. Kept byte-identical to the pre-#6091 query and ordered exactly like GET /views
+          // (the two `... ORDER BY created_at ASC LIMIT 200` reads below); both are pinned by
+          // tests/unit/multitable-context-view-order.test.ts. Installs since #6091 stamp strictly
+          // increasing created_at per view (template-library.ts), so they have no ties at all.
+          // The save-as-template read (POST /templates) still breaks ties by id — see its note.
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
@@ -7167,6 +9326,75 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
       const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
+      // A6 (customer feedback 2026-09-24 #1b): DELETE /sheets/:sheetId 409s
+      // (SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED) for a managed sheet no matter who is asking —
+      // see sheet-delete-guard.ts. Reporting `canDeleteSheet: true` for one draws a trash icon
+      // (MetaSheetViewRail.vue) that can never work. Reuse the delete route's OWN check
+      // (`resolveSheetDeleteRefusal`) rather than duplicating the managed predicate, and only probe
+      // it once the actor has ALREADY cleared `hasSheetLifecycleAuthority` — an actor without that
+      // authority is refused before this point and must never learn whether the sheet is managed
+      // (mirrors the route's own authz-before-existence posture, see its DELETE handler above).
+      //
+      // S1 (adversarial-review fix, #6089): the probe is a SIDE lookup on an otherwise-successful
+      // load — the button is the only thing at stake, never the load itself. A THROWN lookup
+      // (missing table, transient connection error, …) must not 500 the whole `/context` response;
+      // it fails CLOSED to `canDeleteSheet: false` (same fail-closed direction as an actor who lacks
+      // lifecycle authority — never fails OPEN into showing a delete affordance the route cannot
+      // actually honour) and logs values-free (no sheet id, no query text).
+      const hasDeleteLifecycleAuthority = effectiveSheetId
+        ? hasSheetLifecycleAuthority(access, selectedSheetScope)
+        : false
+      let canDeleteSheet = false
+      if (hasDeleteLifecycleAuthority && effectiveSheetId) {
+        try {
+          canDeleteSheet = (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: managed-sheet probe failed for canDeleteSheet; failing closed to false',
+            { reason: 'managed_sheet_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canDeleteSheet = false
+        }
+      }
+
+      // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
+      // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
+      // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source: read on the sheet plus the three axes, no counts;
+      // the read is this handler's own `capabilities.canRead`, and /context does not apply the projection fences —
+      // see the #5936 note above — while the copy route's gate reads it as the fences leave it). The target gate runs
+      // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
+      // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
+      // entry, never 500s the load, and logs values-free.
+      let canCopySheet = false
+      if (effectiveSheetId && resolvedBaseId && access.userId) {
+        try {
+          canCopySheet = (await resolveCopyTargetWritable(access, pool.query.bind(pool), resolvedBaseId))
+            && (await hasFullTableReadAccess(req, pool.query.bind(pool), effectiveSheetId, access, capabilities))
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: copy-sheet gate probe failed for canCopySheet; failing closed to false',
+            { reason: 'copy_sheet_gate_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canCopySheet = false
+        }
+      }
+      // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
+      // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
+      let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
+      if (selectedSheet) {
+        const sourceSheetId = typeof selectedSheet.copied_from_sheet_id === 'string' ? selectedSheet.copied_from_sheet_id : ''
+        let canReadSource = false
+        if (sourceSheetId) {
+          try {
+            canReadSource = (await resolveReadableSheetIds(req, pool.query.bind(pool), [sourceSheetId], access)).has(sourceSheetId)
+          } catch {
+            canReadSource = false
+          }
+        }
+        selectedCopiedFrom = serializeCopiedFrom(selectedSheet, canReadSource)
+      }
+
       return res.json({
         ok: true,
         data: {
@@ -7177,22 +9405,28 @@ export function univerMetaRouter(): Router {
               baseId: typeof selectedSheet.base_id === 'string' ? selectedSheet.base_id : null,
               name: String(selectedSheet.name),
               description: typeof selectedSheet.description === 'string' ? selectedSheet.description : null,
+              copiedFrom: selectedCopiedFrom,
             }
             : null,
-          sheets: (sheetListResult as any).rows.map((row: any) => ({
+          // #5825: filter the RAW rows (they carry `system_kind`; the serialized shape below does not).
+          sheets: ((sheetListResult as any).rows as any[]).filter((row: any) =>
+            !isHiddenSystemSheet(row)
+            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
+          ).map((row: any) => ({
             id: String(row.id),
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
-          })).filter((row: any) =>
-            !isSystemPeopleSheetDescription(row.description)
-            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
-          ),
+            copiedFrom: serializeCopiedFrom(row),
+          })),
           views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
           // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
           personalOverrideViewIds,
+          // 客户反馈 2026-09-24 #4c: the instance business timezone the web shows and parses date-times in
+          // (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai). A zone id — instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
@@ -7209,6 +9443,19 @@ export function univerMetaRouter(): Router {
             // sheet-admin, mirroring revert-preview/-execute's own canManageSheetAccess (D2) floor exactly.
             sheetRevertEnabled: (String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
             personalViewsEnabled: isPersonalViewsEnabled(),
+            // Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only
+            // pattern as pitResetEnabled. Deliberately NOT `capabilities.canManageFields`: that is
+            // post-scope-grant and true for a sheet-scoped full-write holder, who
+            // `DELETE /sheets/:sheetId` refuses (hasSheetLifecycleAuthority = GLOBAL schema authority
+            // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
+            // affordance from being shown to an actor the server will 403. Single-sheet by construction
+            // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
+            // delete entry for the CURRENT sheet only, never for the rail's other rows. Additionally
+            // ANDed with "not managed" (see the local `canDeleteSheet` computed above) — the route
+            // itself still 409s a managed sheet's delete as the backstop.
+            canDeleteSheet,
+            // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
+            canCopySheet,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -7234,7 +9481,10 @@ export function univerMetaRouter(): Router {
         return res.status(401).json({ error: 'Authentication required' })
       }
       const result = await pool.query(
-        'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
+           FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
       )
       const readableSheetRows = await filterReadableSheetRowsForAccess(
         pool.query.bind(pool),
@@ -7246,6 +9496,8 @@ export function univerMetaRouter(): Router {
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
         description: typeof r.description === 'string' ? r.description : null,
+        // Copy-sheet S1 badge (ADR CS-14): kind/at only — the source id is never listed here.
+        copiedFrom: serializeCopiedFrom(r),
       }))
       return res.json({ ok: true, data: { sheets } })
     } catch (err) {
@@ -7264,12 +9516,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
       return res.json({ ok: true, data: { items } })
@@ -7289,16 +9538,15 @@ export function univerMetaRouter(): Router {
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(PERMISSION_CANDIDATES_MAX_ITEMS, Math.max(1, Math.floor(rawLimit as number)))
+      : 20
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const items = await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit })
       return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
@@ -7314,21 +9562,136 @@ export function univerMetaRouter(): Router {
   // resolvePersonAssignableDirectory read model for ONE person field — the same allowed set the write
   // validator accepts, hydrated + active-only. Gated on canEditRecord (the picker is used while editing
   // a record's person field), NOT canManageSheetAccess like /permission-candidates.
+  //
+  // #5781 — THIS CHANGE BOUNDS DISCLOSURE ONLY; IT DOES NOT NARROW WHO IS ELIGIBLE.
+  // Plainly: the underlying eligible set is DEPLOYMENT-WIDE, not sheet-scoped. It comes from
+  // loadSheetMemberUserIdSet → listSheetPermissionCandidates, whose `user_candidates` CTE carries the
+  // sheet id only in the LEFT JOIN ON clause and filters on nothing but the search term — so "sheet
+  // members" is really "every active user in the deployment HOLDING A GLOBAL multitable:read/write
+  // grant" (loadCandidateUserEligibilityMap, multitable/permission-service.ts:239-269, consumed at
+  // :584-597 — direct or via a role). In a deployment that puts multitable:read on the generic `user`
+  // role that is effectively everyone, but the predicate is a real one and the earlier unqualified
+  // wording was falsifiable. Before this change, any actor with
+  // canEditRecord on ANY sheet could call this with no search term and receive that whole roster
+  // hydrated to id + name + email, unlimited; the sibling /permission-candidates, which answers the
+  // same shape, requires canManageSheetAccess AND clamps to 50.
+  // So this route now (a) requires a search term of at least PERSON_DIRECTORY_MIN_QUERY_LENGTH ON THE
+  // UNRESTRICTED BRANCH — the one whose allowed set IS that deployment-wide roster — and answers such
+  // a term-less call with an empty list plus `requiresQuery` (a values-free marker the picker renders
+  // as "type to search"), and (b) clamps EVERY answer to PERSON_DIRECTORY_MAX_ITEMS with `hasMore`.
+  // A field carrying restrictToMemberGroupIds keeps its term-less browse: its set is (sheet members ∩
+  // the configured groups), an intersection that can only narrow, and the clamp still applies. See the
+  // gate itself below for why that grants no new capability.
+  // It deliberately leaves the eligible SET alone: that set is shared with the write validator
+  // (createPersonMemberResolver — same file documents the single-source-of-truth contract), so
+  // narrowing it on the read side only would make the picker offer less than a save accepts.
+  // Narrowing the set on BOTH sides (i.e. making listSheetPermissionCandidates actually sheet-scoped)
+  // is tracked separately under #5781 and is NOT done here.
+  //
+  // RESIDUALS this change does NOT close (stated so the next reader does not over-read the bound):
+  //  (1) THE ROW CAP IS THE ONLY PER-REQUEST BOUND; "TERM REQUIRED" DOES NOT GUARANTEE NARROWING — on
+  //      this route AND on the two same-shaped reads named in (2). The term is a plain substring, so a
+  //      character that (almost) every row contains passes the 1-character minimum and matches
+  //      (almost) the whole set: `@` matches every user with a well-formed email address (all three
+  //      reads match email), and on the two reads that also match the id (mention candidates,
+  //      form-share candidates) `-` matches every UUID-shaped id, which is what the in-app
+  //      user-creation paths mint (crypto.randomUUID in admin-users.ts, dingtalk-oauth.ts,
+  //      directory-sync.ts and AuthService.register; seeded or bootstrap accounts may carry other
+  //      ids). Such a term does not reorder anything: here and on
+  //      form-share the order is by name regardless of the term, and the mention read's prefix rank
+  //      only lifts rows whose name/email/id STARTS with the character — never a UUID or an email for
+  //      `-`/`@` — so the rest tie and fall back to created_at, id, the old term-less order. `q=-` /
+  //      `q=@` therefore return essentially the first page a term-less call used to. What the term
+  //      requirement removes is the UI's AUTOMATIC term-less request when a picker/composer opens
+  //      (privacy hygiene); against a caller who types one character on purpose, the per-request
+  //      bound is the 50-row cap (plus `hasMore`) and nothing else. The LIKE-escaping of `%` / `_`
+  //      keeps the search literal; it is search correctness, not a disclosure bound, for the same
+  //      reason.
+  //      Across requests: with a deterministic order and no rate limiter or audit row on any of the
+  //      three, a scripted actor can walk the set by varying the term and reassemble most of a
+  //      few-thousand-user roster in a few hundred calls; the aggregate is only made INCONVENIENT, not
+  //      bounded. Making the term actually narrow (e.g. match the id only exactly or by prefix, the
+  //      email only by prefix) changes search behaviour and is an OWNER DECISION, not taken here; the
+  //      durable fix is still the set-narrowing follow-up named above (plus, if wanted, a rate limit /
+  //      audit row).
+  //  (1b) #5809 `?match=exact` ON THIS ROUTE MATCHES THE USER ID BY EQUALITY. The substring search
+  //      never looks at the id; exact mode does (lower(id::text) = lower(term)), so a caller with
+  //      canEditRecord who already holds an eligible user's id (from a person cell, an export or a
+  //      created_by value) gets back that user's name and email in one call. That is not a new
+  //      disclosure where comments:read is held (seeded onto the generic `user` role): mention
+  //      candidates below already match ids by substring across ALL active users and return the
+  //      name and email. It IS new for an edit-capable caller WITHOUT comments:read — a narrower
+  //      audience than the one mention candidates already serves, and limited to ids of this field's
+  //      eligible set. API tokens cannot reach this route (oapi-read-allowlist.ts). A blank exact
+  //      term never browses: the route answers it with `requiresQuery` and the helper returns [].
+  //  (2) THE TWO PARALLEL READS OF THE SAME ROSTER NOW CARRY THE SAME PER-REQUEST BOUNDS (#5795).
+  //      - GET /api/comments/mention-candidates (routes/comments.ts -> CommentService
+  //        .listMentionCandidates), and its sibling GET /api/multitable/:spreadsheetId/mention-candidates
+  //        which reads the same service behind the same gate: a term is required (term-less ⇒ empty +
+  //        `requiresQuery`, no query issued), at most 50 rows with `hasMore`, the term is matched
+  //        literally, and the deployment-wide active-user `total` is no longer computed — `total` is
+  //        the clamped page size. #5809 adds an opt-in `?match=exact-email` to the first of the two
+  //        (email EQUALITY instead of the substring; same gate, term requirement and ceiling), whose
+  //        rows are a subset of the substring rows for the same term.
+  //        What #5795 still leaves open there: the gate is unchanged
+  //        (rbacGuard('comments','read'), seeded onto the generic `user` role, + sheet read), and so is
+  //        the set — every ACTIVE user in the deployment, with no permission filter at all, i.e. a
+  //        superset of this route's set (equal only where every active user holds multitable
+  //        read/write). Residual (1) therefore bites hardest on that endpoint.
+  //      - GET /sheets/:sheetId/form-share-candidates (further down THIS file; gate canManageViews,
+  //        which a sheet-level full-write grant alone turns on): same term requirement + marker, its
+  //        existing clamp (50, default 20) now with `hasMore`, literal term. It was already capped at
+  //        50 before #5795, so against a deliberate caller its term requirement removes nothing (see
+  //        (1)); the change there is UI / privacy hygiene. Its set is unchanged
+  //        (listSheetPermissionCandidates users + member groups), and so is the DingTalk-binding
+  //        enrichment it adds per user — whether that dimension should be visible to a full-write
+  //        holder is an open owner question, recorded on that route.
+  //      Neither is re-scoped. Do NOT read this as "the roster is now bounded deployment-wide":
+  //  (2b) AT LEAST ONE MORE READ OF THE SAME USER SET IS NOT BOUNDED THIS WAY. GET
+  //      /api/approvals/directory/users (routes/approvals.ts, gate rbacGuardAny approvals:read |
+  //      approvals:write | approvals:act — e.g. the plm-collaborator access preset carries
+  //      approvals:read) answers a TERM-LESS call with up to 50 (default 20) active users (id, name,
+  //      email) ordered by name, via services/approval-directory.ts searchDirectoryUsers: it has the
+  //      50-row cap only —
+  //      no term requirement, no `hasMore` — and ApprovalUserPicker issues that term-less request on
+  //      mount and every time the picker opens. It is owned by the approvals surface and deliberately
+  //      not touched here; it is a follow-up for its owners. The reads named in this block are the
+  //      ones found, not a proven-complete inventory of user-directory reads.
+  //  (3) WHERE THE BOUNDS ARE PROVEN. The route-level behaviour is pinned by
+  //      tests/unit/multitable-person-directory-bounded.test.ts (which MOCKS the resolver) and the
+  //      generated SQL by tests/unit/multitable-person-directory-resolver.test.ts (which asserts on the
+  //      SQL STRING). Neither executes that SQL, so the ILIKE predicate, the LIKE-escape convention and
+  //      the `LIMIT $n` are additionally executed against real Postgres in
+  //      tests/integration/multitable-person-member-group-restrict.test.ts (registered in
+  //      plugin-tests.yml, which hard-fails without DATABASE_URL). That lane is the ONLY place the
+  //      DB-side bound is actually run — it cannot run on a developer box without a local Postgres.
+  //      The two #5795 surfaces are pinned at route level by tests/unit/comment-mention-candidates-
+  //      bounded.test.ts and tests/unit/multitable-form-share-candidates-bounded.test.ts (both mock the
+  //      roster read) and, for the mention SQL, by tests/unit/comment-service.test.ts (which inspects
+  //      the query-builder calls: LIMIT, escaped term, no COUNT). As far as a grep of tests/integration
+  //      shows, no wired real-Postgres lane executes the mention SQL's SUBSTRING search
+  //      (comments.api.test.ts is deliberately unwired; only the #5809 exact-email arm runs, in the
+  //      person-member-group-restrict suite), nor listSheetPermissionCandidates WITH a search term — its term-less
+  //      form does run for real via the person-member-group-restrict suite, the escaped-term path does not.
   router.get('/sheets/:sheetId/person-fields/:fieldId/directory', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     if (!sheetId || !fieldId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and fieldId are required' } })
     }
-    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
+    // Case folding now happens in SQL (ILIKE), so keep the term as typed for the echo.
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    // #5809 — opt-in EXACT lookup for the import resolver (`?match=exact`): the same gate, allowed set,
+    // ceiling and response shape, but the hydration keeps only rows whose id / name / email EQUALS the
+    // term (resolvePersonAssignableDirectory `exact`). Any other `match` value keeps the substring
+    // search below byte-for-byte. Exact mode never browses: it requires a term even on a restricted
+    // field (a strictly tighter rule than the §5 browse exemption, which stays substring-only).
+    const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
       const field = fields.find((f) => f.id === fieldId)
@@ -7336,11 +9699,66 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Person field not found: ${fieldId}` } })
       }
 
-      const directory = await resolvePersonAssignableDirectory(pool.query.bind(pool), sheetId, personRestrictGroupIds(field))
-      const items = q
-        ? directory.filter((e) => (e.name ?? '').toLowerCase().includes(q) || (e.email ?? '').toLowerCase().includes(q))
-        : directory
-      return res.json({ ok: true, data: { items, total: items.length, query: q } })
+      // Resolved BEFORE the term gate because the gate only applies to the unrestricted branch (below).
+      const restrictGroupIds = personRestrictGroupIds(field)
+
+      // #5781: no term ⇒ no roster. Answered BEFORE the directory is resolved, so a term-less call
+      // hydrates nothing — no name/email ever leaves the users table for it. Deliberately a 200 with a
+      // values-free marker rather than a 400: MetaPersonPicker opens with an empty search box and
+      // fires this immediately, and a 400 would render as a load FAILURE instead of "type to search".
+      //
+      // The requirement applies ONLY to the unrestricted branch, which is the one that leaks: an
+      // unrestricted field's allowed set IS the deployment-wide roster (see above). A field with
+      // restrictToMemberGroupIds resolves to (sheet members ∩ the explicitly configured groups) — a
+      // strictly narrower, deliberately configured set (person-field-restriction.ts intersects, never
+      // widens) — so it keeps its browse affordance: the picker on a 3-person reviewer group shows the
+      // 3 names instead of making the user guess a first letter. This grants NO new capability: the
+      // same actor can already retrieve up to PERSON_DIRECTORY_MAX_ITEMS rows of that same restricted
+      // set with any one-character term, and the term-less answer is clamped by the same ceiling (so a
+      // huge "All staff" group stays bounded). The gate is narrowed in scope, never in strength.
+      if ((exactMatch || restrictGroupIds.length === 0) && q.length < PERSON_DIRECTORY_MIN_QUERY_LENGTH) {
+        return res.json({
+          ok: true,
+          data: {
+            items: [],
+            total: 0,
+            limit: PERSON_DIRECTORY_MAX_ITEMS,
+            query: '',
+            hasMore: false,
+            requiresQuery: true,
+            minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+          },
+        })
+      }
+
+      const page = await resolvePersonAssignableDirectory(
+        pool.query.bind(pool),
+        sheetId,
+        restrictGroupIds,
+        undefined, // keep the canonical (write-validator) allowed-set resolver — eligibility unchanged
+        // Search + ceiling are pushed into the hydration query: fetch one past the ceiling to learn
+        // `hasMore` without a second COUNT (the queryRecordsWithCursor convention), so the DB never
+        // hands back more than PERSON_DIRECTORY_MAX_ITEMS + 1 rows of display data.
+        exactMatch
+          ? { exact: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 }
+          : { search: q, limit: PERSON_DIRECTORY_MAX_ITEMS + 1 },
+      )
+      const hasMore = page.length > PERSON_DIRECTORY_MAX_ITEMS
+      const items = hasMore ? page.slice(0, PERSON_DIRECTORY_MAX_ITEMS) : page
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          total: items.length,
+          limit: PERSON_DIRECTORY_MAX_ITEMS,
+          query: q,
+          // `hasMore` = the truncation signal used by the record-approval list
+          // (routes/multitable-record-approvals.ts) and by this file's own paged reads; no new convention.
+          hasMore,
+          requiresQuery: false,
+          minQueryLength: PERSON_DIRECTORY_MIN_QUERY_LENGTH,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7367,12 +9785,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (subjectType !== 'user' && parsed.data.accessLevel === 'write-own') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
@@ -7409,7 +9824,13 @@ export function univerMetaRouter(): Router {
         // permission-revert execute path holds, so this forward sheet-grant write serializes against a
         // concurrent revert — it cannot interleave between the revert's live-grant re-check and its apply
         // (which would turn a re-checked de-escalation into a net escalation).
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: the SAME statement now also re-reads `deleted_at` and refuses unless the sheet is still
+        // live. The liveness gate above ran on the POOL, before this transaction existed; a soft delete
+        // that committed in between left this row lock FREE, so this transaction took it without waiting
+        // and without seeing the pre-delete row version, and wrote grants onto a dead sheet. The throw
+        // rolls back before the DELETE/INSERT below; the outer catch answers the gate's own 404 body.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT perm_code FROM spreadsheet_permissions
@@ -7483,6 +9904,10 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: the in-transaction liveness re-check (under the row lock) found the sheet gone. Same
+      // values-free body the pre-transaction gate answers, so the window is not an existence oracle.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update sheet permission failed:', err)
@@ -7502,12 +9927,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const r = await pool.query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
       return res.json({ ok: true, data: { enabled: (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true } })
     } catch (err) {
@@ -7529,13 +9951,20 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer (row-level-read-deny). Fence-before-check, then the live column
+        // read + UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        // #5938: this is an ACCESS-CONTROL write (it turns row-level read-deny on or off), and its
+        // liveness gate above ran on the POOL before this transaction existed. A soft delete
+        // committing in that window would simply be overwritten on top of: the UPDATE's `WHERE id`
+        // still matches the deleted row. Lock the row and re-read `deleted_at` in ONE statement
+        // first, so the UPDATE below cannot land on a sheet that is dead at write time. Taken AFTER
+        // the fence, so the lock order (fence → sheet row) is the one every fenced writer uses.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
@@ -7559,6 +9988,12 @@ export function univerMetaRouter(): Router {
       })
       return res.json({ ok: true, data: { enabled: parsed.data.enabled } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      // #5938: the in-transaction liveness re-check (under the row lock) refused — same values-free
+      // body this route's own pre-transaction gate answers.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set row-level-read-deny flag failed:', err)
@@ -7577,12 +10012,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const r = await pool.query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
       const raw = (r.rows[0] as { rules?: unknown } | undefined)?.rules
       // parseConditionalRules round-trips the stored rules; `rejected` surfaces any legacy/unknown rows so
@@ -7614,13 +10046,18 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer (conditional-read rules). Fence-before-check, then the live
+        // column read + UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        // #5938: same as the row-level-read-deny writer above — an ACCESS-CONTROL write whose gate
+        // ran on the pool. Lock the row and re-read `deleted_at` in one statement before the UPDATE,
+        // which carries no `deleted_at` predicate of its own and would otherwise overwrite the
+        // read-deny rules of a sheet soft-deleted inside the window.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
@@ -7644,6 +10081,12 @@ export function univerMetaRouter(): Router {
       })
       return res.json({ ok: true, data: { rules } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      // #5938: in-transaction liveness re-check (under the row lock) refused — same values-free body
+      // as this route's own gate.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set conditional-rules failed:', err)
@@ -7666,9 +10109,14 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
       const sheetId = String((viewRow.rows[0] as any).sheet_id)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -7684,7 +10132,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM meta_view_permissions vp
@@ -7787,8 +10235,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
       const sheetId = String((viewRow.rows[0] as any).sheet_id)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (subjectType === 'user') {
         const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
@@ -7811,7 +10260,12 @@ export function univerMetaRouter(): Router {
         // Never-escalate-under-concurrency (#3389 follow-up): lock the owning sheet row (the SAME lock the
         // permission-revert execute path takes — sheetId is the view's sheet) so this forward view-grant
         // write serializes against a concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the OWNING sheet is still live —
+        // the lock the pre-transaction gate's verdict relies on is only free of a concurrent soft delete
+        // once it is HELD, so the verdict has to be re-taken here. `meta_view_permissions` rows outlive a
+        // soft-deleted sheet exactly as `spreadsheet_permissions` rows do.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           'SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3',
@@ -7859,6 +10313,8 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { viewId, subjectType, subjectId, permission: parsed.data.permission } })
     } catch (err) {
+      // #5938: in-transaction liveness re-check (under the owning sheet's row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update view permission failed:', err)
@@ -7876,13 +10332,14 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -7899,7 +10356,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM field_permissions fp
@@ -8002,12 +10459,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fieldCheck = await pool.query('SELECT id FROM meta_fields WHERE id = $1 AND sheet_id = $2', [fieldId, sheetId])
       if (fieldCheck.rows.length === 0) {
@@ -8035,7 +10489,11 @@ export function univerMetaRouter(): Router {
         // Never-escalate-under-concurrency (#3389 follow-up): take the SAME meta_sheets row lock the
         // permission-revert execute path holds, so this forward field-grant write serializes against a
         // concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the sheet is still live. The
+        // pre-transaction gate read liveness on the pool; a soft delete committing between that read and
+        // this lock leaves the lock free, so `field_permissions` writes would land on a dead sheet.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT visible, read_only
@@ -8060,12 +10518,30 @@ export function univerMetaRouter(): Router {
             [sheetId, fieldId, subjectType, subjectId],
           )
         } else {
+          // PROVENANCE: an operator decision is STAMPED, on the INSERT and on the DO UPDATE alike.
+          //
+          // Until this line every row this route wrote carried `created_by = NULL`, so a deliberate
+          // human decision was indistinguishable from an unattributed row — and, worse, an operator
+          // edit LAYERED ON TOP of a row a customer pack had created kept the PACK's marker, which
+          // made the operator's decision look like installer debris to the next pack revision's
+          // reconcile. Stamping here is what makes
+          // stock-preparation-field-permissions.ts's `operator` classification a property of the
+          // data. Rows written before this shipped stay NULL, which that classifier also treats as
+          // an operator row — that is the fallback, not the design.
           await query(
-            `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
-             DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
-            [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
+             DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only, created_by = EXCLUDED.created_by`,
+            [
+              sheetId,
+              fieldId,
+              subjectType,
+              subjectId,
+              parsed.data.visible ?? true,
+              parsed.data.readOnly ?? false,
+              operatorFieldPermissionCreatedBy(getRequestActorId(req)),
+            ],
           )
         }
 
@@ -8109,6 +10585,9 @@ export function univerMetaRouter(): Router {
         data: { sheetId, fieldId, subjectType, subjectId, visible: parsed.data.visible ?? true, readOnly: parsed.data.readOnly ?? false },
       })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: in-transaction liveness re-check (under the sheet row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field permission failed:', err)
@@ -8127,18 +10606,19 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
       if (recordCheck.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8155,7 +10635,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM record_permissions rp
@@ -8368,9 +10848,18 @@ export function univerMetaRouter(): Router {
       const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50
       const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5807 — the People-sheet quantity bound applies HERE too, and not as a history nicety: this route
+      // reconstructs the state of the CURRENTLY-LIVE records, so `asOf=<now>` reproduces the LIVE roster
+      // (full `data`, 200 rows a page, `offset` with no upper bound) and `total` is the exact headcount
+      // the window exists to withhold. It was named as a GAP in the first cut and is closed here with the
+      // same ruler as /view: the first window of rows, `total` clamped to it, nothing past it. Resolved
+      // AFTER the 401/403/404 above, so it adds no oracle. Ordinary sheets: byte-identical to before.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
 
       // Scope to CURRENTLY-LIVE records (deleted-since-T are out of v1).
       const liveIds = ((await pool.query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: unknown }>).map((r) => String(r.id))
@@ -8398,7 +10887,12 @@ export function univerMetaRouter(): Router {
       }
       visible.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)) // stable pagination
       const total = visible.length // post-permission-filter total (LOCK-3)
-      return res.json({ ok: true, data: { records: visible.slice(offset, offset + limit), total, asOf: asOfIso } })
+      // #5807 CHOKEPOINT: truncate the page to the window (an offset past it yields an empty page, never
+      // row 51) and clamp the reported `total`, which would otherwise re-publish the roster's exact
+      // cardinality. `boundEnumeratedRows`/`boundPageMeta` are the identity for every ordinary sheet.
+      const boundedRecords = boundEnumeratedRows(readBound, visible.slice(offset, offset + limit), offset)
+      const boundedTotal = boundPageMeta(readBound, { offset, limit, total, hasMore: false }).total
+      return res.json({ ok: true, data: { records: boundedRecords, total: boundedTotal, asOf: asOfIso } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -8428,11 +10922,12 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (!access.isAdminRole) {
         const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
@@ -8586,8 +11081,9 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const sheetCheck = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       if (sheetCheck.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Per-entity-type gate IN the WHERE clause. Condition strings are STATIC (no user input) — safe to interpolate;
       // every value (sheetId, entityType, limit, offset) is parameterized. A `permission` row's kind is its entity_id
@@ -8623,14 +11119,21 @@ export function univerMetaRouter(): Router {
         if (entityType === 'sheet_config') return redactConditionalReadRuleLiterals(val as { conditionalReadRules?: unknown }, allowedFieldIds)
         return val
       }
+      // Resolve only actors from rows that survived the per-entity permission predicate above. This stays a
+      // single batched directory read, after the authorization/redaction-sensitive row selection is complete.
+      const actorNames = await resolveUserDisplayNames(
+        pool.query.bind(pool),
+        rows.map((r) => typeof r.actor_id === 'string' ? r.actor_id : null),
+      )
       return res.json({ ok: true, data: { items: rows.map((r) => {
         const et = String(r.entity_type)
+        const actorId = typeof r.actor_id === 'string' ? r.actor_id : null
         return {
           id: String(r.id), entityType: et, entityId: String(r.entity_id), action: String(r.action),
           before: redactPayload(et, r.before),
           after: redactPayload(et, r.after),
           changedKeys: r.changed_keys ?? [],
-          batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+          batchId: r.batch_id ?? null, actorId, actorName: actorId ? (actorNames.get(actorId) ?? null) : null, createdAt: r.created_at,
         }
       }), limit, offset } })
     } catch (err: unknown) {
@@ -8653,8 +11156,9 @@ export function univerMetaRouter(): Router {
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
       const rev = revRes.rows[0] as ConfigRevisionRow | undefined
       if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
@@ -8741,6 +11245,18 @@ export function univerMetaRouter(): Router {
       // field revert (name/order only) is unaffected and stays on the existing safe path.
       if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
         return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
+      }
+      // Field type CONVERSION revisions are not revertable from config history (ADR
+      // docs/development/multitable-field-retype-first-batch-adr-20260926.md §3.10). A conversion revision and its
+      // undo revision look exactly like an ordinary PATCH retype here (`update`, changed_keys type + property, both
+      // ends plain scalars), so isSupportedFieldRetypeRevert would open them — but the conversion REWROTE every cell,
+      // and a schema-only revert would flip the field back to text over cells that are still option-shaped, after
+      // which the whole-column undo can never pass its field check and the pre-image is unreachable. Refused BEFORE
+      // any token is minted (the lossy branch and the generic path below both mint one). Only a revision whose
+      // revert would WRITE type or property is looked up: a rename / reorder revert issues no extra statement.
+      if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(pool.query.bind(pool) as FieldRetypeConvertQuery, String(rev.id)))) {
+        const refusal = fieldRetypeConversionRestoreRefusal()
+        return res.status(refusal.status).json({ ok: false, error: { code: refusal.code, message: refusal.message, details: refusal.details } })
       }
       // ── 4c-1 LOSSY / value-transform retype revert PREVIEW (design-lock #3812; owner-ratified 2026-07-08) ────
       // Second flag, default off, AND requires the base Tier-2 flag (403'd immediately above ⇒ base off = 403 for
@@ -8854,8 +11370,9 @@ export function univerMetaRouter(): Router {
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
       const rev = revRes.rows[0] as ConfigRevisionRow | undefined
       if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
@@ -8886,14 +11403,27 @@ export function univerMetaRouter(): Router {
         }
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
+        const fieldLinkDropFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+              sourceSheetId: sheetId,
+              fieldId: rev.entity_id,
+            })
+          : null
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
           // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
           // below strips the dropped field's key from EVERY record of this sheet's `data` (a whole-sheet
           // record-data write via the shared field-drop cascade helper), so this txn is a record writer and
           // must converge onto the canonical fence: acquire it first, then refuse (409 in the outer catch) if
           // a recovery holds a durable block. (dropFieldCascade carries its own revision disposition.)
-          // Flag-off ⇒ no-op / byte-identical.
-          await fenceWriterEntry(query, sheetId)
+          // Flag-off ⇒ no-op / byte-identical. Flag-on FIELD un-create must enter the shared plan even
+          // when preflight saw missing/non-link, so a late retype cannot sneak an unfenced target.
+          if (fieldLinkDropFencePlan) {
+            await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+          } else if (rev.entity_type === 'field' && isWriterFenceEnabled()) {
+            throw new LinkWriterFencePlanChangedError()
+          } else {
+            await fenceWriterEntry(query, sheetId)
+          }
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -8949,6 +11479,14 @@ export function univerMetaRouter(): Router {
         if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
         const before = (rev.before ?? {}) as Record<string, unknown>
         const undeleteSheetId = String(rev.sheet_id)
+        const fieldLinkFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkRestoreFencePlan(pool.query.bind(pool), {
+              sourceSheetId: undeleteSheetId,
+              fieldId: rev.entity_id,
+              before,
+              deleteRevisionId: rev.id,
+            })
+          : null
         let failure: { status: number; code: string; message: string } | null = null
         try {
           failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
@@ -8956,7 +11494,8 @@ export function univerMetaRouter(): Router {
             // undelete, `recreateFieldFromConfig` below re-materializes the field's cells across this sheet's
             // `meta_records`, so this txn is a record writer: take the canonical fence first, then refuse (409
             // in the outer catch) under an active recovery block. Flag-off ⇒ no-op / byte-identical.
-            await fenceWriterEntry(query, sheetId)
+            if (fieldLinkFencePlan) await enterFieldLinkRestoreFencePlan(query, fieldLinkFencePlan)
+            else await fenceWriterEntry(query, sheetId)
             // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
             const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
             const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
@@ -8973,13 +11512,28 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
             }
             if (rev.entity_type === 'field') {
-              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id, deleteRevisionId: rev.id })
+              await recreateFieldFromConfig(query, {
+                sheetId: undeleteSheetId,
+                fieldId: rev.entity_id,
+                before,
+                actorId: getRequestActorId(req),
+                source: 'restore',
+                restoredFromId: rev.id,
+                deleteRevisionId: rev.id,
+                linkFencePlan: fieldLinkFencePlan,
+              })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
             return null
           })
         } catch (e) {
+          if (isRetryableLiveLinkDatabaseConflict(e)) {
+            return res.status(409).json({
+              ok: false,
+              error: { code: 'LINK_INTEGRITY', message: 'A linked record was deleted concurrently; retry the undelete.' },
+            })
+          }
           if (e instanceof RecordServiceRestoreConflictError) {
             return res.status(409).json({ ok: false, error: { code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' } })
           }
@@ -9013,7 +11567,13 @@ export function univerMetaRouter(): Router {
           // field permissions) now take this SAME lock (#3389 follow-up), so the serialization is two-sided.
           // (One remaining un-serialized writer: the legacy /api/spreadsheets/:id/permissions grant|revoke route —
           // see the dev-verification honest gaps for the retire-or-lock follow-up.)
-          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+          //
+          // #5938: the lock statement ALSO re-reads `deleted_at` and refuses unless the sheet is still live. The
+          // route's liveness gate ran on the pool before this transaction opened; a soft delete committing in
+          // between leaves the lock free, so the de-escalation would apply to a sheet that no longer exists —
+          // narrowing, invisibly, what a later restore brings back. The throw rolls back before
+          // `applyPermissionDeEscalation`; the outer catch answers the gate's own values-free 404.
+          await assertSheetLiveForUpdate(query, sheetId)
           const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
           if (!verdict.valid) {
@@ -9053,7 +11613,7 @@ export function univerMetaRouter(): Router {
           }
           const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
           let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
-          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string; details?: Record<string, unknown> } | null> => {
             // W0-1 L4cov (fence the config-restore-execute record writes — lossy retype-revert branch). This is
             // the highest-value config-restore fence: `applyLossyRetypeCellRewrite` below rewrites the coerced/
             // dropped cells AND emits one `recordRecordRevision` per changed cell (C5 history completeness), so
@@ -9062,6 +11622,10 @@ export function univerMetaRouter(): Router {
             // guarantee this lane exists to protect. Fence first, then refuse (409 in the outer catch) under an
             // active recovery block. Flag-off ⇒ no-op / byte-identical.
             await fenceWriterEntry(query, sheetId)
+            // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before the 4c-1 rewrite.
+            if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+              return fieldRetypeConversionRestoreRefusal()
+            }
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
@@ -9118,7 +11682,7 @@ export function univerMetaRouter(): Router {
             lossyExecuteSummary = lossSummary
             return null
           })
-          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } })
           invalidateFieldCache(sheetId)
           return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys }, lossSummary: lossyExecuteSummary } })
         }
@@ -9131,7 +11695,15 @@ export function univerMetaRouter(): Router {
       if (classify.kind === 'gated' && !isSupportedSheetConfigRevert(rev) && !isSupportedFieldRetypeRevert(rev)) return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
-      const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+      const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string; details?: Record<string, unknown> } | null> => {
+        // D-H1: generic config-restore (name/order/view/sheet_config applyConfigRevert) was the
+        // unfenced sibling of the un-create / undelete / lossy-retype branches above. Fence-before-check
+        // before the snapshot read and UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before applyConfigRevert.
+        if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+          return fieldRetypeConversionRestoreRefusal()
+        }
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
@@ -9156,7 +11728,7 @@ export function univerMetaRouter(): Router {
         })
         return null
       })
-      if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+      if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } })
       // D-6: this Tier-1 (sheet_config)/Tier-2 (field name/order/type/property) revert path applies a real
       // meta_fields UPDATE on success but — unlike the uncreate (:8832) / undelete (:8878) / 4c-1 lossy-retype
       // (:9003) branches above — never invalidated metaFieldCache. loadSheetFields (:4183) is the ONLY loader
@@ -9170,14 +11742,28 @@ export function univerMetaRouter(): Router {
       if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
-      // W0-1 L4cov: a fenced config-restore branch (uncreate / undelete / lossy retype-revert) observed a
-      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape as reset/revert.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      // W0-1 L4cov / D-H1: a fenced config-restore branch (uncreate / undelete / lossy retype-revert /
+      // generic applyConfigRevert) observed a durable recovery writer-block → refuse with the same
+      // 409 RECOVERY_IN_PROGRESS shape as reset/revert.
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
+      // #5938: the permission-revert branch's in-transaction liveness re-check (under the sheet row lock)
+      // found the sheet soft-deleted or gone. Same values-free 404 this route's own pre-transaction
+      // `sheetLiveness !== 'live'` gate answers (anchored on the identifier, not a line number: this PR's
+      // own insertions moved that gate), so the TOCTOU window cannot be told apart from "it was already
+      // deleted when you asked".
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      // O-2 X2: this route's applyPermissionDeEscalation writes field_permissions and
+      // spreadsheet_permissions, BOTH of which carry a recovery-authority trigger that is ARMED from
+      // ladder rung L1 onward. Without this line a 40001 raised under a held exclusive lease fell
+      // through to the 500 below — an unmapped 500, which is exactly what the L6 soak criterion
+      // forbids. Dormant during L1 (only the battery holds a lease, over synthetic subjects) and
+      // ACTIVE from L4, when real subjects take leases. Same mapping the five sibling catches in
+      // this file already use; this one was an omission, not a design.
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] config-restore execute failed:', err)
@@ -9314,9 +11900,10 @@ export function univerMetaRouter(): Router {
       if ((await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])).rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate the preview on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
         const denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         if (denied.has(recordId)) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } }) // row-deny → 404 no-oracle
@@ -9397,9 +11984,10 @@ export function univerMetaRouter(): Router {
     const uniqueIds = [...new Set(requestedIds)] // the scope is a SET (BS-1); order/dups irrelevant
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const previewCtx = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!previewCtx) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       // shared context hoisted out of the per-record loop (once per sheet+actor, not once per record):
@@ -9509,11 +12097,12 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Live record only — undelete (resurrect + meta_links rebuild) is Slice 2.
       const currentRes = await pool.query(
@@ -9678,6 +12267,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
           return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         }
@@ -9724,9 +12315,10 @@ export function univerMetaRouter(): Router {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const currentRes = await pool.query('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
       if (currentRes.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
@@ -9820,6 +12412,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: (err as Error).message } })
@@ -9873,9 +12467,10 @@ export function univerMetaRouter(): Router {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       // fieldPermissions = the SAME deriveFieldPermissions(layer-3) the legacy /restore gates with — `allowed` is a
@@ -9976,6 +12571,8 @@ export function univerMetaRouter(): Router {
           // the WHOLE transaction rolled back → zero writes. The CAS aborts on the FIRST conflicting record, so the
           // conflict blocker list is first-only BY DESIGN (a full version preflight would reintroduce the TOCTOU we
           // deliberately avoid). denied/forbidden are reported in full above (those are preflighted, not thrown).
+          const writerFenceResponse = sendWriterFenceConflict(res, err)
+          if (writerFenceResponse) return writerFenceResponse
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record version conflicted; nothing written', blockers: [{ recordId: (err as ServiceVersionConflictError).recordId, reason: 'conflict' }] } })
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record field is forbidden; nothing written', blockers: [{ recordId: '', reason: 'forbidden' }] } })
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${(err as Error).message}; nothing written`, blockers: [{ recordId: '', reason: 'error' }] } })
@@ -9999,6 +12596,7 @@ export function univerMetaRouter(): Router {
           })
           outcomes.push({ recordId: c.recordId, status: 'restored', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version, restoredFieldIds: c.diff.map((d) => d.fieldId) })
         } catch (err) {
+          if (serializeWriterFenceConflict(err)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
@@ -10016,819 +12614,880 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  // ============================================================================================================
-  // T8-1: Point-in-Time Revert-to-T (non-destructive sheet rollback). Per the T8 design-lock (PIT-1..7):
-  // preview-first + PIT identity (PIT-1), reuse reconstructRecordsAtT (PIT-4, no re-derivation), counts never leak
-  // (PIT-3/LOCK-3 — denied rows invisible), forward-only source=restore (PIT-5), reveal NEVER composes (PIT-7 —
-  // this path calls NO reveal/reveal-grant function; the writable set is the actor's normal mask). Revert undoes
-  // post-T value changes and KEEPS records created after T (non-destructive); it NEVER deletes. Undelete of post-T
-  // deletions is CLASSIFIED in the preview but its EXECUTE is deferred to the codebase-wide undelete slice
-  // (resurrect + meta_links rebuild is "Slice 2" across the restore routes). The destructive Reset is T8-2.
-  type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
-  // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
-  // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
-  // Resolved ONCE here (router construction), exactly as the pre-extraction route-local const did; the shared
-  // resolver now also backs the 4c-1 lossy-retype write-symmetric cap (C4 — same ceiling, one definition).
+  // D3 / PIT-6 hard ceiling shared by exact-anchor Revert and Reset. The legacy wall-clock calculators were
+  // removed when the four routes moved to the L6/L7/L8 exact-anchor authority below; keeping a second, unreachable
+  // recovery planner here would invite a future accidental re-wire to an untrusted `asOf` path.
   const SHEET_REVERT_MAX_RECORDS = resolveSheetRevertMaxRecords()
-  type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
-  const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
-    if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
-    return `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
-  }
-  const computeSheetRevert = async (
-    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
-    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | SheetRevertTooLarge | { historyIncomplete: true } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
-    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
-    if (!patchContext) return null
-    const { fieldById } = patchContext
-    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
-    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): fail-closed integrity precheck,
-    // SHARED by preview and execute (both call this compute — the execute re-check is by construction, and it
-    // runs BEFORE the previewIdentity verification, which is revision-derived and blind to uncaptured writes).
-    // Refusal ⇒ no token minted, zero rows written.
-    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
-    if (!integrity.ok) return { historyIncomplete: true }
-    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
-    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
-    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
-    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
-      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
-    }
-    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
-    const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
-    const resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }> = []
-    let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
-    for (const [recordId, target] of stateMap) {
-      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted/resurrected — no denied-record oracle)
-      const live = liveById.get(recordId)
-      if (target.exists) {
-        if (!live) {
-          // existed at T, gone now (deleted after T) → T8-1 undelete. Collect the FULL server-side T-snapshot (NOT a
-          // masked diff — undelete re-creates the whole record; read-masking still applies on later reads). The
-          // snapshotHash binds the exact target into the resurrect identity (a deleted record has no live version).
-          const snap = asRec(target.data)
-          // Schema-drift guard (parity with the live-revert branch below): if the T-snapshot carries a field that no
-          // longer exists in the current schema, do NOT resurrect — re-inserting would write a stale field key into
-          // meta_records.data. Exclude it (counted as drift → re-preview), never resurrect a schema-drifted snapshot.
-          let resurrectDrift = false
-          for (const fid of Object.keys(snap)) if (!fieldById.has(fid)) { resurrectDrift = true; break }
-          if (resurrectDrift) { driftCount++; continue }
-          resurrects.push({ recordId, snapshot: snap, snapshotHash: hashPreviewChanges(Object.entries(snap).map(([fieldId, value]) => ({ fieldId, op: 'set', value }))) })
-          undeleteCount++; continue
-        }
-        const targetSnapshot = asRec(target.data)
-        let drift = false
-        for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
-        if (drift) { driftCount++; continue } // schema drift → excluded → re-preview
-        const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
-        const masked = diff.filter((c) => allowed.has(c.fieldId))
-        if (masked.length === 0) continue // already matches T in the actor's visible fields
-        reverts.push({ recordId, diff: masked, changesHash: hashPreviewChanges(masked.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
-      }
-      // target deleted-at-T: live present → KEPT (non-destructive, never re-delete); live absent → unchanged.
-    }
-    const createdAfterTIds: string[] = []
-    for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) { keptCreatedAfterT++; createdAfterTIds.push(id) } // created after T (visible) → KEPT by revert; the DELETE-SET for reset (T8-2)
-    // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
-    // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
-    // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
-    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length, scope: 'effective_write_set' }
-    return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
-  }
 
-  type PitResetRevert = { recordId: string; diff: RecordChange[]; changesHash: string; version: number }
-  type PitResetDelete = { recordId: string; version: number; data: Record<string, unknown> }
-  type PitResetComputation =
-    | null
-    | { tooLarge: true; recordCount: number }
-    | { historyIncomplete: true }
-    | { blocked: true; reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported' }
-    | {
-        reverts: PitResetRevert[]
-        deletes: PitResetDelete[]
-        patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>>
-      }
-
-  const computeSheetReset = async (
-    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
-    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<PitResetComputation> => {
-    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
-    if (!patchContext) return null
-    const { fieldById, fieldPermissions } = patchContext
-    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
-    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): shared fail-closed precheck — same
-    // doctrine as computeSheetRevert above. Rule 3 is load-bearing HERE: the delete-set loop below pushes live
-    // rows absent from the reconstruction into `deletes`, so an uncaptured-CREATE row would be silently
-    // destroyed if the precheck did not enumerate the LIVE row set first.
-    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
-    if (!integrity.ok) return { historyIncomplete: true }
-    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
-    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
-    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
-    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
-      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
-    }
-    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso)
-    const reverts: PitResetRevert[] = []
-    const deletes: PitResetDelete[] = []
-    for (const [recordId, live] of liveById) {
-      const target = stateMap.get(recordId)
-      if (!target || !target.exists) {
-        if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
-        deletes.push({ recordId, version: live.version, data: live.data })
-      }
-    }
-    for (const [recordId, target] of stateMap) {
-      if (!target.exists) continue
-      const live = liveById.get(recordId)
-      if (!live) return { blocked: true, reason: 'undelete_unsupported' }
-      const targetSnapshot = asRec(target.data)
-      for (const fid of Object.keys(targetSnapshot)) {
-        if (!fieldById.has(fid)) return { blocked: true, reason: 'schema_drift' }
-      }
-      const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
-      if (diff.length === 0) continue
-      if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
-      if (diff.some((c) => {
-        const guard = fieldById.get(c.fieldId)
-        const perm = fieldPermissions[c.fieldId]
-        return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true) || !allowed.has(c.fieldId)
-      })) return { blocked: true, reason: 'forbidden' }
-      reverts.push({ recordId, diff, changesHash: hashPreviewChanges(diff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
-    }
-    return { reverts, deletes, patchContext }
-  }
-
-  // D-1c §0.6 unified refusal (rule 1): one values-free 409 for all four routes (revert/reset × preview/execute).
-  // Deliberately carries NO record ids and NO counts — the refusal must not become a denied-record existence
-  // oracle — and, being an error response, carries no previewIdentity: refusal ⇒ no execute token exists.
-  const sendHistoryIncomplete = (res: Response) => res.status(409).json({
-    ok: false,
-    error: {
-      code: 'HISTORY_INCOMPLETE',
-      message: 'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
-    },
-  })
-
-  const sendPitResetBlocked = (res: Response, reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported') => {
-    if (reason === 'schema_drift' || reason === 'undelete_unsupported') {
-      return res.status(422).json({ ok: false, error: { code: 'RESET_UNSUPPORTED', message: 'Reset-to-T cannot be executed for this sheet without a separate schema-drift/undelete slice; nothing written.' } })
-    }
-    return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied or forbidden, so nothing was written.' } })
-  }
-
-  // T8-1 undelete: PIT Revert resurrects records that existed at T but are deleted now. Default-OFF flag (ON TOP of
-  // canManageSheetAccess), and at execute the undelete-specific floor is canDeleteRecord (NEVER canEditRecord) + a
-  // typed confirm:'undelete'. The resurrect set is bound into the SAME pit-revert identity (resurrectScopeHash); the
-  // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
-  // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
+  // T8-1 → W0 L8: exact-anchor undelete (resurrection) is categorically FAIL-CLOSED (INBOUND_UNPROVABLE)
+  // until an at-anchor inbound reconstruction authority exists — the L8 kernel whole-refuses any plan that
+  // contains resurrects, and a resurrect-bearing preview never mints an executable token. The legacy
+  // MULTITABLE_ENABLE_PIT_UNDELETE flag can therefore no longer make `undeleteSupported` true on this
+  // surface; it is still resolved so the preview's blocked-reason disclosure can distinguish "flag off"
+  // (UNDELETE_DISABLED) from "flag on but authority missing" (INBOUND_UNPROVABLE), and so the flag's
+  // manifest-pinned source read stays live.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
-  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The first-cut W0-1
-  // generation-aware precheck (#4269) improves on #4234, but exact committed-event anchoring, the all-writer
-  // fence, trust checkpoints, target-generation validation, and Revert's outer transaction are still required
-  // before destructive recovery is enablement-ready. This flag therefore stays default-OFF; turning it on is a
-  // separate owner-gated rollout decision after the complete W0 trust correction lands and passes staging. Mirrors
-  // reset-execute's PIT_RESET_ENABLED() gate exactly (same String(env).trim().toLowerCase()==='true'
-  // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
-  // needs to render even while the button that would call execute is hidden).
+  // Revert-execute master gate (default-OFF). The exact-anchor authority is WIRED (L6 resolveExactAnchor +
+  // L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing); enablement remains a separate
+  // owner-gated ops decision. Mirrors reset-execute's PIT_RESET_ENABLED() gate exactly (same
+  // String(env).trim().toLowerCase()==='true' resolution). revert-preview is outside the execution-feature
+  // flag so the FE can render a read-only plan while execute remains hidden; it is not open access: the route
+  // still requires authentication, sheet management, conservative full-read, and the recovery trust pair
+  // before it can mint an execute token.
   const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
 
-  router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
+  // ── W0-1 L5-wire: trust-checkpoint ACTIVATION (the production caller for activateCheckpoint) ────────────
+  // Owner review 2026-07-17: activateCheckpoint had NO production caller — without an activated checkpoint,
+  // exact-anchor recovery (L6-b) can only ever refuse `no-covering-checkpoint`. This route is the canonical
+  // L5-wire slice (order: L5-wire → L6-b → L7 → L8). It is ADDITIVE-ONLY trust provisioning: one fenced
+  // transaction that snapshots baselines and activates a checkpoint (design lock §3 cutover) — it performs no
+  // destructive write and enables nothing by itself (strict/Revert/Reset stay behind their own flags).
+  // Default-OFF flag + sheet-admin (D2) floor, mirroring the recovery routes' gating discipline exactly.
+  const TRUST_CHECKPOINT_ACTIVATION_ENABLED = () =>
+    String(process.env.MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION ?? '').trim().toLowerCase() === 'true'
+
+  router.post('/sheets/:sheetId/trust-checkpoint-activate', async (req: Request, res: Response) => {
+    if (!TRUST_CHECKPOINT_ACTIVATION_ENABLED()) {
+      return res.status(403).json({ ok: false, error: { code: 'TRUST_CHECKPOINT_ACTIVATION_DISABLED', message: 'Trust-checkpoint activation is disabled (MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION is off).' } })
+    }
+    // Gate P2 (independent gate, 2026-07-17): a checkpoint's trust DEPENDS on the canonical fence — the §3
+    // cutover allocates `trusted_since_seq` and snapshots baselines, and without the L4 fence a concurrent
+    // write can interleave between the two (torn baseline: a record's baseline row disagrees with the seq
+    // boundary), minting a DURABLE untrustworthy artifact that persists into the fence-on era. Fail closed:
+    // activation refuses unless the fence flag is on. Env-only check — before any DB read (no oracle).
+    if (!isWriterFenceEnabled()) {
+      return res.status(409).json({ ok: false, error: { code: 'TRUST_CHECKPOINT_FENCE_REQUIRED', message: 'Trust-checkpoint activation requires the canonical writer fence (MULTITABLE_ENABLE_WRITER_FENCE) to be enabled.' } })
+    }
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId required' } })
     try {
       const pool = poolManager.get()
+      // LIVENESS-EXEMPT AT THIS LAYER (see the note below the capability floor): `sheetLiveness` is not
+      // even destructured, so nothing here can accidentally begin refusing on it out of order.
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
-      const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
-      const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
-        ? mintPitRevertPreviewIdentity({
-            sheetId, asOf: asOfIso, strategy: 'revert',
-            scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-            resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
-            actorId: access.userId,
-          })
-        : null // nothing to revert AND nothing to resurrect → no-op, no executable token
-      return res.json({ ok: true, data: {
-        asOf: asOfIso, strategy: 'revert',
-        summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
-        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        undeleteRecordIds: resurrects.map((r) => r.recordId),
-        // The undelete-revert face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is
-        // checked FIRST — so undelete is only actually supported when BOTH gates are on. Reporting
-        // PIT_UNDELETE alone would promise an undelete that revert-execute then refuses with REVERT_DISABLED.
-        undeleteSupported: PIT_UNDELETE_ENABLED() && SHEET_REVERT_ENABLED(), previewIdentity,
-      } })
-    } catch (err) {
-      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] revert-preview failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute revert preview' } })
-    }
-  })
-
-  router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
-    if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
-    try {
-      const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
-      // D-1c §0.6 rule 4 (TOCTOU): the execute re-check refuses HERE — before previewIdentity verification and
-      // before any transaction — so a preview that passed never licenses an execute over history that has since
-      // gone untrustworthy. Zero writes on this path.
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
-      const { reverts, resurrects, patchContext } = computed
-      // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
-      // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
-      if (resurrects.length > 0) {
-        if (!PIT_UNDELETE_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'UNDELETE_DISABLED', message: 'PIT undelete is disabled (MULTITABLE_ENABLE_PIT_UNDELETE is off).' } })
-        if (!capabilities.canDeleteRecord) return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Undelete requires delete permission (canDeleteRecord).' } })
-        if ((parsed.data.confirm ?? '').trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm resurrecting deleted records.' } })
-      }
-      const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
-        sheetId, asOf: asOfIso, strategy: 'revert',
-        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
-        actorId: access.userId,
-      })
-      if (!verdict.valid) {
-        const status = verdict.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Revert preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
-      }
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
-      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
-      // W0-1 L4 durable block (v3.6 §4 item 3): revert-execute mutates across MULTIPLE transactions (the
-      // resurrect txn + the per-record patch loop), so the transaction-scoped canonical advisory fence —
-      // released at each COMMIT — cannot hold external writers off across the whole operation. Commit a
-      // DURABLE `applying` block under the fence in a short claim txn, release the advisory fence, then apply.
-      // Every external fenced writer that later acquires the fence observes `applying` and parks; the block is
-      // cleared (or set `paused_retryable` on failure) in the finally below. No-op when the L4 flag is off.
-      //
-      // P2 follow-up (v3.6 §4.1 fixed lock order): the claim ALSO takes `PIT_RECOVERY_LOCK_NS`, right after
-      // the canonical fence — the SAME order reset-execute uses. This was previously missing entirely (revert
-      // took no PIT lock at all), so reset-execute's comment claiming the PIT lock "serializes recovery-vs-
-      // recovery" was an overclaim: the two operations' PIT locks never intersected. It is not what closes
-      // the reset-during-revert race (that's reset's `assertNoActiveWriterBlock` below, catching the
-      // committed durable block across revert's released-fence gap — see canonical-sheet-fence.ts's
-      // RECOVERY-VS-RECOVERY doc); it brings revert into the same fixed canonical→PIT discipline as reset so
-      // the two mechanisms actually intersect where their transactions do overlap.
-      const writerFenceOn = isWriterFenceEnabled()
-      if (writerFenceOn) {
-        try {
-          await pool.transaction(async ({ query }) => {
-            await acquireCanonicalSheetFence(query, sheetId)
-            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-            await claimDurableWriterBlock(query, sheetId)
-          })
-        } catch (claimErr) {
-          if (claimErr instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-          throw claimErr
-        }
-      }
-      let blockResolution: 'clear' | 'paused_retryable' = 'clear'
+      // D2 floor: provisioning the trust anchor for destructive recovery is a sheet-admin capability, the
+      // same floor as revert/reset themselves — a plain writer must not move the sheet's trust floor.
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      // NO liveness refusal here, deliberately. Existence — and therefore soft-deleted-ness — is a
+      // DIFFERENTIATED response, and this route moved every such response INSIDE the transaction, after
+      // the authority lease and the post-lease final authorization, precisely so a revoked-but-unexpired
+      // claims-admin cannot enumerate designated canaries. A pre-transaction 404 here re-opens exactly
+      // that oracle (it broke the GATE-ORDER and ORACLE-AFTER-LEASE goldens). The liveness condition
+      // lives in `assertTrustCheckpointSheetExists` at step 4c below, which is where it inherits the
+      // correct ordering.
+      // DB-FRESH pre-check, BEFORE any differentiated response. The capability floor above can be
+      // satisfied by JWT claims alone, so without this a REVOKED-but-unexpired claims-admin token could
+      // still tell 409 (not allowlisted) from 404 (no such sheet) and enumerate which sheets are
+      // designated canaries. This pool-level check closes that oracle: a revoked actor gets the uniform
+      // 403 before the allowlist or existence reads run. It is NOT the authoritative gate — the
+      // authoritative, race-observing re-check runs again INSIDE the fenced transaction below; this one
+      // exists only so no differentiated response is reachable on stale claims.
       try {
-      // T8-1 undelete — run FIRST (atomic, all-or-nothing) so a resurrect conflict aborts the request with ZERO writes
-      // BEFORE any best-effort field-revert is applied (no mixed partial). Each resurrect re-inserts the FULL T-snapshot
-      // (schema-drift-rejected in computeSheetRevert) under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
-      // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
-      // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
-      const resurrectedIds: string[] = []
-      const undeleteInboundTotals = { replayed: 0, total: 0 }
-      if (resurrects.length > 0) {
-        // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
-        // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
-        // the spine invariant (mirror never owns a meta_links row) is structural, not snapshot-hygiene-reliant.
-        const linkFieldIds = fields.filter((f) => f.type === 'link' && fieldById.get(f.id)?.readOnly !== true).map((f) => f.id)
-        const undeleteActorId = getRequestActorId(req)
-        try {
-          await pool.transaction(async ({ query }) => {
-            // W0-1 L4: the recovery's OWN resurrect writes take the canonical fence (for seq-ordering) but
-            // bypass the durable block THEY committed above. No-op when the L4 flag is off.
-            await fenceWriterEntry(query, sheetId, { bypassBlockCheck: true })
-            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
-            for (const r of resurrects) {
-              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
-              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-              try {
-                // revision-emitted: PIT resurrect — recordRecordRevision(action:'create') below, same txn.
-                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
-              } catch (e) {
-                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-                throw e
-              }
-              for (const fieldId of linkFieldIds) {
-                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
-                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
-                }
-              }
-              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
-              // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
-              // parallel inbound semantic. Anchor derivation (R11 A′, ratified 2026-07-11 — replaces the
-              // R8 `created_at DESC` latest-delete heuristic): resurrect has no trash row to read an
-              // anchor off (unlike restoreRecord's `meta_records_trash.delete_revision_id`), but the
-              // revert already carries `asOf` T on the wire and the semantics are "restore the record as
-              // it existed at T". A record is in the resurrect set precisely because its latest revision
-              // with `created_at <= T` is NOT a delete (reconstructRecordsAtT, delete-aware), so the
-              // deletion that removed that T-era record is the FIRST 'delete' revision strictly AFTER T.
-              // Deriving the anchor from T (below) is therefore vintage-EXACT: under multi-vintage churn
-              // (delete → restore → delete → resurrect an OLDER vintage via PIT asOf) it anchors to THAT
-              // vintage's deletion and replays exactly that vintage's captured edges — never a later
-              // vintage's, never a cross-vintage union. The deterministic tiebreak
-              // `created_at ASC, version ASC, id ASC` (LOCK-11 parity, complement of reconstruct's
-              // `created_at <= T ... DESC`) makes the choice unique and stable even when two delete
-              // revisions share a millisecond (version is the exercised discriminator; id is
-              // belt-and-suspenders — the version index is not UNIQUE). A delete at exactly
-              // `created_at == T` that is the record's latest `<= T` revision ⇒ absent at T ⇒ not in the
-              // resurrect set (golden E). The STRICTNESS of `> T` (vs `>= T`) is load-bearing in the
-              // inverse case: a re-create at exactly T makes the record PRESENT at T, so its removing
-              // delete is a strictly-later one — `>= T` would mis-anchor to the prior vintage's
-              // same-instant delete (golden F). If the deletion
-              // happened while capture was off (or its tombstones aged out via retention) the anchor
-              // still resolves but carries zero tombstones ⇒ zero replay — silent and honest, never
-              // fabricated. OVER-replay stays impossible regardless, because precondition 6 (neighbour
-              // consent — replay only what N's OWN live `data` still declares) gates every edge
-              // independently of the anchor. See `multitable-undelete-inbound-resurrect-realdb.test.ts`
-              // for the vintage-exact + same-ms tiebreak + boundary goldens. Runs AFTER the outbound
-              // loop (NOT EXISTS must see those rows; self-link stays single).
-              if (isRecordUndeleteInboundEnabled()) {
-                const anchorRes = await query(
-                  `SELECT id FROM meta_record_revisions
-                    WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete' AND created_at > $3
-                    ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`,
-                  [sheetId, r.recordId, asOfIso],
-                )
-                const anchorId = ((anchorRes.rows as Array<{ id?: string }>)[0]?.id) ?? null
-                if (anchorId) {
-                  const replay = await replayInboundLinks(query, anchorId)
-                  undeleteInboundTotals.replayed += replay.replayed
-                  undeleteInboundTotals.total += replay.total
-                }
-              }
-              resurrectedIds.push(r.recordId)
-            }
-          })
-        } catch (err) {
-          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
-          throw err
-        }
-        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
-          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
-          eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId: undeleteActorId }))
-        }
+        await assertTrustCheckpointActivationAuthority(req, pool.query.bind(pool) as unknown as TrustCheckpointQueryFn, sheetId)
+      } catch (err) {
+        if (err instanceof TrustCheckpointActivationForbiddenError) return sendForbidden(res)
+        throw err
       }
-      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
-      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
-      type Outcome = { recordId: string; status: 'reverted' | 'skipped'; newVersion?: number; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
-      const outcomes: Outcome[] = []
-      for (const c of reverts) {
-        if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
-        const hasForbidden = c.diff.some((ch) => {
-          const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          // W1-3 LOCK-F2: shared predicate for the layer-3 clause, same invariant as before.
-          return !(guard && !guard.hidden && guard.readOnly !== true) || isFieldWriteForbidden(perm)
-        })
-        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
-        try {
-          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', bypassWriterBlock: true /* W0-1 L4: recovery's own in-fence patch — bypass the durable block it owns */ })
-          outcomes.push({ recordId: c.recordId, status: 'reverted', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version })
-        } catch (err) {
-          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
-          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
-          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
-          throw err
-        }
-      }
-      const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
-      } catch (revertApplyErr) {
-        // W0-1 L4: a failure AFTER the durable block was claimed (and possibly after the resurrect txn already
-        // COMMITTED) = a half-applied recovery. Keep the sheet blocked (`paused_retryable` — recoverable by a
-        // re-run's claim) so no external writer races the partial state; the finally persists it, then the
-        // outer catch maps the error to its response.
-        blockResolution = 'paused_retryable'
-        throw revertApplyErr
-      } finally {
-        if (writerFenceOn) {
-          await pool.transaction(async ({ query }) => {
-            await acquireCanonicalSheetFence(query, sheetId)
-            // P2 follow-up: same fixed canonical→PIT order as the claim above (see its comment).
-            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-            await setRecoveryWriterState(query, sheetId, blockResolution === 'clear' ? null : 'paused_retryable')
-          })
-        }
-      }
+      // NOTE — the canary allowlist and the sheet-existence read used to be adjudicated HERE, before the
+      // transaction. They are not any more: both are DIFFERENTIATED responses, and the pre-transaction
+      // DB-fresh check above is only a fast reject against a snapshot that a concurrent revoke can
+      // invalidate before the transaction even begins. Both now run INSIDE the transaction, after the
+      // actor authority lease has frozen the actor's authority and the post-lease FINAL authorization has
+      // confirmed it — see the ordered block below. That is what closes the post-revocation state oracle.
+
+      // Design lock §3 + actor authority lease (this slice): ONE transaction, in EXACTLY this order —
+      //
+      //   BEGIN → canonical sheet fence → actor authority lease → DB-fresh FINAL authorization
+      //         → durable-block / allowlist / existence adjudication → activateCheckpoint → COMMIT
+      //
+      // Every step's placement is load-bearing; none of them may be reordered "for latency".
+      // Any failure — a refused lease, a denied re-check, a durable block, the fail-closed
+      // unattributable-trash abort — rolls the WHOLE activation back: no checkpoint, no baselines.
+      const result = await pool.transaction(async ({ query }) => {
+        // 1. CANONICAL SHEET FENCE — this MUST remain the FIRST lock the transaction takes. Holding it,
+        //    the activation later takes a blocking `FOR KEY SHARE` on meta_sheets(sheetId) through the
+        //    checkpoint FK; seven production sites take `meta_sheets … FOR UPDATE` / delete that row and
+        //    none of them acquires this fence afterwards, so no wait-for cycle exists. Taking ANY
+        //    meta_sheets row lock ahead of this line constructs a real 40P01 (reproduced by the
+        //    lock-order census, and by this slice's FENCE-FIRST-ORDER golden).
+        //    `fenceWriterEntry` is split here rather than called whole: its durable-block half is a
+        //    differentiated adjudication and belongs after the final authorization (step 4a). The flag
+        //    gate `fenceWriterEntry` applies is already satisfied — the route refuses
+        //    TRUST_CHECKPOINT_FENCE_REQUIRED above when MULTITABLE_ENABLE_WRITER_FENCE is off, so this
+        //    line is only ever reached with the fence enabled.
+        await acquireCanonicalSheetFence(query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 2. ACTOR AUTHORITY LEASE — the EXISTING recovery-authority lease, on the EXISTING keys, for the
+        //    authenticated principal ONLY (never the body, the sheet id, or the allowlist). Non-waiting in
+        //    both directions, so it adds no blocking edge under the held fence. `busy` and `unavailable`
+        //    both THROW from inside the transaction and roll back immediately; only `ready` returns.
+        //    Exactly one attempt — no hidden auto-retry (an in-transaction re-poll would hold the fence
+        //    across attempts and starve every writer of this sheet).
+        await acquireTrustCheckpointActivationLease(req, query as unknown as TrustCheckpointQueryFn)
+
+        // 3. DB-FRESH FINAL AUTHORIZATION, under the fence AND under the lease. The outer
+        //    resolveSheetCapabilities can be satisfied by JWT CLAIMS ALONE (multitable/access.ts
+        //    `resolveRequestAccess` returns without any DB read when the token carries an admin role, and
+        //    again when it carries a non-empty perms array), so on its own it lets a REVOKED user with an
+        //    unexpired token mint the trust anchor destructive recovery later resolves against. This
+        //    re-derives the D2 floor from CURRENT rows — claims may identify the actor, never widen the
+        //    grant. Running it after the lease is what makes the answer STABLE to COMMIT: a revoke that
+        //    commits while the activation parks on the fence is observed here, and a revoke that would
+        //    otherwise land in the READ COMMITTED sliver between this read and the cutover is refused
+        //    40001 by the armed authority triggers instead.
+        await assertTrustCheckpointActivationAuthority(req, query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 4. DIFFERENTIATED ADJUDICATION — only now, with authority confirmed against a frozen state.
+        // 4a. durable recovery writer block (the second half of the split fenceWriterEntry).
+        await assertNoActiveWriterBlock(query as unknown as TrustCheckpointQueryFn, sheetId)
+        // 4b. canary allowlist (fail-closed): the O-2 ladder's L2-C rung provisions a checkpoint for a
+        //     NAMED synthetic sheet only and forbids bulk-provisioning customer sheets. UNSET or EMPTY
+        //     allowlist ⇒ refuse for EVERY sheet, so owner designation is a precondition by construction
+        //     and this code names no sheet.
+        assertTrustCheckpointSheetAllowlisted(sheetId)
+        // 4c. existence — after the allowlist, so a designation-less deployment leaks no sheet-existence
+        //     oracle to anyone.
+        await assertTrustCheckpointSheetExists(query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 5. CUTOVER.
+        return activateCheckpoint(query as unknown as TrustCheckpointQueryFn, { sheetId })
+      })
+      return res.json({ ok: true, data: { checkpointId: result.checkpointId, trustedSinceSeq: result.trustedSinceSeq, baselineCount: result.baselineCount } })
     } catch (err) {
-      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] revert-execute failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute revert' } })
+      if (err instanceof TrustCheckpointActivationForbiddenError) {
+        // In-transaction DB-fresh denial ⇒ the WHOLE transaction rolled back (no checkpoint, no baselines).
+        // Same 403 envelope as the pre-transaction floor: a revoked actor learns "forbidden" and nothing else.
+        return sendForbidden(res)
+      }
+      if (err instanceof TrustCheckpointAuthorityBusyError) {
+        // Lease `busy` ⇒ transaction rolled back before any write. Named + values-free + explicitly
+        // retryable; the retry is the operator's to issue, never this route's.
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: TRUST_CHECKPOINT_AUTHORITY_BUSY_CODE,
+            message: TRUST_CHECKPOINT_AUTHORITY_BUSY_MESSAGE,
+            details: { retryable: true },
+          },
+        })
+      }
+      if (err instanceof TrustCheckpointAuthorityUnavailableError) {
+        // Lease `unavailable` ⇒ the canonical authority substrate is not 9/9 ARMED. Fail closed: the
+        // transaction rolled back with zero checkpoint/baseline writes. NOT retryable — it needs an
+        // operator enablement rung, not another request. Values-free: the envelope discloses nothing
+        // about which part of the substrate is missing.
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_CODE,
+            message: TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_MESSAGE,
+            details: { retryable: false },
+          },
+        })
+      }
+      if (err instanceof TrustCheckpointSheetNotAllowlistedError) {
+        return res.status(409).json({ ok: false, error: { code: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE, message: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE } })
+      }
+      if (err instanceof TrustCheckpointSheetMissingError) {
+        // VALUES-FREE (owner fix, 2026-08-25): the error class already carries a fixed message;
+        // pasting the request's sheetId back here re-introduced a request value into a refusal
+        // observable by a caller without current authority. Pinned by the l5wire 404 golden,
+        // which asserts the SERIALISED body never contains the requested id.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof CheckpointUnattributableTrashError) {
+        // Fail-closed abort (owner P1, L5): a trashed-only record whose vintage cannot be causally attributed
+        // makes the baseline untrustworthy. Values-free envelope (no record ids, no counts — D-1c rule 1).
+        return res.status(409).json({ ok: false, error: { code: 'HISTORY_INCOMPLETE', message: 'Record history for this sheet is incomplete or inconsistent with its live data; the trust checkpoint was not activated and nothing was written.' } })
+      }
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'A recovery operation is in progress on this sheet; try again once it completes.' } })
+      }
+      // Belt-and-braces (gate P3): a RACING second activation trips the one-active partial-unique at the
+      // building→active flip — surface it as a conflict, not a 500. (With the fence required above, two
+      // activations serialize on the fence and this is near-unreachable; kept for the raw-SQL edge.)
+      if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505') {
+        return res.status(409).json({ ok: false, error: { code: 'ACTIVATION_CONFLICT', message: 'Another trust-checkpoint activation for this sheet completed first; retry to supersede it.' } })
+      }
+      console.error('[univer-meta] trust-checkpoint-activate failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to activate trust checkpoint' } })
     }
   })
 
-  // ── T8-2 Reset-to-T (DESTRUCTIVE PIT restore) ─────────────────────────────────────────────────────────────────
-  // Reset = T8-1 Revert (surviving records → their T-state) + SOFT-DELETE the records CREATED AFTER T (Revert keeps
-  // them). Gated behind a default-OFF env flag (D1, belt-and-suspenders) ON TOP OF canManageSheetAccess (D2), the
-  // size ceiling (D3), a typed two-step confirm:'reset' (D4), whole-sheet only (D5). The destructive delete-set is
-  // bound into the signed identity by record id + preview-time version and RE-ENUMERATED + re-compared at execute,
-  // so Reset can NEVER delete a record/version the actor did not see in the preview. PIT-2: all revert + delete
-  // writes happen in ONE transaction; a single denied/forbidden/locked/conflicted target aborts the whole Reset with
-  // zero writes/deletes/revisions.
+  // ── W0 L8 exact-anchor wiring: revert/reset preview+execute ─────────────────────────────────────────────
+  // All four surfaces run on L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery
+  // (via the exact-anchor-recovery-route helpers). Destructive authority is EXACTLY one historyBatchId or
+  // anchorOperationId; any nonblank free wall-clock `asOf` refuses EXACT_ANCHOR_REQUIRED before any DB
+  // access, and both ids together refuse AMBIGUOUS_ANCHOR. Execute is TOKEN-ONLY authority (P1-1): the
+  // verified previewIdentity carries the mode/anchor/scope; the request supplies no mode and a wrong-mode
+  // token refuses BEFORE any write. Master flags stay default-OFF (SHEET_REVERT / PIT_RESET); the trust
+  // pair (WRITER_FENCE + CONTIGUITY_STRICT) is required by both preview and execute
+  // (RECOVERY_TRUST_REQUIRED otherwise). The apply is one transaction, all-or-nothing — the legacy
+  // per-record best-effort loop and the multi-transaction durable-block claim/release dance are gone.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
-  const PIT_RESET_RETENTION_BLOCKED = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
-  const sendPitResetRetentionBlocked = (res: Response) => res.status(409).json({
+  const isMetaRevisionRetentionEnabled = () => process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'
+  const sendRecoveryRetentionBlocked = (res: Response, mode: 'revert' | 'reset') => res.status(409).json({
     ok: false,
     error: {
-      code: 'RESET_RETENTION_CONFLICT',
-      message: 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
+      code: mode === 'revert' ? 'REVERT_RETENTION_CONFLICT' : 'RESET_RETENTION_CONFLICT',
+      message: mode === 'revert'
+        ? 'Revert-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using recovery.'
+        : 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
     },
   })
 
-  router.post('/sheets/:sheetId/reset-preview', async (req: Request, res: Response) => {
-    if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
+  /**
+   * In-fence full-read adjudication for exact-anchor preview/apply (P1-2 TOCTOU): ALWAYS re-resolve
+   * access/capabilities from the provided query — never close over pre-fence results. A revoke that lands
+   * while the apply parks on the canonical fence is observed here.
+   */
+  const makeFullReadEvaluator = (req: Request, sheetId: string) =>
+    async (query: TrustCheckpointQueryFn): Promise<boolean> => {
+      const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+      if (!access.userId || !capabilities.canManageSheetAccess) return false
+      return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
+    }
+
+  type RecoveryArchiveRouteDatabase = Pick<
+    RecoveryArchiveRouterDatabaseRuntime,
+    'transaction' | 'query'
+  >
+  const recoveryArchiveRestoreTransaction: RecoveryArchiveRestoreJobTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      ))
+    })
+  const recoveryArchiveCatalogTransaction: RecoveryArchiveCatalogTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveCatalogQuery)
+      ))
+    })
+  const resolveRecoveryArchiveAutocommitQuery = (): RecoveryArchiveRestoreJobQuery => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase.query
+    const pool = poolManager.get()
+    return pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery
+  }
+  const resolveRecoveryArchiveContextDatabase = (): RecoveryArchiveRouteDatabase => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase
+    const pool = poolManager.get()
+    return {
+      query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+      transaction: async (work) => pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      )),
+    }
+  }
+
+  const resolveRecoveryArchiveRestoreOwnerContext = async (
+    req: Request,
+    sheetId: string,
+  ): Promise<RecoveryArchiveRestoreOwnerContextResolution> => {
+    const database = resolveRecoveryArchiveContextDatabase()
+    const query = database.query as TrustCheckpointQueryFn
+    const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+    if (!access.userId) return { ok: false, status: 401, code: 'UNAUTHENTICATED' }
+    if (!capabilities.canManageSheetAccess) return { ok: false, status: 403, code: 'FORBIDDEN' }
+
+    const scopeResult = await query(
+      `SELECT sheet_row.base_id, base_row.workspace_id
+         FROM public.meta_sheets sheet_row
+         LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+        WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+      [sheetId],
+    )
+    const scope = scopeResult.rows[0] as { base_id?: unknown; workspace_id?: unknown } | undefined
+    if (!scope) {
+      return access.isAdminRole
+        ? { ok: false, status: 404, code: 'NOT_FOUND' }
+        : { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
+      return { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    const baseId = typeof scope.base_id === 'string' ? scope.base_id.trim() : ''
+    const workspaceId = typeof scope.workspace_id === 'string' ? scope.workspace_id.trim() : ''
+    if (!baseId || !workspaceId) {
+      return { ok: false, status: 503, code: 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE' }
+    }
+    const actorId = access.userId
+    const evaluatePlanAuthorization = makePlanAuthorization(req, sheetId)
+    const mutationObserver = createRecoveryMutationObserver(req, database, sheetId, actorId)
+    return {
+      ok: true,
+      context: {
+        workspaceId,
+        baseId,
+        sheetId,
+        actorId,
+        evaluatePlanAuthorization,
+        syncApply: {
+          preliminaryFullRead: makeFullReadEvaluator(req, sheetId),
+          stabilizeAuthorization: makeAuthorizationStabilizer(),
+          finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
+          evaluatePlanAuthorization,
+          onMutationApplied: mutationObserver.onMutationApplied,
+          afterCommit: mutationObserver.afterCommit,
+        },
+        recheckAuthority: async (freshQuery) => {
+          const fresh = await resolveRecoverySheetAuthority(req, freshQuery, sheetId)
+          if (
+            fresh.access.userId !== actorId ||
+            !fresh.capabilities.canManageSheetAccess
+          ) {
+            return false
+          }
+          const freshScope = await freshQuery(
+            `SELECT sheet_row.base_id, base_row.workspace_id
+               FROM public.meta_sheets sheet_row
+               LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+              WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+            [sheetId],
+          )
+          const freshRow = freshScope.rows[0] as {
+            base_id?: unknown
+            workspace_id?: unknown
+          } | undefined
+          if (
+            freshRow?.base_id !== baseId ||
+            freshRow?.workspace_id !== workspaceId
+          ) {
+            return false
+          }
+          return hasFullTableReadAccess(
+            req,
+            freshQuery,
+            sheetId,
+            fresh.access,
+            fresh.capabilities,
+          )
+        },
+      },
+    }
+  }
+
+  const makeAuthorizationStabilizer = createRecoveryAuthorizationStabilizer
+  const makePlanAuthorization = (req: Request, sheetId: string) =>
+    createRecoveryPlanAuthorization(
+      sheetId,
+      (query, targetSheetId) => resolveRecoverySheetAuthority(req, query, targetSheetId),
+      (query, targetSheetId, authority) => hasFullTableReadAccess(
+        req, query, targetSheetId, authority.access, authority.capabilities,
+      ),
+    )
+
+  /** Trust pair (fence + CONTIGUITY_STRICT), env-only + values-free: 409 RECOVERY_TRUST_REQUIRED. */
+  const requireRecoveryTrust = (res: Response): boolean => {
+    if (checkExactAnchorRecoveryTrust().ok) return true
+    const m = mapRecoveryTrustRefusal()
+    res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    return false
+  }
+
+  /** Post-commit only. `context` labels the log line (recovery keeps its original wording). */
+  const bestEffortYjsInvalidate = async (recordIds: string[], context = 'recovery') => {
+    if (!yjsInvalidator || recordIds.length === 0) return
+    try {
+      await yjsInvalidator(recordIds)
+    } catch (err) {
+      console.warn(`[univer-meta] yjs invalidation after ${context} failed (non-fatal):`, err)
+    }
+  }
+
+  /** Best-effort provenance-aware retention sweep — ambiguous/legacy burns are never eligible. */
+  const bestEffortPruneRecoveryBurns = async (
+    transaction: RecoveryArchiveRestoreJobTransaction,
+  ) => {
+    try {
+      await pruneEligibleRecoveryTokenBurns(transaction)
+    } catch (err) {
+      console.warn('[univer-meta] recovery token burn prune failed (non-fatal):', err)
+    }
+  }
+
+  const parseAnchorBody = (req: Request): ExactAnchorBody => {
+    const b = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
+    return {
+      ...(Object.prototype.hasOwnProperty.call(b, 'historyBatchId') ? { historyBatchId: b.historyBatchId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'anchorOperationId') ? { anchorOperationId: b.anchorOperationId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'asOf') ? { asOf: b.asOf } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'previewIdentity') ? { previewIdentity: b.previewIdentity } : {}),
+      ...(Object.prototype.hasOwnProperty.call(b, 'confirm') ? { confirm: b.confirm } : {}),
+    }
+  }
+
+  const createRecoveryMutationObserver = (
+    req: Request,
+    database: RecoveryArchiveRouteDatabase,
+    sheetId: string,
+    actorId: string,
+  ) => {
+    const appliedReverts: AppliedRevertFact[] = []
+    const appliedDeleteIds: string[] = []
+    const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
+    const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+    const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+
+    const onMutationApplied = async (
+      query: QueryFn,
+      mutation: ExactAnchorAppliedMutation,
+    ): Promise<void> => {
+      appliedLinkInvalidations.push(...mutation.linkInvalidations)
+      const { payload } = await enqueueRecoveryMutationEvent(query, sheetId, actorId, mutation)
+      if (mutation.kind === 'revert') {
+        updatedEventPayloads.push(payload)
+        appliedReverts.push({
+          recordId: mutation.recordId,
+          version: mutation.version,
+          fieldIds: mutation.changedFieldIds,
+          patch: mutation.patch,
+          revisionId: mutation.revisionId,
+        })
+      } else {
+        deletedEventPayloads.push(payload)
+        appliedDeleteIds.push(mutation.recordId)
+      }
+    }
+
+    const afterCommit = async (): Promise<void> => {
+      try {
+        const side = await runRecoveryPostCommitSideEffects(
+          database.query,
+          sheetId,
+          actorId,
+          appliedReverts,
+          appliedLinkInvalidations,
+          createRecordWriteHelpers(req, { query: database.query }),
+        )
+        for (const payload of updatedEventPayloads) {
+          emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', payload)
+        }
+        if (appliedDeleteIds.length > 0) {
+          publishMultitableSheetRealtime({
+            spreadsheetId: sheetId,
+            actorId,
+            source: 'multitable',
+            kind: 'record-deleted',
+            recordIds: appliedDeleteIds,
+          })
+          for (const payload of deletedEventPayloads) {
+            emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', payload)
+          }
+        }
+        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
+        void bestEffortPruneRecoveryBurns(database.transaction)
+      } catch (error) {
+        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', error)
+      }
+    }
+
+    return { appliedReverts, appliedDeleteIds, afterCommit, onMutationApplied }
+  }
+
+  /**
+   * Shared PREVIEW handler for both modes. No-oracle ordering: parse shape (no DB) → 401/403 admin floor →
+   * existence-hidden 403 for non-admin unknown sheets → conservative full-read 403 → system-admin-only 404 →
+   * retention conflict 409 → trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
+   * VALUES-FREE (record/field ids + counts only; never targetData/live snapshots), and `previewIdentity`
+   * is present ONLY when the plan is executable — resurrection-bearing, schema-drifted, and no-op plans
+   * never receive a destructive token.
+   */
+  const handleExactAnchorPreview = async (req: Request, res: Response, mode: 'revert' | 'reset') => {
+    if (mode === 'reset' && !PIT_RESET_ENABLED()) {
+      return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    }
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    const parsed = parseRecoveryAnchorRequest(parseAnchorBody(req))
+    if (parsed.ok === false) {
+      const m = mapParseRefusal(parsed.reason)
+      return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    }
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin cap, above plain record-write
-      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
-      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
-      const { reverts, deletes } = computed
-      const previewIdentity = (reverts.length > 0 || deletes.length > 0)
-        ? mintPitResetPreviewIdentity({
-            sheetId, asOf: asOfIso, strategy: 'reset',
-            revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-            deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
-          })
-        : null // nothing to revert AND nothing to delete → no-op, no executable token
-      return res.json({ ok: true, data: {
-        asOf: asOfIso, strategy: 'reset',
-        summary: { visibleRevertCount: reverts.length, deleteCount: deletes.length, visibleUndeleteCount: 0, conflictCount: 0 },
-        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        deleteRecordIds: deletes.map((d) => d.recordId),
-        undeleteSupported: false, previewIdentity,
-      } })
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin floor, above plain record-write
+      // A non-system-admin who can manage some sheets must not use 404 vs 403 to probe whether another sheet
+      // exists. Only a system admin may receive an explicit missing-sheet result; everyone else gets the same
+      // values-free 403 as an existing sheet they cannot read in full.
+      //
+      // SOFT DELETE added a SECOND way to ask that question, so it is hidden on exactly the same terms:
+      // this check runs AFTER the authority gate (unlike every other route on this router, which follows
+      // the file's 404-before-gate convention), and a non-admin gets the same 403 for deleted as for
+      // absent. `sheetLiveness` also subsumes the existence probe this branch used to run itself, so the
+      // separate `SELECT 1 FROM meta_sheets` — which lacked the deleted_at filter its siblings carry — is
+      // gone rather than merely corrected.
+      if (sheetLiveness !== 'live') {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return sendSheetNotLive(res, sheetLiveness)
+      }
+      // Conservative full-table read before anchor/history/size adjudication — an actor without it sees 403
+      // before any recovery-state oracle.
+      if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+        return sendForbidden(res)
+      }
+      // Retention posture is observable only after shape, authentication, existence hiding, and the
+      // conservative full-read gate. It remains anchor-neutral: no trust/history/anchor work runs first.
+      if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
+      if (!requireRecoveryTrust(res)) return
+      // Primary live-sheet ceiling (D3/PIT-6) AFTER full-read — no size oracle for denied actors.
+      const ceiling = await enforceSheetRecoverySizeCeiling(pool.query.bind(pool) as QueryFn, sheetId, SHEET_REVERT_MAX_RECORDS)
+      if (ceiling.ok === false) {
+        const m = mapSizeCeilingFailure(ceiling, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      const preview = await previewExactAnchorRecovery(pool.query.bind(pool) as QueryFn, {
+        sheetId,
+        request: parsed.request,
+        actorId: access.userId,
+        mode,
+        evaluateFullReadAccess: makeFullReadEvaluator(req, sheetId),
+        evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
+      })
+      if (preview.ok === false) {
+        const m = httpForPreviewFailure(preview, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+      const { summary } = preview
+      return res.json({
+        ok: true,
+        data: {
+          strategy: mode,
+          anchorOperationId: preview.anchor.anchorOperationId,
+          anchorSeq: preview.anchor.anchorSeq,
+          checkpointId: preview.anchor.checkpointId,
+          ...(parsed.request.kind === 'history-batch' ? { historyBatchId: parsed.request.historyBatchId } : {}),
+          summary: {
+            visibleRevertCount: summary.reverts.length,
+            // Canonical W2 wire fields consumed by the reset/revert UI.
+            resurrectCount: summary.resurrectIds.length,
+            driftCount: summary.driftCount,
+            effectiveWriteCount: summary.effectiveWriteCount,
+            deleteCount: summary.deleteIds.length,
+            // Compatibility aliases for older clients; values are derived from the same plan.
+            visibleUndeleteCount: summary.resurrectIds.length,
+            keptCreatedAfterTCount: summary.keptCreatedAfterAnchorCount,
+            conflictCount: summary.driftCount,
+          },
+          records: summary.reverts,
+          undeleteRecordIds: summary.resurrectIds,
+          deleteRecordIds: summary.deleteIds,
+          // Exact-anchor undelete is categorically fail-closed (INBOUND_UNPROVABLE) — never promised.
+          undeleteSupported: false,
+          ...(summary.resurrectIds.length > 0
+            ? { undeleteBlockedReason: PIT_UNDELETE_ENABLED() ? 'INBOUND_UNPROVABLE' : 'UNDELETE_DISABLED' }
+            : {}),
+          previewIdentity: preview.previewIdentity,
+          executable: preview.executable,
+        },
+      })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] reset-preview failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute reset preview' } })
+      console.error(`[univer-meta] ${mode}-preview failed:`, err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to compute ${mode} preview` } })
     }
-  })
+  }
 
-  router.post('/sheets/:sheetId/reset-execute', async (req: Request, res: Response) => {
-    if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
+  /**
+   * Shared EXECUTE handler. TOKEN-ONLY authority: the body carries `previewIdentity` (+ typed
+   * `confirm:'reset'` for reset); mode comes from the VERIFIED token and a wrong-mode token refuses
+   * BEFORE any transaction/write. The kernel re-adjudicates everything in-fence (full-read + plan
+   * authorization + drift/schema/value/link/lock) and the apply is all-or-nothing: any refusal maps to a
+   * typed envelope with ZERO writes (burn included). Post-commit side effects are best-effort — they can
+   * never turn a committed recovery into a 500.
+   */
+  const handleExactAnchorExecute = async (req: Request, res: Response, mode: 'revert' | 'reset') => {
+    if (mode === 'revert') {
+      if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
+    } else {
+      if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    }
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    // D4: a typed two-step confirm — Reset (destructive) cannot be triggered by a stray Revert-shaped call.
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.literal('reset') }).safeParse(req.body)
-    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity and confirm:"reset" are required' } })
-    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
-    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    const body = parseAnchorBody(req)
+    const previewIdentity = typeof body.previewIdentity === 'string' ? body.previewIdentity : ''
+    const confirm = typeof body.confirm === 'string' ? body.confirm : ''
+    if (!sheetId || !previewIdentity) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: mode === 'reset' ? 'sheetId, previewIdentity and confirm:"reset" are required' : 'sheetId and previewIdentity are required' } })
+    }
+    // No free wall-clock authority survives on ANY destructive surface: a nonblank asOf refuses even at
+    // execute (the token is the only authority; a wall-clock echo is never silently ignored).
+    if (Object.prototype.hasOwnProperty.call(body, 'asOf') && typeof body.asOf !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a string when present.' } })
+    }
+    if (typeof body.asOf === 'string' && body.asOf.trim()) {
+      const m = mapParseRefusal('exact-anchor-required')
+      return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+    }
+    // Execute is token-only. Never silently ignore a second authority or a caller-supplied mode: the
+    // verified token owns both anchor and mode. Rejecting the shape also makes stale clients re-preview
+    // instead of accidentally succeeding under a different contract.
+    const rawBody = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
+    if (
+      Object.prototype.hasOwnProperty.call(rawBody, 'historyBatchId') ||
+      Object.prototype.hasOwnProperty.call(rawBody, 'anchorOperationId') ||
+      Object.prototype.hasOwnProperty.call(rawBody, 'mode')
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Execute accepts previewIdentity only; anchor and mode are bound by the verified preview token.',
+        },
+      })
+    }
+    // D4: Reset keeps the typed two-step confirm — a stray Revert-shaped call cannot trigger a Reset.
+    if (mode === 'reset' && confirm.trim() !== 'reset') {
+      return res.status(400).json({ ok: false, error: { code: 'RESET_CONFIRM_REQUIRED', message: 'Type "reset" to confirm this operation.' } })
+    }
     try {
       const pool = poolManager.get()
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
-      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
-      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      // D-1c §0.6 rule 4 (TOCTOU): execute re-check — refused before previewIdentity verification and before
-      // the destructive transaction. Zero writes on this path.
-      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
-      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
-      const { reverts, deletes, patchContext } = computed
-      // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
-      // preview and execute re-enumerates into deletes; a delete target edited since preview changes its bound version.
-      const verdict = verifyPitResetPreviewIdentity(parsed.data.previewIdentity, {
-        sheetId, asOf: asOfIso, strategy: 'reset',
-        revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
+      // Match preview's existence-hiding contract before token verification. A non-system-admin must not
+      // distinguish an unknown sheet from an existing sheet they cannot read in full by observing 409 vs 403
+      // — nor, since soft delete, a DELETED one. Liveness is checked here (after the authority gate, unlike
+      // the file's usual 404-before-gate convention) and subsumes the old unfiltered existence probe.
+      if (sheetLiveness !== 'live') {
+        if (!access.isAdminRole) return sendForbidden(res)
+        return sendSheetNotLive(res, sheetLiveness)
+      }
+      // Fresh conservative full-read BEFORE token/anchor adjudication — no oracle for denied actors.
+      if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+        return sendForbidden(res)
+      }
+      // Same no-oracle point as preview: authorized full-read callers may observe the compatibility
+      // conflict, while malformed/unauthenticated/nonexistent/unauthorized requests retain their order.
+      if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
+
+      // TOKEN-ONLY authority (P1-1): verify + MODE-ISOLATE before any transaction or write.
+      const verified = verifyExactAnchorRecoveryIdentity(previewIdentity, { sheetId, actorId: access.userId })
+      if (!verified.valid || !verified.claims) {
+        const status = verified.reason === 'expired' ? 410 : 409
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `${mode === 'reset' ? 'Reset' : 'Revert'} preview identity rejected; the sheet changed since preview — re-preview` } })
+      }
+      if (verified.claims.mode !== mode) {
+        return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity was minted for a different recovery mode; re-preview as ${mode}.` } })
+      }
+
+      if (!requireRecoveryTrust(res)) return
+      const ceiling = await enforceSheetRecoverySizeCeiling(pool.query.bind(pool) as QueryFn, sheetId, SHEET_REVERT_MAX_RECORDS)
+      if (ceiling.ok === false) {
+        const m = mapSizeCeilingFailure(ceiling, mode)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      const actorId = access.userId
+      const mutationObserver = createRecoveryMutationObserver(req, {
+        query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+        transaction: async (work) => pool.transaction(async ({ query }) => (
+          work(query as unknown as RecoveryArchiveRestoreJobQuery)
+        )),
+      }, sheetId, actorId)
+      const result = await executeExactAnchorRecoveryApply(
+        (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
+        {
+          token: previewIdentity,
+          sheetId,
+          actorId,
+          // P25 structural split: preliminary (pre-lock) and final (post-lock/lease) are now two distinct
+          // fields/interfaces (`PreliminaryFullRead` / `FinalLockedFullRead`) so the kernel cannot conflate
+          // the two calls. Both are wired from the SAME `makeFullReadEvaluator` adapter (DB-fresh, re-resolved
+          // from the in-fence query — never a pre-fence closure) — behavior is unchanged from before the
+          // split; only the shape each call site is allowed to take is now structurally distinct.
+          preliminaryFullRead: makeFullReadEvaluator(req, sheetId),
+          stabilizeAuthorization: makeAuthorizationStabilizer(),
+          finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
+          evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
+          onMutationApplied: mutationObserver.onMutationApplied,
+        },
+      )
+      if (result.ok === false) {
+        const m = mapApplyRefusal(result.reason)
+        return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
+      }
+
+      await mutationObserver.afterCommit()
+
+      // Counts/ids only — no recovered values, no patches (values-free result contract).
+      return res.json({
+        ok: true,
+        data: {
+          strategy: mode,
+          mode: result.mode,
+          anchorSeq: result.anchorSeq,
+          checkpointId: result.checkpointId,
+          anchorOperationId: verified.claims.anchorOperationId,
+          revertedCount: result.applied.reverts,
+          resurrectedCount: result.applied.resurrects,
+          keptCreatedAfterAnchor: result.keptCreatedAfterAnchor,
+          records: mutationObserver.appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
+          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: mutationObserver.appliedDeleteIds } : {}),
+        },
       })
-      if (!verdict.valid) {
-        const status = verdict.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Reset preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
-      }
-      const { fieldById } = patchContext
-
-      const actorId = getRequestActorId(req)
-      const affectedIds = [...new Set([...reverts.map((r) => r.recordId), ...deletes.map((d) => d.recordId)])]
-      const batchId = randomUUID()
-      const updatedRows: Array<{ recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown> }> = []
-      const deletedRecordIds: string[] = []
-
-      try {
-        await pool.transaction(async ({ query }) => {
-          // W0-1 L4 (§4.1 canonical fence convergence — the §0.2-i fix): acquire the CANONICAL sheet-write
-          // fence (the same advisory key every ordinary writer now takes) as the FIRST statement, THEN
-          // refuse if a recovery already holds a durable writer-block — `fenceWriterEntry` is the SAME
-          // standard L4 entry point every other fully-fenced writer uses (REST/bulk/plugin/attachment/
-          // lock-unlock; see canonical-sheet-fence.ts). This is the load-bearing correction for TWO separate
-          // bugs, fixed together because they're both "reset didn't converge onto the shared fence
-          // discipline": (a) pre-L4, reset held ONLY `PIT_RECOVERY_LOCK_NS`, DISJOINT from the auto-
-          // number/writer fence, so an ordinary concurrent fenced writer did not block on reset and the
-          // causal-seq guarantee evaporated (v3.6 §0.2-i); (b) reset never checked `recovery_writer_state`
-          // at all, so a reset that began during revert-execute's multi-txn apply window — where the
-          // canonical fence is released BETWEEN revert's own transactions but its durable `applying` block
-          // is already committed — proceeded and interleaved two destructive recoveries (P2 follow-up: see
-          // canonical-sheet-fence.ts's RECOVERY-VS-RECOVERY doc for the full two-direction analysis). A
-          // block observed here throws `SheetWriterBlockedError`, caught below and mapped to the same 409
-          // RECOVERY_IN_PROGRESS revert-execute's own claim step returns. No-op when the L4 flag is off ⇒
-          // this destructive txn keeps its exact pre-L4 lock shape (byte-identical).
-          await fenceWriterEntry(query, sheetId)
-          // W0-1 C4 FENCE (owner §6.2.4) + v3.6 §4.1 fixed lock order (canonical → PIT, always in this
-          // order to introduce no deadlock): the recovery-only advisory lock, retained UNCONDITIONALLY
-          // (pre-L4 behaviour, flag or no flag). `FOR UPDATE` on scope rows alone does NOT stop a concurrent
-          // NEW-record insert (phantom) landing between the outer/preview check and this write; the
-          // advisory lock plus the in-txn re-check below closes the check→write window. Chosen over
-          // SERIALIZABLE (lowest blast radius, no serialization-failure retry loop). Namespace int is the
-          // fixed W0-1 constant exported from canonical-sheet-fence.ts (single source of truth — revert-
-          // execute's claim/release steps take the SAME lock, same order); `hashtext(sheetId)` is the
-          // per-sheet key. NOTE this lock is NOT what closes the reset-vs-revert race above: reset's window
-          // holding it does not overlap revert's (revert only holds it briefly during its own claim/release,
-          // not across its multi-txn apply gap) — the `fenceWriterEntry` block-check above is the mechanism
-          // that does that job; this lock is the design's mandated companion for the windows where the two
-          // operations' transactions DO overlap (see canonical-sheet-fence.ts).
-          await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
-          // W0-1 C8 (same-txn re-check): re-run the integrity precheck INSIDE the fenced transaction. A
-          // phantom uncaptured write that committed after the outer computeSheetReset precheck (which runs
-          // BEFORE this transaction) is caught HERE — the check and the destructive write are now atomic.
-          // Refusal throws → the whole reset rolls back (zero writes) → mapped to the 409 below.
-          //
-          // L6-SEAM (v3.7 §9.5 / §5 "in-fence execute recompute"): the FULL fix recomputes target/schema/set
-          // (`computeSheetReset`) UNDER this fence with the token-bound anchorSeq, not just re-running the
-          // integrity precheck — a stale delete-set computed before the fence can still mis-target (v3.7
-          // §0.1 P1-B). L4 delivers the fence-first ORDERING that makes such an in-fence recompute sound; the
-          // exact-anchor resolver + full in-fence recompute land in L6/L7. Marked here as the wiring seam.
-          const inTxnIntegrity = await precheckSheetHistoryIntegrity(query, sheetId)
-          if (inTxnIntegrity.ok === false) throw new HistoryIncompleteInTxnError(inTxnIntegrity.reason)
-          const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
-          const baseId = typeof baseRow?.base_id === 'string' ? baseRow.base_id : null
-          const lockedRows = affectedIds.length > 0
-            ? (await query(
-                `SELECT id, version, data, created_by, locked, locked_by, created_at, updated_at
-                   FROM meta_records
-                  WHERE sheet_id = $1 AND id = ANY($2::text[])
-                  FOR UPDATE`,
-                [sheetId, affectedIds],
-              )).rows as Array<Record<string, unknown>>
-            : []
-          const rowById = new Map(lockedRows.map((r) => [String(r.id), r]))
-
-          for (const candidate of reverts) {
-            const row = rowById.get(candidate.recordId)
-            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
-            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
-            const serverVersion = Number(row.version ?? 1)
-            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
-            const previousData = normalizeJson(row.data)
-            const patch: Record<string, unknown> = {}
-            const unsetIds: string[] = []
-            for (const change of candidate.diff) {
-              if (change.op === 'unset') unsetIds.push(change.fieldId)
-              else patch[change.fieldId] = change.value
-            }
-            const updateRes = unsetIds.length > 0
-              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
-              // revision-emitted: PIT reset revert unset+set — recordRecordRevision below, same txn.
-              ? await query(
-                  `UPDATE meta_records
-                     SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
-                   WHERE sheet_id = $2 AND id = $3
-                   RETURNING version`,
-                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId, unsetIds],
-                )
-              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
-              // revision-emitted: PIT reset revert set-only — recordRecordRevision below, same txn.
-              : await query(
-                  `UPDATE meta_records
-                     SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
-                   WHERE sheet_id = $2 AND id = $3
-                   RETURNING version`,
-                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId],
-                )
-            const nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion + 1)
-            const afterImage: Record<string, unknown> = { ...previousData, ...patch }
-            const revisionPatch: Record<string, unknown> = { ...patch }
-            for (const removedId of unsetIds) {
-              delete afterImage[removedId]
-              revisionPatch[removedId] = null
-            }
-            await recordRecordRevision(query, {
-              sheetId,
-              recordId: candidate.recordId,
-              version: nextVersion,
-              action: 'update',
-              source: 'restore',
-              actorId,
-              changedFieldIds: [...Object.keys(patch), ...unsetIds],
-              patch: revisionPatch,
-              snapshot: afterImage,
-              batchId,
-            })
-            for (const change of candidate.diff) {
-              const field = fieldById.get(change.fieldId)
-              // Mirror-read-only hardening (C2/I-1): never reset/replay the mirror side of a twoWay link
-              // (`readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). DEFENSE-IN-DEPTH: the reset-preview PREFLIGHT
-              // (RESET_BLOCKED, ~:9322) is the reachable PRIMARY guard — it refuses a mirror-diff reset before this
-              // replay runs; this skip is the second door, reached only if that preflight were ever bypassed.
-              if (field?.type !== 'link' || field.readOnly === true) continue
-              const ids = change.op === 'unset' ? [] : normalizeLinkIds(change.value)
-              const cfg = field.link
-              if (ids.length > 0 && !cfg?.foreignSheetId) {
-                throw new ServiceValidationError('Link field is missing its foreign sheet target', 'FORBIDDEN')
-              }
-              if (ids.length > 0) {
-                const exists = await query(
-                  'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-                  [cfg.foreignSheetId, ids],
-                )
-                const found = new Set((exists.rows as Array<{ id: unknown }>).map((r) => String(r.id)))
-                if (ids.some((id) => !found.has(id))) {
-                  throw new ServiceValidationError('Linked reset target is no longer valid', 'FORBIDDEN')
-                }
-              }
-              const current = await query('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
-              const existingIds = (current.rows as Array<{ foreign_record_id: unknown }>).map((r) => String(r.foreign_record_id))
-              const existing = new Set(existingIds)
-              const next = new Set(ids)
-              const toDelete = existingIds.filter((id) => !next.has(id))
-              const toInsert = ids.filter((id) => !existing.has(id))
-              if (toDelete.length > 0) {
-                await query(
-                  'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
-                  [change.fieldId, candidate.recordId, toDelete],
-                )
-              }
-              for (const foreignId of toInsert) {
-                await query(
-                  `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-                   VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-                  [buildId('lnk').slice(0, 50), change.fieldId, candidate.recordId, foreignId],
-                )
-              }
-              if (ids.length === 0) await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
-            }
-            updatedRows.push({ recordId: candidate.recordId, version: nextVersion, fieldIds: [...Object.keys(patch), ...unsetIds], patch: revisionPatch })
-          }
-
-          for (const candidate of deletes) {
-            const row = rowById.get(candidate.recordId)
-            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
-            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
-            const serverVersion = Number(row.version ?? 1)
-            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
-            const createdBy = typeof row.created_by === 'string' ? row.created_by : null
-            if (!capabilities.canDeleteRecord || !ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) {
-              throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
-            }
-            const snapshot = normalizeJson(row.data)
-            // 4c-3 §7 (D-3): this inline delete wrote trash + a delete revision but never CAPTURED —
-            // it was the second resurrection surface whose inbound edges were silently lost forever.
-            // Pre-generate the revision id so the tombstones can anchor to it (same shape as
-            // record-service.deleteRecord); capture MUST run before the links DELETE below destroys
-            // the rows. Cap breach throws (TombstoneCaptureCapExceededError) → whole reset rolls
-            // back, fail-closed — never a half-captured destruction.
-            const resetDeleteRevisionId = randomUUID()
-            if (isTombstoneCaptureEnabled()) {
-              const totalToCapture = await countInboundLinkCaptureRows(query, candidate.recordId)
-              assertWithinCaptureCap(totalToCapture)
-              await insertInboundLinkTombstones(query, { sheetId, recordId: candidate.recordId, sourceRevisionId: resetDeleteRevisionId })
-            }
-            await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
-            await recordRecordRevision(query, {
-              sheetId,
-              recordId: candidate.recordId,
-              version: serverVersion,
-              action: 'delete',
-              source: 'restore',
-              actorId,
-              changedFieldIds: [],
-              patch: {},
-              snapshot,
-              batchId,
-              id: resetDeleteRevisionId,
-            })
-            try {
-              await query(
-                `INSERT INTO meta_records_trash
-                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
-                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
-                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null, resetDeleteRevisionId],
-              )
-            } catch (err) {
-              if (!isUndefinedColumnError42703(err, 'delete_revision_id')) throw err
-              await query(
-                `INSERT INTO meta_records_trash
-                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
-              )
-            }
-            // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
-            // revision-emitted: PIT reset delete — recordRecordRevision(action:'delete') below, same txn.
-            await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
-            deletedRecordIds.push(candidate.recordId)
-          }
-        })
-      } catch (err) {
-        // W0-1 L4 P2 follow-up: `fenceWriterEntry` observed another recovery's durable writer-block
-        // (revert-execute mid-apply) and refused BEFORE any read/write in this transaction — same
-        // RECOVERY_IN_PROGRESS 409 shape as revert-execute's own claim-step refusal.
-        if (err instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-        // W0-1 C8: the in-txn integrity re-check refused — the whole reset rolled back (zero writes). Map to
-        // the same values-free 409 as the outer precheck (no denied-record oracle, no token).
-        if (err instanceof HistoryIncompleteInTxnError) return sendHistoryIncomplete(res)
-        if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
-          return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: 'Reset target changed since preview; nothing written — re-preview.' } })
-        }
-        if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
-          return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
-        }
-        // 4c-3 c4 (review P3-1): a cap breach inside the reset txn rolls the WHOLE reset back
-        // (fail-closed) — map it to the same 422 the delete route uses instead of a generic 500.
-        if (err instanceof TombstoneCaptureCapExceededError) {
-          return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
-        }
-        throw err
-      }
-      if (updatedRows.length > 0) {
-        publishMultitableSheetRealtime({
-          spreadsheetId: sheetId,
-          actorId,
-          source: 'multitable',
-          kind: 'record-updated',
-          recordIds: updatedRows.map((r) => r.recordId),
-          fieldIds: [...new Set(updatedRows.flatMap((r) => r.fieldIds))],
-          recordPatches: updatedRows.map((r) => ({ recordId: r.recordId, version: r.version, patch: r.patch })),
-        })
-        for (const row of updatedRows) {
-          eventBus.emit('multitable.record.updated', withAutomationEventId({ sheetId, recordId: row.recordId, changes: row.patch, actorId }))
-        }
-      }
-      if (deletedRecordIds.length > 0) {
-        publishMultitableSheetRealtime({
-          spreadsheetId: sheetId,
-          actorId,
-          source: 'multitable',
-          kind: 'record-deleted',
-          recordIds: deletedRecordIds,
-        })
-        for (const recordId of deletedRecordIds) {
-          eventBus.emit('multitable.record.deleted', withAutomationEventId({ sheetId, recordId, actorId }))
-        }
-      }
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount: updatedRows.length, deletedCount: deletedRecordIds.length, deletedRecordIds } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+      }
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] reset-execute failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute reset' } })
+      console.error(`[univer-meta] ${mode}-execute failed:`, err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to execute ${mode}` } })
     }
+  }
+
+  router.post('/sheets/:sheetId/revert-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'revert'))
+  router.post('/sheets/:sheetId/revert-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'revert'))
+  router.post('/sheets/:sheetId/reset-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'reset'))
+  router.post('/sheets/:sheetId/reset-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'reset'))
+
+  const manualCapture = options.recoveryArchiveRuntime
+    ? createRecoveryArchiveManualCommand(recoveryArchiveRestoreTransaction, options.recoveryArchiveRuntime,
+        options.recoveryArchiveManualPolicy)
+    : undefined
+  registerRecoveryArchiveRestoreOwnerRoutes(router, {
+    resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
+    service: {
+      captureManual: manualCapture && options.recoveryArchiveManualPolicy
+        ? (context, requestId) => manualCapture.capture({ workspaceId: context.workspaceId, baseId: context.baseId,
+            sheetId: context.sheetId, actorId: context.actorId, requestId }) : undefined,
+      readManual: manualCapture
+        ? (context, requestId) => manualCapture.read({ workspaceId: context.workspaceId, baseId: context.baseId,
+            sheetId: context.sheetId, actorId: context.actorId, requestId }) : undefined,
+      preview: options.recoveryArchiveRuntime
+        ? (context, input) => previewRecoveryArchive(
+            recoveryArchiveCatalogTransaction,
+            resolveRecoveryArchiveAutocommitQuery(),
+            options.recoveryArchiveRuntime,
+            {
+              ...context,
+              ...input,
+            },
+          )
+        : undefined,
+      executeSync:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? async (context, input) => {
+              if (!context.syncApply) {
+                throw new RecoveryArchivePreviewError(
+                  'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE',
+                )
+              }
+              const result = await executeRecoveryArchiveSync(
+                recoveryArchiveRestoreTransaction,
+                resolveRecoveryArchiveAutocommitQuery(),
+                options.recoveryArchiveRuntime,
+                {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                  previewIdentity: input.previewIdentity,
+                  scope: input.scope,
+                  recheckAuthority: context.recheckAuthority,
+                  preliminaryFullRead: context.syncApply.preliminaryFullRead,
+                  stabilizeAuthorization: context.syncApply.stabilizeAuthorization,
+                  finalLockedFullRead: context.syncApply.finalLockedFullRead,
+                  evaluatePlanAuthorization: context.syncApply.evaluatePlanAuthorization,
+                  ...(context.syncApply.onMutationApplied
+                    ? { onMutationApplied: context.syncApply.onMutationApplied }
+                    : {}),
+                  auditedReplayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                },
+              )
+              if (result.ok) await context.syncApply.afterCommit()
+              return result
+            }
+          : undefined,
+      listCatalog: (context, input) => listRecoveryArchiveCatalog(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          ...input,
+        },
+      ),
+      readCatalog: (context, generationId) => readRecoveryArchiveCatalogEntry(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          generationId,
+        },
+      ),
+      listJobs: (context, input) => listRecoveryArchiveRestoreJobs(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          ...input,
+        },
+      ),
+      accept:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAsyncResumeHorizonMs) &&
+        (options.recoveryArchiveAsyncResumeHorizonMs ?? -1) > 0
+          ? (context, input) => acceptFrozenRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              options.recoveryArchiveRuntime!.objectStore,
+              options.recoveryArchiveRuntime!.transactionDepth,
+              {
+                identity: {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                },
+                token: input.token,
+                resumeDeadline: new Date(
+                  Date.now() + options.recoveryArchiveAsyncResumeHorizonMs!,
+                ),
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
+      read: (context, jobId) => readRecoveryArchiveRestoreJobStatus(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      resume: (context, jobId) => resumeRecoveryArchiveRestoreJob(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      cancel:
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? (context, jobId) => cancelRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              {
+                workspaceId: context.workspaceId,
+                baseId: context.baseId,
+                sheetId: context.sheetId,
+                actorId: context.actorId,
+                jobId,
+                replayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
+    },
   })
 
   router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
@@ -11023,49 +13682,117 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const requestAccess = await resolveRequestAccess(req)
+      if (!requestAccess.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-
-      const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
-      if (recordCheck.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
-      }
-
-      const { subjectType, subjectId, accessLevel } = parsed.data
-      if (subjectType === 'user') {
-        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
-        if (userCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
-        }
-      } else if (subjectType === 'role') {
-        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
-        if (roleCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
-        }
-      } else {
-        const groupCheck = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
-        if (groupCheck.rows.length === 0) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
-        }
-      }
-
-      await pool.query(
-        `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (record_id, subject_type, subject_id)
-         DO UPDATE SET access_level = EXCLUDED.access_level`,
-        [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+      // Real transaction + canonical sheet+record row-auth advisory BEFORE auth/read/write so a
+      // concurrent approval create final recheck serializes against deny INSERT (phantom-safe).
+      // HTTP response is emitted ONLY after pool.transaction resolves (post-COMMIT): the callback
+      // returns a typed outcome and must not touch res — otherwise a COMMIT failure can leave a
+      // success body already written (headersSent) while persistence rolls back.
+      const { acquireRecordLinkRowAuthLockOnQuery } = await import(
+        '../services/approval-record-link-row-auth-lock'
       )
+      type PutRecordPermissionTxnOutcome =
+        | {
+            kind: 'ok'
+            data: {
+              sheetId: string
+              recordId: string
+              subjectType: 'user' | 'role' | 'member-group'
+              subjectId: string
+              accessLevel: 'read' | 'write' | 'admin' | 'none'
+            }
+          }
+        | { kind: 'error'; status: number; code: string; message: string }
 
-      return res.json({
-        ok: true,
-        data: { sheetId, recordId, subjectType, subjectId, accessLevel },
+      const outcome = await pool.transaction(async ({ query }): Promise<PutRecordPermissionTxnOutcome> => {
+        // Lock every source consumed by the final capability read before the row-auth advisory.
+        // baseId is intentionally empty: this route consumes sheet, actor, and sheet-grant
+        // authority only. Shared locks let peer readers proceed while serializing revokes.
+        await lockRecordLinkAuthorityRowsOnQuery(query, {
+          userId: requestAccess.userId,
+          baseId: '',
+          sheetId,
+        })
+        await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
+
+        // ORDER (#5839): AUTHORITY FIRST, then existence. The sheet-row probe used to sit here, ahead
+        // of the 403, and answered 404 with the id echoed back — so a signed-in caller this route then
+        // refused could tell a live sheet from a soft-deleted or absent one just by reading the status.
+        // Nothing the capability resolver consumes reads `meta_sheets.deleted_at`, so a caller without
+        // canManageSheetAccess now gets the SAME 403 in all three states.
+        // SCOPE, so this is not read as more than it is: the resolver does read `meta_sheets` in ONE
+        // place — its own approval-projection fence (`loadApprovalProjectionSheetIds`,
+        // multitable/permission-service.ts: `id = ANY($1::text[]) AND base_id = $2`, deliberately with
+        // no `deleted_at` filter). For an id inside that admin-only base the fence hits for a live AND
+        // for a soft-deleted sheet and strips canManageSheetAccess, so PRESENT (403) is still
+        // distinguishable from ABSENT (404 below) there, at one extra round trip. Strictly narrower
+        // than the probe removed here (which split live from soft-deleted on every base); pinned as a
+        // named RESIDUAL in tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
+        const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
+          query,
+          sheetId,
+          requestAccess.userId,
+        )
+        if (!capabilities.canManageSheetAccess) {
+          return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
+        }
+
+        // Liveness AFTER the 403, and it is this route's own check: the resolver above returns
+        // { isAdminRole, capabilities, permissions } — no liveness — so dropping the probe without
+        // this would let a manager write grants onto a soft-deleted sheet (the record rows outlive it).
+        // One PK lookup, inside the transaction, under the advisory lock already held.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
+
+        const recordCheck = await query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+        if (recordCheck.rows.length === 0) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Record not found: ${recordId}` }
+        }
+
+        const { subjectType, subjectId, accessLevel } = parsed.data
+        if (subjectType === 'user') {
+          const userCheck = await query('SELECT id FROM users WHERE id = $1', [subjectId])
+          if (userCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `User not found: ${subjectId}` }
+          }
+        } else if (subjectType === 'role') {
+          const roleCheck = await query('SELECT id FROM roles WHERE id = $1', [subjectId])
+          if (roleCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Role not found: ${subjectId}` }
+          }
+        } else {
+          const groupCheck = await query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+          if (groupCheck.rows.length === 0) {
+            return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` }
+          }
+        }
+
+        await query(
+          `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (record_id, subject_type, subject_id)
+           DO UPDATE SET access_level = EXCLUDED.access_level`,
+          [sheetId, recordId, subjectType, subjectId, accessLevel, requestAccess.userId],
+        )
+
+        return {
+          kind: 'ok',
+          data: { sheetId, recordId, subjectType, subjectId, accessLevel },
+        }
       })
+
+      if (outcome.kind === 'error') {
+        return res.status(outcome.status).json({
+          ok: false,
+          error: { code: outcome.code, message: outcome.message },
+        })
+      }
+      return res.json({ ok: true, data: outcome.data })
     } catch (err) {
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update record permission failed:', err)
@@ -11083,26 +13810,72 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const requestAccess = await resolveRequestAccess(req)
+      if (!requestAccess.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-
-      const result = await pool.query(
-        'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
-        [permissionId, sheetId, recordId],
+      // Same post-COMMIT response contract as PUT: callback returns a typed outcome / throws;
+      // never touches res. Canonical row-auth advisory + txn-local auth stay inside the txn.
+      const { acquireRecordLinkRowAuthLockOnQuery } = await import(
+        '../services/approval-record-link-row-auth-lock'
       )
-      if ((result.rowCount ?? 0) === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
-      }
+      type DeleteRecordPermissionTxnOutcome =
+        | { kind: 'ok'; data: { deleted: true; permissionId: string } }
+        | { kind: 'error'; status: number; code: string; message: string }
 
-      return res.json({ ok: true, data: { deleted: true, permissionId } })
+      const outcome = await pool.transaction(async ({ query }): Promise<DeleteRecordPermissionTxnOutcome> => {
+        await lockRecordLinkAuthorityRowsOnQuery(query, {
+          userId: requestAccess.userId,
+          baseId: '',
+          sheetId,
+        })
+        await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
+
+        // ORDER (#5839): same as PUT — authority first, then existence. The pre-403 sheet-row probe
+        // told a caller this route was about to refuse whether the sheet was live, soft-deleted or
+        // never there; nothing the capability inputs consume reads `meta_sheets.deleted_at`, so a
+        // caller without canManageSheetAccess now gets the same 403 in all three states. Same SCOPE
+        // caveat as the PUT twin above: the resolver's approval-projection fence DOES read
+        // `meta_sheets` by id (multitable/permission-service.ts, no `deleted_at` filter), so inside
+        // that admin-only base present stays distinguishable from absent. Pinned as a RESIDUAL in
+        // tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
+        const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
+          query,
+          sheetId,
+          requestAccess.userId,
+        )
+        if (!capabilities.canManageSheetAccess) {
+          return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
+        }
+
+        // Liveness AFTER the 403 — the resolver has none to give, and a revoke on a deleted sheet
+        // must still refuse rather than quietly edit a sheet that no longer exists.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
+
+        const result = await query(
+          'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
+          [permissionId, sheetId, recordId],
+        )
+        if ((result.rowCount ?? 0) === 0) {
+          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` }
+        }
+
+        return { kind: 'ok', data: { deleted: true, permissionId } }
+      })
+
+      if (outcome.kind === 'error') {
+        return res.status(outcome.status).json({
+          ok: false,
+          error: { code: outcome.code, message: outcome.message },
+        })
+      }
+      return res.json({ ok: true, data: outcome.data })
     } catch (err) {
       if (isUndefinedTableError(err, 'record_permissions')) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
       }
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete record permission failed:', err)
@@ -11118,12 +13891,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const result = await pool.query(
         'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500',
@@ -11157,19 +13927,23 @@ export function univerMetaRouter(): Router {
     const sheetId = parsed.data.sheetId
     const fieldId = parsed.data.id ?? buildId('fld').slice(0, 50)
     const name = parsed.data.name.trim()
+    // Mojibake gate — the live incident created FIELDS this way, so the create path is gated first.
+    const createHygieneRefusal = sendDisplayNameHygieneRefusal(res, name)
+    if (createHygieneRefusal) return createHygieneRefusal
     const requestedType = parsed.data.type
     const rawProperty = parsed.data.property ?? {}
     const desiredOrder = parsed.data.order
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        throw new NotFoundError(`Sheet not found: ${sheetId}`)
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
+        // Exact-anchor recovery binds its plan to the complete field schema. Join the canonical
+        // sheet fence before reading or changing that schema so a create cannot commit between
+        // the recovery transaction's schema hash and its final writes. Flag-off remains a no-op.
+        await fenceWriterEntry(query, sheetId)
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the new field + any shifted fields share it
         const { type, property } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
@@ -11177,6 +13951,9 @@ export function univerMetaRouter(): Router {
           requestedType,
           rawProperty,
         )
+        // 关联字段缺目标表 fail-closed（create）。放在 §2a.2 墙之前、且不看 payload 是否显式带 foreign 键：
+        // 这里判的是"落库后的结果状态"，所以 `POST {type:'link'}` 连 property 都不带也会被挡住。
+        assertLinkFieldForeignSheetPresent(type, property)
         const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -11262,6 +14039,11 @@ export function univerMetaRouter(): Router {
       if (err instanceof PermissionError) {
         return sendForbidden(res, err.message)
       }
+      // 关联字段缺目标表 —— 稳定错误码，message 不含 fieldId（前端按码翻人话）。放在 ValidationError 前面，
+      // 因为它是 Error 的独立子类而不是 ValidationError 的子类（避免被通用 VALIDATION_ERROR 吞掉码）。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -11292,19 +14074,28 @@ export function univerMetaRouter(): Router {
       const refererContext = extractMultitableRecordCreateContextFromUrl(
         req.get('referer') ?? req.get('referrer'),
       )
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId ?? refererContext.sheetId,
         viewId: parsed.data.viewId ?? refererContext.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget as DashboardWidgetInput))
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
 
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — the dashboard is `view-aggregate`'s twin: a group-by widget over the People system
+      // sheet's `Name` column IS the roster, one bucket per person, and a clamped bucket list is a wrong
+      // aggregate the same way a clamped COUNT is. Refusing only `view-aggregate` would have closed the
+      // front door and left this side door open, so both answer the SAME values-free 403, here too after
+      // the 401/403/404 so it adds no oracle.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
       const fieldScopeMap = access.userId
@@ -11399,17 +14190,34 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
-      if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5839: the sheet ROW is read only AFTER authority and liveness. It used to be the FIRST statement
+      // here and answered 404 with the requested id pasted back, so a caller this handler then refused
+      // with 403 could still tell a live sheet from a soft-deleted or an absent one. Nothing needed the
+      // row earlier: its ONLY consumer is `baseId` on the next line, already downstream of both refusals.
+      // The throw is RACE-ONLY now — liveness said `live` one statement ago, so a miss means the sheet was
+      // deleted in between. Values-free (SHEET_NOT_FOUND_MESSAGE, no id): the catch below maps it to the
+      // same 404 shape, which must not re-open the oracle the probe was.
+      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
+      if (!sourceSheet) throw new NotFoundError(SHEET_NOT_FOUND_MESSAGE)
+      const baseId = sourceSheet.baseId ?? await pool.transaction(async ({ query }) => ensureLegacyBase(query as unknown as QueryFn))
+      const plan = await planPeopleSheetPreset(pool.query.bind(pool) as unknown as QueryFn, baseId)
       const preset = await pool.transaction(async ({ query }) => {
-        const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query as unknown as QueryFn)
-        return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId)
+        return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId, plan)
       })
+      // #5807: the transaction has COMMITTED. Purge the Yjs state of exactly the existing People rows the
+      // re-sync rewrote, so a persisted Y.Doc cannot re-serve their old Email / Avatar / Name. Nothing on
+      // first provisioning (inserts only) or on a re-sync that rewrote nothing; a failure is logged, never
+      // fails the request (same contract as the record post-commit hook).
+      await bestEffortYjsInvalidate(preset.rewrittenRecordIds, 'people-sheet sync')
 
       return res.json({ ok: true, data: { targetSheet: preset.sheet, fieldProperty: preset.fieldProperty } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -11433,18 +14241,17 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const query = pool.query.bind(pool)
 
-      const sheetsRes = await query(
-        `SELECT id FROM meta_sheets WHERE base_id = $1 AND description = $2 AND deleted_at IS NULL LIMIT 1`,
-        [baseId, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
-      )
-      const peopleSheetId = (sheetsRes.rows[0] as any)?.id
+      // Same selection rule as the People sync (system_kind first, then the earliest trimmed sentinel).
+      const peopleSheetRow = await selectPeopleSheetRow(query as unknown as QueryFn, baseId)
+      const peopleSheetId: string | undefined = typeof peopleSheetRow?.id === 'string' ? peopleSheetRow.id : undefined
 
       if (!peopleSheetId) {
         return res.json({ ok: true, data: { items: [] } })
       }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // F5 (#2106 §3 F5): gate the people sheet's default display field by its own layer-2 ∧ layer-3 allowed set.
       // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2 (auto-pick parity): drop any
@@ -11488,6 +14295,13 @@ export function univerMetaRouter(): Router {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
+    // Mojibake gate — checked on the RAW payload before any DB work, so a corrupt rename costs
+    // nothing and lands nowhere. A PATCH that carries no `name` is unaffected.
+    if (typeof parsed.data.name === 'string') {
+      const renameHygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.data.name.trim())
+      if (renameHygieneRefusal) return renameHygieneRefusal
+    }
+
     try {
       const pool = poolManager.get()
       const existing = await pool.query(
@@ -11496,8 +14310,9 @@ export function univerMetaRouter(): Router {
       )
       if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
       const preflightSheetId = String((existing.rows[0] as any).sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       let sheetId = ''
       // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2/B3): set INSIDE the transaction when this PATCH
       // triggers the expression-change bulk recompute; the snapshot of live record ids is reused
@@ -11505,6 +14320,9 @@ export function univerMetaRouter(): Router {
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
       const updated = await pool.transaction(async ({ query }) => {
+        // Fence before re-reading the field: recovery hashes and applies against one schema
+        // generation, while field retype/property/order writes serialize outside that window.
+        await fenceWriterEntry(query, preflightSheetId)
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
           [fieldId],
@@ -11634,6 +14452,33 @@ export function univerMetaRouter(): Router {
         if (hierarchyParentMutationError) {
           throw new ValidationError(hierarchyParentMutationError)
         }
+
+        // 关联字段缺目标表 fail-closed（update）。两点是刻意的：
+        //   1) 触发条件按本文件既有的"lazy/on-edit"惯例收窄 —— 只有这次 PATCH 真的在写 property
+        //      （payload 带 property 键）或把别的类型转成 link 时才判。纯改名 / 纯调序不判：它不会让任何
+        //      健康字段变坏，已经坏掉的字段靠读取侧人话 + 字段管理面板的强制选择去自愈。
+        //   2) 位置排在既有的 lookup/rollup、跨 base 墙、aiShortcut、公式、层级父字段几道校验之后 ——
+        //      那些校验对同一个请求给的是更具体的原因（例如"该字段是层级视图的父字段"），保持它们的优先级，
+        //      本门只在没人反对时兜底。它仍在任何写语句之前，所以照样是 fail-closed。
+        if (typeof parsed.data.property !== 'undefined' || (nextType === 'link' && currentType !== 'link')) {
+          assertLinkFieldForeignSheetPresent(nextType, nextProperty)
+        }
+
+        // F8A 第一刀（裁决 b）：改类型的无损白名单，服务端权威。
+        // 在此之前 (currentType → nextType) 这一对除 link/formula/lookup/rollup 目标与层级父字段外
+        // 零配对校验 —— 下面那条裸 `UPDATE meta_fields` 不迁移任何单元格值，于是任何过得了本路由
+        // :12937 那道 `capabilities.canManageFields`（管理员角色或 multitable:manage-schema）的调用方
+        // 绕开前端下拉框就能做有损改类型（例如把存着 "abc" 的文本字段改成数字）。
+        // 白名单与前端 utils/field-retype.ts 同源于
+        // tests/fixtures/field-retype-truth-table.json（双侧镜像测试）。
+        // 位置刻意排在上面所有专门校验之后：那些校验对同一个请求给的是更具体的原因（层级父字段、
+        // 跨 base 墙、公式引用……），保持它们的优先级；同时仍在任何写语句之前，所以照样 fail-closed。
+        // 判 property 用的是 DB 里的 currentProperty（富文本长文本不许改回单行文本），不是请求体 ——
+        // 请求体里的 property 是"改完之后"的，拿它判会让用户把 rich 关掉 + 改类型一次过。
+        // 范围要说准：这只挡住"同一次请求"；先 PATCH {property:{}} 关掉 rich、再 PATCH {type:'string'}
+        // 的两步路径仍然两步都 200（rich ON→OFF 没有门），HTML 原样留在单元格 —— 已知边界，
+        // 有 characterization 用例钉着，加不加 ON→OFF 的门是 owner 决策。
+        assertLosslessFieldRetype(currentType, nextType, currentProperty)
 
         // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
         // live record afterward (B3). B1 trigger = the request explicitly CARRIES
@@ -11793,6 +14638,14 @@ export function univerMetaRouter(): Router {
           error: { code: 'FORMULA_EXPRESSION_BULK_OVER_CAP', message: err.message, total: err.total, max: err.max },
         })
       }
+      // 关联字段缺目标表 —— 与 create 侧同一稳定码，message values-free。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
+      }
+      // F8A：不在无损白名单里的改类型 —— 稳定码 + 中文 message（不含 fieldId），前端按码给人话。
+      if (err instanceof FieldRetypeNotLosslessError) {
+        return res.status(400).json({ ok: false, error: { code: FIELD_RETYPE_NOT_LOSSLESS_CODE, message: err.message } })
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -11803,6 +14656,369 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update field' } })
+    }
+  })
+
+  /**
+   * 字段类型转换（带值迁移）第 2 刀 —— **只读预览** `POST /fields/:fieldId/retype-preview`。
+   * 设计锁：docs/development/multitable-field-retype-first-batch-adr-20260926.md §2（门）/ §1（范围与托管表并集）/ §4（A 规则）。
+   *
+   * 与上面的 `PATCH /fields/:fieldId` 互不相干：PATCH 仍只做无损改类型，`string → select / multiSelect` 在那里照旧
+   * 400 FIELD_RETYPE_NOT_LOSSLESS（本路由不改它的任何一行）。本路由只读：`pool.query`、不开事务、不取栅栏、不写表；
+   * 执行与撤销在第 3 刀。
+   *
+   * 五门顺序固定、任一不过即停、在全部通过之前**不扫描**：
+   *   ① 本 flag `!== 'true'` ⇒ 403 FIELD_RETYPE_CONVERT_DISABLED（纯 env，先于任何读库）；
+   *   ② legacy manage-schema flag 生效 ⇒ 409 FIELD_RETYPE_TRUST_REQUIRED（reason legacy_manage_schema_flag）——用
+   *      `isLegacyWriteImpliesManageSchemaEnabled`，即真正放宽 canManageFields 的那一个判定（trim + 小写），
+   *      比字面 `=== 'true'` 更宽地拒绝：flag 以任何被当作「开」的写法存在都拒；
+   *   ③ capabilities.canManageFields（照抄 PATCH）⇒ 否则 403；
+   *   ④ sheetLiveness !== 'live' ⇒ 404（sendSheetNotLive）；
+   *   ⑤ capabilities.canRead && hasFullTableReadAccess ⇒ 否则整面 403，无 scoped 模式、无 undisclosed 标记。
+   *      canManageFields 单凭 `multitable:manage-schema` 即可为真（manage-schema-permission.ts `deriveCanManageFields`），
+   *      与 canRead 无关（access.ts `deriveCapabilities`）；少了 canRead，一个只有改结构权、读不了本表的主体会过全部五门、
+   *      拿到全部 recordId。`hasFullTableReadAccess` 自 #6147 起自己也先查 canRead；门 ⑤ 不依赖它，显式判定留作纵深防御。
+   * 之后：范围校验（422，details.reason）→ 规模（live + 本表回收站 > 记录上限 ⇒ 413，不截断）→ 扫描。
+   * 响应 values-free：只有计数与 recordId，永不含单元格值或选项文本。
+   */
+  router.post('/fields/:fieldId/retype-preview', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    // ① flag — env only, before any DB work.
+    if (!isFieldRetypeConvertEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_CONVERT_DISABLED_CODE,
+          message: 'Field type conversion is disabled on this deployment.',
+        },
+      })
+    }
+    // ② legacy manage-schema transition flag — it lets multitable:write hold canManageFields, below the gate the
+    // owner approved for conversion. env only, values-free.
+    if (isLegacyWriteImpliesManageSchemaEnabled()) {
+      return res.status(409).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+          message: 'Field type conversion requires the tightened schema-management permission; it is refused while the legacy write-implies-manage-schema transition switch is on.',
+          details: { reason: 'legacy_manage_schema_flag' },
+        },
+      })
+    }
+
+    // The server derives every option from the cells — a client-supplied `property` is refused, not ignored.
+    const parsed = z.object({ targetType: z.string().min(1).max(64) }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const targetType = parsed.data.targetType
+
+    const sendNotSupported = (reason: FieldRetypeConvertScopeReason) => res.status(422).json({
+      ok: false,
+      error: {
+        code: FIELD_RETYPE_CONVERT_NOT_SUPPORTED_CODE,
+        message: 'This field type conversion is not supported here. The first batch converts a text field to single or multiple select, on a sheet that no plugin, system, pipeline or approval projection manages.',
+        details: { reason },
+      },
+    })
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown; type?: unknown; property?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
+
+      // Scope (422, first hit): the pair, then the managed-sheet union (a)-(e).
+      const rawType = fieldRow.type
+      const pairRefusal = classifyFieldRetypeConvertPair(rawType, mapFieldType(String(rawType ?? '')), targetType)
+      if (pairRefusal) return sendNotSupported(pairRefusal)
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendNotSupported(managedReason)
+      const convertTarget = targetType as FieldRetypeConvertTargetType
+
+      // Size (413, never truncated): live rows + THIS sheet's recycle-bin rows, checked before and after the read.
+      const cap = resolveSheetRevertMaxRecords()
+      const tooLarge = (total: number) => res.status(413).json({
+        ok: false,
+        error: {
+          code: 'SHEET_TOO_LARGE',
+          message: `This sheet has ${total} records including its recycle bin, above the ${cap}-record ceiling for a field type conversion; a conversion of this size is refused.`,
+        },
+      })
+      const counted = await countFieldRetypeConvertScanRows(query, sheetId)
+      if (counted.live + counted.trash > cap) return tooLarge(counted.live + counted.trash)
+      const live = await loadFieldRetypeConvertLiveCells(query, sheetId, fieldId)
+      const trash = await loadFieldRetypeConvertTrashCells(query, sheetId, fieldId)
+      if (live.length + trash.length > cap) return tooLarge(live.length + trash.length)
+
+      const sourceProperty = normalizeJson(fieldRow.property)
+      const plan = planFieldRetypeConvert({ sourceProperty, targetType: convertTarget, live, trash })
+      let previewToken: string | undefined
+      if (plan.verdict === 'ok') {
+        const planHash = hashFieldRetypeConvertPlan(canonicalFieldRetypeConvertPlanInput({ sheetId, fieldId, sourceType: 'string', sourceProperty, plan }))
+        previewToken = mintFieldRetypeConvertPreviewIdentity({
+          sheetId,
+          fieldId,
+          actorId: access.userId,
+          sourceType: 'string',
+          targetType: convertTarget,
+          planHash,
+        })
+      }
+      return res.json({ ok: true, data: toFieldRetypeConvertPreviewResponse(plan, { recordCap: cap, previewToken }) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] field retype preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview the field type conversion' } })
+    }
+  })
+
+  /**
+   * 字段类型转换（带值迁移）第 3 刀 —— **执行** `POST /fields/:fieldId/retype-execute` 与**整列撤销**
+   * `POST /fields/:fieldId/retype-undo`。
+   * 设计锁：docs/development/multitable-field-retype-first-batch-adr-20260926.md §3。事务半在
+   * multitable/field-retype-convert-execute.ts；这里只有门、HTTP 映射与提交后的失效。
+   *
+   * 两条路由与上面的预览**同五门、同顺序**（① 本 flag ② legacy manage-schema flag ③ canManageFields ④ 表存活
+   * ⑤ canRead && hasFullTableReadAccess），之后依次是：
+   *   托管表并集（422，不需要凭证就能判，所以排在凭证之前——托管表上无论带什么凭证都是 422）
+   *   → 确认串（400 CONFIRM_REQUIRED）
+   *   → 信任门：规范表栅栏未开 ⇒ 409 FIELD_RETYPE_TRUST_REQUIRED（reason writer_fence_disabled）。直接调
+   *     `isWriterFenceEnabled()`，不自写比较
+   *   → （仅执行）凭证认证 + 逐 claim 校验 ⇒ 401 PREVIEW_IDENTITY_INVALID；配对校验 ⇒ 422（目标类型只存在于凭证里）
+   *   → 事务。
+   * 事务之前的每一步都只读、不取任何锁；到不了事务的请求对库零写入。
+   *
+   * `PATCH /fields/:fieldId` 与无损白名单一行不改：`string → select / multiSelect` 在那里照旧 400。
+   * 提交后：字段缓存失效 + 该表全部活动记录的协同文档失效（ADR 增补 C4：不只被改写的记录）。**不做**（与 PATCH 改类型同口径）：公式物化值重算、视图
+   * filter / sort / group 迁移、自动化 `record.updated`、实时推送。
+   */
+  const sendFieldRetypeConvertFailure = (res: Response, failure: FieldRetypeConvertFailure) => res.status(failure.status).json({
+    ok: false,
+    error: {
+      code: failure.code,
+      message: failure.message,
+      ...(failure.details ? { details: failure.details } : {}),
+    },
+  })
+
+  /** ① ②：纯 env，先于任何读库。返回 true = 已应答。 */
+  const refuseFieldRetypeConvertByFlags = (res: Response): boolean => {
+    if (!isFieldRetypeConvertEnabled()) {
+      res.status(403).json({
+        ok: false,
+        error: { code: FIELD_RETYPE_CONVERT_DISABLED_CODE, message: 'Field type conversion is disabled on this deployment.' },
+      })
+      return true
+    }
+    if (isLegacyWriteImpliesManageSchemaEnabled()) {
+      res.status(409).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+          message: 'Field type conversion requires the tightened schema-management permission; it is refused while the legacy write-implies-manage-schema transition switch is on.',
+          details: { reason: 'legacy_manage_schema_flag' },
+        },
+      })
+      return true
+    }
+    return false
+  }
+
+  /** 信任门（fail-closed）：栅栏未开则执行 / 撤销一律 409；预览不受影响。返回 true = 已应答。 */
+  const refuseFieldRetypeConvertWithoutFence = (res: Response): boolean => {
+    if (isWriterFenceEnabled()) return false
+    res.status(409).json({
+      ok: false,
+      error: {
+        code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+        message: 'Field type conversion needs the canonical writer fence, which is not enabled on this deployment. Nothing was written.',
+        details: { reason: 'writer_fence_disabled' },
+      },
+    })
+    return true
+  }
+
+  /** PG 锁类 SQLSTATE ⇒ 409（可重试）。只认 code，不看散文。 */
+  const FIELD_RETYPE_RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '55P03', '40001'])
+
+  const sendFieldRetypeConvertError = (res: Response, err: unknown, label: string): Response => {
+    const writerFenceResponse = sendWriterFenceConflict(res, err)
+    if (writerFenceResponse) return writerFenceResponse
+    if (err instanceof TombstoneCaptureCapExceededError) {
+      return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+    }
+    const sqlState = (err as { code?: unknown } | null | undefined)?.code
+    if (typeof sqlState === 'string' && FIELD_RETYPE_RETRYABLE_SQLSTATES.has(sqlState)) {
+      return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: 'Another operation on this sheet is in progress; retry shortly.' } })
+    }
+    const hint = getDbNotReadyMessage(err)
+    if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+    // values-free: the error NAME only — a driver message can quote a cell value or an option text.
+    console.error(`[univer-meta] field retype ${label} failed:`, err instanceof Error ? err.name : 'unknown')
+    return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to ${label} the field type conversion` } })
+  }
+
+  router.post('/fields/:fieldId/retype-execute', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    if (refuseFieldRetypeConvertByFlags(res)) return
+
+    // `.strict()`: there is no targetType, no property and no force / override key — anything else is refused.
+    const parsed = z.object({ previewToken: z.string().min(1).max(8192), confirm: z.string().max(64).optional() }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
+      // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
+
+      // 1 — typed confirm.
+      if (parsed.data.confirm !== FIELD_RETYPE_CONVERT_CONFIRM) {
+        return res.status(400).json({ ok: false, error: { code: FIELD_RETYPE_CONFIRM_REQUIRED_CODE, message: `Type "${FIELD_RETYPE_CONVERT_CONFIRM}" to confirm converting the field type (every cell of the column is rewritten).` } })
+      }
+      // 2 — trust gate.
+      if (refuseFieldRetypeConvertWithoutFence(res)) return
+      // 3 — the token, authenticated, then claim by claim. Nothing is locked yet.
+      const identity = readFieldRetypeConvertPreviewIdentity(parsed.data.previewToken)
+      if (identity.ok === false) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertIdentityInvalid(identity.reason))
+      if (checkFieldRetypeConvertClaims(identity.claims, { fieldId, sheetId, actorId: access.userId })) {
+        return sendFieldRetypeConvertFailure(res, fieldRetypeConvertIdentityInvalid())
+      }
+      const targetType = identity.claims.targetType as FieldRetypeConvertTargetType
+
+      const outcome = await pool.transaction(({ query: txQuery }) => executeFieldRetypeConvert(txQuery as unknown as FieldRetypeConvertQuery, {
+        sheetId,
+        fieldId,
+        actorId: access.userId,
+        historyActorId: getRequestActorId(req),
+        previewToken: parsed.data.previewToken,
+        targetType,
+        mapFieldType,
+        normalizeProperty: normalizeJson,
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
+      }))
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
+
+      const { result } = outcome
+      invalidateFieldCache(sheetId)
+      // every live record of the sheet, not only the rewritten ones: the column changed type for all of them, and an
+      // open collaborative document still holds the cell in its old representation
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype convert')
+      return res.json({
+        ok: true,
+        data: {
+          convertRevisionId: result.convertRevisionId,
+          sheetId: result.sheetId,
+          fieldId: result.fieldId,
+          sourceType: result.sourceType,
+          targetType: result.targetType,
+          recordCount: result.recordCount,
+          cells: result.cells,
+          options: result.options,
+          undo: { confirm: FIELD_RETYPE_UNDO_CONFIRM },
+        },
+      })
+    } catch (err) {
+      return sendFieldRetypeConvertError(res, err, 'execute')
+    }
+  })
+
+  router.post('/fields/:fieldId/retype-undo', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    if (refuseFieldRetypeConvertByFlags(res)) return
+
+    // `.strict()`: no force, no partial, no record subset — a whole-column undo or nothing.
+    const parsed = z.object({ convertRevisionId: z.string().uuid(), confirm: z.string().max(64).optional() }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
+
+      if (parsed.data.confirm !== FIELD_RETYPE_UNDO_CONFIRM) {
+        return res.status(400).json({ ok: false, error: { code: FIELD_RETYPE_CONFIRM_REQUIRED_CODE, message: `Type "${FIELD_RETYPE_UNDO_CONFIRM}" to confirm undoing the field type conversion (every converted cell is restored).` } })
+      }
+      if (refuseFieldRetypeConvertWithoutFence(res)) return
+
+      const outcome = await pool.transaction(({ query: txQuery }) => undoFieldRetypeConvert(txQuery as unknown as FieldRetypeConvertQuery, {
+        sheetId,
+        fieldId,
+        convertRevisionId: parsed.data.convertRevisionId.toLowerCase(),
+        historyActorId: getRequestActorId(req),
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
+      }))
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
+
+      const { result } = outcome
+      invalidateFieldCache(sheetId)
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype undo')
+      return res.json({
+        ok: true,
+        data: {
+          convertRevisionId: result.convertRevisionId,
+          undoRevisionId: result.undoRevisionId,
+          sheetId: result.sheetId,
+          fieldId: result.fieldId,
+          restoredType: result.restoredType,
+          recordCount: result.recordCount,
+          cells: result.cells,
+        },
+      })
+    } catch (err) {
+      return sendFieldRetypeConvertError(res, err, 'undo')
     }
   })
 
@@ -11817,15 +15033,37 @@ export function univerMetaRouter(): Router {
       const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
       if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
       const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // MANAGED-TABLE GUARD (field-level twin of the DELETE /sheets refusal below; same registry row,
+      // same ordering: after the authority gate so an unauthorised actor never learns the table is
+      // plugin-owned, before the fence plan and the transaction so a refusal is literally zero-write —
+      // no advisory lock, no tombstone capture, no config revision, no record strip). Every field on a
+      // registered sheet is refused, not only the provisioned ones: the host cannot prove which fields
+      // a plugin provisioned. See multitable/managed-field-delete-guard.ts for the incident and argument.
+      if (await resolveManagedFieldDeleteRefusal(pool.query.bind(pool), sheetId)) {
+        return res.status(409).json(managedFieldDeleteRefusalBody())
+      }
+      const fieldLinkDropFencePlan = await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+        sourceSheetId: sheetId,
+        fieldId,
+      })
       const result = await pool.transaction(async ({ query }) => {
         // W0-1 L4cov: dropFieldCascade below strips the dropped field's key from every record of this sheet's
         // `data` (a whole-sheet record-data write via the shared field-drop cascade helper — the SAME cascade
         // the config-restore un-create branch fences at ~8888), so the FORWARD field-delete txn is a record
         // writer too and must take the canonical fence FIRST, then refuse (409 RECOVERY_IN_PROGRESS in the
-        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical.
-        await fenceWriterEntry(query, sheetId)
+        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical. Flag-on must enter
+        // the shared plan even when preflight saw missing/non-link, so a late retype cannot sneak an
+        // unfenced target via a source-only fence.
+        if (fieldLinkDropFencePlan) {
+          await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+        } else if (isWriterFenceEnabled()) {
+          throw new LinkWriterFencePlanChangedError()
+        } else {
+          await fenceWriterEntry(query, sheetId)
+        }
         const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
@@ -11850,11 +15088,10 @@ export function univerMetaRouter(): Router {
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      // W0-1 L4cov: fence-then-block-checked forward field-delete → a durable recovery block surfaces here as
-      // 409 RECOVERY_IN_PROGRESS (same shape as reset/revert and the un-create sibling).
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      // W0-1 L4cov / D-H1: fence-then-block-checked forward field-delete → a durable recovery block or a
+      // concurrent link-plan change surfaces here through the shared writer-fence mapping.
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       console.error('[univer-meta] delete field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete field' } })
     }
@@ -11868,12 +15105,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       let result = await pool.query(
         'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
@@ -11892,6 +15126,9 @@ export function univerMetaRouter(): Router {
           config: {},
         })
         await pool.transaction(async ({ query }) => {
+          // D-H1: GET /views lazily inserts the default view. Fence-before-check in this txn
+          // before the source INSERT. Flag-off ⇒ no-op / byte-identical.
+          await fenceWriterEntry(query, sheetId)
           const insert = await query(
             `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
              VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -11953,6 +15190,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list views failed:', err)
@@ -11985,12 +15225,9 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       if (parsed.data.filterInfo !== undefined && filterInfoExceedsMaxDepth(parsed.data.filterInfo, 0)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Filter nesting exceeds the maximum depth of ${MAX_FILTER_DEPTH}` } })
@@ -12030,6 +15267,9 @@ export function univerMetaRouter(): Router {
         config: incomingConfig,
       }
       await pool.transaction(async ({ query }) => {
+        // D-H1: view create is a config/view source writer. Fence-before-check, then INSERT.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
@@ -12060,6 +15300,9 @@ export function univerMetaRouter(): Router {
       const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
       return res.status(201).json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create view failed:', err)
@@ -12099,8 +15342,9 @@ export function univerMetaRouter(): Router {
       }
 
       const row: any = current.rows[0]
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const beforeView = viewConfigSnapshotFromRow(row)
       // #2068 re-save guard: compute the writer's allowed-field set up front, then merge the incoming
       // filterInfo against the current DB filter so a redacted denied condition (echoed back with NO `value`)
@@ -12171,6 +15415,9 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: view patch is a config/view source writer. Fence-before-check on the view's sheet,
+        // then UPDATE. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, String(row.sheet_id))
         await query(
           `UPDATE meta_views
            SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb
@@ -12205,6 +15452,9 @@ export function univerMetaRouter(): Router {
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update view failed:', err)
@@ -12234,8 +15484,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const view: UniverMetaViewConfig = {
         id: viewId,
@@ -12300,8 +15551,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
@@ -12449,6 +15701,8 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: form-share writes view.config. Fence-before-check, then UPDATE. Flag-off ⇒ no-op.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `UPDATE meta_views
            SET config = $2::jsonb
@@ -12473,6 +15727,9 @@ export function univerMetaRouter(): Router {
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update form share config failed:', err)
@@ -12502,8 +15759,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
       }
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
@@ -12539,6 +15797,9 @@ export function univerMetaRouter(): Router {
       }
       const afterView = viewConfigSnapshot(view)
       await pool.transaction(async ({ query }) => {
+        // D-H1: form-share token regenerate writes view.config. Fence-before-check, then UPDATE.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         await query(
           `UPDATE meta_views
            SET config = $2::jsonb
@@ -12568,6 +15829,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] regenerate form share token failed:', err)
@@ -12575,6 +15839,40 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // #5795 follow-up — SAME THREE BOUNDS AS THE #5781 PERSON DIRECTORY; ELIGIBILITY UNCHANGED.
+  // Gate: canManageFormShareForSheet -> capabilities.canManageViews, which a sheet-level full-write
+  // grant alone is enough to turn on (permission-service applyContextSheetSchemaWriteGrant, not an
+  // admin-only capability). It reads the same listSheetPermissionCandidates roster as the person
+  // directory, and before this change a term-less call answered with 20-50 users + member groups
+  // (name + email + DingTalk-binding flags). It was already clamped to 50; what it lacked was "must
+  // supply a term". Now:
+  //  (a) a term shorter than FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH (after trim) is answered with an
+  //      empty list + the values-free `requiresQuery` marker, AFTER the existing 404 / permission /
+  //      liveness gates and BEFORE any candidate or DingTalk lookup (zero hydration). 200, not 400:
+  //      MetaFormShareManager asks with an empty search box as soon as the allowlist section opens.
+  //  (b) the existing clamp stays (FORM_SHARE_CANDIDATES_MAX_ITEMS = 50, default 20), and the roster
+  //      read is asked for ONE row past it so `hasMore` needs no second query. The SQL LIMIT lives
+  //      inside listSheetPermissionCandidates, so the clamp is below the name/email hydration. The
+  //      probe row is dropped BEFORE the DingTalk enrichment, which therefore only ever runs on the
+  //      page actually returned. CAVEAT, stated so nobody over-reads `hasMore`: that function applies
+  //      its SQL LIMIT before its eligibility filter (and this route then drops role rows), so
+  //      `hasMore: true` is exact ("more eligible matches exist"), but `hasMore: false` can miss
+  //      matches hidden behind ineligible users inside the first limit+1 rows — the same
+  //      under-return the route already had before this change.
+  //  (c) the term is handed down as a LITERAL substring (LIKE metacharacters escaped here, so the
+  //      shared listSheetPermissionCandidates stays byte-identical), so a typed `%` or `_` searches
+  //      for that character. This is search correctness, NOT a disclosure bound: that function also
+  //      matches `u.id`, so `-` (in every UUID-shaped id) or `@` (in every well-formed email address)
+  //      still matches (almost) every user and, because it orders by name regardless of the term,
+  //      returns essentially the first page a term-less call did. Against a deliberate caller this route's per-request bound is the 50-row
+  //      cap it already had; what (a) removes is MetaFormShareManager's automatic term-less request
+  //      when the allowlist section opens (UI / privacy hygiene). See residual (1) on the
+  //      person-directory route.
+  // NOT changed: who is eligible (listSheetPermissionCandidates, its eligibility filter, and the
+  // user/member-group filter below are untouched) and the DingTalk enrichment's fields. Whether a
+  // sheet full-write holder should see colleagues' DingTalk-binding / auth-grant flags at all is an
+  // open question for the owner; it is bounded by (a)/(b) now but deliberately not removed here.
+  // Aggregate bound: still only "inconvenient" — see residual (1) on the person-directory route.
   router.get('/sheets/:sheetId/form-share-candidates', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
@@ -12583,21 +15881,51 @@ export function univerMetaRouter(): Router {
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(FORM_SHARE_CANDIDATES_MAX_ITEMS, Math.max(1, Math.floor(rawLimit as number)))
+      : 20
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
-      const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
+      if (q.length < FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH) {
+        return res.json({
+          ok: true,
+          data: {
+            items: [],
+            total: 0,
+            limit,
+            query: '',
+            hasMore: false,
+            requiresQuery: true,
+            minQueryLength: FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH,
+          },
+        })
+      }
+
+      const page = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, {
+        q: escapeLikeTerm(q),
+        limit: limit + 1,
+      }))
         .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
+      const hasMore = page.length > limit
+      const candidates = hasMore ? page.slice(0, limit) : page
       const items = await enrichFormShareCandidatesWithDingTalkStatus(pool.query.bind(pool), candidates)
-      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          total: items.length,
+          limit,
+          query: q,
+          hasMore,
+          requiresQuery: false,
+          minQueryLength: FORM_SHARE_CANDIDATES_MIN_QUERY_LENGTH,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -12623,15 +15951,22 @@ export function univerMetaRouter(): Router {
       }
       const row: any = current.rows[0]
       const sheetId = String(row.sheet_id ?? '')
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       await pool.transaction(async ({ query }) => {
+        // D-H1: view delete is a config/view source deleter. Fence-before-check, then dropViewCascade.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         // U3-L2: the view-delete cascade is the shared dropViewCascade (also used by the un-create execute).
         await dropViewCascade(query, { sheetId, viewId, viewRow: row, actorId: getRequestActorId(req) })
       })
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete view failed:', err)
@@ -12678,9 +16013,10 @@ export function univerMetaRouter(): Router {
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const record = await getPersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
       let config: PersonalViewConfigOverlay | null = null
@@ -12711,11 +16047,12 @@ export function univerMetaRouter(): Router {
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       // Presentation-only overlay of a view the actor can already READ (§1-A); this is not a
       // write to shared config/permissions, so the gate is read access, not canManageViews.
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // Any `userId`/`actorId` field inside the request body is ignored entirely —
       // `sanitizePersonalOverlayConfig` only ever extracts the known presentation facets.
@@ -12750,9 +16087,10 @@ export function univerMetaRouter(): Router {
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (!access.userId) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const deleted = await deletePersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
       return res.json({ ok: true, data: { viewId, deleted } })
@@ -12764,42 +16102,268 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  /**
+   * Delete a sheet — SOFT, and behind SCHEMA authority. Two faults were found on the live
+   * deployment and both are closed here.
+   *
+   * FAULT 1 (authority). This route used to admit `canManageViews` (or `canManageSheetAccess` for a
+   * scoped sheet). After the #5357 split a write-only OPERATOR still holds `canManageViews` — so an
+   * operator who may not rename ONE field header could permanently destroy the WHOLE sheet. The gate
+   * is now `canManageFields`: the same schema-authority tier as renaming a field, renaming this sheet,
+   * or deleting a field.
+   *
+   * The gate is `hasSheetLifecycleAuthority` (see its docblock) — NOT plain `canManageFields`, which
+   * is post-scope-grant and would hand sheet delete to a scoped `spreadsheet:write` holder. Precisely
+   * what moves, in every direction; this is NOT a uniform tightening:
+   *   - a GLOBAL `multitable:write` operator LOSES sheet delete (the reported fault);
+   *   - a `multitable:manage-schema` holder without `multitable:write` GAINS it, which is the
+   *     doctrine, not an accident: an actor trusted to delete a FIELD is trusted to delete the SHEET;
+   *   - a SHEET-SCOPED ADMIN (`spreadsheet:admin`) is UNCHANGED — admitted before via
+   *     `canManageSheetAccess`, admitted now via `sheetScope.canAdmin`;
+   *   - a SHEET-SCOPED `spreadsheet:write` holder stays REFUSED. It is not in
+   *     `SHEET_ADMIN_PERMISSION_CODES`, so the old scoped branch refused it, and gating on the
+   *     post-grant `canManageFields` would have silently flipped it to allowed — widening #5357's
+   *     documented field-level residual into whole-sheet delete + restore. It does not;
+   *   - a GLOBAL `multitable:share` holder without schema authority LOSES it on a scoped sheet.
+   *     Share authority decides WHO MAY SEE a sheet; it was never authority over whether the sheet
+   *     exists.
+   *
+   * FAULT 2 (recoverability). This route used to `DELETE FROM meta_sheets`, cascading the sheet's
+   * records away with no recovery at all. It now sets `deleted_at` and leaves `meta_records` and
+   * `meta_links` untouched, so `POST /sheets/:sheetId/restore` below brings the sheet back COMPLETE.
+   * Every listing already filters `deleted_at IS NULL` (GET /sheets, GET /bases, `loadSheetRow`), so
+   * the sheet disappears from the product exactly as before.
+   *
+   * INBOUND EDGES. The old cascade had to physically delete inbound `meta_links` rows because
+   * `meta_links.foreign_record_id` carries no FK and its targets were about to vanish. Nothing
+   * vanishes now, so the edges are KEPT (that is what makes a restore complete) and the READ path
+   * hides them instead: `loadLinkValuesByRecord`'s repair-on-read now also requires the foreign
+   * record's sheet to be live. A source sheet therefore still shows no link into a deleted sheet —
+   * the same observable behaviour, with the rows still there to restore.
+   *
+   * The link-delete fence plan is unchanged: the same participants must be quiescent, because the
+   * same edges stop being readable.
+   */
   router.delete('/sheets/:sheetId', async (req: Request, res: Response) => {
     const sheetId = req.params.sheetId
     if (!sheetId || typeof sheetId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (sheetScope?.hasAssignments) {
-        if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      } else if (!capabilities.canManageViews) {
-        return sendForbidden(res)
-      }
-      // Referential integrity (cross-base dangling-link repair, companion to repair-on-read): the sheet's
-      // records are about to be deleted (FK cascade on meta_sheets→meta_records). meta_links.record_id has
-      // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
-      // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
-      // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
-      const del = await pool.transaction(async ({ query }) => {
-        await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
-        return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+      // AUTHZ-FIRST (real-DB goldens, not the file's 404-first habit). An actor without authority
+      // must not learn whether the sheet exists: capabilities are resolved and refused BEFORE any
+      // existence or liveness answer. Only an actor who WOULD have been allowed through sees the
+      // 404. The `loadSheetRow` below is then a TOCTOU backstop, not the existence gate.
+      const { access, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // MANAGED-SHEET GUARD (after the authority gate, so an unauthorised actor never learns that a
+      // sheet is plugin-owned; before the write). A plugin-provisioned sheet has a deterministic id
+      // that `ensureObject` re-inserts with ON CONFLICT DO NOTHING and reads back with
+      // `deleted_at IS NULL` — soft-deleting it does not "hide a table", it breaks that plugin's
+      // provisioning until someone finds the UI-less restore endpoint. System sheets (People
+      // directory, projections) are refused on the same path. See multitable/sheet-delete-guard.ts
+      // for why the registry row is the authoritative signal.
+      const deleteRefusal = await resolveSheetDeleteRefusal(pool.query.bind(pool), sheetId)
+      if (deleteRefusal) return res.status(409).json(sheetDeleteRefusalBody(deleteRefusal))
+      const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
+        pool.query.bind(pool),
+        sheetId,
+      )
+      await pool.transaction(async ({ query }) => {
+        if (sheetDeleteFencePlan) {
+          await enterSheetLinkDeleteFencePlan(query, sheetDeleteFencePlan)
+        }
+        return query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [sheetId])
       })
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
       return res.json({ ok: true, data: { deleted: sheetId } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete sheet' } })
+    }
+  })
+
+  /**
+   * Undo a soft delete. Same schema-authority gate as the delete itself — undoing a destructive act
+   * is not a lesser authority than performing it, and a restore makes a table (and every record and
+   * inbound link in it) visible again.
+   *
+   * 404 when the sheet id is unknown OR when it is not soft-deleted: "restore" has no meaning for a
+   * live sheet, and answering 200 would tell a caller a recovery happened when nothing did. The
+   * capability gate runs BEFORE that distinction is drawn, so a caller without schema authority never
+   * learns whether a given id is deleted, live, or absent.
+   *
+   * The base-scoped table recycle bin lists eligible soft-deleted sheets and calls this endpoint.
+   */
+  router.post('/sheets/:sheetId/restore', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
+
+    try {
+      const pool = poolManager.get()
+      // The sheet is soft-deleted, so `loadSheetRow` (deleted_at IS NULL) cannot see it — read the row
+      // directly, including its deleted_at, and let the gate run before the row is interpreted.
+      const sheetRes = await pool.query('SELECT id, base_id, name, description, deleted_at FROM meta_sheets WHERE id = $1', [sheetId])
+      const row = (sheetRes.rows as any[])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown; deleted_at?: unknown }
+        | undefined
+      // RESTORE-FLOW EXEMPT from the sheet-liveness refusal: resurrecting a deleted sheet is the one
+      // operation that MUST see one. It is gated on the restore authority instead
+      // (hasSheetLifecycleAuthority), and it can only ever clear `deleted_at` — never read or write
+      // the sheet's records. Every other sheet-addressed path refuses; see sheet-liveness.ts.
+      const { access, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
+      if (!row || row.deleted_at === null || typeof row.deleted_at === 'undefined') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      const restored = await pool.transaction(async ({ query }) => {
+        await fenceWriterEntry(query, sheetId)
+        return query(
+          'UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id, base_id, name, description',
+          [sheetId],
+        )
+      })
+      const restoredRow = ((restored as any).rows ?? [])[0] as
+        | { id: unknown; base_id?: unknown; name?: unknown; description?: unknown }
+        | undefined
+      if (!restoredRow) {
+        // Lost a race with a concurrent restore: the sheet is live, so nothing here restored it.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `No deleted sheet to restore: ${sheetId}` } })
+      }
+      invalidateSheetSummaryCache(sheetId)
+      invalidateFieldCache(sheetId)
+      invalidateViewConfigCache()
+      return res.json({
+        ok: true,
+        data: {
+          restored: sheetId,
+          sheet: {
+            id: String(restoredRow.id),
+            baseId: typeof restoredRow.base_id === 'string' ? restoredRow.base_id : null,
+            name: String(restoredRow.name ?? ''),
+            description: typeof restoredRow.description === 'string' ? restoredRow.description : null,
+          },
+        },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to restore sheet' } })
+    }
+  })
+
+  /**
+   * F21 (sheet half) — rename a sheet's DISPLAY NAME. Accepts `{ name }` and nothing else.
+   *
+   * GATE: `canManageFields` via `resolveSheetCapabilities` — the SAME tier as `PATCH /fields/:fieldId`
+   * (#5357). A `multitable:write` operator is refused; an admin or a `multitable:manage-schema` holder
+   * is allowed. Existence is checked first (mirrors `DELETE /sheets/:sheetId` and the
+   * `PUT /sheets/:sheetId/row-level-read-deny` sheet_config writer), so a deleted or unknown sheet is
+   * a 404 for everybody.
+   *
+   * HISTORY: recorded on the EXISTING config-revision channel as a `sheet_config` update with
+   * `changedKeys: ['name']` — the same machinery `PUT /sheets/:sheetId/row-level-read-deny` writes, so
+   * the rename shows up in `GET /bases/:baseId/history/events` and `GET /sheets/:sheetId/config-history`
+   * with no new event system. It opens no new RESTORE path: `isSupportedSheetConfigRevert` admits only
+   * `{conditionalReadRules, rowLevelReadPermissionsEnabled}`, so a `name` revision stays gated
+   * fail-closed exactly like every other sheet_config key outside the Tier-1 set.
+   *
+   * A rename-to-the-same-name records nothing and writes nothing (`configUpdateDiff` → null, the
+   * recorder's no-spam contract).
+   */
+  router.patch('/sheets/:sheetId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
+    const parsed = parseDisplayRenamePayload(req.body)
+    if (!parsed.ok) return sendInvalidDisplayName(res)
+    const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
+    if (hygieneRefusal) return hygieneRefusal
+
+    try {
+      const pool = poolManager.get()
+      // AUTHZ-FIRST (real-DB goldens, not the file's 404-first habit). An actor without authority
+      // must not learn whether the sheet exists: capabilities are resolved and refused BEFORE any
+      // existence or liveness answer. Only an actor who WOULD have been allowed through sees the
+      // 404. The `loadSheetRow` below is then a TOCTOU backstop, not the existence gate.
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res, DISPLAY_RENAME_FORBIDDEN_MESSAGE)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) return sendSheetNotLive(res, 'absent')
+
+      const nextName = parsed.name
+      await pool.transaction(async ({ query }) => {
+        // D-H1: sheet_config writer. Fence-before-check, then the live name read + UPDATE, so a rename
+        // cannot interleave with a recovery that is hashing/applying one schema generation.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
+        const beforeResult = await query('SELECT name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+        const beforeRow = ((beforeResult as any).rows ?? [])[0] as { name?: unknown } | undefined
+        if (!beforeRow) throw new NotFoundError(`Sheet not found: ${sheetId}`)
+        const diff = configUpdateDiff({ name: String(beforeRow.name ?? '') }, { name: nextName }, ['name'])
+        if (!diff) return
+        await query('UPDATE meta_sheets SET name = $1 WHERE id = $2 AND deleted_at IS NULL', [nextName, sheetId])
+        await recordConfigRevision(query, {
+          sheetId,
+          entityType: 'sheet_config',
+          entityId: sheetId,
+          action: 'update',
+          before: diff.before,
+          after: diff.after,
+          changedKeys: diff.changedKeys,
+          batchId: randomUUID(),
+          actorId: getRequestActorId(req),
+        })
+      })
+      // The sheet summary cache carries the display name (`{ id, name }`) — drop it or readers keep
+      // serving the old label.
+      invalidateSheetSummaryCache(sheetId)
+      return res.json({
+        ok: true,
+        data: { sheet: { id: sheetId, baseId: sheet.baseId, name: nextName, description: sheet.description } },
+      })
+    } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] rename sheet failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rename sheet' } })
     }
   })
 
@@ -12820,8 +16384,20 @@ export function univerMetaRouter(): Router {
     const sheetId = parsed.data.id ?? buildId('sheet').slice(0, 50)
     const name = parsed.data.name ?? `Univer Sheet ${new Date().toISOString()}`
     const description = parsed.data.description ?? null
+    // #5807: the People sentinel description is how pre-`system_kind` People sheets are still found by
+    // the People sync and hidden from sheet lists, so a client may not mint it. Same trim as the
+    // predicate that reads it. Refused before any read or write; the message never echoes the input.
+    if (isSystemPeopleSheetDescription(description)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: RESERVED_SHEET_DESCRIPTION_MESSAGE } })
+    }
     const requestedBaseId = parsed.data.baseId?.trim()
     const seed = parsed.data.seed === true
+    if (
+      isElearningProjectionSheetIdCandidate(sheetId)
+      || (requestedBaseId !== undefined && isElearningProjectionBaseIdCandidate(requestedBaseId))
+    ) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -12849,6 +16425,11 @@ export function univerMetaRouter(): Router {
             throw new ValidationError('Insufficient permissions')
           }
         }
+
+        // D-H1: sheet provisioning writes meta_sheets + default meta_views (and may seed records).
+        // Fence-before-check on the new sheet id before the link-target lock and source INSERTs.
+        // Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
 
         // ②a §2a.4-c TOCTOU close: reject if creating this sheet (with this resolved baseId) would
         // retroactively make an EXISTING link field cross-base (a link previously pointed at this
@@ -12913,6 +16494,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { sheet: { id: sheetId, baseId, name, description, seeded: seed } } })
     } catch (err) {
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof CrossBaseLinkError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -12953,16 +16537,12 @@ export function univerMetaRouter(): Router {
 
       try {
         const pool = poolManager.get()
-        const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-        if (!sheet) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-        }
-
-        const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
         if (!access.userId) {
           return res.status(401).json({ error: 'Authentication required' })
         }
         if (!capabilities.canCreateRecord) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
         const xlsx = await loadXlsxModule()
         let parsed: ParsedXlsxResult
@@ -13006,8 +16586,11 @@ export function univerMetaRouter(): Router {
             })
             createdRecordIds.push(created.recordId)
           } catch (error) {
+            const writerFenceFailure = serializeWriterFenceConflict(error)
             if (error instanceof RecordCreateValidationFailedError) {
               failures.push({ rowIndex, message: 'Record validation failed', code: 'VALIDATION_FAILED' })
+            } else if (writerFenceFailure) {
+              failures.push({ rowIndex, message: writerFenceFailure.message, code: writerFenceFailure.code })
             } else if (error instanceof RecordServiceFieldForbiddenError || error instanceof RecordServiceValidationError) {
               failures.push({ rowIndex, message: error.message, code: error.code })
             } else if (error instanceof RecordServicePermissionError) {
@@ -13082,10 +16665,6 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       let viewHiddenFieldIds: string[] = []
       // Capture the resolved view so the export can apply its ROW filter + sort (not only the
       // hidden-field mask). #3003 wired "all rows" to this route but exported the WHOLE sheet — it read
@@ -13093,19 +16672,39 @@ export function univerMetaRouter(): Router {
       // exported every row. parity fix: export ALL rows OF THE VIEW'S FILTER (the full filtered set,
       // not a page, not the unfiltered sheet), in the view's sort order.
       let view: SharedMultitableViewConfig | null = null
-      if (viewId) {
-        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
-        if (!view || view.sheetId !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
-        }
-        viewHiddenFieldIds = view.hiddenFieldIds ?? []
-      }
 
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
+      // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared
+      // values-free 403: identical body to the authority refusal above, so it echoes no sheet id and
+      // adds no oracle (a caller without read/export already got that 403 one line earlier). Covers csv
+      // too — the format branch is far below and both share this pipeline.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
+
+      // #5839: BOTH existence probes — the sheet row and the view row — now run AFTER the 401/403/404
+      // above. They used to run first, and each answered 404 echoing the requested id, so a caller this
+      // route then refused (no read / no export) could enumerate sheet ids AND view ids. Neither is
+      // needed earlier: `sheet` is consumed only by the download filename far below, and `view` /
+      // `viewHiddenFieldIds` only by the field mask and the row query that follow. The view probe reads
+      // meta_views, so the sibling ledger (whose EXISTENCE_PROBE regex is meta_sheets-only) never saw it
+      // and never will; its message is values-free here for the same reason the sheet's is, and it is a
+      // NAMED constant (EXPORT_VIEW_NOT_FOUND_MESSAGE) so the behavioural pin has something to hold.
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: EXPORT_VIEW_NOT_FOUND_MESSAGE } })
+        }
+        viewHiddenFieldIds = view.hiddenFieldIds ?? []
+      }
 
       // D3c: export must mirror the view path's field masking — apply subject-scoped
       // field_permissions + view.hidden_field_ids, not only static property.hidden.
@@ -13163,6 +16762,27 @@ export function univerMetaRouter(): Router {
       // call — `fieldIds` is the fully-masked set (field_permissions ∧ view-hidden ∧ §2a.3-taint ∧
       // selection). Keeping it a single call-site preserves the egress-coverage + taint-chokepoint
       // guard counts (a denied/tainted column never reaches a cell regardless of which branch ran).
+      // 客户反馈 2026-09-24 #4c (PR #6083 review B1): date-times export as the SAME `YYYY-MM-DD HH:mm` (24h)
+      // business-zone wall clock the grid shows — not the raw stored `…T01:00:00.000Z`. Zone rule per column:
+      // a dateTime field's explicit non-'UTC' zone, else the instance business timezone; createdTime /
+      // modifiedTime carry no field zone → business timezone. Resolved ONCE per export, not per cell. The
+      // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
+      // export re-imports to the same instant (minute precision — the displayed precision).
+      const exportDateTimeZoneById = new Map<string, string>()
+      // #6181: a `date` (date-only) column exports as the `YYYY-MM-DD` day the grid shows (#6178): a day as written
+      // keeps that day; a stored instant (e.g. `2026-09-17T16:00:00.000Z`) is its day in the instance business
+      // timezone (`2026-09-18` in Asia/Shanghai) — not the raw ISO, never the UTC day. The web shows a `date` in
+      // the business timezone only (no per-field zone), so the export does too.
+      const exportDateOnlyZoneById = new Map<string, string>()
+      for (const field of fields) {
+        if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
+        else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+        else if (field.type === 'date') exportDateOnlyZoneById.set(field.id, resolveMultitableBusinessTimezone())
+      }
+      // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
+      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
+      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, string>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -13171,6 +16791,23 @@ export function univerMetaRouter(): Router {
           // (a cell must read as text, never `<p>…</p>`).
           if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
             return serializeXlsxCell(richLongTextToPlainText(cell))
+          }
+          const dateTimeZone = exportDateTimeZoneById.get(field.id)
+          if (dateTimeZone) {
+            const wallClock = formatDateTimeValue(cell, dateTimeZone)
+            // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
+            if (wallClock !== null) return wallClock
+          }
+          const dateOnlyZone = exportDateOnlyZoneById.get(field.id)
+          if (dateOnlyZone) {
+            const day = formatDateOnlyValue(cell, dateOnlyZone)
+            // A value that names no day (legacy junk) keeps the raw projection — never dropped.
+            if (day !== null) return day
+          }
+          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupZone && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
+            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
@@ -13262,6 +16899,7 @@ export function univerMetaRouter(): Router {
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
           await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
         // Link-FILTER materialization (parity with /view): a link condition matches on the linked
@@ -13393,22 +17031,30 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      let view: SharedMultitableViewConfig | null = null
-      if (viewId) {
-        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
-        if (!view || view.sheetId !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
-        }
-      }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — an aggregate over the People system sheet cannot be truncated without lying (a clamped
+      // COUNT/SUM is a wrong number, and this route hard-fails rather than truncate by design), and its
+      // footer count is exactly the roster cardinality the window withholds. Same values-free 403.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
+
+      // #5839 B2 (optional move): the view lookup is a meta_views probe outside the sheet-existence
+      // guard's scope, so it moved to AFTER the authority/liveness checks above (it was previously
+      // between the deleted sheet-row probe and the 403, which would have kept it as an existence
+      // oracle for `viewId` even though the sheet oracle it originally sat next to is now closed).
+      // Its only real consumer (view?.hiddenFieldIds) is further down, so nothing between the old and
+      // new position dereferences `view`. Message is values-free (no id echoed back).
+      let view: SharedMultitableViewConfig | null = null
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })
+        }
+      }
 
       // max-rows guard: COUNT first, HARD-FAIL (413) with total — never truncate (aggregates must be exact)
       const maxRows = Number(process.env.MULTITABLE_AGGREGATE_MAX_ROWS || '10000')
@@ -13625,10 +17271,22 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
+      // #5839: the sheet-row probe that used to open this handler is GONE. It answered 404 with the id
+      // pasted back before the first 403, so a caller without canManageFields could tell a live sheet
+      // from a soft-deleted or an absent one, and nothing downstream ever read the row (`sheet` was
+      // bound and never used). Dropping it ALONE would have been a regression in the other direction:
+      // this handler bound no `sheetLiveness` at all, so a canManageFields caller would then have
+      // dry-run against a soft-deleted (or absent) sheet and got a 200 computed from its field schema
+      // — `loadFieldsForSheetShared` reads meta_fields by sheet_id and never joins meta_sheets, and
+      // `resolveSheetCapabilities` does NOT zero capabilities for a dead sheet (permission-service.ts).
+      // So BOTH branches below now end in authority-then-liveness:
+      //   recordId present → requireRecordReadable (403 canRead, then its own liveness 404, then record)
+      //   recordId absent  → the 403 and the liveness 404 written out here, in that order.
+      // The 403 is per-branch rather than shared after the if/else ON PURPOSE: a shared one would have
+      // to sit AFTER this branch's liveness refusal, which would hand a caller without canManageFields
+      // a 404 SHEET_DELETED — the same oracle, re-opened one refusal later. And `sheetLiveness` is
+      // bound INSIDE the branch, never hoisted into a cross-branch `let`: a hoisted binding is one the
+      // recordId path never refuses on (the closure guard's bind-and-use assertion reds on exactly that).
       // #5c: when recordId is present, the record-level read gate (requireRecordReadable) yields
       // access + capabilities (404 record-not-on-sheet / 401 / 403 sheet-!canRead). Per the current
       // schema record-read is grant-additive (record_permissions.access_level is read|write|admin,
@@ -13643,11 +17301,13 @@ export function univerMetaRouter(): Router {
         }
         capabilities = readable.capabilities
         recordReadAccess = readable.access
+        if (!capabilities.canManageFields) return sendForbidden(res)
       } else {
-        const resolved = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-        capabilities = resolved.capabilities
+        const { capabilities: sheetCapabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        capabilities = sheetCapabilities
+        if (!capabilities.canManageFields) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       }
-      if (!capabilities.canManageFields) return sendForbidden(res)
 
       const referencedFieldIds = dryRunFormulaEngine.extractFieldReferences(expression)
       if (referencedFieldIds.length > DRY_RUN_MAX_REFERENCED_FIELDS) {
@@ -13727,22 +17387,44 @@ export function univerMetaRouter(): Router {
     const search = normalizeSearchTerm(req.query.search)
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
     const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : undefined
-    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam!, 1), 5000) : undefined
-    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam!, 0) : 0
+    // #5807: `let`, not `const` — a bounded (People) sheet re-clamps both to its window right after the
+    // read gate below, BEFORE any record query runs. Ordinary sheets keep these values untouched.
+    let limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam!, 1), 5000) : undefined
+    let offset = Number.isFinite(offsetParam) ? Math.max(offsetParam!, 0) : 0
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
-      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      // SEED PATH: `?seed=true` MATERIALIZES the sheet on first touch, so an ABSENT sheet is this
+      // route's normal input, not an error — the TOCTOU goldens require 200 (created at the legacy base)
+      // for a clean id and 400 VALIDATION_ERROR for one that would retroactively cross an existing link,
+      // and a liveness 404 preempts both.
+      //
+      // 'deleted' is NOT exempted, and the distinction is the point: re-seeding over a soft-deleted sheet
+      // would RESURRECT IT BY GET — a plain read silently undoing a delete, bypassing the restore
+      // authority entirely. Absent means "create it"; deleted means "it was deliberately removed".
+      const seedMayMaterialize = seed && sheetLiveness === 'absent'
+      if (!seedMayMaterialize && sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — People system sheet: bound the QUANTITY, never the authority. Resolved AFTER the 401/403/
+      // 404 above (it must add no oracle) and BEFORE every record query below, so the SQL itself asks for
+      // at most the window. `readBound.bounded` is false for every ordinary sheet and every branch below
+      // is then byte-identical to before.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedWindow = boundReadWindow(readBound, { limit, offset })
+      limit = boundedWindow.limit
+      offset = boundedWindow.offset
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
@@ -14044,6 +17726,18 @@ export function univerMetaRouter(): Router {
         }
       }
 
+      // #5807 CHOKEPOINT — every branch above (SQL fast path, in-memory filter/sort, plain page, and the
+      // `limit`-less "whole sheet" branch) lands here, so a bounded sheet cannot answer past its window
+      // even if one branch missed the pre-clamp. Placed BEFORE the link/attachment/person summaries and
+      // the record-permission filter, so nothing downstream is ever built for a dropped row.
+      if (readBound.bounded) {
+        rows = boundEnumeratedRows(readBound, rows, offset)
+        // The window is never advertised as continuable, and `total` is clamped to it (an honest total
+        // would re-publish the roster's cardinality). A `limit`-less request had no `page` at all; it
+        // gets one now, as the ONLY signal that the answer was truncated.
+        page = boundPageMeta(readBound, page ?? { offset, limit: limit ?? readBound.maxItems, total: rows.length, hasMore: false })
+      }
+
       const linkValuesByRecord = await loadLinkValuesByRecord(
         pool.query.bind(pool),
         rows.map((r) => r.id),
@@ -14214,15 +17908,20 @@ export function univerMetaRouter(): Router {
     } catch (err) {
       // ②a §2a.4-c: a centralized sheet-create TOCTOU rejection surfaced by the `seed=true` branch
       // (createSeededSheet) maps to 400 VALIDATION_ERROR, mirroring POST /sheets (:6838).
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof CrossBaseLinkError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] view failed:', err)
@@ -14238,12 +17937,14 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
-      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
       const protectedPublicAccess = publicAccessAllowed
         ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, resolved.view)
@@ -14262,6 +17963,10 @@ export function univerMetaRouter(): Router {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!effectivePublicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
+      // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
+      // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
+      // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
@@ -14308,7 +18013,6 @@ export function univerMetaRouter(): Router {
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
       const fieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, effectiveAccess.userId) : new Map()
       const viewScopeMap = (effectiveAccess.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], effectiveAccess.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, {
@@ -14319,7 +18023,7 @@ export function univerMetaRouter(): Router {
       // D1 (#2106): the record-value echo must honor layer-3 (field_permissions), not just layer-1∧2 — the
       // same composite /view + /records enforce (#2028). visibleFields already applied layer-1 (view.hidden) ∧
       // layer-2 (property.hidden); fieldPermissions[].visible adds layer-3. For an ANONYMOUS public-form caller
-      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals visibleFieldIds (the public path is
+      // effectiveAccess.userId='' → fieldScopeMap is empty → this equals the layer-1/2 visible set (the public path is
       // unchanged; anonymous has no subject to scope to).
       let readableFieldIds = new Set(visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id))
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds): in edit-mode
@@ -14379,6 +18083,9 @@ export function univerMetaRouter(): Router {
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
           ...(resolved.view ? (() => { const layout = projectPublicFormLayout(resolved.view.config); return layout ? { formLayout: layout } : {} })() : {}),
+          // 客户反馈 2026-09-24 #4c: the (public) form never loads /context, so it learns the instance business
+          // timezone here — same value as /context. A zone id only: nothing actor-, tenant- or view-derived.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
@@ -14438,11 +18145,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
-      }
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       const publicTokenParam = typeof parsed.data.publicToken === 'string'
         ? parsed.data.publicToken.trim()
         : typeof req.query.publicToken === 'string'
@@ -14476,6 +18179,25 @@ export function univerMetaRouter(): Router {
       }
       const canWriteFormRecord = parsed.data.recordId ? effectiveCapabilities.canEditRecord : effectiveCapabilities.canCreateRecord
       if (!canWriteFormRecord) return sendForbidden(res)
+      // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
+      // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
+      // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      //
+      // #5839 B5: the SHEET ROW probe now sits BELOW this line too. It used to run before any
+      // refusal and answer `Sheet not found: <id>`, so a caller this route was about to turn away
+      // could still tell a live sheet from an absent one. Nothing above needs the row:
+      // resolveSheetCapabilities takes the `view.sheetId` STRING, and `sheet.baseId` / `sheet.id`
+      // are first read by the response's commentsScope. What remains above is the VIEW row probe —
+      // the view is an AUTHORISATION INPUT here (isPublicFormAccessAllowed / the protected-form
+      // evaluation both consume it), so it cannot move; that is the named residual, issue #5908.
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // Loaded here, after authority and liveness. The 404 below is RACE-ONLY — a delete committing
+      // between the liveness read above and this one — and values-free (never echoes an id).
+      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -14665,16 +18387,57 @@ export function univerMetaRouter(): Router {
       const recordId = parsed.data.recordId
       let resultRecordId = recordId ?? buildId('rec')
       let nextVersion = 1
+      const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+        pool.query.bind(pool),
+        view.sheetId,
+        Object.keys(data),
+      )
+      if (linkWriterFencePlan) {
+        assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+      }
+
+      // P1#2d REPLACE — build the form.submitted payload ONCE before the txn (stable `_eventId`) so the
+      // same-txn durable enqueue (flag ON, at the end of BOTH the EDIT and CREATE branches below) and the
+      // legacy post-commit emit (flag OFF) carry the same event identity. `recordId: resultRecordId` is the
+      // value the legacy literal read back post-commit as `record.id`: EDIT ⇒ the request's recordId; CREATE ⇒
+      // the pre-generated id the INSERT writes verbatim ($1) and RETURNING echoes unchanged.
+      const formSubmittedPayload = withAutomationEventId({
+        sheetId: view.sheetId,
+        recordId: resultRecordId,
+        actorId: getRequestActorId(req),
+        mode: recordId ? 'update' : 'create',
+      })
 
       await pool.transaction(async ({ query }) => {
-        // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
-        // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
-        // form-submit CREATE branch allocates auto-numbers below; byte-identical when the L4 flag is off), then
-        // a flag-gated durable recovery-block refusal covers BOTH the EDIT (UPDATE @14655) and CREATE (INSERT
-        // @14743) branches of this handler in one place. A block observed here throws `SheetWriterBlockedError`,
-        // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
-        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
-        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        // Flag OFF preserves the form submitter's pre-existing unconditional source fence for auto-number
+        // allocation. Flag ON enters the complete source+target plan in one sorted batch and rechecks every
+        // submitted target while those fences are held, covering both edit and create branches.
+        if (linkWriterFencePlan) {
+          await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+          for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+            if (ids.length === 0) continue
+            const exists = await query(
+              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+              [cfg.foreignSheetId, ids],
+            )
+            const found = new Set(
+              (exists.rows as Array<Record<string, unknown>>)
+                .map((row) => (typeof row.id === 'string' ? row.id : ''))
+                .filter((id) => id.length > 0),
+            )
+            if (ids.some((id) => !found.has(id))) {
+              throw new LinkWriterFencePlanChangedError('Linked records changed concurrently; retry the write')
+            }
+          }
+        } else {
+          await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+          if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        }
+        // Field retype slice 3a (ADR §3.11 row 5, form submit EDIT + CREATE incl. public forms): the submission
+        // was validated against `fieldById`, loaded through the pool before this transaction. Re-read the
+        // submitted fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift — one call covers both
+        // branches. No query unless the conversion flag AND the writer fence are both on.
+        await assertFieldSchemaUnchangedAfterFence(query, view.sheetId, fieldById, Object.keys(data))
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)
@@ -14785,6 +18548,11 @@ export function univerMetaRouter(): Router {
           }
           // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
           await sealOperation(query, op)
+          // P1#2d REPLACE: same-transaction durable enqueue on the EDIT branch's SUCCESS path (flag ON) —
+          // atomic with the UPDATE + revision + link replay (a version-conflict/lock/not-found throw above
+          // rolls the enqueue back with the txn). After the seal: the outbox row is not a record-history event,
+          // so it never enters the operation's event count. Flag OFF ⇒ no-op (legacy post-commit emit fires).
+          await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
           return
         }
 
@@ -14822,10 +18590,10 @@ export function univerMetaRouter(): Router {
         // site A6): this INSERT previously created a brand-new meta_records row with NO revision —
         // reconstructRecordsAtT derives record EXISTENCE purely from meta_record_revisions, so this
         // record was invisible to it at every T, including "now". Worse than incomplete history: a
-        // Reset-to-T run at any T after this create could not tell "created after T" from "created
-        // before T but never captured", so `computeSheetReset` pushed it into the unconditional
-        // delete-set and Reset would DESTROY a record that legitimately existed at T (§0.5's corrected
-        // CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
+        // destructive recovery could not tell "created after the anchor" from "created before the anchor
+        // but never captured". The exact-anchor trust precheck now refuses that incomplete chain before
+        // planning; this revision supplies the positive history needed for a trustworthy decision (§0.5's
+        // corrected CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
         // patch (link ids already folded in via `patch[fieldId]=ids` above, same as the auto-number
         // values just assigned). source='public-form' per OD-2 — unlike the EDIT branch, THIS branch is
         // genuinely reachable by an anonymous public submitter, so the surface name is exactly accurate
@@ -14844,6 +18612,10 @@ export function univerMetaRouter(): Router {
         })
         // W0-1 L6-a: seal the operation LAST for the CREATE branch. No-op when inert.
         await sealOperation(query, op)
+        // P1#2d REPLACE: same-transaction durable enqueue on the CREATE branch's SUCCESS path (flag ON) —
+        // atomic with the INSERT + links + create revision. After the seal for the same reason as the EDIT
+        // branch (the outbox row is not a record-history event). Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
       })
 
       const recordRes = await pool.query(
@@ -14861,11 +18633,10 @@ export function univerMetaRouter(): Router {
         data: normalizeJson(row.data),
       }
       const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
-      const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
       // D1 (#2106): gate the write echo by layer-2 ∧ layer-3 (the #2028 composite), not just layer-1∧2. This
       // covers a denied field the submitter never sent — a server-assigned / recalculated formula value. The
       // submit handler loads no fieldScopeMap today; add one. ANONYMOUS (effectiveAccess.userId='') → empty
-      // scope map → readableEchoFieldIds equals visibleFormFieldIds, so the public-form echo is unchanged.
+      // scope map → readableEchoFieldIds equals the layer-1/2 visible set, so the public-form echo is unchanged.
       const echoFieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), view.sheetId, effectiveAccess.userId) : new Map()
       const echoFieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, { hiddenFieldIds: view.hiddenFieldIds ?? [], fieldScopeMap: echoFieldScopeMap })
       // §2a.3 read/JSON taint mask via the single CHOKEPOINT (maskStoredRecordFieldIds) — C1: in
@@ -14966,12 +18737,10 @@ export function univerMetaRouter(): Router {
       // unchanged.) Payload is sheetId/recordId only (matchesTrigger + handleEvent key off those, and
       // actions re-read the record) — no raw record.data egress. `mode` distinguishes a new submission
       // ('create') from a form-link edit ('update').
-      eventBus.emit('multitable.form.submitted', withAutomationEventId({
-        sheetId: view.sheetId,
-        recordId: record.id,
-        actorId: getRequestActorId(req),
-        mode: recordId ? 'update' : 'create',
-      }))
+      // P1#2d REPLACE: flag OFF ⇒ legacy post-commit emit (the SAME prebuilt payload object — byte-identical
+      // fields; `recordId: resultRecordId` === the `record.id` the old literal read here, see the payload's
+      // construction above the txn); flag ON ⇒ SUPPRESSED (the same-txn enqueue is the delivery path).
+      emitRecordEventIfLegacy(eventBus, 'multitable.form.submitted', formSubmittedPayload)
 
       return res.json({
         ok: true,
@@ -14992,10 +18761,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      // W0-1 L4cov: the fence's durable-block refusal (added at this handler's txn entry) surfaces here.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
@@ -15014,6 +18782,12 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (isRetryableLiveLinkDatabaseConflict(err)) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'LINK_CONFLICT', message: 'Linked records changed concurrently; retry the form submission.' },
+        })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -15043,10 +18817,12 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -15059,15 +18835,37 @@ export function univerMetaRouter(): Router {
       }
       sheetId = String(recordRow.sheet_id)
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5839 B5: the SHEET ROW probe MOVED here, below the 401/403/liveness triple. It used to run
+      // above them and answer `Sheet not found: <sheetId>`, which told a caller this route was about
+      // to refuse whether the sheet was live, soft-deleted or absent. The row itself is still needed
+      // (`sheet.baseId` / `sheet.id` build the response's commentsScope), so it is moved, not
+      // dropped; its 404 is now RACE-ONLY and values-free.
+      //
+      // What deliberately stays ABOVE, both pre-existing and both pinned by issue #5911:
+      //  1. the RECORD row probe. Without `sheetId`/`viewId` in the body it is the only way to learn
+      //     which sheet is being addressed, and it is not a SHEET oracle — with a body `sheetId`, an
+      //     ABSENT sheet yields zero rows and the byte-identical `Record not found: <recordId>` that a
+      //     LIVE sheet returns for a recordId not on it.
+      //  2. `resolveMetaSheetId` above it, when the body carries `sheetId`/`viewId`. A viewId on a
+      //     DIFFERENT sheet throws `ConflictError`; since #5946 the call goes through
+      //     `orRefuseSheetViewMismatch`, which answers it with the values-free absent-sheet 404
+      //     instead of the generic 500 this used to reach. Still a pre-authority answer, and still a
+      //     VIEW-side difference from the 404 an unknown viewId gets: it turns on
+      //     `view.sheetId !== sheetId`, never on whether the named sheet is live, soft-deleted or
+      //     absent, so the three sheet states stay indistinguishable here (pinned by the
+      //     `resolveMetaSheetId` cell in tests/unit/multitable-sheet-existence-oracle-b5.test.ts and
+      //     by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts).
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
       // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
@@ -15080,7 +18878,9 @@ export function univerMetaRouter(): Router {
       // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        // #5839 B5: values-free. This branch already sits behind the 401/403/liveness triple, but the
+        // body echoed the resolved sheet id back, which is exactly the value the move above removes.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
       const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
         isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
@@ -15187,6 +18987,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePatchFieldValidationError) {
         return res.status(err.statusCode).json({
           ok: false,
@@ -15269,11 +19072,18 @@ export function univerMetaRouter(): Router {
       // the deleted records-query-cache block): a subject-scoped mask cannot ride a subject-less cache key
       // without cross-subject poisoning, and this is not the grid hot path (the grid uses GET /view), so
       // dropping the cache is smaller and safer than designing a subject-aware key.
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5807 — People system sheet quantity bound, resolved after the 401/403/404 (no oracle). This
+      // reader is CURSOR-paginated: the window is the FIRST page and any cursor is a walk past it, so a
+      // cursor on a bounded sheet answers an empty page (fail-closed — the cursor is opaque here).
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedCursor = boundCursorRead(readBound, { limit, cursor: cursor || undefined })
 
       // Field-read gate: layer-2 (property.hidden) ∧ layer-3 (field_permissions.visible) — the #2015
       // composite shared with GET /view. hiddenFieldIds:[] keeps layer-1 a display-only concern (this list
@@ -15304,14 +19114,17 @@ export function univerMetaRouter(): Router {
       }
 
       const sort = sortField ? { fieldId: sortField, direction: sortDir } : undefined
-      const result: CursorPaginatedResult<LoadedMultitableRecord> = await queryRecordsWithCursor({
-        query: pool.query.bind(pool),
-        sheetId,
-        cursor: cursor || undefined,
-        limit,
-        sort,
-        filter,
-      })
+      // #5807: `skip` (a cursor on a bounded sheet) answers the empty page WITHOUT reading records at all.
+      const result: CursorPaginatedResult<LoadedMultitableRecord> = boundedCursor.skip
+        ? { items: [], nextCursor: null, hasMore: false }
+        : await queryRecordsWithCursor({
+          query: pool.query.bind(pool),
+          sheetId,
+          cursor: cursor || undefined,
+          limit: boundedCursor.limit,
+          sort,
+          filter,
+        })
 
       // Record-permission filter (parity with GET /view): drop records the subject cannot read when
       // record-level assignments exist. Read is grant-additive today, so this is mostly defense-in-depth,
@@ -15336,10 +19149,13 @@ export function univerMetaRouter(): Router {
         }
       }
 
+      // #5807 CHOKEPOINT: truncate to the window and hand back NO continuation — a bounded sheet never
+      // offers a `nextCursor`, so the only way to ask for more is a cursor this route now refuses.
+      const boundedItems = boundEnumeratedRows(readBound, items, 0)
       const body = {
         ok: true,
         data: {
-          records: items.map((r) => ({
+          records: boundedItems.map((r) => ({
             id: r.id,
             version: r.version,
             data: filterRecordDataByFieldIds(r.data, allowedFieldIds),
@@ -15348,8 +19164,8 @@ export function univerMetaRouter(): Router {
             lockedBy: r.lockedBy,
             lockedAt: r.lockedAt,
           })),
-          nextCursor: result.nextCursor,
-          hasMore: result.hasMore,
+          nextCursor: readBound.bounded ? null : result.nextCursor,
+          hasMore: readBound.bounded ? false : result.hasMore,
         },
       }
       return res.json(body)
@@ -15380,10 +19196,12 @@ export function univerMetaRouter(): Router {
       let sheetId = sheetIdParam
       let viewConfig: UniverMetaViewConfig | null = null
       if (sheetIdParam || viewIdParam) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: sheetIdParam,
           viewId: viewIdParam,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
         viewConfig = resolved.view
       }
@@ -15527,15 +19345,21 @@ export function univerMetaRouter(): Router {
           linkSummaries,
           ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
+          // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link / linked-record peek) shows its
+          // date-times in the SAME instance business timezone as /context and /form-context — a zone id,
+          // instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
         },
       })
     } catch (err) {
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] record context failed:', err)
@@ -15570,17 +19394,18 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-
-      // Verify sheet exists
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5807 — People system sheet quantity bound (after the 401/403/404, no oracle). This route is the
+      // one that MUST also bound `displayMap`: the loader fills it from every matched record regardless
+      // of `limit`, so clamping the page alone would still ship the whole roster's display values.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedWindow = boundReadWindow(readBound, { limit, offset })
 
       const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2: /records-summary projects
@@ -15609,21 +19434,30 @@ export function univerMetaRouter(): Router {
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
-        displayFieldId,
-        allowedFieldIds,
-        search,
-        limit,
-        offset,
-        ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
-      })
+      // #5807: a request that STARTS past the window can only answer the empty page, and
+      // `loadRecordSummaries` reads + summarizes every row of the sheet before it slices — so skip the
+      // read instead of doing that work for an answer that is thrown away. Same shape the chokepoint
+      // below would have produced. Ordinary sheets never take this branch (`beyondWindow` is false).
+      const summary: RecordSummaryPage = boundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: boundedWindow.offset, limit: boundedWindow.limit ?? readBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), sheetId, {
+          displayFieldId,
+          allowedFieldIds,
+          search,
+          limit: boundedWindow.limit ?? limit,
+          offset: boundedWindow.offset,
+          ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
+        })
+      // #5807 CHOKEPOINT: truncates `records`, REBUILDS `displayMap` from the survivors, clamps
+      // `page.total` to the window and never says `hasMore`. Identity for every ordinary sheet.
+      const boundedSummary = boundRecordSummaryPage(readBound, summary)
 
       return res.json({
         ok: true,
         data: {
-          records: summary.records,
-          displayMap: summary.displayMap,
-          page: summary.page,
+          records: boundedSummary.records,
+          displayMap: boundedSummary.displayMap,
+          page: boundedSummary.page,
         },
       })
     } catch (err) {
@@ -15673,15 +19507,27 @@ export function univerMetaRouter(): Router {
 
       const linkConfig = parseLinkFieldConfig(field.property)
       if (!linkConfig) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Link field is missing foreignSheetId: ${fieldId}` } })
+        // 已有坏字段（写入口收紧之前落库的）走这里：稳定码 + values-free message，前端按码翻人话，
+        // 不再把 `fld_...` 原样甩给用户。自愈路径 = 在「管理字段」里编辑它并选好目标表。
+        return res.status(400).json({
+          ok: false,
+          error: { code: LINK_FIELD_FOREIGN_SHEET_MISSING_CODE, message: LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE },
+        })
       }
 
       const targetSheet = await loadSheetRow(pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
-      const { access: foreignAccess, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { access: foreignAccess, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — the bound follows the FOREIGN sheet (the one being enumerated), not the source sheet: the
+      // legacy person field is a link INTO the People sheet, so this picker is one of its readers. The
+      // already-`selected` summaries below are the caller's own record's values, not an enumeration, and
+      // stay untouched — that is what keeps the person chip rendering.
+      const foreignReadBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), linkConfig.foreignSheetId)
+      const foreignBoundedWindow = boundReadWindow(foreignReadBound, { limit, offset })
 
       // ②b §3.2 Sink B-2 / decision (d) — the EXPLICIT cross-base candidate pull. Unlike the inline
       // summary sinks (silent mask), this endpoint deliberately enumerates the foreign sheet's records,
@@ -15748,13 +19594,19 @@ export function univerMetaRouter(): Router {
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), linkConfig.foreignSheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
-        search,
-        limit,
-        offset,
-        allowedFieldIds: foreignAllowedFieldIds,
-        ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
-      })
+      // #5807: same short-circuit as /records-summary — past the window there is nothing to answer, and
+      // the loader would otherwise read and summarize the whole foreign sheet to produce it.
+      const summary: RecordSummaryPage = foreignBoundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: foreignBoundedWindow.offset, limit: foreignBoundedWindow.limit ?? foreignReadBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
+          search,
+          limit: foreignBoundedWindow.limit ?? limit,
+          offset: foreignBoundedWindow.offset,
+          allowedFieldIds: foreignAllowedFieldIds,
+          ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
+        })
+      // #5807 CHOKEPOINT (same helper as /records-summary, same ruler).
+      const boundedSummary = boundRecordSummaryPage(foreignReadBound, summary)
 
       return res.json({
         ok: true,
@@ -15766,8 +19618,8 @@ export function univerMetaRouter(): Router {
           },
           targetSheet,
           selected,
-          records: summary.records,
-          page: summary.page,
+          records: boundedSummary.records,
+          page: boundedSummary.page,
         },
       })
     } catch (err) {
@@ -15849,15 +19701,30 @@ export function univerMetaRouter(): Router {
 
         const pool = poolManager.get()
         try {
-          const sheetRes = await pool.query(
-            'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-            [sheetId],
-          )
-          if (sheetRes.rows.length === 0) {
-            return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-          }
-          const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          // #5839: the inline `SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL` probe
+          // that used to open this block is GONE. It answered 404 with the requested id pasted back
+          // BEFORE the 403 below, so any signed-in caller — including one without canEditRecord — could
+          // tell a live sheet from a soft-deleted or an absent one just by attempting an upload.
+          //
+          // The refusal is now `sheetLiveness !== 'live'`, AFTER the authority check, written as a
+          // RESPONSE rather than a throw. Two things changed with it:
+          //   - `!== 'live'` (not `=== 'deleted'`): the probe used to be what answered the ABSENT case,
+          //     and `multitable_attachments.sheet_id` is `NOT NULL REFERENCES meta_sheets(id)`
+          //     (db/migrations/zzzz20260319103000_create_multitable_attachments.ts:8). `storeAttachment`
+          //     uploads the BYTES to storage BEFORE the INSERT (multitable/attachment-service.ts:439
+          //     upload → :453 INSERT), so letting an absent sheet through would write the file, take an
+          //     FK violation on the INSERT, best-effort-delete the blob and answer 500. Refusing here
+          //     keeps that whole sequence from starting.
+          //   - a response, not `throw new SheetNotLiveError(...)`: this is a MULTER callback, not a
+          //     service callback — `res` is in scope and every other refusal in it returns directly.
+          //     The throw could not be answered correctly anyway: SheetNotLiveError extends Error
+          //     (multitable/sheet-liveness.ts:50) and this block's catch tests `instanceof NotFoundError`
+          //     (a module-private class), so a thrown one fell through to the 500 below. That path was
+          //     reachable only in the race between the deleted probe and the resolver; with the probe
+          //     gone it would have become the ordinary soft-delete answer.
+          const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
           if (!capabilities.canEditRecord) return sendForbidden(res)
+          if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
           if (fieldId) {
             const fieldRes = await pool.query(
@@ -15989,6 +19856,9 @@ export function univerMetaRouter(): Router {
       }
       const access = await resolveRequestAccess(req)
       const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), attachmentRow.sheetId)
+      if (sheetCapabilities.sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetCapabilities.sheetLiveness)
+      }
       if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
       if (attachmentRow.recordId) {
         const creatorMap = await loadRecordCreatorMap(
@@ -16125,6 +19995,7 @@ export function univerMetaRouter(): Router {
       // `blob_purged_at` for the compensating sweep.
       await deleteAttachmentBinaryShared({
         storage,
+        transaction: pool.transaction.bind(pool),
         storageFileId: attachmentRow.storageFileId,
         storagePath: attachmentRow.storagePath,
         query: pool.query.bind(pool),
@@ -16178,16 +20049,19 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
 
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const recordService = new RecordService(pool, eventBus)
       // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create.
       recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
@@ -16231,6 +20105,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -16299,10 +20176,12 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -16395,6 +20274,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -16446,7 +20328,17 @@ export function univerMetaRouter(): Router {
         expectedVersion,
         access,
         resolveSheetAccess: async (sheetId) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response — the route's catch maps
+          // SheetNotLiveError to the same 404. A soft-deleted sheet's recycle bin must not list, its
+          // records must not be deleted, and a trashed record must not be restored into it.
+          //
+          // `=== 'deleted'` and NOT `!== 'live'`: an ABSENT sheet already has pinned semantics that
+          // belong to the service, not to this guard — the recycle-bin golden requires that restoring
+          // into a HARD-deleted sheet answers 409 from RecordService's orphan guard ("rejected, not
+          // resurrected"), and a 404 here would preempt it. Only the soft-deleted case is new: the row
+          // still exists, so the orphan guard would happily resurrect a record into a deleted sheet.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sheetId, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
         oapiAudit: buildOapiAuditContext(req, 'delete', 'records:write'),
@@ -16454,6 +20346,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -16519,14 +20414,19 @@ export function univerMetaRouter(): Router {
         ...(Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
         ...(Number.isFinite(offsetRaw) ? { offset: offsetRaw } : {}),
         resolveSheetAccess: async (sid) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response (see above). `=== 'deleted'`
+          // for the same reason: an absent sheet's behaviour is the service's to define (409 orphan
+          // guard), and only the soft-deleted case is this change's to close.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sid, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
       // Field-read mask: listDeletedRecords returns raw stored data, so mirror the live read/history path
       // here — project each trashed record's data through the actor's visible field set so a
       // field_permissions.visible=false (or taint-masked formula) value can't leak through the trash API.
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const allowedFieldIds = computeAllowedFieldIds(visibleFields, capabilities, fieldScopeMap)
@@ -16596,13 +20496,20 @@ export function univerMetaRouter(): Router {
         actorId: getRequestActorId(req),
         access,
         resolveSheetAccess: async (sid) => {
-          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          const { capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sid)
+          // Inside a SERVICE CALLBACK: throw instead of writing a response (see above). `=== 'deleted'`
+          // for the same reason: an absent sheet's behaviour is the service's to define (409 orphan
+          // guard), and only the soft-deleted case is this change's to close.
+          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sid, sheetLiveness)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
       // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
       return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -16640,10 +20547,12 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -16657,10 +20566,11 @@ export function univerMetaRouter(): Router {
       sheetId = String(recordRow.sheet_id)
       const createdBy = typeof recordRow.created_by === 'string' ? recordRow.created_by : null
 
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const actorId = getRequestActorId(req)
 
       if (parsed.data.locked) {
@@ -16791,10 +20701,13 @@ export function univerMetaRouter(): Router {
 
       // base-B sheet resolution: only `access` is taken here — the base-B capability is re-derived UNDER the
       // guard's sheet lock (§4, below) so it cannot drift between this resolve and the edge write.
-      const { access } = await resolveSheetCapabilities(req, q, sheetB)
+      const { access, sheetLiveness: livenessB } = await resolveSheetCapabilities(req, q, sheetB)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
+      // Soft delete: BOTH ends of a cross-base mirror edge must be live. Sheet A is checked below, at
+      // its own resolve — an edge must never be written into, or out of, a deleted sheet.
+      if (livenessB !== 'live') return sendSheetNotLive(res, livenessB)
       const actorId = getRequestActorId(req)
       const actorUserId = access.userId
 
@@ -16836,7 +20749,8 @@ export function univerMetaRouter(): Router {
 
       // Sheet-A write context (schema/echo-mask/guards) — config-level, resolved pre-transaction; the
       // per-row gating happens under FOR UPDATE inside the guard below.
-      const { capabilities: capsA, sheetScope: scopeA } = await resolveSheetCapabilities(req, q, sheetA)
+      const { capabilities: capsA, sheetScope: scopeA, sheetLiveness: livenessA } = await resolveSheetCapabilities(req, q, sheetA)
+      if (livenessA !== 'live') return sendSheetNotLive(res, livenessA)
       const patchContext = await buildRecordPatchContext(req, q, sheetA, access, capsA)
       if (!patchContext) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetA}` } })
@@ -16851,7 +20765,23 @@ export function univerMetaRouter(): Router {
         // Gating-row locks FIRST, deterministic order (sheets sorted, then records): serializes against
         // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
         // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
-        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        //
+        // #5954: the sheet locks RE-READ LIVENESS under the lock, for BOTH ends. `livenessA`/`livenessB`
+        // above were read PRE-transaction; a soft delete of either sheet that commits after those reads
+        // leaves this lock free (or hands it over once the deleter commits). The lock-only statement this
+        // replaced then wrote when sheet B had died (200: an `add` wrote the forward edge and bumped rec_A's
+        // version, a `remove` removed it); when sheet A had died it was refused only incidentally, by Lock
+        // C's readability derivation (the uniform 403, after the base-A authority check and the quota call),
+        // never by a liveness check. The helper locks both rows in JS code-unit `id` order in ONE statement
+        // and throws SheetNotLiveError — mapped below to the same values-free sendSheetNotLive 404 the
+        // pre-transaction gates answer, and rolling this transaction back. The argument order is the refusal
+        // PRECEDENCE (B, then A — the same order the gates above run in): it picks which 404 body is answered
+        // when both ends died with different verdicts (pinned by the mirror-op guard test and real-DB F-8).
+        // The lock order is the helper's own: it sorts the ids in JS and the statement locks them in that
+        // array order (`WITH ORDINALITY … ORDER BY u.ord`) — the order lockRecordLinkTargetSheetsOnQuery
+        // uses — whatever the database locale and whatever characters the ids carry (sheet ids are
+        // client-chosen: POST /sheets accepts any 1–50 character `id`).
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
         // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
         // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
         // LIFTS the capability (applyContextSheetSchemaWriteGrant), a revoke committing between that resolve
@@ -16971,6 +20901,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof MirrorLinkTargetUnavailableError) {
         // The ONE uniform fail-closed body (Lock C). Do not add fields, vary the message, or branch here.
         return res.status(403).json({ ok: false, error: { code: 'MIRROR_LINK_TARGET_UNAVAILABLE', message: 'Link target is not available' } })
@@ -17032,16 +20965,19 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       // F3 (#2106 §3 F3) echo-mask composition + write-gate guard map — extracted to
       // `buildRecordPatchContext` (single source of truth shared with the A2 AI shortcut
@@ -17184,9 +21120,17 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // W0-1 L4-cov follow-up: the PRIMARY fenced write (record-write-service txn entry) observed a
+      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape the
+      // reset/revert/config-restore routes use, instead of falling through to a 500. (Derived-value
+      // materialization refusals never reach here — they are caught + skipped at their sites.)
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       if (err instanceof VersionConflictError || err instanceof ServiceVersionConflictError) {
         return res.status(409).json({
           ok: false,
@@ -17223,8 +21167,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -17250,8 +21195,9 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
       if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -17259,7 +21205,8 @@ export function univerMetaRouter(): Router {
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -17287,8 +21234,11 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -17298,19 +21248,29 @@ export function univerMetaRouter(): Router {
       if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-      const input = await preflightDingTalkAutomationUpdate(
+      const preflight = await preflightAutomationRuleUpdate(
         pool.query.bind(pool),
         sheetId,
         ruleId,
         parsed,
         automationService,
       )
-      if (!input) {
+      if (!preflight) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      const input = preflight.input
+      // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
+      // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
+      // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
+      // re-type a rule whose stored `actionConfig` carries never-checked `branches`, must still have those branch
+      // values checked, not slip past unvalidated.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
 
-      const updated = await automationService.updateRule(ruleId, sheetId, input)
+      const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
@@ -17335,8 +21295,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -17365,8 +21326,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
@@ -17396,8 +21358,9 @@ export function univerMetaRouter(): Router {
     }
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       const automationService = getAutomationServiceInstance()
       if (!automationService) {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })

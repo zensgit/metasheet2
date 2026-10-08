@@ -91,6 +91,17 @@ function buildLinearGraph() {
   }
 }
 
+// P7-R1 gate P2-1 closure — Anti-skip-green sentinel (mirrors approval-realdb-handler /
+// approval-field-edit-enforcement.db.test.ts): the approval-realdb-p7r1-sweep job (in
+// .github/workflows/approval-realdb-p7r1-coverage-repair.yml) sets
+// EXPECT_DB=1, so a broken/missing DATABASE_URL there REDS the run instead of the whole file
+// silently reporting skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test
+// cleanly — it never runs in the required no-DB `test (20.x)` job.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 describeIfDatabase('Approval Wave 2 WP4 slice 1 — template categories & clone', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''

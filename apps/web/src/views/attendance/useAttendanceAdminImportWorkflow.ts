@@ -681,6 +681,14 @@ const ATTENDANCE_IMPORT_FIELD_MEANINGS: Record<string, { en: string; zh: string 
     en: 'Uploaded CSV file reference returned by the server.',
     zh: '服务端返回的已上传 CSV 文件引用。',
   },
+  convertedArtifactFileId: {
+    en: 'Uploaded original XLSX artifact reference for a client-side conversion.',
+    zh: '客户端转换时原始 XLSX 工件的已上传文件引用。',
+  },
+  convertedSheetName: {
+    en: 'Worksheet name used to produce the converted CSV.',
+    zh: '生成转换后 CSV 所使用的工作表名称。',
+  },
   csvOptions: {
     en: 'CSV parsing options such as header row and delimiter.',
     zh: 'CSV 解析选项，例如表头行和分隔符。',
@@ -717,6 +725,8 @@ const ATTENDANCE_IMPORT_FIELD_ORDER = [
   'entries',
   'csvText',
   'csvFileId',
+  'convertedArtifactFileId',
+  'convertedSheetName',
   'csvOptions',
   'userId',
   'orgId',
@@ -927,6 +937,7 @@ export function useAttendanceAdminImportWorkflow({
   // X1 xlsx direct import: converted CSV text for a selected .xlsx.
   const importCsvConvertedText = ref('')
   const importCsvConvertedSheetName = ref('')
+  const importCsvConvertedArtifactFileId = ref('')
   const importCsvFileName = ref('')
   const importCsvFileId = ref('')
   const importCsvFileRowCountHint = ref<number | null>(null)
@@ -1179,6 +1190,18 @@ export function useAttendanceAdminImportWorkflow({
     } else {
       delete payload.groupSync
     }
+    const convertedXlsx = Boolean(importCsvConvertedText.value)
+      && isDirectConvertibleXlsxName(importCsvFile.value?.name)
+    if (convertedXlsx) {
+      const artifactFileId = normalizeIdentifier(importCsvConvertedArtifactFileId.value)
+      const sheetName = normalizeIdentifier(importCsvConvertedSheetName.value)
+      if (!artifactFileId || !sheetName) return null
+      payload.convertedArtifactFileId = artifactFileId
+      payload.convertedSheetName = sheetName
+    } else {
+      delete payload.convertedArtifactFileId
+      delete payload.convertedSheetName
+    }
     payload.mode = importMode.value || payload.mode || 'override'
     if (payload.mappingProfileId === '') delete payload.mappingProfileId
     normalizeImportPayloadColumns(payload)
@@ -1323,6 +1346,7 @@ export function useAttendanceAdminImportWorkflow({
     // clearing only on null let a stale conversion shadow a directly-set CSV).
     importCsvConvertedText.value = ''
     importCsvConvertedSheetName.value = ''
+    importCsvConvertedArtifactFileId.value = ''
     importCsvFileName.value = file?.name ?? ''
     importCsvFileId.value = ''
     importCsvFileRowCountHint.value = null
@@ -1333,6 +1357,7 @@ export function useAttendanceAdminImportWorkflow({
     const file = extractFileFromEvent(event)
     importCsvConvertedText.value = ''
     importCsvConvertedSheetName.value = ''
+    importCsvConvertedArtifactFileId.value = ''
     if (file) {
       const verdict = await inspectImportFile(file)
       // Rapid re-selection race (xlsx-guard lock §7): if the input no longer
@@ -1566,6 +1591,46 @@ export function useAttendanceAdminImportWorkflow({
     return { fileId, rowCount, bytes, expiresAt }
   }
 
+  async function uploadImportConvertedArtifact(file: File): Promise<{
+    fileId: string
+    sha256: string
+    bytes: number
+    expiresAt: string
+  }> {
+    const query = new URLSearchParams()
+    const resolvedOrgId = normalizedOrgId()
+    if (resolvedOrgId) query.set('orgId', resolvedOrgId)
+    if (file?.name) query.set('filename', file.name)
+
+    const response = await apiFetch(`/api/attendance/import/upload-artifact?${query.toString()}`, {
+      method: 'POST',
+      body: file as unknown as BodyInit,
+      headers: {
+        'Content-Type': file.type,
+      },
+    })
+
+    const data = await response.json().catch(() => ({} as any))
+    if (!response.ok || data?.ok !== true) {
+      throw new Error(data?.error?.message || tr(
+        `Failed to upload original XLSX artifact (HTTP ${response.status})`,
+        `上传原始 XLSX 工件失败（HTTP ${response.status}）`,
+      ))
+    }
+
+    const fileId = normalizeIdentifier(data.data?.fileId)
+    const sha256 = normalizeIdentifier(data.data?.sha256)
+    const bytes = Number(data.data?.bytes)
+    const expiresAt = normalizeIdentifier(data.data?.expiresAt)
+    if (!fileId || !sha256 || !Number.isSafeInteger(bytes) || bytes < 0 || !expiresAt) {
+      throw new Error(tr(
+        'Artifact upload returned incomplete provenance metadata.',
+        '工件上传未返回完整的来源元数据。',
+      ))
+    }
+    return { fileId, sha256, bytes, expiresAt }
+  }
+
   async function applyImportCsvFile() {
     if (!importCsvFile.value) {
       reportStatus(
@@ -1613,6 +1678,18 @@ export function useAttendanceAdminImportWorkflow({
       if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
 
       const convertedText = importCsvConvertedText.value
+      const convertedXlsx = Boolean(convertedText) && isDirectConvertibleXlsxName(file.name)
+      if (convertedXlsx) {
+        if (!importCsvConvertedArtifactFileId.value) {
+          const uploadedArtifact = await uploadImportConvertedArtifact(file)
+          importCsvConvertedArtifactFileId.value = uploadedArtifact.fileId
+        }
+        next.convertedArtifactFileId = importCsvConvertedArtifactFileId.value
+        next.convertedSheetName = importCsvConvertedSheetName.value
+      } else {
+        delete next.convertedArtifactFileId
+        delete next.convertedSheetName
+      }
       const effectiveSize = convertedText ? convertedText.length : file.size
       const shouldUpload = importDebugOptions.forceUploadCsv || effectiveSize >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
       if (shouldUpload) {
@@ -1654,7 +1731,7 @@ export function useAttendanceAdminImportWorkflow({
     return Number.isFinite(expiresAt) && expiresAt - now() > 60 * 1000
   }
 
-  async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+  async function ensureImportCommitToken(options: { forceRefresh?: boolean; orgId?: unknown } = {}): Promise<boolean> {
     if (options.forceRefresh) {
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
@@ -1662,7 +1739,11 @@ export function useAttendanceAdminImportWorkflow({
     if (isImportCommitTokenValid()) return true
 
     try {
-      const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+      const targetOrgId = normalizeIdentifier(options.orgId) ?? normalizedOrgId()
+      const response = await apiFetch('/api/attendance/import/prepare', {
+        method: 'POST',
+        body: JSON.stringify(targetOrgId ? { orgId: targetOrgId } : {}),
+      })
       if (response.status === 404) {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
@@ -1716,7 +1797,7 @@ export function useAttendanceAdminImportWorkflow({
 
       const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
       const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: chunkPayload.orgId })
       if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
       if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
@@ -1933,7 +2014,7 @@ export function useAttendanceAdminImportWorkflow({
       message: tr('Queued async preview job.', '已排队异步预览任务。'),
     }
 
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) return true
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -1950,7 +2031,7 @@ export function useAttendanceAdminImportWorkflow({
       if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
         if (!refreshed || !importCommitToken.value) {
           throw new Error(tr(
             'Failed to refresh import commit token. Check server deployment/migrations.',
@@ -2069,7 +2150,7 @@ export function useAttendanceAdminImportWorkflow({
         message: null,
       }
 
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!tokenOk) {
         if (importPreviewTask.value) {
           importPreviewTask.value = {
@@ -2156,7 +2237,7 @@ export function useAttendanceAdminImportWorkflow({
     applyImportScalabilityHints(payload, { mode: 'commit' })
     importLoading.value = true
     try {
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!tokenOk) return
       if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -2175,7 +2256,7 @@ export function useAttendanceAdminImportWorkflow({
           } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
             importCommitToken.value = ''
             importCommitTokenExpiresAt.value = ''
-            const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+            const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
             if (!refreshed || !importCommitToken.value) {
               throw new Error(tr(
                 'Failed to refresh import commit token. Check server deployment/migrations.',
@@ -2252,7 +2333,7 @@ export function useAttendanceAdminImportWorkflow({
         } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
-          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
           if (!refreshed || !importCommitToken.value) {
             throw new Error(tr(
               'Failed to refresh import commit token. Check server deployment/migrations.',
@@ -2347,6 +2428,7 @@ export function useAttendanceAdminImportWorkflow({
     importCsvFile,
     importCsvConvertedText,
     importCsvConvertedSheetName,
+    importCsvConvertedArtifactFileId,
     importCsvFileName,
     importCsvFileId,
     importCsvFileRowCountHint,

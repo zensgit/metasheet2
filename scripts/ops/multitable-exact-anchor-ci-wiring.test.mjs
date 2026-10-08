@@ -1,0 +1,1002 @@
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { readFileSync as readFileSyncRaw } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+/**
+ * LINE ENDINGS: every repo source this guard parses is read through this wrapper, which
+ * normalizes CRLF to LF. The guard's parsers and its in-memory mutation fixtures are all
+ * line-oriented over LF-joined literals (`.split('\n')`, `/.*$/`, `"...\n    name: ...\n"`),
+ * and none of those match a line that ends in a carriage return. On a Windows checkout
+ * (`core.autocrlf=true`) that made the whole file read red for a reason unrelated to any
+ * change under test, while CI stayed green. Normalizing at the READ boundary is a no-op on
+ * CI (Linux checkouts are already LF, so `String#replace` returns the identical string), so
+ * this widens nothing: the same bytes are parsed, and every assertion below is unchanged.
+ *
+ * @param {Parameters<typeof readFileSyncRaw>[0]} path
+ * @param {Parameters<typeof readFileSyncRaw>[1]} [encoding]
+ */
+function readFileSync(path, encoding) {
+  const text = readFileSyncRaw(path, encoding)
+  return typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : text
+}
+
+// W0 L6-b CI two-point wiring contract. The exact-anchor authority suite is DATABASE_URL-gated and
+// must have BOTH (1) a vitest.config.ts exclusion so the no-DB lane cannot skip-green it and (2) a
+// whole-file entry in plugin-tests.yml's multitable real-DB step. Removing either point must fail CI.
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const repoRoot = join(__dirname, '..', '..')
+const FILES = [
+  // Target-generation/floor comparator: DB-gated and required as one whole-file invocation too.
+  'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
+  'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
+  'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
+  // W0 L8 destructive-apply suite joins the same two-point contract: removing/relocating either its
+  // vitest.config.ts exclusion or its whole-file plugin-tests.yml invocation must red this guard.
+  'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
+  // W2 route wiring is DB-gated too; keep its Express/auth/side-effect goldens impossible to skip-green.
+  'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+  // T8-1 route behavior, including Revert-vs-retention no-oracle ordering, is real-DB-only.
+  'tests/integration/multitable-revert-pit-realdb.test.ts',
+  // Closeout database guard: authority reader/writer leases.
+  'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
+  'tests/integration/multitable-recovery-lease-backoff-realdb.test.ts',
+  'tests/integration/recovery-conflict-classifier-realdb.test.ts',
+  // Closeout goldens added by the TM-closeout slices — must stay two-point wired (no manual-only goldens).
+  'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
+  'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
+  'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+  // D-H1 cross-sheet link writers must keep their no-skip real-DB lane in the same two-point contract.
+  'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+  // #5954: the cross-base mirror op's sheet-liveness-under-lock race (and the C2 Decision-F goldens it
+  // lives with) — a behaviour only real Postgres can show, so it must not skip-green either.
+  'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
+]
+const REAL_DB_STEP = 'Run multitable real-DB integration'
+
+function historyPanelWebContract(workflow, required) {
+  const step = namedStepBody(workflow, 'Run record history panel spec')
+  assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
+  assert.match(step, /run: pnpm --filter @metasheet\/web exec vitest run multitable-record-history-panel --reporter=dot/)
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.equal(workflow.split('\n').filter(line => line.trim() === `- '${path}'`).length, 2)
+  }
+  const commands = required.replace(/\\\n/g, ' ').split('\n').filter(line => !/^\s*#/.test(line) && line.includes('vitest run '))
+  assert.ok(commands.some(line => line.split(/\s+/).includes('multitable-record-history-panel')))
+}
+
+test('record history panel remains selected in both web lanes and both guard triggers', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/multitable-web-guard.yml'), 'utf8')
+  const required = readFileSync(join(repoRoot, 'apps/web/scripts/run-required-web-tests.sh'), 'utf8')
+  historyPanelWebContract(workflow, required)
+  assert.throws(() => historyPanelWebContract(workflow.replace('vitest run multitable-record-history-panel ', 'vitest run missing-history-panel '), required))
+  assert.throws(() => historyPanelWebContract(workflow, required.replaceAll('multitable-record-history-panel', 'missing-history-panel')))
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.throws(() => historyPanelWebContract(workflow.replace(`- '${path}'`, "- 'missing-history-path'"), required))
+  }
+})
+
+function manualCheckpointContract(workflow) {
+  const step = namedStepBody(workflow, 'Run isolated manual checkpoint acceptance')
+  assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
+  assert.match(step, /^\s+TM_TEST_PG_BIN="\$\(pg_config --bindir\)" node scripts\/ops\/run-recovery-manual-checkpoint\.mjs\s*$/m)
+}
+
+function attachmentStageRunnerContract(runner) {
+  assert.match(runner, /:\s*\['scripts\/verify-recovery-manual-checkpoint\.mts', 'scripts\/verify-recovery-attachment-stage\.mts'\]/)
+  assert.match(runner, /for \(const script of scripts\)/)
+  assert.match(runner, /'exec', 'tsx', script\]/)
+  assert.match(runner, /assert\.equal\(code, 0,/)
+}
+
+test('required plugin lane runs the owned-cluster manual checkpoint driver without skip-green', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  manualCheckpointContract(workflow)
+  assert.throws(() => manualCheckpointContract(workflow.replace(
+    'node scripts/ops/run-recovery-manual-checkpoint.mjs', 'echo checkpoint-disabled',
+  )))
+  assert.throws(() => manualCheckpointContract(workflow.replace(
+    '      - name: Run isolated manual checkpoint acceptance',
+    '      - name: Run isolated manual checkpoint acceptance\n        if: false',
+  )))
+  const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  attachmentStageRunnerContract(runner)
+  assert.throws(() => attachmentStageRunnerContract(runner.replace(
+    ", 'scripts/verify-recovery-attachment-stage.mts']", "]",
+  )))
+  assert.match(runner, /scripts\/verify-recovery-manual-checkpoint\.mts/)
+  assert.match(runner, /assert\.equal\(code, 0,/)
+})
+
+function ownedWorkbenchContract(runner) {
+  assert.match(runner, /const workbench = process\.argv\.includes\('--workbench'\)/)
+  assert.match(runner, /if \(workbench\) \{/)
+  assert.match(runner, /runPnpm\(\['migrate'\], databaseEnv\)/)
+  assert.match(runner, /runPnpm\(\['exec', 'tsx', 'scripts\/verify-timemachine-workbench\.mts'\], databaseEnv\)/)
+  assert.match(runner, /SELECT count\(\*\) FROM pg_stat_activity WHERE datname=/)
+  assert.match(runner, /'WORKBENCH_DATABASE_CONNECTIONS_REMAIN'/)
+  assert.match(runner, /run\('dropdb',/)
+}
+
+test('optional full-workbench acceptance owns its migrated database and residue gate', () => {
+  const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  ownedWorkbenchContract(runner)
+  assert.throws(() => ownedWorkbenchContract(runner.replace(
+    'scripts/verify-timemachine-workbench.mts', 'scripts/disabled-workbench.mts',
+  )))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('WORKBENCH_DATABASE_CONNECTIONS_REMAIN', 'ignored')))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('if (workbench)', 'if (false && workbench)')))
+})
+
+test('owned acceptance modes cannot silently suppress one another', () => {
+  for (const modes of [['--browser', '--workbench'], ['--attachment-stage', '--workbench'], ['--browser', '--attachment-stage']]) {
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), ...modes], {
+      env: {}, encoding: 'utf8', timeout: 10000,
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /INCOMPATIBLE_ACCEPTANCE_ARGUMENTS/)
+  }
+})
+
+function maskCommentsAndStrings(src) {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    if (src[i] === '/' && src[i + 1] === '/') {
+      out += '  '
+      i += 2
+      while (i < src.length && src[i] !== '\n') {
+        out += ' '
+        i++
+      }
+      continue
+    }
+    if (src[i] === '/' && src[i + 1] === '*') {
+      out += '  '
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' '
+        i++
+      }
+      if (i < src.length) {
+        out += '  '
+        i += 2
+      }
+      continue
+    }
+    if (src[i] === "'" || src[i] === '"') {
+      const quote = src[i]
+      out += ' '
+      i++
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === '\\' && i + 1 < src.length) {
+          out += '  '
+          i += 2
+          continue
+        }
+        out += src[i] === '\n' ? '\n' : ' '
+        i++
+      }
+      if (i < src.length) {
+        out += ' '
+        i++
+      }
+      continue
+    }
+    out += src[i]
+    i++
+  }
+  return out
+}
+
+// LINE ENDINGS: normalize to LF before any line-oriented parsing below. `.` never matches
+// a carriage return and `$` without the `m` flag only anchors at end-of-input, so on a CRLF
+// checkout (Windows `core.autocrlf`) the `//`-comment strip silently no-ops and the first
+// apostrophe inside a surviving comment shifts quote pairing for every entry after it. On LF
+// input `String#replace` returns an identical string, so CI (Linux, LF) is bit-for-bit
+// unchanged. Same defect and same fix as `extractTestExcludeArrayBody` in
+// `./ci-realdb-step-contract.mjs`; this file predates that shared module and keeps its own copy.
+function normalizeEol(text) {
+  return text.replace(/\r\n?/g, '\n')
+}
+
+function testExcludeEntries(rawSrc) {
+  const src = normalizeEol(rawSrc)
+  const masked = maskCommentsAndStrings(src)
+  const testKey = /\btest\s*:\s*\{/.exec(masked)
+  assert.ok(testKey, 'vitest config must contain a test object')
+  const openBrace = masked.indexOf('{', testKey.index + testKey[0].length - 1)
+  let depth = 1
+  for (let i = openBrace + 1; i < masked.length && depth > 0; i++) {
+    if (masked[i] === '{') depth++
+    else if (masked[i] === '}') depth--
+    else if (depth === 1) {
+      const match = /^(exclude\s*:\s*\[)/.exec(masked.slice(i))
+      if (!match) continue
+      const arrayStart = i + match[1].length - 1
+      let arrayDepth = 0
+      for (let j = arrayStart; j < masked.length; j++) {
+        if (masked[j] === '[') arrayDepth++
+        else if (masked[j] === ']' && --arrayDepth === 0) {
+          const body = src
+            .slice(arrayStart + 1, j)
+            .split('\n')
+            .map((line) => line.replace(/\/\/.*$/, ''))
+            .join('\n')
+          return [...body.matchAll(/'([^']+)'|"([^"]+)"/g)].map(
+            (entry) => entry[1] ?? entry[2],
+          )
+        }
+      }
+    }
+  }
+  return []
+}
+
+function namedStepBody(rawWorkflow, nameNeedle) {
+  // Same CRLF reason as normalizeEol above: the `- name:` line regex below ends in `.*$`,
+  // which matches NOTHING on a line whose last character is a carriage return, so every
+  // step lookup in this file failed on a Windows checkout.
+  const lines = normalizeEol(rawWorkflow).split('\n')
+  let start = -1
+  let indent = ''
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(\s*)- name:\s*(.*)$/)
+    if (match && match[2].includes(nameNeedle)) {
+      start = i
+      indent = match[1]
+      break
+    }
+  }
+  assert.ok(
+    start >= 0,
+    `workflow step containing ${JSON.stringify(nameNeedle)} not found`,
+  )
+  const body = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const match = lines[i].match(/^(\s*)- name:\s*/)
+    if (match && match[1] === indent) break
+    body.push(lines[i])
+  }
+  return body.join('\n')
+}
+
+function stepHasEnvKey(stepBody, key) {
+  const lines = stepBody.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const env = /^(\s*)env:\s*$/.exec(lines[i])
+    if (!env) continue
+    const envIndent = env[1].length
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*(?:#.*)?$/.test(lines[j])) continue
+      const indent = lines[j].match(/^(\s*)/)[1].length
+      if (indent <= envIndent) break
+      if (new RegExp(`^\\s*${key}:\\s*\\S`).test(lines[j])) return true
+    }
+  }
+  return false
+}
+
+function wholeFileVitestArgs(stepBody) {
+  return stepBody.split('\n').flatMap((line) => {
+    if (/^\s*#/.test(line)) return []
+    const match = line.match(
+      /^\s+(tests\/integration\/\S+\.(?:test|spec)\.[tj]sx?)\s*(?:\\)?\s*$/,
+    )
+    return match ? [match[1]] : []
+  })
+}
+
+for (const file of FILES) {
+  test(`vitest.config.ts excludes ${file} from the no-DB job`, () => {
+    const config = readFileSync(
+      join(repoRoot, 'packages/core-backend/vitest.config.ts'),
+      'utf8',
+    )
+    assert.ok(
+      testExcludeEntries(config).includes(file),
+      `test.exclude must contain the exact entry ${file}`,
+    )
+  })
+
+  test(`plugin-tests.yml runs ${file} as a whole file with real Postgres`, () => {
+    const workflow = readFileSync(
+      join(repoRoot, '.github/workflows/plugin-tests.yml'),
+      'utf8',
+    )
+    const step = namedStepBody(workflow, REAL_DB_STEP)
+    assert.ok(
+      stepHasEnvKey(step, 'DATABASE_URL'),
+      `${REAL_DB_STEP} must define DATABASE_URL`,
+    )
+    assert.ok(
+      stepHasEnvKey(step, 'METASHEET_REAL_DB_TEST_STEP'),
+      `${REAL_DB_STEP} must set the fail-not-skip marker`,
+    )
+    assert.match(
+      step,
+      /\bvitest\b[^\n]*--config\s+vitest\.integration\.config\.ts\b/,
+    )
+    assert.ok(
+      wholeFileVitestArgs(step).includes(file),
+      `${REAL_DB_STEP} must run ${file} as a whole-file argument`,
+    )
+  })
+}
+
+test('placement parsers reject comment-only and wrong-step decoys', () => {
+  const file = FILES[1]
+  const configDecoy = `export default defineConfig({ test: { // '${file}'\nexclude: ['other.test.ts'] } })`
+  assert.equal(testExcludeEntries(configDecoy).includes(file), false)
+
+  const workflowDecoy = [
+    'steps:',
+    `  # ${file}`,
+    '  - name: Run some other integration',
+    '    env:',
+    '      DATABASE_URL: postgresql://example',
+    '      METASHEET_REAL_DB_TEST_STEP: 1',
+    '    run: |',
+    '      pnpm exec vitest --config vitest.integration.config.ts run \\',
+    `        ${file} \\`,
+    `  - name: ${REAL_DB_STEP}`,
+    '    run: echo no-db',
+  ].join('\n')
+  const realStep = namedStepBody(workflowDecoy, REAL_DB_STEP)
+  assert.equal(stepHasEnvKey(realStep, 'DATABASE_URL'), false)
+  assert.equal(wholeFileVitestArgs(realStep).includes(file), false)
+})
+
+/**
+ * The production statement the source writer parks on, read from its single definition (#5938).
+ *
+ * The waiter probe used to carry a hand-copied COPY of this text. A copy cannot fail loudly: reword the
+ * statement and the probe matches nothing, so the `>= 2` floor reds as if the lock had been LOST, and
+ * the property it existed to prove stops being checked. So the probe derives its pattern from the
+ * constant, and this guard pins BOTH halves of that derivation — the reference, and that the constant
+ * really is a `meta_sheets` row lock that reads `deleted_at`.
+ */
+const SHEET_ROW_LOCK_SQL_CONSTANT = 'SHEET_ROW_LOCK_LIVENESS_SQL'
+
+function readSheetRowLockLivenessSql() {
+  const src = readFileSync(
+    join(repoRoot, 'packages/core-backend/src/multitable/sheet-liveness.ts'),
+    'utf8',
+  )
+  const m = new RegExp(`export const ${SHEET_ROW_LOCK_SQL_CONSTANT} = '([^']+)'`).exec(src)
+  assert.ok(m, `${SHEET_ROW_LOCK_SQL_CONSTANT} must be exported from src/multitable/sheet-liveness.ts`)
+  return m[1]
+}
+
+function assertAuthorityWriterWaiterContract(source) {
+  const start = source.indexOf('// Both production writers must be blocked')
+  const end = source.indexOf('// Membership writers have no sheet-row prerequisite', start)
+  assert.ok(start >= 0 && end > start, 'authority-writer waiter contract block must exist')
+  const block = source.slice(start, end)
+
+  // (1) The FOR UPDATE leg is DERIVED from the production constant, never copied.
+  assert.match(
+    block,
+    /query LIKE \$1\b/,
+    'waiter probe must bind the FOR UPDATE pattern as a parameter it derives, not inline a literal',
+  )
+  assert.match(
+    block,
+    /\[`\$\{SHEET_ROW_LOCK_LIVENESS_SQL\}%`\]/,
+    `waiter probe must derive the FOR UPDATE pattern from ${SHEET_ROW_LOCK_SQL_CONSTANT}`,
+  )
+  assert.match(
+    source,
+    /import \{ SHEET_ROW_LOCK_LIVENESS_SQL \} from '\.\.\/\.\.\/src\/multitable\/sheet-liveness'/,
+    `the golden must import ${SHEET_ROW_LOCK_SQL_CONSTANT} from the production module`,
+  )
+  assert.doesNotMatch(
+    block,
+    /query LIKE '[^']*FROM meta_sheets[^']*FOR UPDATE%'/,
+    're-inlining a copy of the row-lock statement is what went blind in #5938',
+  )
+  // (2) …and the constant really is the meta_sheets row lock that reads deleted_at.
+  const productionSql = readSheetRowLockLivenessSql()
+  assert.match(productionSql, /\bFROM\s+meta_sheets\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must lock meta_sheets`)
+  assert.match(productionSql, /\bFOR\s+UPDATE\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must take a row lock`)
+  assert.match(productionSql, /\bdeleted_at\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must read deleted_at under that lock`)
+
+  assert.match(
+    block,
+    /query LIKE 'SELECT id FROM meta_sheets WHERE id = \$1 FOR SHARE%'/,
+    'waiter probe must recognize the main authority helper FOR SHARE writer',
+  )
+  assert.match(
+    block,
+    /expect\(authorityWaiters\)\.toBeGreaterThanOrEqual\(2\)/,
+    'the golden must still require both independent authority writers to park',
+  )
+  assert.doesNotMatch(
+    block,
+    /expect\(authorityWaiters\)\.toBeGreaterThanOrEqual\(1\)/,
+    'weakening the dual-writer guarantee to one waiter is forbidden',
+  )
+}
+
+test('authority waiter matcher covers FOR UPDATE and FOR SHARE while preserving the >=2 guarantee', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  assertAuthorityWriterWaiterContract(routeTest)
+})
+
+test('authority waiter contract rejects the tempting >=1 weakening', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  const weakened = routeTest.replace(
+    'expect(authorityWaiters).toBeGreaterThanOrEqual(2)',
+    'expect(authorityWaiters).toBeGreaterThanOrEqual(1)',
+  )
+  assert.throws(
+    () => assertAuthorityWriterWaiterContract(weakened),
+    /both independent authority writers|weakening the dual-writer guarantee/,
+  )
+})
+
+test('authority waiter contract rejects re-inlining a copy of the row-lock statement (#5938 blindness)', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  // The exact regression: a hand-copied literal that no longer matches what the route issues. It is
+  // still a syntactically fine probe — only the guard can tell it apart from the derived one.
+  const reblinded = routeTest.replace(
+    'query LIKE $1',
+    "query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'",
+  )
+  assert.throws(
+    () => assertAuthorityWriterWaiterContract(reblinded),
+    /re-inlining a copy of the row-lock statement|must bind the FOR UPDATE pattern/,
+  )
+})
+
+const TIME_MACHINE_REPLAY_MIGRATIONS = [
+  'zzzz20260708090000_create_meta_tombstone_tables',
+  'zzzz20260709100000_add_delete_revision_id_to_meta_records_trash',
+  'zzzz20260711000000_add_meta_record_revisions_restored_from_version',
+  'zzzz20260713150000_create_meta_record_version_markers',
+  'zzzz20260715160000_add_meta_record_chain_seq',
+  'zzzz20260715170000_add_meta_sheet_recovery_writer_state',
+  'zzzz20260715180000_create_meta_history_trust_checkpoints',
+  'zzzz20260715210000_create_meta_record_history_operations',
+  'zzzz20260719120000_create_meta_recovery_token_burns',
+  'zzzz20260721121000_add_recovery_authority_locks',
+  'zzzz20260728120000_correct_recovery_authority_locks',
+  'zzzz20260821120000_recovery_authority_functions_fix_search_path',
+  'zzzz20260826120000_create_meta_recovery_archive_catalog',
+  'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
+  'zzzz20260826122000_add_section_causality_substrate',
+  'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
+  'zzzz20260826123000_add_archive_writer_block_ownership',
+  'zzzz20260826124000_create_recovery_archive_crypto_registry',
+  'zzzz20260827120000_add_recovery_archive_coverage_binding',
+  'zzzz20260828120000_add_recovery_archive_snapshot_reservations',
+  'zzzz20260828121000_add_recovery_archive_key_registry',
+  'zzzz20260828124000_add_recovery_archive_source_pin_authority',
+  'zzzz20260828125000_add_recovery_archive_object_receipt_authority',
+  'zzzz20260828126000_amend_recovery_archive_claim_anchor',
+  'zzzz20260828130000_add_recovery_archive_legal_hold_authority',
+  'zzzz20260828131000_create_recovery_archive_restore_jobs',
+  'zzzz20260915160000_create_recovery_archive_derived_effects',
+  'zzzz20260918120000_add_recovery_archive_section_checkpoints',
+  'zzzz20260918130000_create_recovery_archive_prepared_captures',
+  'zzzz20260918140000_create_recovery_archive_manual_requests',
+  'zzzz20260919130000_extend_archive_nonce_object_identity',
+  'zzzz20260919160000_create_archive_attachment_restore_stages',
+  'zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert',
+]
+const TIME_MACHINE_REPLAY_VERIFIER =
+  'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
+const ARCHIVE_LEGAL_HOLD_MIGRATION =
+  'src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority.ts'
+const ARCHIVE_CRYPTO_REGISTRY_MIGRATION =
+  'src/db/migrations/zzzz20260826124000_create_recovery_archive_crypto_registry.ts'
+const ARCHIVE_RESTORE_JOBS_MIGRATION =
+  'src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs.ts'
+const ARCHIVE_LEGAL_HOLD_FUNCTIONS = [
+  'meta_recovery_archive_expiry_authorize',
+  'meta_recovery_archive_legal_hold_expiry_guard_row',
+  'meta_recovery_archive_legal_hold_guard_row',
+  'meta_recovery_archive_legal_hold_guard_truncate',
+  'meta_recovery_archive_legal_hold_release_authorize',
+]
+const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
+const TIME_MACHINE_REPLAY_FAILURE_MIGRATION =
+  'zzzz20260715170000_add_meta_sheet_recovery_writer_state'
+const MIGRATION_REPLAY_EXCLUDE =
+  '008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts'
+
+function migrationReplayContract(workflow, verifier) {
+  const step = namedStepBody(workflow, 'prove Time Machine down/up replay')
+  assert.ok(stepHasEnvKey(step, 'DATABASE_URL'), 'migration replay step must define DATABASE_URL')
+
+  const stepLines = step.split('\n')
+  const runLine = stepLines.findIndex((line) => /^\s*run:\s*\|\s*$/.test(line))
+  assert.ok(runLine >= 0, 'migration replay step must have a block run command')
+  const commands = stepLines
+    .slice(runLine + 1)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+  assert.deepEqual(
+    commands,
+    [
+      'pnpm -F @metasheet/core-backend db:migrate',
+      'pnpm -F @metasheet/core-backend db:migrate',
+      `pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}`,
+      'pnpm -F @metasheet/core-backend db:migrate',
+    ],
+    'workflow must run normal migrate twice, the direct down/up verifier, then a ledger no-op pass',
+  )
+
+  const failureStep = namedStepBody(workflow, 'Prove injected Time Machine down failure cleanup')
+  assert.ok(stepHasEnvKey(failureStep, 'DATABASE_URL'), 'failure cleanup step must define DATABASE_URL')
+  assert.ok(
+    stepHasEnvKey(failureStep, TIME_MACHINE_REPLAY_FAILURE_ENV),
+    'failure cleanup step must arm the deterministic down failure',
+  )
+  assert.match(
+    failureStep,
+    new RegExp(`${TIME_MACHINE_REPLAY_FAILURE_ENV}:\\s*${TIME_MACHINE_REPLAY_FAILURE_MIGRATION}`),
+    'required CI must inject after the pinned middle migration',
+  )
+  const verifierCommand = `pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}`
+  const recoveryCommand = `env -u ${TIME_MACHINE_REPLAY_FAILURE_ENV} ${verifierCommand}`
+  assert.ok(
+    failureStep.includes(`if ${verifierCommand}; then`),
+    'required CI must require the armed verifier to fail',
+  )
+  assert.ok(
+    failureStep.includes(recoveryCommand),
+    'required CI must explicitly unarm the failure injection before proving recovery',
+  )
+  assert.equal(
+    failureStep.split(verifierCommand).length - 1,
+    2,
+    'failure cleanup step must run exactly one injected verifier and one unarmed recovery verifier',
+  )
+  assert.ok(
+    failureStep.indexOf(`if ${verifierCommand}; then`) < failureStep.indexOf(recoveryCommand),
+    'required CI must run the injected verifier before the unarmed recovery verifier',
+  )
+
+  const excludeValues = [...workflow.matchAll(/^\s*MIGRATION_EXCLUDE:\s*(\S+)\s*$/gm)].map(
+    (match) => match[1],
+  )
+  assert.deepEqual(
+    excludeValues,
+    [MIGRATION_REPLAY_EXCLUDE, MIGRATION_REPLAY_EXCLUDE],
+    'migration replay and db:list must use the same exact exclusion set',
+  )
+
+  const migrationBlock = verifier.match(
+    /const MIGRATIONS: NamedMigration\[\] = \[([\s\S]*?)^\]/m,
+  )?.[1]
+  assert.ok(migrationBlock, 'verifier must declare the explicit migration sequence')
+  const names = [...migrationBlock.matchAll(/name:\s*'([^']+)'/g)].map((match) => match[1])
+  assert.deepEqual(
+    names,
+    TIME_MACHINE_REPLAY_MIGRATIONS,
+    'verifier must exercise the exact 33 Time Machine migrations in causal order',
+  )
+  assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
+  assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
+  assert.match(
+    verifier,
+    /zzzz20260826122000_add_section_causality_substrate[\s\S]*assertPreD2cEndpointFunctionsUnconfigured/,
+    'verifier must assert pre-D2c endpoint function proconfig after D2c down',
+  )
+  assert.match(verifier, /database_url_required/)
+  assert.match(verifier, /await assertOwnedSurfaceAbsent\(db\)/)
+  assert.match(verifier, /changedKeys\.length === 0/)
+  assert.match(
+    verifier,
+    /downed\.add\(migration\.name\)\s+await migration\.module\.down\(db\)/,
+    'verifier must mark the current migration for recovery before down() can partially fail',
+  )
+  assert.match(
+    verifier,
+    /TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER[\s\S]*injected_down_failure/,
+    'verifier must retain a deterministic verifier-only down failure injection',
+  )
+  assert.match(verifier, /sequence_row\.seqcache::text/, 'sequence fingerprint must include cache_size')
+  assert.doesNotMatch(verifier, /\b(last_value|is_called)\b/, 'runtime sequence state must stay excluded')
+  assert.doesNotMatch(verifier, /error\.message/, 'failure output must not expose database error messages')
+  for (const index of [
+    'uq_meta_records_trash_delete_revision',
+    'idx_meta_record_version_markers_sheet_record',
+    'idx_meta_record_revisions_sheet_record_seq',
+    'idx_meta_record_version_markers_sheet_record_seq',
+    'idx_meta_record_revisions_operation',
+    'idx_meta_record_version_markers_operation',
+    'idx_meta_config_revisions_operation',
+    'idx_meta_field_value_tombstones_operation',
+    'idx_meta_link_tombstones_operation',
+  ]) {
+    assert.match(verifier, new RegExp(`'${index}'`), `verifier must check owned index ${index}`)
+  }
+  for (const constraint of [
+    'chk_meta_sheets_recovery_writer_state',
+    'chk_meta_sheets_recovery_writer_owner_kind',
+    'chk_meta_sheets_recovery_writer_owner_tuple',
+    'chk_meta_sheets_recovery_writer_fence',
+    'uq_meta_record_version_markers_sheet_record_version',
+    'fk_mrr_operation',
+    'fk_mrvm_operation',
+    'fk_mcr_operation',
+    'fk_mfvt_operation',
+    'fk_mlt_operation',
+    'chk_meta_recovery_archive_coverage_kind_binding',
+  ]) {
+    assert.match(verifier, new RegExp(`'${constraint}'`), `verifier must check owned constraint ${constraint}`)
+  }
+  assert.match(verifier, /'meta_config_revisions'/, 'verifier must fingerprint meta_config_revisions')
+  assert.match(
+    verifier,
+    /'meta_nonrecord_history_operation_binding_guard_row'/,
+    'verifier must own the operation-binding guard function',
+  )
+  for (const trigger of [
+    'trg_mcr_operation_binding_immutable',
+    'trg_mfvt_operation_binding_immutable',
+    'trg_mlt_operation_binding_immutable',
+    'trg_mcr_reject_append_sealed',
+    'trg_mfvt_reject_append_sealed',
+    'trg_mlt_reject_append_sealed',
+  ]) {
+    assert.match(verifier, new RegExp(`'${trigger}'`), `verifier must check owned trigger ${trigger}`)
+  }
+}
+
+test('required CI pins the Time Machine migration down/up replay contract', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/migration-replay.yml'), 'utf8')
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  migrationReplayContract(workflow, verifier)
+})
+
+test('migration replay contract rejects removal of the direct verifier', () => {
+  const workflow = readFileSync(
+    join(repoRoot, '.github/workflows/migration-replay.yml'),
+    'utf8',
+  ).replace(`pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}`, 'true')
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  assert.throws(() => migrationReplayContract(workflow, verifier), /direct down\/up verifier/)
+})
+
+test('migration replay contract rejects migration-set or exclusion drift', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/migration-replay.yml'), 'utf8')
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  const driftedMigration = verifier.replace(
+    "name: 'zzzz20260715180000_create_meta_history_trust_checkpoints'",
+    "name: 'zzzz20260715180000_omitted_trust_checkpoint'",
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, driftedMigration),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingArchiveCleanup = verifier.replace(
+    "  {\n    name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',\n    module: recoveryArchiveStagingCleanup,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveCleanup),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingSectionCausality = verifier.replace(
+    "  {\n    name: 'zzzz20260826122000_add_section_causality_substrate',\n    module: sectionCausality,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingSectionCausality),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingOperationBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',\n    module: operationBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingOperationBinding, verifier, 'operation-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingOperationBinding),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingArchiveWriterBlock = verifier.replace(
+    "  {\n    name: 'zzzz20260826123000_add_archive_writer_block_ownership',\n    module: archiveWriterBlock,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingArchiveWriterBlock, verifier, 'archive-writer-block removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveWriterBlock),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingCoverageBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',\n    module: coverageBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingCoverageBinding, verifier, 'coverage-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingCoverageBinding),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingObjectReceiptAuthority = verifier.replace(
+    "  {\n    name: 'zzzz20260828125000_add_recovery_archive_object_receipt_authority',\n    module: objectReceiptAuthority,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingObjectReceiptAuthority,
+    verifier,
+    'object-receipt-authority removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingObjectReceiptAuthority),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingClaimAnchorAmendment = verifier.replace(
+    "  {\n    name: 'zzzz20260828126000_amend_recovery_archive_claim_anchor',\n    module: claimAnchorAmendment,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingClaimAnchorAmendment,
+    verifier,
+    'claim-anchor-amendment removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingClaimAnchorAmendment),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingLegalHoldAuthority = verifier.replace(
+    "  {\n    name: 'zzzz20260828130000_add_recovery_archive_legal_hold_authority',\n    module: legalHoldAuthority,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingLegalHoldAuthority,
+    verifier,
+    'legal-hold-authority removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingLegalHoldAuthority),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingArchiveCryptoRegistry = verifier.replace(
+    "  {\n    name: 'zzzz20260826124000_create_recovery_archive_crypto_registry',\n    module: archiveCryptoRegistry,\n  },\n",
+    '',
+  )
+  assert.notEqual(
+    missingArchiveCryptoRegistry,
+    verifier,
+    'archive-crypto-registry removal mutation must apply',
+  )
+  assert.throws(
+    () => migrationReplayContract(workflow, missingArchiveCryptoRegistry),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingRestoreJobs = verifier.replace(
+    "  {\n    name: 'zzzz20260828131000_create_recovery_archive_restore_jobs',\n    module: restoreJobs,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingRestoreJobs, verifier, 'restore-jobs removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingRestoreJobs),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingDerivedEffects = verifier.replace(
+    "  {\n    name: 'zzzz20260915160000_create_recovery_archive_derived_effects',\n    module: derivedEffects,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingDerivedEffects, verifier, 'derived-effects removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingDerivedEffects),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const missingSectionCheckpoints = verifier.replace(
+    /  \{\n    name: 'zzzz20260918120000_add_recovery_archive_section_checkpoints',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingSectionCheckpoints, verifier, 'section-checkpoints removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingSectionCheckpoints),
+    /exact 33 Time Machine migrations/,
+  )
+
+  const driftedExclude = workflow.replace(
+    `MIGRATION_EXCLUDE: ${MIGRATION_REPLAY_EXCLUDE}`,
+    `MIGRATION_EXCLUDE: ${MIGRATION_REPLAY_EXCLUDE},unexpected.ts`,
+  )
+  const missingPreparedCaptures = verifier.replace(
+    /  \{\n    name: 'zzzz20260918130000_create_recovery_archive_prepared_captures',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingPreparedCaptures, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingPreparedCaptures), /exact 33 Time Machine migrations/)
+  const missingManualRequests = verifier.replace(
+    /  \{\n    name: 'zzzz20260918140000_create_recovery_archive_manual_requests',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingManualRequests, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingManualRequests), /exact 33 Time Machine migrations/)
+  const missingNonceObjects = verifier.replace(
+    /  \{\n    name: 'zzzz20260919130000_extend_archive_nonce_object_identity',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingNonceObjects, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingNonceObjects), /exact 33 Time Machine migrations/)
+  const missingAttachmentStages = verifier.replace(
+    /  \{\n    name: 'zzzz20260919160000_create_archive_attachment_restore_stages',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingAttachmentStages, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingAttachmentStages), /exact 33 Time Machine migrations/)
+  const missingRetypeConvertReason = verifier.replace(
+    /  \{\n    name: 'zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingRetypeConvertReason, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingRetypeConvertReason), /exact 33 Time Machine migrations/)
+  assert.throws(() => migrationReplayContract(driftedExclude, verifier), /same exact exclusion set/)
+})
+
+test('migration replay census names every D3 legal-hold function owned by the migration', () => {
+  const migration = readFileSync(
+    join(repoRoot, 'packages/core-backend', ARCHIVE_LEGAL_HOLD_MIGRATION),
+    'utf8',
+  )
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  const migrationFunctions = [
+    ...migration.matchAll(/CREATE FUNCTION public\.([a-z0-9_]+)\(/g),
+  ].map((match) => match[1]).sort()
+  assert.deepEqual(
+    migrationFunctions,
+    ARCHIVE_LEGAL_HOLD_FUNCTIONS,
+    'the D3 migration must retain the exact five owned functions',
+  )
+
+  const rosterBlock = verifier.match(
+    /const ARCHIVE_LEGAL_HOLD_FUNCTIONS = \[([\s\S]*?)^\]/m,
+  )?.[1]
+  assert.ok(rosterBlock, 'replay verifier must declare the D3 legal-hold function roster')
+  const rosterFunctions = [...rosterBlock.matchAll(/'([^']+)'/g)]
+    .map((match) => match[1])
+    .sort()
+  assert.deepEqual(
+    rosterFunctions,
+    migrationFunctions,
+    'replay absence and fingerprint census must cover every D3 migration-owned function',
+  )
+})
+
+test('migration replay census covers every D2h and D5 catalog object', () => {
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+
+  for (const migrationPath of [ARCHIVE_CRYPTO_REGISTRY_MIGRATION, ARCHIVE_RESTORE_JOBS_MIGRATION]) {
+    const migration = readFileSync(join(repoRoot, 'packages/core-backend', migrationPath), 'utf8')
+    const objects = [
+      ...migration.matchAll(/CREATE TABLE public\.([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE VIEW public\.([a-z0-9_]+)/g),
+      ...migration.matchAll(/ADD COLUMN ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CONSTRAINT ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE INDEX ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE (?:CONSTRAINT )?TRIGGER ([a-z0-9_]+)/g),
+      ...migration.matchAll(/CREATE FUNCTION public\.([a-z0-9_]+)/g),
+    ].map((match) => match[1])
+
+    for (const objectName of new Set(objects)) {
+      assert.match(
+        verifier,
+        new RegExp("'" + objectName + "'"),
+        'replay verifier must census ' + objectName + ' from ' + migrationPath,
+      )
+    }
+  }
+})
+
+test('migration replay contract rejects recovery, fingerprint, and values-free output drift', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/migration-replay.yml'), 'utf8')
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+
+  const unmarkedCurrentMigration = verifier.replace(
+    '      downed.add(migration.name)\n      await migration.module.down(db)',
+    '      await migration.module.down(db)\n      downed.add(migration.name)',
+  )
+  assert.throws(() => migrationReplayContract(workflow, unmarkedCurrentMigration), /mark the current migration/)
+
+  const missingCacheSize = verifier.replace('sequence_row.seqcache::text', 'sequence_row.seqcycle::text')
+  assert.throws(() => migrationReplayContract(workflow, missingCacheSize), /include cache_size/)
+
+  const leakedDatabaseMessage = verifier.replace(
+    "return `Time Machine migration replay FAIL phase=${phase} code=unexpected_database_error category=database count=0`",
+    'return error.message',
+  )
+  assert.throws(() => migrationReplayContract(workflow, leakedDatabaseMessage), /must not expose database error messages/)
+})
+
+test('migration replay contract rejects an unarmed or skip-green failure-cleanup proof', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/migration-replay.yml'), 'utf8')
+  const verifier = readFileSync(
+    join(repoRoot, 'packages/core-backend', TIME_MACHINE_REPLAY_VERIFIER),
+    'utf8',
+  )
+  const verifierCommand = `pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}`
+  const recoveryCommand = `env -u ${TIME_MACHINE_REPLAY_FAILURE_ENV} ${verifierCommand}`
+
+  const unarmed = workflow.replace(
+    `${TIME_MACHINE_REPLAY_FAILURE_ENV}: ${TIME_MACHINE_REPLAY_FAILURE_MIGRATION}`,
+    `${TIME_MACHINE_REPLAY_FAILURE_ENV}_REMOVED: ${TIME_MACHINE_REPLAY_FAILURE_MIGRATION}`,
+  )
+  assert.throws(() => migrationReplayContract(unarmed, verifier), /arm the deterministic down failure/)
+
+  const skipGreen = workflow.replace(`if pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}; then`, 'true')
+  assert.throws(() => migrationReplayContract(skipGreen, verifier), /require the armed verifier to fail/)
+
+  const noRecovery = workflow.replace(
+    `          env -u ${TIME_MACHINE_REPLAY_FAILURE_ENV} pnpm -F @metasheet/core-backend exec tsx ${TIME_MACHINE_REPLAY_VERIFIER}\n\n      - name: List migrations`,
+    '      - name: List migrations',
+  )
+  assert.throws(() => migrationReplayContract(noRecovery, verifier), /explicitly unarm the failure injection/)
+
+  const stillArmedRecovery = workflow.replace(
+    `env -u ${TIME_MACHINE_REPLAY_FAILURE_ENV} pnpm`,
+    'pnpm',
+  )
+  assert.throws(
+    () => migrationReplayContract(stillArmedRecovery, verifier),
+    /explicitly unarm the failure injection/,
+  )
+
+  const reversedOrder = workflow
+    .replace(`          if ${verifierCommand}; then`, '          __INJECTED_VERIFIER__')
+    .replace(`          ${recoveryCommand}`, `          if ${verifierCommand}; then`)
+    .replace('          __INJECTED_VERIFIER__', `          ${recoveryCommand}`)
+  assert.throws(
+    () => migrationReplayContract(reversedOrder, verifier),
+    /run the injected verifier before the unarmed recovery verifier/,
+  )
+})

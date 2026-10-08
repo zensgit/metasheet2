@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { isAdmin } from '../../src/rbac/service'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
@@ -75,6 +76,7 @@ async function buildApp(user?: { id: string }): Promise<Express> {
 
 const SUMMARY_URL = '/api/multitable/ai/usage-summary'
 const savedEnv = new Map<string, string | undefined>()
+const pinned = usePinnedServer()
 
 describe('GET /api/multitable/ai/usage-summary (internal, admin-only, limiter-free)', () => {
   beforeEach(() => {
@@ -105,7 +107,8 @@ describe('GET /api/multitable/ai/usage-summary (internal, admin-only, limiter-fr
 
   it('A3-T7: admin gets a 200 flat summary {callerDayTokens, callerWeekTokens, instanceDayUsd, caps}', async () => {
     const app = await buildApp({ id: 'admin-1' })
-    const res = await request(app).get(SUMMARY_URL).expect(200)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get(SUMMARY_URL).expect(200)
 
     expect(res.body).toEqual({
       callerDayTokens: 123,
@@ -126,7 +129,8 @@ describe('GET /api/multitable/ai/usage-summary (internal, admin-only, limiter-fr
 
   it('A3-T7: the summary read shares the quota SUM SQL (no status filter, same windows)', async () => {
     const app = await buildApp({ id: 'admin-1' })
-    await request(app).get(SUMMARY_URL).expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).get(SUMMARY_URL).expect(200)
 
     const sql = sumQueryCalls[0].sql
     expect(sql).toContain('user_daily_tokens')
@@ -138,14 +142,16 @@ describe('GET /api/multitable/ai/usage-summary (internal, admin-only, limiter-fr
   it('A3-T7: non-admin → 403; unauthenticated → 403 (ADMIN_REQUIRED — 401 belongs upstream)', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const nonAdminApp = await buildApp({ id: 'user-1' })
-    const nonAdmin = await request(nonAdminApp).get(SUMMARY_URL).expect(403)
+    pinned.setApp(nonAdminApp)
+    const nonAdmin = await request(pinned.url()).get(SUMMARY_URL).expect(403)
     expect(nonAdmin.body.code).toBe('ADMIN_REQUIRED')
     expect(sumQueryCalls).toHaveLength(0)
 
     vi.restoreAllMocks()
     vi.mocked(isAdmin).mockResolvedValue(true)
     const anonApp = await buildApp()
-    await request(anonApp).get(SUMMARY_URL).expect(403)
+    pinned.setApp(anonApp)
+    await request(pinned.url()).get(SUMMARY_URL).expect(403)
     expect(sumQueryCalls).toHaveLength(0)
   })
 
@@ -155,16 +161,18 @@ describe('GET /api/multitable/ai/usage-summary (internal, admin-only, limiter-fr
 
     // The shortcut limiter at rpm=1 would 429 the second request; the summary
     // route must never consume (or be blocked by) that budget.
-    await request(app).get(SUMMARY_URL).expect(200)
-    await request(app).get(SUMMARY_URL).expect(200)
-    await request(app).get(SUMMARY_URL).expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).get(SUMMARY_URL).expect(200)
+    await request(pinned.url()).get(SUMMARY_URL).expect(200)
+    await request(pinned.url()).get(SUMMARY_URL).expect(200)
     expect(sumQueryCalls).toHaveLength(3)
   })
 
   it('A3-T7: ledger read failure → 500 INTERNAL_ERROR (read-only route, no fail-open numbers)', async () => {
     sumQueryError = new Error('ledger down')
     const app = await buildApp({ id: 'admin-1' })
-    const res = await request(app).get(SUMMARY_URL).expect(500)
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get(SUMMARY_URL).expect(500)
     expect(res.body.ok).toBe(false)
     expect(res.body.error.code).toBe('INTERNAL_ERROR')
   })

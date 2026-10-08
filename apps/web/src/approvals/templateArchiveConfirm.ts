@@ -16,11 +16,11 @@ export function templateArchiveConfirmMessage(
   usage: ApprovalTemplateUsageDTO | undefined,
 ): string {
   const usageLine = usage
-    ? `该模板下有 ${usage.activeInstanceCount} 个进行中的审批（历史累计 ${usage.instanceCount} 个）。`
+    ? `该表单下有 ${usage.activeInstanceCount} 个进行中的审批（历史累计 ${usage.instanceCount} 个）。`
     : ''
-  return `确定停用模板「${name}」？停用后该模板将无法再发起新的审批。${usageLine}已在进行中的审批不受影响，会按原流程继续走完。`
+  return `确定停用表单「${name}」？停用后该表单将无法再发起新的审批。${usageLine}已在进行中的审批不受影响，会按原流程继续走完。`
 }
 
 export function templateUnarchiveConfirmMessage(name: string): string {
-  return `确定启用模板「${name}」？启用后该模板可以重新发起审批。`
+  return `确定启用表单「${name}」？启用后该表单可以重新发起审批。`
 }

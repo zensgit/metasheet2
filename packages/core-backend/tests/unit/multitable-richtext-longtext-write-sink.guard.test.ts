@@ -61,9 +61,23 @@ function listRuntimeTsFiles(): string[] {
 /**
  * FROZEN allowlist of every `src` file that writes `meta_records.data`, keyed by `src`-relative path.
  *   CHOKEPOINT — references `validateLongTextValue` / `sanitizeRichLongText` (this is asserted, not assumed).
+ *   DELEGATED  — does not call the sanitizer directly; routes user-content scalars through a named
+ *                helper file that IS a CHOKEPOINT (asserted: writer refs helper symbol + helper refs sanitizer).
  *   SAFE       — writes only non-user-content columns; a rich-`longText` value can never appear.
  */
-const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: string }> = {
+const ALLOWLIST: Record<
+  string,
+  { disposition: 'CHOKEPOINT' | 'DELEGATED' | 'SAFE'; reason: string; through?: string; throughSymbol?: string }
+> = {
+  'multitable/exact-anchor-recovery-execute.ts': {
+    disposition: 'DELEGATED',
+    through: 'multitable/exact-anchor-restore-validate.ts',
+    throughSymbol: 'assertExactRestorableScalarValue',
+    reason:
+      'L8 exact-anchor apply delegates changed restorable scalars through assertExactRestorableScalarValue ' +
+      '(exact-anchor-restore-validate.ts), which directly references validateLongTextValue for rich longText; ' +
+      'fail-closed value-invalid — no redundant production sanitizer call in execute just to satisfy a scanner',
+  },
   'multitable/records.ts': {
     disposition: 'CHOKEPOINT',
     reason: 'plugin-SDK createRecord/patchRecord → normalizeFieldValue routes longText through validateLongTextValue',
@@ -92,13 +106,24 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'T3-6 read-model projection writes ONLY the fixed system columns (requestNo/templateId/name/status/outcome/requesterId/approverId/timestamps/currentNodeKey) derived from approval_instances+approval_records — never form_snapshot or a user-supplied rich-longText carrier',
   },
-  'multitable/formula-engine.ts': {
+  'multitable/derived-write-fence.ts': {
     disposition: 'SAFE',
-    reason: 'writes ONLY computed formula-result keys — derived server-side, never raw user HTML',
+    reason:
+      'the SHARED flag-gated fence+UPDATE seam for derived-value materializations (formula engine + the univer-meta relation-agg resolvers route through it since the #4438 post-merge follow-up) — writes ONLY computed formula/relation-agg result keys, derived server-side, never raw user HTML',
   },
   'multitable/automation-service.ts': {
     disposition: 'SAFE',
     reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
+  },
+  'multitable/field-retype-convert-execute.ts': {
+    disposition: 'SAFE',
+    reason:
+      'Field retype convert / whole-column undo (ADR multitable-field-retype-first-batch-adr-20260926 §3). It writes ONE column, and only between `string` and `select` / `multiSelect`: the pair is re-checked under the field row lock (a `longText` source or target, rich or not, is refused 422 pair_not_in_first_batch), and the undo restores the source type recorded on the job row, which is that same `string`. No request-supplied value is written — the convert moves the text ALREADY stored in the cell into its option shape, the undo writes back the pre-image of that same cell — so no rich-longText carrier can arrive through this file.',
+  },
+  'services/elearning-stats-multitable-projection.ts': {
+    disposition: 'SAFE',
+    reason:
+      'writes only the fixed aggregate projection columns (department identity/date/counts/rates/credits/timestamps); suppressed groups contain no metric values and no rich-longText field exists in the system-owned schema',
   },
   'multitable/side-door-delete-trash.ts': {
     disposition: 'SAFE',
@@ -144,6 +169,44 @@ describe('rich-longText write-sink — durable structural guard', () => {
       `These files are marked CHOKEPOINT but do NOT reference validateLongTextValue/sanitizeRichLongText ` +
         `(the sanitizer was removed or never wired):\n` +
         lying.map((rel) => `  - ${rel}`).join('\n'),
+    ).toEqual([])
+  })
+
+  test('every DELEGATED writer routes through a named helper that itself references the sanitizer', () => {
+    const failures: string[] = []
+    for (const rel of writerFiles) {
+      const entry = ALLOWLIST[rel]
+      if (entry?.disposition !== 'DELEGATED') continue
+      const through = entry.through
+      const symbol = entry.throughSymbol
+      if (!through || !symbol) {
+        failures.push(`${rel}: DELEGATED entry missing through/throughSymbol`)
+        continue
+      }
+      const writerSrc = readFileSync(join(SRC, rel), 'utf8')
+      if (!new RegExp(`\\b${symbol}\\b`).test(writerSrc)) {
+        failures.push(`${rel}: does not reference delegated symbol ${symbol}`)
+      }
+      const helperPath = join(SRC, through)
+      let helperSrc: string
+      try {
+        helperSrc = readFileSync(helperPath, 'utf8')
+      } catch {
+        failures.push(`${rel}: delegated helper ${through} is missing`)
+        continue
+      }
+      if (!new RegExp(`\\b${symbol}\\b`).test(helperSrc)) {
+        failures.push(`${through}: does not define/export ${symbol}`)
+      }
+      if (!SANITIZER_REF.test(helperSrc)) {
+        failures.push(
+          `${through}: delegated helper does NOT reference validateLongTextValue/sanitizeRichLongText`,
+        )
+      }
+    }
+    expect(
+      failures,
+      `DELEGATED write-sink guard failures:\n` + failures.map((f) => `  - ${f}`).join('\n'),
     ).toEqual([])
   })
 

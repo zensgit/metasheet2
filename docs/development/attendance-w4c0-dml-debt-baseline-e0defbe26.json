@@ -1,0 +1,623 @@
+{
+  "schemaVersion": 1,
+  "generatedFromRef": "e0defbe26d7f2e1747e74aa908ca710422812bf7",
+  "lockAnchor": "docs/development/attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md#8.4",
+  "runtimeRoots": [
+    "apps/web",
+    "packages/core-backend",
+    "packages/mssql-readonly-utils",
+    "packages/openapi",
+    "packages/openapi/dist-sdk",
+    "plugins/plugin-attendance",
+    "plugins/plugin-audit-logger",
+    "plugins/plugin-integration-core",
+    "plugins/plugin-intelligent-restore",
+    "plugins/plugin-telemetry-otel",
+    "plugins/plugin-view-gantt",
+    "scripts",
+    "tools/cli"
+  ],
+  "debtEntries": [
+    {
+      "id": "P01",
+      "title": "Live POST /api/attendance/punch: event insert, then upsertAttendanceRecord.",
+      "owningSlice": "W4C-2",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 3,
+      "tables": [
+        "attendance_events:insert",
+        "attendance_records:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: op",
+        "plugins/plugin-attendance/index.cjs :: upsertAttendanceRecord"
+      ],
+      "contentHash": "59c5b84f305afe14b8f8a485231e1d1df0dbfd0981f1dedad8fe581c0e6f1ed6"
+    },
+    {
+      "id": "P02",
+      "title": "applyAttendanceInOutMergePolicy: second-pass record mutation after the first upsert.",
+      "owningSlice": "W4C-2",
+      "sharedHook": false,
+      "confidence": "heuristic",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P03",
+      "title": "Scheduled cron callback: runAutoAbsenceForOrgDate -> generateAbsenceRecords direct record insert.",
+      "owningSlice": "W4C-2",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 1,
+      "tables": [
+        "attendance_records:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: generateAbsenceRecords"
+      ],
+      "contentHash": "6065fe7e06b3dac8751f2bbdefc04069bef79ec88a22430cec45d9df8e925c45"
+    },
+    {
+      "id": "P04",
+      "title": "Administrator POST /api/attendance/auto-absence/run: the same direct absence writer through a separate initiator.",
+      "owningSlice": "W4C-2",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 1,
+      "tables": [
+        "attendance_records:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: generateAbsenceRecords"
+      ],
+      "contentHash": "6065fe7e06b3dac8751f2bbdefc04069bef79ec88a22430cec45d9df8e925c45"
+    },
+    {
+      "id": "P05",
+      "title": "POST /api/attendance/anomaly-result-edits: upsert followed by attachManualResultEditMarkerToRecord UPDATE.",
+      "owningSlice": "W4C-3c",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 3,
+      "tables": [
+        "attendance_record_result_edits:insert",
+        "attendance_record_result_edits:update",
+        "attendance_records:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: applyAttendanceResultEdit",
+        "plugins/plugin-attendance/index.cjs :: attachManualResultEditMarkerToRecord",
+        "plugins/plugin-attendance/index.cjs :: markAttendanceResultEditNotificationStatus"
+      ],
+      "contentHash": "beba202df63b5bd32d7c0e88f73371b7ecb343d5162c18fb4c7af38631c87164"
+    },
+    {
+      "id": "P06",
+      "title": "Modern synchronous /import/commit: values, unnest, or staging INSERT...SELECT bulk upsert.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 8,
+      "tables": [
+        "attendance_import_batches:insert",
+        "attendance_import_items:insert",
+        "attendance_records:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: appendSkipped",
+        "plugins/plugin-attendance/index.cjs :: batchInsertAttendanceImportItemsStaging",
+        "plugins/plugin-attendance/index.cjs :: batchInsertAttendanceImportItemsUnnest",
+        "plugins/plugin-attendance/index.cjs :: batchInsertAttendanceImportItemsValues",
+        "plugins/plugin-attendance/index.cjs :: batchUpsertAttendanceRecordsStaging",
+        "plugins/plugin-attendance/index.cjs :: batchUpsertAttendanceRecordsUnnest",
+        "plugins/plugin-attendance/index.cjs :: batchUpsertAttendanceRecordsValues"
+      ],
+      "contentHash": "177d91987fab4ab8bc27cc4b2547d5d7739d9866898e861ae1fb44b2a8352dd7"
+    },
+    {
+      "id": "P07",
+      "title": "Async import queue worker processAsyncImportCommitJob -> commitAttendanceImportPayload.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "heuristic",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P08",
+      "title": "Async import startup recovery that re-enqueues P07 after restart.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P09",
+      "title": "Legacy POST /api/attendance/import: private per-row mapping/calculation/upsert loop.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "heuristic",
+      "siteCount": 13,
+      "tables": [
+        "attendance_events:insert",
+        "attendance_import_batches:insert",
+        "attendance_import_batches:update",
+        "attendance_import_items:insert",
+        "attendance_requests:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: dataTypeFor"
+      ],
+      "contentHash": "72f5ad6763d82550b86b6e7fe89d4dd6397d3d464e2e1550ce4af28acc59c4bc"
+    },
+    {
+      "id": "P10",
+      "title": "/api/attendance/integrations/:id/sync: separate per-row calculation/upsert loop.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 1,
+      "tables": [
+        "attendance_records:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: upsertAttendanceRecord"
+      ],
+      "contentHash": "2f12cfd199cb1be5def6c336dd5645a217d8cf75232bae68f5bfded9f5be8c09"
+    },
+    {
+      "id": "P11",
+      "title": "/import/rollback/:id: hard delete of records carrying source_batch_id.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "heuristic",
+      "siteCount": 2,
+      "tables": [
+        "attendance_import_batches:update",
+        "attendance_records:delete"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: isAnomaly"
+      ],
+      "contentHash": "3187e55744f6b0727b642b38dba8cfaa8693d674a759333072be29ab4663648f"
+    },
+    {
+      "id": "P12",
+      "title": "Approval request creation/edit: pending edit overwrites mutable form_snapshot without a version.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 4,
+      "tables": [
+        "attendance_requests:insert",
+        "attendance_schedule_dispatch_requests:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: buildWhere",
+        "plugins/plugin-attendance/index.cjs :: resolveAttendanceRequestDraft"
+      ],
+      "contentHash": "b85c77d1a9c695d413ca37f2c1a315d7c54e5780ec09515020f32f20a2e530f6"
+    },
+    {
+      "id": "P13",
+      "title": "Attendance plugin terminal handling: correction/leave/overtime and outdoor can all upsert the row.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": true,
+      "confidence": "heuristic",
+      "siteCount": 17,
+      "tables": [
+        "approval_assignments:insert",
+        "approval_assignments:update",
+        "approval_instances:insert",
+        "approval_instances:update",
+        "approval_records:insert",
+        "attendance_leave_balance_events:insert",
+        "attendance_leave_balances:insert",
+        "attendance_requests:insert",
+        "attendance_requests:update",
+        "attendance_shift_swap_requests:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: assertDispatchScopeAllowed",
+        "plugins/plugin-attendance/index.cjs :: buildWhere",
+        "plugins/plugin-attendance/index.cjs :: deactivateAttendanceApprovalAssignments",
+        "plugins/plugin-attendance/index.cjs :: replaceAttendanceApprovalAssignments",
+        "plugins/plugin-attendance/index.cjs :: upsertAttendanceApprovalInstance"
+      ],
+      "contentHash": "8745de87db126deef934d3a587203e044493e9fc6bfba9d78e7acc89e19018a4"
+    },
+    {
+      "id": "P14",
+      "title": "Approved-request cancellation: balance/leave-ledger reversal only; no result reversal today.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": true,
+      "confidence": "direct",
+      "siteCount": 11,
+      "tables": [
+        "approval_instances:update",
+        "approval_records:insert",
+        "attendance_leave_balance_events:insert",
+        "attendance_leave_balances:update",
+        "attendance_requests:update",
+        "attendance_rotation_assignments:delete",
+        "attendance_rotation_assignments:insert",
+        "attendance_rotation_assignments:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: cancelRequest",
+        "plugins/plugin-attendance/index.cjs :: reverseLeaveBalanceDeduction"
+      ],
+      "contentHash": "1f0ff246a62405f6a2b1f8c6d677d785881380251893c591b68e45d8a839e318"
+    },
+    {
+      "id": "P15",
+      "title": "scripts/attendance/generate-cleanup-sql.cjs: privileged generated record/event deletes.",
+      "owningSlice": "W4C-3c",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 2,
+      "tables": [
+        "attendance_events:delete",
+        "attendance_records:delete"
+      ],
+      "symbols": [
+        "scripts/attendance/generate-cleanup-sql.cjs :: getArg"
+      ],
+      "contentHash": "aa6ccd9e8b6a63248db174058524cb77401192e2af98523158b1884669e81135"
+    },
+    {
+      "id": "P16",
+      "title": "Test-user cleanup and staging helpers: dynamic/direct synthetic deletes and inserts.",
+      "owningSlice": "W4C-3c",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 68,
+      "tables": [
+        "approval_assignments:delete",
+        "approval_instances:delete",
+        "approval_records:delete",
+        "attendance_auto_shift_auto_write_runs:delete",
+        "attendance_events:delete",
+        "attendance_events:insert",
+        "attendance_import_batches:delete",
+        "attendance_import_items:delete",
+        "attendance_leave_balance_events:delete",
+        "attendance_leave_balances:delete",
+        "attendance_leave_balances:insert",
+        "attendance_record_result_edits:delete",
+        "attendance_records:delete",
+        "attendance_records:insert",
+        "attendance_records:update",
+        "attendance_requests:delete",
+        "attendance_requests:insert",
+        "attendance_rotation_assignments:delete",
+        "attendance_schedule_dispatch_requests:delete",
+        "attendance_shift_assignments:delete",
+        "attendance_shift_assignments:insert"
+      ],
+      "symbols": [
+        "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs :: seedUsersAndRecords",
+        "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs :: insertPunch",
+        "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs :: main",
+        "scripts/ops/staging-attendance-c5-delivery-smoke.ts :: cleanup",
+        "scripts/ops/staging-attendance-c5-delivery-smoke.ts :: seedCompTimeBalance",
+        "scripts/ops/staging-attendance-dispatch-d5-smoke.mjs :: cleanupStep",
+        "scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs :: seedPartialRecord",
+        "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs :: assertStaleCandidate409",
+        "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs :: seedCandidateRecords",
+        "scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs :: seedOwedPunchRecord",
+        "scripts/ops/staging-attendance-multi-shift-m5-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs :: assertStatutoryMustPaySetup",
+        "scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-report-sync-a2-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-report-sync-a2-smoke.mjs :: seedAttendanceRecord",
+        "scripts/ops/staging-attendance-schedule-publish-p4-smoke.mjs :: cleanup",
+        "scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs :: cleanupStep",
+        "scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs :: cleanup"
+      ],
+      "contentHash": "714cee63ebcc9a29540a54172b1fd361370341957d4253eb35a12007ecc51941"
+    },
+    {
+      "id": "P17",
+      "title": "Central legacy approve/reject, generic action/bridge, and any card action reaching an attendance instance.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": true,
+      "confidence": "direct",
+      "siteCount": 12,
+      "tables": [
+        "approval_assignments:insert",
+        "approval_assignments:update",
+        "approval_instances:insert",
+        "approval_instances:update",
+        "approval_records:insert"
+      ],
+      "symbols": [
+        "packages/core-backend/src/routes/approvals.ts :: POST /api/approvals/:id/approve",
+        "packages/core-backend/src/routes/approvals.ts :: POST /api/approvals/:id/reject",
+        "packages/core-backend/src/routes/approvals.ts :: POST /api/approvals/:id/remind",
+        "packages/core-backend/src/services/ApprovalBridgeService.ts :: queryFn"
+      ],
+      "contentHash": "e4bb995b685093b3c7edbc385ec80eee8ff96a9d0b58e19349cb9debac674b95"
+    },
+    {
+      "id": "P18",
+      "title": "Terminal shift_swap and schedule_dispatch write schedule assignments/group membership outside the result transaction.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 16,
+      "tables": [
+        "approval_instances:update",
+        "approval_records:insert",
+        "attendance_requests:update",
+        "attendance_schedule_dispatch_requests:update",
+        "attendance_shift_assignments:insert",
+        "attendance_shift_assignments:update",
+        "attendance_shift_swap_requests:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: archiveScheduleDispatchSourceKey",
+        "plugins/plugin-attendance/index.cjs :: archiveShiftSwapSourceKey",
+        "plugins/plugin-attendance/index.cjs :: closeScheduleDispatchRequest",
+        "plugins/plugin-attendance/index.cjs :: finalizeScheduleDispatchRequest",
+        "plugins/plugin-attendance/index.cjs :: finalizeShiftSwapRequest",
+        "plugins/plugin-attendance/index.cjs :: insertShiftSwapReplacementAssignment",
+        "plugins/plugin-attendance/index.cjs :: respondShiftSwapConsent"
+      ],
+      "contentHash": "91f9610f04f605e0a6a1b9f59e596c43c9d5e8dd36ef122bbeaeed553e83d485"
+    },
+    {
+      "id": "P19",
+      "title": "Decision/cancellation request lookup plus global permission bypass lacks an explicit org-bound authorization contract.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P20",
+      "title": "Anomaly, makeup-anomaly facts, open-record attribution, and DecisionTrace are direct ordinary readers.",
+      "owningSlice": "W4C-3c",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P21",
+      "title": "Time conversion has multiple silent UTC/server-local fallback helpers without uniform IANA validation.",
+      "owningSlice": "W4C-1/W4C-2",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P22",
+      "title": "Current request terminalization has three reachable execution bodies and no reconciliation listener.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": true,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P23",
+      "title": "/import/rollback/:id accepts a broader authorization posture than import commit.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P24",
+      "title": "Integration sync has a distinct semantic pipeline; dryRun still writes the run plus last_sync_at.",
+      "owningSlice": "W4C-3a",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P25",
+      "title": "Import token, preview/job, template-preference, upload-lifecycle, and temporary-staging writes are operational DML.",
+      "owningSlice": "W4C-0",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 0,
+      "tables": [],
+      "symbols": [],
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "P26",
+      "title": "Central approval assignment mutation is not one route (admin/reassign, generic approve/return/revoke/jump/...).",
+      "owningSlice": "W4C-3b",
+      "sharedHook": true,
+      "confidence": "direct",
+      "siteCount": 26,
+      "tables": [
+        "approval_assignments:insert",
+        "approval_assignments:update",
+        "approval_instances:insert",
+        "approval_instances:update",
+        "approval_records:insert"
+      ],
+      "symbols": [
+        "packages/core-backend/src/services/ApprovalProductService.ts :: attachmentIdsByField",
+        "packages/core-backend/src/services/ApprovalProductService.ts :: consumeAndSkip",
+        "packages/core-backend/src/services/ApprovalProductService.ts :: nodeLabel",
+        "packages/core-backend/src/services/ApprovalProductService.ts :: queryFn",
+        "packages/core-backend/src/services/ApprovalProductService.ts :: skip",
+        "packages/core-backend/src/services/ApprovalProductService.ts :: targetUserIds"
+      ],
+      "contentHash": "ed8bde91e7ba5c4bec659493d757bbda5531bbd898e16e2240b7468c8d5fa7f1"
+    },
+    {
+      "id": "P27",
+      "title": "Schedule publication (draft->live) writes attendance_shift_assignments/attendance_rotation_assignments to published.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 4,
+      "tables": [
+        "attendance_rotation_assignments:update",
+        "attendance_shift_assignments:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: enforceAttendanceSchedulePublicationConflicts"
+      ],
+      "contentHash": "10bc38bb25b8a4d873ae1db4ea46fe1bb44ca91956421032496b0f12e3fb32f6"
+    },
+    {
+      "id": "P28",
+      "title": "Core-backend onboarding default shift: POST /api/admin/users writes a default assignment.",
+      "owningSlice": "W4C-3b",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 1,
+      "tables": [
+        "attendance_shift_assignments:insert"
+      ],
+      "symbols": [
+        "packages/core-backend/src/routes/admin-users.ts :: body"
+      ],
+      "contentHash": "e946b40b5ee513a55c07b6060feb0fd3e52314e11f5d34a0a59c66e3099d7d35"
+    },
+    {
+      "id": "X01",
+      "title": "Fixed-schedule group assignment writer (insertAttendanceGroupFixedScheduleAssignments / softDeactivateAttendanceGroupFixedScheduleManagedRows / skipReason).",
+      "owningSlice": "W4C-3b (unconfirmed)",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 3,
+      "tables": [
+        "attendance_shift_assignments:insert",
+        "attendance_shift_assignments:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: insertAttendanceGroupFixedScheduleAssignments",
+        "plugins/plugin-attendance/index.cjs :: skipReason",
+        "plugins/plugin-attendance/index.cjs :: softDeactivateAttendanceGroupFixedScheduleManagedRows"
+      ],
+      "contentHash": "2746ac84f782f7727bcc122dc798d1e327f8c93705df3b9e534ce936b89c7448"
+    },
+    {
+      "id": "X02",
+      "title": "Payroll cycle summary export writes attendance_shift_assignments as a side effect (handlePayrollCycleSummaryExport).",
+      "owningSlice": "W4C-3b (unconfirmed)",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 7,
+      "tables": [
+        "attendance_shift_assignments:delete",
+        "attendance_shift_assignments:insert",
+        "attendance_shift_assignments:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: handlePayrollCycleSummaryExport"
+      ],
+      "contentHash": "342c4819525c56d228f20dc2445e453c0fed9f0675411ddd65c80889189a3701"
+    },
+    {
+      "id": "X03",
+      "title": "Auto-shift auto-write run/run-item ledger (insertAutoShiftAutoWriteRun / insertAutoShiftAutoWriteRunItem / finalizeAutoShiftAutoWriteRun).",
+      "owningSlice": "W4C-3b (unconfirmed)",
+      "sharedHook": false,
+      "confidence": "direct",
+      "siteCount": 3,
+      "tables": [
+        "attendance_auto_shift_auto_write_run_items:insert",
+        "attendance_auto_shift_auto_write_runs:insert",
+        "attendance_auto_shift_auto_write_runs:update"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: finalizeAutoShiftAutoWriteRun",
+        "plugins/plugin-attendance/index.cjs :: insertAutoShiftAutoWriteRun",
+        "plugins/plugin-attendance/index.cjs :: insertAutoShiftAutoWriteRunItem"
+      ],
+      "contentHash": "220c390dc01e43183328c7f7e11bec5e539d6caae9541f8feae6f53f2546afc2"
+    },
+    {
+      "id": "X04",
+      "title": "Comp-time/leave ledger writers not covered by P14 (applyAnnualLeaveManualAdjustment / runAnnualLeaveAccrual / accrual-lot helpers).",
+      "owningSlice": "W4C-3b (unconfirmed)",
+      "sharedHook": true,
+      "confidence": "heuristic",
+      "siteCount": 10,
+      "tables": [
+        "attendance_leave_accrual_run_items:insert",
+        "attendance_leave_accrual_runs:insert",
+        "attendance_leave_balance_events:insert",
+        "attendance_leave_balances:insert",
+        "attendance_leave_balances:update",
+        "attendance_leave_manual_adjustments:insert"
+      ],
+      "symbols": [
+        "plugins/plugin-attendance/index.cjs :: applyAnnualLeaveManualAdjustment",
+        "plugins/plugin-attendance/index.cjs :: existing",
+        "plugins/plugin-attendance/index.cjs :: lots",
+        "plugins/plugin-attendance/index.cjs :: runAnnualLeaveAccrual",
+        "plugins/plugin-attendance/index.cjs :: skip"
+      ],
+      "contentHash": "98151fb8860008661c098b354d8e6f09d9e4e997231d5a71710f1f706df2d3ff"
+    },
+    {
+      "id": "X05",
+      "title": "AttendanceExpiryService scheduled comp-time/leave-balance expiry sweep.",
+      "owningSlice": "W4C-3b (unconfirmed)",
+      "sharedHook": true,
+      "confidence": "direct",
+      "siteCount": 2,
+      "tables": [
+        "attendance_leave_balance_events:insert",
+        "attendance_leave_balances:update"
+      ],
+      "symbols": [
+        "packages/core-backend/src/services/AttendanceExpiryService.ts :: (module-scope)"
+      ],
+      "contentHash": "4dc64c6217814d15509f966ecb36065933cbd9fb1df1cde55154bff56ae0ee85"
+    }
+  ],
+  "genericSharedAllowlist": [
+    "packages/core-backend/scripts/test-approvals-contract.mjs :: cleanup",
+    "packages/core-backend/scripts/test-approvals-contract.mjs :: cleanup",
+    "packages/core-backend/scripts/test-approvals-contract.mjs :: setupTestInstance",
+    "packages/core-backend/scripts/test-approvals-contract.mjs :: setupTestInstance",
+    "packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts :: up",
+    "packages/core-backend/src/seeds/seed-approvals.ts :: main",
+    "packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts :: normalizeCommand",
+    "packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts :: normalizeCommand",
+    "packages/core-backend/src/services/AfterSalesApprovalBridgeService.ts :: normalizeCommand"
+  ],
+  "manifestContentHash": "921e097094aabb62edab24f207762d19883b18d195e4493e1d35cb1aebc599ff"
+}

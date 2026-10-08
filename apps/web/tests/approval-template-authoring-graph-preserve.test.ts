@@ -292,10 +292,15 @@ describe('G-1 unsupportedTemplateAuthoringReason — complex graphs are save-abl
   })
 
   it('still returns a reason for a LINEAR approval node carrying an unsupported config key', () => {
-    // A node-level `timeout` on a LINEAR approval node is outside the editor allowlist → fail-closed
-    // (the linear-path config check still runs; a complex graph would skip it and preserve). NOTE:
-    // `fieldPermissions` is NO LONGER an example here — T1-4 added it to the linear allowlist and the
-    // editor authors it; this guard covers the config keys the linear editor still can't represent.
+    // A node-level `signaturePolicy` on a LINEAR approval node is outside the editor allowlist →
+    // fail-closed (the linear-path config check still runs; a complex graph would skip it and
+    // preserve). NOTE: `fieldPermissions` is NOT an example here — T1-4 added it to the linear
+    // allowlist and the editor authors it. P1-C (approval-parity-master-design-lock-20260817.md
+    // §P1-C) ALSO removed `timeout` (+ `approvalThreshold`) from this list of examples — both are
+    // now linear-authored/preserved keys (apps/web/tests/approval-template-authoring-threshold-
+    // timeout-compat.test.ts covers their no-flatten status); `signaturePolicy` remains the
+    // still-unsupported example, per the master lock's explicit deferral ("Keep persisted
+    // `signaturePolicy` round-trip-safe and read-only until its declared owner slice").
     const template = buildTemplate({
       nodes: [
         { key: 'start', type: 'start', name: '发起', config: {} },
@@ -307,7 +312,7 @@ describe('G-1 unsupportedTemplateAuthoringReason — complex graphs are save-abl
             assigneeSources: [{ kind: 'requester' }],
             approvalMode: 'single',
             emptyAssigneePolicy: 'error',
-            timeout: { afterMinutes: 60, effect: 'remind' },
+            signaturePolicy: { required: true },
           } as never,
         },
         { key: 'end', type: 'end', name: '结束', config: {} },

@@ -8,7 +8,7 @@
           打开 Base、继续清洗表或从模板开始。
         </p>
       </div>
-      <MtButton class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
+      <MtButton class="multitable-home__refresh" :disabled="loading" @click="refreshHomeData">
         {{ loading ? '刷新中...' : '刷新' }}
       </MtButton>
     </header>
@@ -99,7 +99,54 @@
             {{ base.icon || base.name.slice(0, 1).toUpperCase() }}
           </div>
           <div class="multitable-home__card-body">
-            <h3>{{ base.name }}</h3>
+            <!--
+              Rename affordance (feat/multitable-rename). Hiding is UX only — the server is the
+              real enforcement (PATCH /api/multitable/bases/:id gates on canManageFields, an admin
+              role or the multitable:manage-schema permission). This view has no per-base
+              capability from listBases(), so canRenameBase mirrors that same server gate via the
+              existing useAuth().hasPermission() pattern (see e.g. IntegrationReadSourceCompositionAuthoringPanel.vue).
+            -->
+            <template v-if="renamingBaseId === base.id">
+              <input
+                v-model="renamingBaseName"
+                class="multitable-home__rename-input"
+                maxlength="255"
+                data-testid="home-base-rename-input"
+                aria-label="Rename base"
+                @keydown.enter="confirmRenameBase(base.id)"
+                @keydown.escape="cancelRenameBase"
+              />
+              <div class="multitable-home__rename-actions">
+                <button
+                  type="button"
+                  class="multitable-home__rename-ok"
+                  data-testid="home-base-rename-confirm"
+                  :disabled="!renamingBaseName.trim()"
+                  aria-label="Confirm rename"
+                  @click="confirmRenameBase(base.id)"
+                >&#x2713;</button>
+                <button
+                  type="button"
+                  class="multitable-home__rename-cancel"
+                  data-testid="home-base-rename-cancel"
+                  aria-label="Cancel rename"
+                  @click="cancelRenameBase"
+                >&#x2717;</button>
+              </div>
+            </template>
+            <template v-else>
+              <div class="multitable-home__card-title">
+                <h3>{{ base.name }}</h3>
+                <button
+                  v-if="canRenameBase"
+                  type="button"
+                  class="multitable-home__rename"
+                  data-testid="home-base-rename"
+                  :aria-label="`重命名 ${base.name}`"
+                  @click="startRenameBase(base)"
+                >&#x270E;</button>
+              </div>
+            </template>
             <small>{{ base.id }}</small>
             <div
               v-if="base.isFavorite || base.lastOpenedAt"
@@ -136,6 +183,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
+import { useAuth } from '../composables/useAuth'
 import type {
   MetaBase,
   MetaContext,
@@ -176,6 +224,16 @@ const { installingTemplateId, errorMessage: installError, installAndOpen } = use
 const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
 const recentBaseOpens = ref(readRecentBaseOpens())
 
+// Rename affordance (feat/multitable-rename). listBases() carries no per-base capability, so this
+// mirrors the server's canManageFields gate (admin role or multitable:manage-schema) via the same
+// useAuth().hasPermission() pattern already used elsewhere for UI-only hiding (e.g.
+// IntegrationReadSourceCompositionAuthoringPanel.vue's canWrite). hasPermission() already resolves
+// admin as true, matching "an admin role OR the permission" from the server's 403 message.
+const auth = useAuth()
+const canRenameBase = computed(() => auth.hasPermission('multitable:manage-schema'))
+const renamingBaseId = ref<string | null>(null)
+const renamingBaseName = ref('')
+
 const decoratedBases = computed(() => {
   return decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value)
 })
@@ -194,6 +252,37 @@ function toggleFavoriteBase(baseId: string): void {
   favoriteBaseIds.value = toggleFavoriteBaseId(baseId)
 }
 
+function startRenameBase(base: MetaBase): void {
+  renamingBaseId.value = base.id
+  renamingBaseName.value = base.name
+}
+
+function cancelRenameBase(): void {
+  renamingBaseId.value = null
+  renamingBaseName.value = ''
+}
+
+// Server gate (canManageFields) is the real enforcement — a 403 here (stale client-side
+// permission snapshot, a role change mid-session) surfaces through errorMessage the same way
+// every other mutation on this view does, never a silent no-op.
+async function confirmRenameBase(baseId: string): Promise<void> {
+  const name = renamingBaseName.value.trim()
+  const current = bases.value.find((base) => base.id === baseId)
+  if (!name || !current || name === current.name) {
+    cancelRenameBase()
+    return
+  }
+  try {
+    const { base } = await multitableClient.renameBase(baseId, name)
+    bases.value = bases.value.map((b) => (b.id === baseId ? { ...b, ...base } : b))
+    errorMessage.value = ''
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '重命名失败'
+  } finally {
+    cancelRenameBase()
+  }
+}
+
 function rememberRecentBase(baseId: string): void {
   recentBaseOpens.value = rememberRecentBaseOpen(baseId)
 }
@@ -205,11 +294,11 @@ function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: Meta
   return view ? { sheet, view } : null
 }
 
-async function loadBases(): Promise<void> {
+async function loadBases(opts?: { force?: boolean }): Promise<void> {
   loading.value = true
   errorMessage.value = ''
   try {
-    const data = await multitableClient.listBases()
+    const data = await multitableClient.listBases(opts)
     bases.value = data.bases ?? []
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载多维表失败'
@@ -218,11 +307,11 @@ async function loadBases(): Promise<void> {
   }
 }
 
-async function loadTemplates(): Promise<void> {
+async function loadTemplates(opts?: { force?: boolean }): Promise<void> {
   templateLoading.value = true
   templateError.value = ''
   try {
-    const data = await multitableClient.listTemplates()
+    const data = await multitableClient.listTemplates(opts)
     templates.value = data.templates ?? []
   } catch (error) {
     templateError.value = error instanceof Error ? error.message : '模板加载失败，可继续新建空白 Base。'
@@ -231,8 +320,15 @@ async function loadTemplates(): Promise<void> {
   }
 }
 
-async function loadHomeData(): Promise<void> {
-  await Promise.all([loadBases(), loadTemplates()])
+async function loadHomeData(opts?: { force?: boolean }): Promise<void> {
+  await Promise.all([loadBases(opts), loadTemplates(opts)])
+}
+
+// The 刷新 button expresses explicit user intent to fetch the latest lists, so
+// it must bypass the catalog cache (Codex review: it previously hit the
+// permanent cache and could never surface bases created elsewhere).
+function refreshHomeData(): void {
+  void loadHomeData({ force: true })
 }
 
 async function openBase(base: MetaBase): Promise<void> {
@@ -519,6 +615,73 @@ onMounted(loadHomeData)
 
 .multitable-home__card-body small {
   color: #64748b;
+}
+
+.multitable-home__card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.multitable-home__rename {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.multitable-home__rename:hover {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.multitable-home__rename-input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.multitable-home__rename-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.multitable-home__rename-ok,
+.multitable-home__rename-cancel {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.multitable-home__rename-ok:hover:not(:disabled) {
+  background: #f0fdf4;
+  color: #16a34a;
+}
+
+.multitable-home__rename-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.multitable-home__rename-cancel:hover {
+  background: #fef2f2;
+  color: #dc2626;
 }
 
 .multitable-home__badges {

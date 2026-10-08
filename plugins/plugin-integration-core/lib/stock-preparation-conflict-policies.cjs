@@ -8,6 +8,8 @@ const crypto = require('node:crypto')
 
 const {
   DUPLICATE_EXPANDED_KEY_POLICIES,
+  IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
+  UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
 } = require('./stock-preparation-conflict-planner.cjs')
 
 const CONFLICT_TYPE_DUPLICATE_EXPANDED_KEY = 'duplicate_expanded_key'
@@ -17,6 +19,17 @@ const DEFAULT_DUPLICATE_POLICY = 'hold'
 const MAX_CONFLICT_POLICIES = 200
 const FINGERPRINT_RE = /^sha16:[0-9a-f]{16}$/
 const STORAGE_PREFIX = 'integration:table-action:conflict-policies:'
+
+// Policy-honesty boundaries. A policy token is validated differently depending on WHERE it arrives:
+//   'selection' — a client is choosing a policy right now (table-scope save, run-only review in a
+//                 dry-run/plan request body). An unimplemented token is refused here, so the refusal
+//                 lands on the operator who chose it instead of surfacing later as a silent hold.
+//   'stored'    — the value was already accepted under an earlier contract and is being re-read
+//                 (the table-scope policy store, and a server-minted dry-run token record). The full
+//                 frozen vocabulary is accepted so no stored artifact stops loading or applying.
+const POLICY_BOUNDARY_SELECTION = 'selection'
+const POLICY_BOUNDARY_STORED = 'stored'
+const CONFLICT_POLICY_NOT_IMPLEMENTED = 'CONFLICT_POLICY_NOT_IMPLEMENTED'
 
 class StockPreparationConflictPolicyError extends Error {
   constructor(status, code, message, details = {}) {
@@ -103,18 +116,28 @@ function normalizeFingerprint(value, field) {
   return fingerprint
 }
 
-function normalizePolicy(value, field) {
+function normalizePolicy(value, field, { boundary = POLICY_BOUNDARY_SELECTION } = {}) {
   const policy = optionalString(value)
   if (!policy || !DUPLICATE_EXPANDED_KEY_POLICIES.includes(policy)) {
     throw new StockPreparationConflictPolicyError(422, 'CONFLICT_POLICY_INVALID', `${field} must be one of the duplicate-expanded-key policies`, {
       field,
-      allowedPolicies: DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+      allowedPolicies: IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+    })
+  }
+  // The token is in the frozen vocabulary but the planner has no named handling for it. Refuse the
+  // SELECTION explicitly; a 'stored' read still returns it so existing rows keep loading.
+  if (boundary === POLICY_BOUNDARY_SELECTION && UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.includes(policy)) {
+    throw new StockPreparationConflictPolicyError(422, CONFLICT_POLICY_NOT_IMPLEMENTED, `${field} names a duplicate-expanded-key policy that is not implemented`, {
+      field,
+      policy,
+      allowedPolicies: IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
+      unimplementedPolicies: UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.slice(),
     })
   }
   return policy
 }
 
-function normalizePolicyRows(value, field = 'policies') {
+function normalizePolicyRows(value, field = 'policies', { boundary = POLICY_BOUNDARY_SELECTION } = {}) {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) {
     throw new StockPreparationConflictPolicyError(422, 'CONFLICT_POLICY_INVALID', `${field} must be an array`, { field })
@@ -132,7 +155,7 @@ function normalizePolicyRows(value, field = 'policies') {
       throw new StockPreparationConflictPolicyError(422, 'CONFLICT_POLICY_INVALID', `${field}[${index}] must be an object`, { field: `${field}[${index}]` })
     }
     const fingerprint = normalizeFingerprint(row.fingerprint, `${field}[${index}].fingerprint`)
-    const policy = normalizePolicy(row.policy, `${field}[${index}].policy`)
+    const policy = normalizePolicy(row.policy, `${field}[${index}].policy`, { boundary })
     if (seen.has(fingerprint)) continue
     seen.add(fingerprint)
     out.push({ fingerprint, policy })
@@ -140,7 +163,11 @@ function normalizePolicyRows(value, field = 'policies') {
   return out
 }
 
-function normalizeRunOnlyConflictPolicyReview(input) {
+// `boundary` defaults to 'selection': every HTTP request body carrying a run-only review is a fresh
+// client selection. The apply path re-normalizes a SERVER-MINTED dry-run token record and passes
+// 'stored' — that content was already validated when the token was created, so an in-flight token
+// issued before this guard existed still applies (its group holds exactly as it did before).
+function normalizeRunOnlyConflictPolicyReview(input, { boundary = POLICY_BOUNDARY_SELECTION } = {}) {
   if (input === undefined || input === null || input === '') return null
   if (!isPlainObject(input)) {
     throw new StockPreparationConflictPolicyError(422, 'CONFLICT_POLICY_INVALID', 'conflictPolicyReview must be an object', {
@@ -157,7 +184,7 @@ function normalizeRunOnlyConflictPolicyReview(input) {
   return {
     conflictType: CONFLICT_TYPE_DUPLICATE_EXPANDED_KEY,
     scope: POLICY_SCOPE_RUN_ONLY,
-    policies: normalizePolicyRows(input.policies, 'conflictPolicyReview.policies'),
+    policies: normalizePolicyRows(input.policies, 'conflictPolicyReview.policies', { boundary }),
   }
 }
 
@@ -242,7 +269,10 @@ function normalizeStoredPolicies(rows) {
   for (const row of Array.isArray(rows) ? rows : []) {
     try {
       const fingerprint = normalizeFingerprint(row.fingerprint, 'stored.policies[].fingerprint')
-      const policy = normalizePolicy(row.policy, 'stored.policies[].policy')
+      // 'stored': the full frozen vocabulary is accepted on read. A row naming an unimplemented
+      // policy MUST keep loading — it was accepted under the earlier contract, and the catch{} below
+      // would otherwise DROP it silently rather than surface anything.
+      const policy = normalizePolicy(row.policy, 'stored.policies[].policy', { boundary: POLICY_BOUNDARY_STORED })
       policies.push({
         fingerprint,
         policy,
@@ -374,8 +404,11 @@ function buildConflictPolicyReview({ diagnostics, runOnlyReview, tableScopeRevie
 }
 
 module.exports = {
+  CONFLICT_POLICY_NOT_IMPLEMENTED,
   CONFLICT_TYPE_DUPLICATE_EXPANDED_KEY,
   DEFAULT_DUPLICATE_POLICY,
+  POLICY_BOUNDARY_SELECTION,
+  POLICY_BOUNDARY_STORED,
   POLICY_SCOPE_RUN_ONLY,
   POLICY_SCOPE_TABLE,
   StockPreparationConflictPolicyError,

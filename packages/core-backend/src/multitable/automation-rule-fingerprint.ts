@@ -9,7 +9,7 @@
  * reorder, or a branch-key change all change the fingerprint.
  *
  * `enumerateRuleActions` assigns every action (top-level AND nested inside a `parallel_branch` /
- * `condition_branch`) the EXACT step-key the executor stamps, via the shared `automation-step-key` builder —
+ * `condition_branch`, including a condition default branch) the EXACT step-key the executor stamps, via the shared `automation-step-key` builder —
  * `${i}` / `${i}.parallel.${branchKey}.${j}` / `${i}.branch.${branchKey}.${j}`. The retry guard AND the
  * future Class-A claim consume THIS walk, so the identities they compare are the executor's own identities,
  * never a divergent index-based path (#4420 review P1). Config is passed RAW to `deriveActionKey` (which
@@ -63,11 +63,18 @@ export function* enumerateRuleActions(
     const kind = branchKindForParent(action.type)
     if (!kind) continue
     const config = action.config
-    const branches = config && typeof config === 'object' ? (config as { branches?: unknown }).branches : undefined
-    if (!Array.isArray(branches)) continue
-    for (const branch of branches as Branch[]) {
+    const branchConfig = config && typeof config === 'object'
+      ? config as { branches?: unknown; defaultBranch?: unknown }
+      : undefined
+    const branches = Array.isArray(branchConfig?.branches) ? branchConfig.branches as Branch[] : []
+    for (const branch of branches) {
       const branchKey = typeof branch?.key === 'string' ? branch.key : ''
       yield* enumerateBranchActions(branch?.actions, i, kind, branchKey, 1)
+    }
+    if (kind === 'branch' && branchConfig?.defaultBranch && typeof branchConfig.defaultBranch === 'object') {
+      const defaultBranch = branchConfig.defaultBranch as Branch
+      const branchKey = typeof defaultBranch.key === 'string' ? defaultBranch.key : ''
+      yield* enumerateBranchActions(defaultBranch.actions, i, kind, branchKey, 1)
     }
   }
 }

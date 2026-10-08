@@ -7,7 +7,7 @@
       data-testid="stock-prep-snapshot-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看其快照批次。', 'Select a project to see its snapshot batches.') }}
+      {{ bi('请选择一个项目,这里会列出它历次同步存下的数据。', 'Select a project and this page lists each copy stored by its syncs.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -21,14 +21,26 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, non-alarming, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-snap__state sp-snap__state--muted"
       data-testid="stock-prep-snapshot-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly batch-list load(); idempotent, no new endpoint. -->
+      <button
+        ref="batchRetryEl"
+        type="button"
+        class="sp-snap__retry"
+        data-testid="stock-prep-snapshot-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取快照批次', 'Retry loading snapshot batches')"
+        @click="onBatchRetry"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <!-- Empty: the project exists but has produced no immutable snapshot batches yet. -->
     <p
@@ -36,7 +48,7 @@
       class="sp-snap__state sp-snap__state--muted"
       data-testid="stock-prep-snapshot-empty"
     >
-      {{ bi('尚无快照批次。', 'No snapshot batches yet.') }}
+      {{ bi('这个项目还没同步过 —— 先同步一次,这里就会有记录。', 'This project has never synced — run one and a copy will appear here.') }}
     </p>
 
     <!-- Data: values-free batches table + a diff-summary panel for the selected batch. -->
@@ -47,16 +59,25 @@
         </span>
       </header>
 
-      <div class="sp-snap__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Most rows carry a "View diff"
+           button, but an incomplete batch's entry is DISABLED (removed from tab order) — if every
+           batch happened to be incomplete the row content alone would give a keyboard operator no way
+           to reach this scroll area, so the wrap itself is ALSO a native scroll-region. -->
+      <div
+        class="sp-snap__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('快照批次表格,可滚动', 'Snapshot batches table, scrollable')"
+      >
         <table class="sp-snap__table">
           <thead>
             <tr>
-              <th scope="col">{{ bi('版本', 'Version') }}</th>
-              <th scope="col">{{ bi('状态', 'Status') }}</th>
-              <th scope="col">{{ bi('批次行数', 'Line count') }}</th>
-              <th scope="col">{{ bi('同步运行', 'Sync run') }}</th>
-              <th scope="col">{{ bi('创建时间', 'Recorded') }}</th>
-              <th scope="col" class="sp-snap__col-action">{{ bi('差异', 'Diff') }}</th>
+              <th scope="col">{{ bi('第几次同步', 'Which sync') }}</th>
+              <th scope="col">{{ bi('这一份还在用吗', 'Still the current one') }}</th>
+              <th scope="col">{{ bi('这一份有多少行', 'Rows in this copy') }}</th>
+              <th scope="col">{{ bi('哪次同步存的', 'Which run stored it') }}</th>
+              <th scope="col">{{ bi('存下时间', 'Time recorded') }}</th>
+              <th scope="col" class="sp-snap__col-action">{{ bi('和上一份比', 'Compare with the previous') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -79,7 +100,7 @@
                   class="sp-snap__incomplete"
                   data-testid="stock-prep-snapshot-incomplete-badge"
                 >
-                  {{ bi('不完整', 'incomplete') }}
+                  {{ bi('不完整(这次没存全)', 'incomplete — this one did not finish saving') }}
                 </span>
               </td>
               <td class="sp-snap__num">{{ batch.lineCount }}</td>
@@ -103,12 +124,12 @@
                   :disabled="batch.incomplete"
                   :title="
                     batch.incomplete
-                      ? bi('批次不完整(缺批次行或缺同步运行),差异不可用。', 'Batch incomplete (no lines or missing sync run) — diff unavailable.')
+                      ? bi('这一份没存全,拿它作比较会得出错的结论,所以不能比。', 'This copy did not finish saving; comparing against it would give a wrong answer, so it is not offered.')
                       : undefined
                   "
                   @click="selectBatch(batch)"
                 >
-                  {{ bi('查看差异', 'View diff') }}
+                  {{ bi('看改了什么', 'See what changed') }}
                 </button>
               </td>
             </tr>
@@ -124,7 +145,7 @@
           class="sp-snap__state sp-snap__state--muted"
           data-testid="stock-prep-snapshot-diff-hint"
         >
-          {{ bi('选择一个批次以查看其差异。', 'Select a batch to see its diff.') }}
+          {{ bi('上面选一份,这里会显示它和上一份比改了什么。', 'Pick one above and this shows what changed since the previous copy.') }}
         </p>
 
         <!-- Diff loading. -->
@@ -138,27 +159,39 @@
         </p>
 
         <!-- Diff error / endpoint-not-ready: neutral copy, never the raw body. -->
-        <p
+        <div
           v-else-if="diffErrored"
           class="sp-snap__state sp-snap__state--muted"
           data-testid="stock-prep-diff-error"
           role="status"
         >
-          {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-        </p>
+          <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+          <!-- H4-3 retry: re-fetches the diff summary for the SAME selected batch (no re-selection). -->
+          <button
+            ref="diffRetryEl"
+            type="button"
+            class="sp-snap__retry"
+            data-testid="stock-prep-diff-retry"
+            :disabled="diffLoading"
+            :aria-label="bi('重试读取差异', 'Retry loading the diff')"
+            @click="onDiffRetry"
+          >
+            {{ bi('重试', 'Retry') }}
+          </button>
+        </div>
 
         <!-- Diff data: values-free per-kind change counts + blocking-exception count + base handle. -->
         <div v-else-if="diff" class="sp-snap__diff" data-testid="stock-prep-snapshot-diff">
           <header class="sp-snap__diff-head">
             <span class="sp-snap__diff-base" data-testid="stock-prep-snapshot-diff-base">
-              {{ bi('对比基准批次', 'Base batch') }}:
+              {{ bi('拿来作比较的那一份', 'Compared against') }}
               <code v-if="diff.baseSnapshotBatchId" class="sp-snap__handle">{{
                 diff.baseSnapshotBatchId
               }}</code>
-              <span v-else>{{ bi('无前序批次', 'no predecessor') }}</span>
+              <span v-else>{{ bi('无前序批次(这是第一次同步,没得比)', 'no predecessor — this is the first sync, so there is nothing to compare with') }}</span>
             </span>
             <span class="sp-snap__diff-blocking" data-testid="stock-prep-snapshot-diff-blocking">
-              {{ bi('阻断级异常', 'Blocking exceptions') }}: {{ diff.blockingExceptionCount }}
+              {{ bi('这次改动带出几件卡住的事', 'Things this change left stuck') }}: {{ diff.blockingExceptionCount }}
             </span>
           </header>
 
@@ -170,10 +203,24 @@
               data-testid="stock-prep-snapshot-diff-count"
               :data-kind="entry.key"
             >
-              <dt class="sp-snap__count-label">{{ bi(entry.zh, entry.en) }}</dt>
+              <dt class="sp-snap__count-label">{{ entry.label }}</dt>
               <dd class="sp-snap__count-value">{{ entry.value }}</dd>
             </div>
           </dl>
+
+          <!-- Q3c: client-side, values-free 对账摘要 CSV — the change-distribution counts (including the
+               two fingerprint-decomposition kinds above), held/ready counts (only when the row detail
+               below has already been loaded — never triggers its own GET), and the diff-id list per
+               change type. No material name / quantity / drawing number ever enters this file; see
+               `buildDiffSummaryCsv` below for the exact contract. -->
+          <button
+            type="button"
+            class="sp-snap__export"
+            data-testid="stock-prep-snapshot-diff-export"
+            @click="onExportDiffSummary"
+          >
+            {{ bi('导出对账摘要', 'Export reconciliation summary') }}
+          </button>
 
           <!-- View-2 per-row drill-down: lazy, values-free (handles + enums + counts + opaque SHA-16
                fingerprints only — never a raw path key / drawing number / quantity / unit). -->
@@ -185,7 +232,7 @@
               :aria-expanded="rowDetailOpen"
               @click="toggleRowDetail"
             >
-              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide row detail') : bi('查看逐行明细', 'View row detail') }}
+              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide the row-by-row list') : bi('看逐行明细', 'See it row by row') }}
             </button>
 
             <template v-if="rowDetailOpen">
@@ -197,14 +244,26 @@
               >
                 {{ bi('正在加载逐行明细…', 'Loading row detail…') }}
               </p>
-              <p
+              <div
                 v-else-if="rowsErrored"
                 class="sp-snap__state sp-snap__state--muted"
                 data-testid="stock-prep-snapshot-diff-rows-error"
                 role="status"
               >
-                {{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}
-              </p>
+                <p class="sp-snap__state-msg">{{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}</p>
+                <!-- H4-3 retry: re-runs the existing loadRowDetail() for the same batch. -->
+                <button
+                  ref="rowsRetryEl"
+                  type="button"
+                  class="sp-snap__retry"
+                  data-testid="stock-prep-snapshot-diff-rows-retry"
+                  :disabled="rowsLoading"
+                  :aria-label="bi('重试读取逐行明细', 'Retry loading row detail')"
+                  @click="onRowsRetry"
+                >
+                  {{ bi('重试', 'Retry') }}
+                </button>
+              </div>
               <p
                 v-else-if="diffRows && diffRows.rowCount === 0"
                 class="sp-snap__state sp-snap__state--muted"
@@ -217,16 +276,24 @@
                   {{ bi('差异行', 'Diff rows') }}: {{ diffRows.rowCount }} ·
                   {{ bi('待处理', 'Held') }}: {{ diffRows.heldRowCount }}
                 </p>
-                <div class="sp-snap__rows-scroll">
+                <!-- H4-3 keyboard: this drill-down table has NO focusable content in any row (plain
+                     text cells only) — without this, a keyboard operator would have no way to reach
+                     its horizontal scroll at all, so the wrap itself is a native scroll-region. -->
+                <div
+                  class="sp-snap__rows-scroll"
+                  tabindex="0"
+                  role="region"
+                  :aria-label="bi('逐行差异明细表格,可滚动', 'Row-detail diff table, scrollable')"
+                >
                   <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
                     <thead>
                       <tr>
-                        <th>{{ bi('差异句柄', 'Diff') }}</th>
-                        <th>{{ bi('类型', 'Type') }}</th>
-                        <th>{{ bi('复核状态', 'Review') }}</th>
-                        <th>{{ bi('变更类别', 'Changes') }}</th>
-                        <th>{{ bi('行数', 'Rows') }}</th>
-                        <th>{{ bi('键指纹', 'Key fp') }}</th>
+                        <th>{{ bi('编号', 'Reference') }}</th>
+                        <th>{{ bi('怎么变的', 'How it changed') }}</th>
+                        <th>{{ bi('看过了吗', 'Reviewed yet') }}</th>
+                        <th>{{ bi('变了哪些方面', 'What changed about it') }}</th>
+                        <th>{{ bi('涉及几行', 'Rows affected') }}</th>
+                        <th>{{ bi('内部标识', 'Internal identifier') }}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -238,9 +305,21 @@
                         :data-review-status="row.reviewStatus"
                       >
                         <td><code class="sp-snap__handle">{{ row.diffId }}</code></td>
-                        <td>{{ row.diffType }}</td>
-                        <td>{{ row.reviewStatus }}</td>
-                        <td>{{ row.changeTypes.length ? row.changeTypes.join(', ') : '—' }}</td>
+                        <!-- PLAIN FIRST, TOKEN KEPT: the words say what happened, the code beside
+                             them is the engine's own enum, unchanged. -->
+                        <td>
+                          <span>{{ diffKindLabel(row.diffType) }}</span>
+                          <code class="sp-snap__token">{{ row.diffType }}</code>
+                        </td>
+                        <td>
+                          <span>{{ reviewLabel(row.reviewStatus) }}</span>
+                          <code class="sp-snap__token">{{ row.reviewStatus }}</code>
+                        </td>
+                        <td>
+                          <span v-if="row.changeTypes.length">{{ row.changeTypes.map(diffKindLabel).join('、') }}</span>
+                          <template v-else>—</template>
+                          <code v-if="row.changeTypes.length" class="sp-snap__token">{{ row.changeTypes.join(', ') }}</code>
+                        </td>
                         <td>{{ row.rowCount }}</td>
                         <td><code class="sp-snap__handle">{{ fingerprintLabel(row.keyFingerprint) }}</code></td>
                       </tr>
@@ -252,6 +331,31 @@
           </div>
         </div>
       </div>
+
+      <StockPrepTechnicalDetails testid="stock-prep-snapshot-tech">
+        <dl>
+          <dt>{{ bi('变更类别枚举', 'Change-kind vocabulary') }}</dt>
+          <dd>
+            <span v-for="entry in changeCountEntries" :key="entry.key">
+              <code>{{ entry.key }}</code> = {{ entry.label }};
+            </span>
+          </dd>
+          <dt>{{ bi('「不完整」是什么意思', 'What “incomplete” means') }}</dt>
+          <dd>
+            {{ bi(
+              '批次不完整 = 零行,或缺同步运行记录 —— 持久化没走完。此类批次的差异入口保持可见但禁用:拿半份数据比出来的结论会误导人。',
+              'A batch is incomplete when it has zero lines or no sync-run row — the persist path did not finish. Its diff entry stays visible but disabled: a comparison against half a batch would mislead.',
+            ) }}
+          </dd>
+          <dt>{{ bi('这些编号是什么', 'What those references are') }}</dt>
+          <dd>
+            {{ bi(
+              '句柄与 sha16 指纹是内部导航标识,不是业务值 —— 原始路径键、图号、数量、单位从不越过这一层。',
+              'The handles and sha16 fingerprints are internal navigation identifiers, not business values — raw path keys, drawing numbers, quantities and units never cross this boundary.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -270,7 +374,7 @@
 // a visible column, nor any customer business value — no drawing numbers, material codes,
 // quantities, versions of parts, path keys, or project names — because the summary shapes carry none
 // and the template reads a fixed whitelist of fields rather than stringifying the row.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
@@ -282,6 +386,13 @@ import {
   type StockPreparationSnapshotDiffSummary,
   type StockPreparationSnapshotDiffRowsResult,
 } from '../../../services/integration/stockPreparation/bomSnapshotDiff'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_DIFF_KIND_PLAIN,
+  STOCK_PREP_DIFF_REVIEW_PLAIN,
+  stockPrepEnumPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
+import { downloadCsvFile } from '../../../services/integration/stockPreparation/stockPrepCsv'
 
 const props = withDefaults(
   defineProps<{
@@ -298,6 +409,17 @@ const { locale } = useLocale()
 // Same synchronous locale idiom as the shell / view 1 / the rest of the integration surface.
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
+}
+
+/** The two diff vocabularies in words; each falls back to the raw token it does not know. */
+function diffKindLabel(kind: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_KIND_PLAIN, kind)
+  return plain ? bi(plain.zh, plain.en) : (kind ?? '—')
+}
+
+function reviewLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_REVIEW_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
 }
 
 const hasProject = computed(() => Boolean(props.projectId))
@@ -337,21 +459,105 @@ function fingerprintLabel(fp: string | null): string {
   return fp ?? '—'
 }
 
-// Fixed whitelist of the eight values-free change-count kinds (counts of lines, never the values).
+// Fixed whitelist of the ten values-free change-count kinds (counts of lines, never the values).
+// Q3c: componentCodeChanged/materialChanged were added alongside the backend's changeCountsFromEvidence
+// (stock-preparation-snapshot-reads.cjs) — both are independent of fingerprintChanged, not new totals
+// carved out of it (a row can carry more than one changeType at once).
 const changeCountEntries = computed(() => {
   const counts = diff.value?.changeCounts
   if (!counts) return []
   return [
-    { key: 'added', zh: '新增', en: 'Added', value: counts.added },
-    { key: 'removed', zh: '删除', en: 'Removed', value: counts.removed },
-    { key: 'quantityChanged', zh: '数量变化', en: 'Quantity changed', value: counts.quantityChanged },
-    { key: 'unitChanged', zh: '单位变化', en: 'Unit changed', value: counts.unitChanged },
-    { key: 'versionChanged', zh: '版本变化', en: 'Version changed', value: counts.versionChanged },
-    { key: 'pathChanged', zh: '路径变化', en: 'Path changed', value: counts.pathChanged },
-    { key: 'missingChildBom', zh: '缺失子 BOM', en: 'Missing child BOM', value: counts.missingChildBom },
-    { key: 'fingerprintChanged', zh: '指纹变化', en: 'Fingerprint changed', value: counts.fingerprintChanged },
-  ]
+    { key: 'added', value: counts.added },
+    { key: 'removed', value: counts.removed },
+    { key: 'quantityChanged', value: counts.quantityChanged },
+    { key: 'unitChanged', value: counts.unitChanged },
+    { key: 'versionChanged', value: counts.versionChanged },
+    { key: 'pathChanged', value: counts.pathChanged },
+    { key: 'missingChildBom', value: counts.missingChildBom },
+    { key: 'fingerprintChanged', value: counts.fingerprintChanged },
+    { key: 'componentCodeChanged', value: counts.componentCodeChanged },
+    { key: 'materialChanged', value: counts.materialChanged },
+  ].map((entry) => {
+    const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_KIND_PLAIN, entry.key)
+    return { ...entry, label: plain ? bi(plain.zh, plain.en) : entry.key }
+  })
 })
+
+/** Point 9 idiom (shared with StockPreparationProjectSyncPanel.vue): filesystem-hostile chars → '_'. */
+function sanitizeFilenameToken(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+function diffSummaryCsvFilename(): string {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const batchToken = sanitizeFilenameToken(selectedBatchId.value || 'batch')
+  return `stock-prep-diff-summary-${batchToken}-${yyyy}${mm}${dd}.csv`
+}
+
+/**
+ * Q3c: builds the client-side, values-free 对账摘要 export — everything here is already on screen,
+ * so this issues NO new GET. Three sections, all under the fixed `section,key,value` header:
+ *   - `batch`: the compared pair by internal handle + version (never a project/customer name).
+ *   - `summary`: `blockingExceptionCount` plus `readyRowCount`/`heldRowCount` — the latter two are
+ *     populated ONLY when the row-detail drill-down has already been opened and loaded
+ *     (`diffRows.value`); when it has not, they are left blank rather than triggering a fetch of
+ *     their own; `ready = rowCount - heldRowCount` matches the two vocabularies the row table itself
+ *     renders (`STOCK_PREP_REVIEW_STATUSES`: only `ready`/`held` exist).
+ *   - `changeCount`: the full whitelist `changeCountEntries` already renders on screen, including the
+ *     two Q3c additions (componentCodeChanged/materialChanged) — same numbers, same keys.
+ *   - `rowId`: only when row detail is loaded — one line per (changeType, diffId) pair, so a
+ *     reviewer can jump from "N rows had a component-code swap" straight to which rows those are,
+ *     without ever exporting the swap's actual values.
+ * VALUES-FREE: every cell is a count, a fixed enum token, or an internal handle
+ * (`snapshotBatchId`/`diffId`) — never a material name, quantity, drawing number, unit or path key.
+ */
+function buildDiffSummaryCsv(): { headers: string[]; rows: Array<Array<string | number>> } {
+  const headers = ['section', 'key', 'value']
+  const rows: Array<Array<string | number>> = []
+
+  const currentBatchId = diff.value?.snapshotBatchId ?? selectedBatchId.value ?? ''
+  const baseBatchId = diff.value?.baseSnapshotBatchId ?? ''
+  const batches = result.value?.batches ?? []
+  const versionOf = (batchId: string): number | string => {
+    const found = batches.find((batch) => batch.snapshotBatchId === batchId)
+    return found ? found.snapshotVersion : ''
+  }
+
+  rows.push(['batch', 'currentSnapshotBatchId', currentBatchId])
+  rows.push(['batch', 'currentSnapshotVersion', currentBatchId ? versionOf(currentBatchId) : ''])
+  rows.push(['batch', 'baseSnapshotBatchId', baseBatchId])
+  rows.push(['batch', 'baseSnapshotVersion', baseBatchId ? versionOf(baseBatchId) : ''])
+
+  rows.push(['summary', 'blockingExceptionCount', diff.value?.blockingExceptionCount ?? ''])
+  const loadedRows = diffRows.value
+  rows.push(['summary', 'readyRowCount', loadedRows ? loadedRows.rowCount - loadedRows.heldRowCount : ''])
+  rows.push(['summary', 'heldRowCount', loadedRows ? loadedRows.heldRowCount : ''])
+
+  for (const entry of changeCountEntries.value) {
+    rows.push(['changeCount', entry.key, entry.value])
+  }
+
+  if (loadedRows) {
+    for (const row of loadedRows.rows) {
+      for (const changeType of row.changeTypes) {
+        rows.push(['rowId', changeType, row.diffId])
+      }
+    }
+  }
+
+  return { headers, rows }
+}
+
+function onExportDiffSummary(): void {
+  if (!diff.value) return
+  const { headers, rows } = buildDiffSummaryCsv()
+  // Guard ON — same reasoning as the missing-components export (stockPrepCsv.ts B3): defensive even
+  // though every cell here is a fixed enum token or an internal handle, never a customer value.
+  downloadCsvFile(diffSummaryCsvFilename(), headers, rows, { guardFormulas: true })
+}
 
 function resetRowDetail(): void {
   rowsSeq += 1 // invalidate any in-flight rows load for the batch we are leaving
@@ -397,18 +603,13 @@ async function loadBatches(): Promise<void> {
   }
 }
 
-async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
-  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
-  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
-  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
-  if (batch.incomplete) return
-  const batchId = batch.snapshotBatchId
+// Shared by selectBatch (first load) and retryDiff (H4-3 error retry) — both fetch the diff summary
+// for a batch already recorded in selectedBatchId, under the SAME monotonic diffSeq guard, so a
+// retry can never let a stale response (from a batch switch mid-retry) win.
+async function fetchDiffSummary(batchId: string): Promise<void> {
   const seq = (diffSeq += 1)
-  selectedBatchId.value = batchId
   diffLoading.value = true
   diffErrored.value = false
-  diff.value = null
-  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
     const summary = await getStockPreparationSnapshotDiff(batchId, props.scope)
     if (seq !== diffSeq || batchId !== selectedBatchId.value) return // superseded — batch A's late summary must not overwrite B
@@ -421,6 +622,28 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   } finally {
     if (seq === diffSeq) diffLoading.value = false
   }
+}
+
+async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
+  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
+  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
+  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
+  if (batch.incomplete) return
+  const batchId = batch.snapshotBatchId
+  selectedBatchId.value = batchId
+  diff.value = null
+  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
+  await fetchDiffSummary(batchId)
+}
+
+// H4-3 retry: re-fetch the diff summary for the CURRENTLY selected batch (selectedBatchId is already
+// set — selectBatch sets it before the first fetch, and it is never cleared on a failed fetch), without
+// re-running resetRowDetail — a plain retry of the summary should not discard an already-open row
+// detail from a PRIOR successful load for this same batch.
+async function retryDiff(): Promise<void> {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  await fetchDiffSummary(batchId)
 }
 
 async function loadRowDetail(): Promise<void> {
@@ -453,6 +676,38 @@ function toggleRowDetail(): void {
   if (rowDetailOpen.value && !diffRows.value && !rowsLoading.value) void loadRowDetail()
 }
 
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). Each of the three retry buttons above carries `:disabled` while its own load is in
+// flight, and the button UNMOUNTS (its error branch yields to the loading branch, leaving the DOM) — the browser drops focus to
+// <body>, stranding a keyboard operator who just pressed Retry. After the load settles we put focus
+// back on the button, but ONLY when it is still rendered (the retry failed again, so there is
+// something to press) AND focus is still on <body> (our own unmount dropped it, and the operator
+// has not Tabbed elsewhere meanwhile) — the second condition is REQUIRED so this can never steal
+// focus from wherever the operator moved to.
+const batchRetryEl = ref<HTMLButtonElement | null>(null)
+const diffRetryEl = ref<HTMLButtonElement | null>(null)
+const rowsRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onBatchRetry(): Promise<void> {
+  await loadBatches()
+  await restoreRetryFocus(batchRetryEl)
+}
+
+async function onDiffRetry(): Promise<void> {
+  await retryDiff()
+  await restoreRetryFocus(diffRetryEl)
+}
+
+async function onRowsRetry(): Promise<void> {
+  await loadRowDetail()
+  await restoreRetryFocus(rowsRetryEl)
+}
+
 onMounted(loadBatches)
 watch(() => props.projectId, loadBatches)
 </script>
@@ -477,6 +732,35 @@ watch(() => props.projectId, loadBatches)
   color: var(--ms-text-3);
 }
 
+.sp-snap__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-snap__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-snap__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-snap__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-snap__overview {
   display: flex;
   flex-direction: column;
@@ -495,12 +779,22 @@ watch(() => props.projectId, loadBatches)
   font-weight: var(--ms-font-weight-title);
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-snap__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.sp-snap__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -514,6 +808,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -554,6 +852,15 @@ watch(() => props.projectId, loadBatches)
   font-size: 12px;
 }
 
+/* The engine's own enum, kept beside the words it means — subordinate, still copyable. */
+.sp-snap__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
+}
+
 .sp-snap__recorded {
   color: var(--ms-text-2);
   font-size: 12px;
@@ -585,6 +892,13 @@ watch(() => props.projectId, loadBatches)
 
 .sp-snap__select:disabled:hover {
   background: transparent;
+}
+
+/* H4-3 keyboard: same ring idiom as the H4-2 dashboard/stepper rings and this file's own
+   rows-toggle ring below — one focus-ring system across the stock-prep surface. */
+.sp-snap__select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__diff-wrap {
@@ -649,6 +963,22 @@ watch(() => props.projectId, loadBatches)
   gap: var(--ms-space-2);
 }
 
+.sp-snap__export {
+  align-self: flex-start;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__export:hover {
+  background: var(--el-fill-color-light);
+}
+
 .sp-snap__rows-toggle {
   align-self: flex-start;
   border: 1px solid var(--ms-border-light);
@@ -677,12 +1007,21 @@ watch(() => props.projectId, loadBatches)
   font-variant-numeric: tabular-nums;
 }
 
+/* H4-3 long-table: bounded height (smaller than the batches table above — this is the secondary,
+   nested drill-down) + BOTH-axis overflow, so its sticky thead has a real scroll range. */
 .sp-snap__rows-scroll {
-  overflow-x: auto;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.sp-snap__rows-scroll:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__rows-table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -696,6 +1035,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__rows-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-2);
   font-weight: var(--ms-font-weight-title);
 }

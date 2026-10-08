@@ -6,10 +6,12 @@
 // without aborting good expanded rows.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const {
   DECISIONS,
+  DENORMALIZED_PLM_FIELD_IDS,
   StockPreparationConflictPlannerError,
   __internals,
   planStockPreparationConflicts,
@@ -391,13 +393,19 @@ function testDuplicateExpandedKeyDiagnosticsValuesFree() {
   assert.equal(diagnostics.stableDiscriminatorCounts.pathParent, 1)
   assert.equal(diagnostics.stableDiscriminatorCounts.sourceDetail, 1)
   assert.equal(diagnostics.stableDiscriminatorCounts.sortLine, 1)
+  // POLICY HONESTY: allowedPolicies advertises only the policies the planner actually honours.
+  // merge_quantity / select_representative / skip_selected stay in the frozen persisted vocabulary
+  // (see the POLICY HONESTY section of stock-preparation-conflict-policies.test.cjs) but are never
+  // offered as choices.
   assert.deepEqual(diagnostics.allowedPolicies, [
     'hold',
     'keep_multiple_rows',
+    'source_correction_required',
+  ])
+  assert.deepEqual(diagnostics.unimplementedPolicies, [
     'merge_quantity',
     'select_representative',
     'skip_selected',
-    'source_correction_required',
   ])
   assert.equal(diagnostics.defaultPolicy, 'hold')
   assert.equal(diagnostics.groups.length, 2)
@@ -701,7 +709,1197 @@ function testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported() {
   }
 }
 
+// ── O1-B: identity for the ANONYMOUS hold families ──────────────────────────
+//
+// RED-witnessed guards (mutation table in the landing commit body):
+//   O1B-P1  every identity-capable anonymous family gets a derived identity,
+//           at the granularity its emitter actually supports
+//   O1B-P2  the identity is a pure function of the plan input (repeat-plan
+//           reproducibility, the property supersede/reopen leans on)
+//   O1B-P3  the reserved namespace is enforced at the planner too: an
+//           idempotencyKey may not impersonate a derived identity
+//   O1B-P4  a hold whose emitter attached nothing stable gets NO identity
+//           (honest deferral, never a hash of nothing)
+//   O1B-P5  keyed holds are untouched — no identity field appears on them
+
+const ANONYMOUS_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+function anonymousPlanInput() {
+  // Every identity-capable family shape at once, plus both deferral shapes.
+  return {
+    expandedRows: [
+      row({ componentSourceId: 'PART-OK', pathTokens: ['PART-OK'] }),
+      // keyless expanded row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-NOKEY', path: '["PART-NOKEY"]', depth: 0 },
+    ],
+    existingRows: [
+      // keyless existing row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-OLD', parentSourceId: null, path: '["PART-OLD"]', depth: 0, active: true },
+      // keyless existing row with NO discriminator at all -> deferral
+      { active: true },
+    ],
+    rowErrors: [
+      // two errors on the SAME locus -> one identity, deliberately
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      // same type, different depth -> different locus
+      { type: 'missing_component', field: 'OBJ_ID', depth: 3 },
+      // depth 0 is a REAL discriminator, not a blank
+      { type: 'missing_order_id', field: 'OrderNo', depth: 0 },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'root' },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'child' },
+      // ext-mapping coercion refusal -> `cell` granularity
+      { type: 'SOURCE_VALUE_NOT_A_NUMBER', target: 'ext_weight', sourceColumn: 'WGT', expectedType: 'number', depth: 0 },
+      { type: 'SOURCE_VALUE_SECRET_SHAPED', target: 'ext_token', sourceColumn: 'TOK', expectedType: 'string', depth: 0 },
+      // the unvalidated umbrella fallback: no type, no context -> deferral
+      { message: 'only a message' },
+    ],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  }
+}
+
+function anonymousHolds(plan) {
+  return plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && !entry.idempotencyKey)
+}
+
+function testO1bAnonymousFamiliesGetGranularityCorrectIdentities() {
+  const plan = planStockPreparationConflicts(anonymousPlanInput())
+  const holds = anonymousHolds(plan)
+  const identified = holds.filter((entry) => entry.derivedRowIdentity)
+  const deferred = holds.filter((entry) => !entry.derivedRowIdentity)
+
+  // O1B-P1: identity present exactly where the emitter carries stable context.
+  assert.equal(holds.length, 12, 'every keyless hold is an anonymous hold')
+  assert.equal(identified.length, 10)
+  assert.deepEqual(
+    deferred.map((entry) => entry.conflictSummary.type).sort(),
+    ['c2_row_error', 'missing_existing_idempotency_key'],
+    'O1B-P4: the contextless umbrella fallback and the discriminator-less row defer',
+  )
+
+  const identityByType = {}
+  for (const hold of identified) {
+    const type = hold.conflictSummary.type
+    identityByType[type] = identityByType[type] || new Set()
+    identityByType[type].add(hold.derivedRowIdentity)
+  }
+
+  // Granularity is encoded in the identity itself, so a reviewer can read it
+  // off a ledger row without re-deriving anything.
+  const granularityOf = (identity) => identity.slice(ANONYMOUS_IDENTITY_PREFIX.length).split(':')[0]
+  for (const hold of identified) {
+    assert.ok(hold.derivedRowIdentity.startsWith(ANONYMOUS_IDENTITY_PREFIX), 'identities are namespaced')
+    assert.match(hold.derivedRowIdentity, /:sha256:[0-9a-f]{32}$/, 'identities are HASHES, never plaintext context')
+  }
+  assert.equal(granularityOf([...identityByType.missing_expanded_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_existing_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_component][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.missing_order_id][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_NOT_A_NUMBER][0]), 'cell')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_SECRET_SHAPED][0]), 'cell')
+
+  // Locus semantics, stated as an assertion: same (type, field, depth) folds to
+  // ONE identity; a different depth or relation is a DIFFERENT locus.
+  assert.equal(identityByType.missing_component.size, 2, 'depth separates loci; same depth folds')
+  assert.equal(identityByType.invalid_quantity.size, 2, 'relation separates loci')
+
+  // No collision across families, granularities or loci.
+  const all = identified.map((entry) => entry.derivedRowIdentity)
+  assert.equal(new Set(all).size, 9, 'exactly 9 distinct identities behind 10 identified holds')
+
+  // A source id that went INTO a hash must not come back OUT of the plan.
+  for (const identity of new Set(all)) {
+    for (const secret of ['PART-NOKEY', 'PART-OLD', 'OBJ_ID', 'ext_weight', 'WGT', 'P-001']) {
+      assert.equal(identity.includes(secret), false, `identity must not leak ${secret}`)
+    }
+  }
+}
+
+function testO1bIdentityIsReproducibleFromTheSameInput() {
+  // O1B-P2. Two independent planner runs over equal (not shared) input must
+  // produce identical identities — without this, every reconcile would
+  // supersede its own ledger rows and no confirmation could ever stick.
+  const first = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const second = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const identitiesOf = (plan) => anonymousHolds(plan).map((entry) => entry.derivedRowIdentity || null)
+  assert.deepEqual(identitiesOf(first), identitiesOf(second), 'identity must be a pure function of the input')
+
+  // Key order in the source object must not move the identity either.
+  const reordered = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ depth: 2, type: 'missing_component', field: 'OBJ_ID' }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const straight = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ type: 'missing_component', field: 'OBJ_ID', depth: 2 }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(reordered)[0].derivedRowIdentity,
+    anonymousHolds(straight)[0].derivedRowIdentity,
+    'stable stringification makes key order irrelevant',
+  )
+
+  // A canonical read that hands `depth` back as a string must NOT re-key the row.
+  const numericDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: 2, active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const stringDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: '2', active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(numericDepth)[0].derivedRowIdentity,
+    anonymousHolds(stringDepth)[0].derivedRowIdentity,
+    'scalar normalisation survives the records-API round trip',
+  )
+}
+
+function testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched() {
+  // O1B-P5: a keyed hold carries no identity field at all — the decision object
+  // of every pre-O1-B class is unchanged, so no existing fingerprint moves.
+  const duplicate = row({ componentSourceId: 'PART-DUP', pathTokens: ['PART-DUP'] })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicate, { ...duplicate }],
+    existingRows: [],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const keyed = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && entry.idempotencyKey)
+  assert.equal(keyed.length, 1)
+  assert.equal(Object.prototype.hasOwnProperty.call(keyed[0], 'derivedRowIdentity'), false)
+
+  // O1B-P3: the reserved namespace is fenced at the planner, not only at the
+  // ledger. A HOLD whose idempotencyKey impersonates a derived identity is
+  // refused rather than keyed under somebody else's addressing scheme — this is
+  // the ledger-relevant surface, since only holds ever reach the ledger.
+  const forgedKey = `${ANONYMOUS_IDENTITY_PREFIX}row:sha256:${'0'.repeat(32)}`
+  const forged = row({ idempotencyKey: forgedKey })
+  assert.throws(
+    () => planStockPreparationConflicts({
+      expandedRows: [forged, { ...forged }],
+      existingRows: [],
+      rowErrors: [],
+      runId: 'run-o1b',
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    }),
+    StockPreparationConflictPlannerError,
+    'a forged anonymous-namespace idempotencyKey must be refused',
+  )
+
+  // THE WALL IS UNTOUCHED: a hold never carries a record or a patch, so adding
+  // identity added no write capability anywhere.
+  for (const hold of plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'record'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'patch'), false)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 备料主表 gains 父组件图号 / 父组件名称 / 规格
+//
+// RED WITNESSES for the three PLM columns the WORKING SHEET was missing. They are
+// composed at record construction, from the SAME expansion batch the snapshot line
+// is built from:
+//   * the parent pair through the in-batch parent index (the expansion emits the
+//     parent as an OBJ_ID only), and
+//   * 规格 from the expansion row's `spec`, which exists ONLY where the deployment
+//     DECLARED readPlan.part.specField — undeclared means an empty column, never a
+//     guessed source column and never a throw.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A two-level batch: one root and one child of it, as the expander emits them.
+function parentChildBatch(childOverrides = {}) {
+  const parent = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件' })
+  const child = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+    ...childOverrides,
+  })
+  return { parent, child }
+}
+
+// 父组件名称 = 父件的**未切分** identityName(老系统口径),不是 F1c 切出来的首段。
+//
+// 老系统 StockInfoController 754-755:
+//   stockInfo.setParentComponentCode(parentBomInfo.getIdentityNo());
+//   stockInfo.setParentComponentName(parentBomInfo.getIdentityName());
+// —— 父件那一侧取的是 identityName **全串**,老系统导出第 5 列 父组件名称 打印的就是它。切分
+// (fillBasicStockInfo 762-770 的 split(" ", 2))只作用在**当前组件**那一侧的 名称/规格 上。
+//
+// F1c 把展开层的 `componentName` 改成了首段,如果这里照抄 `parent.componentName`,父组件名称 就从
+// 「主体组件 DN1200」悄悄退成「主体组件」—— 既偏离老系统,也是对改前行为的回退。行上现成有全串
+// (展开层 createRow 落的 `nameAndSpec`),所以先取它。
+//
+// 把 `firstPresentValue(parent, EXPANSION_NAME_AND_SPEC_KEYS)` 换回 `parent.componentName` ⇒ 本用例必红。
+function testParentComponentNameIsTheUnsplitLegacyString() {
+  const { parent, child } = parentChildBatch()
+  parent.nameAndSpec = '主体组件 DN1200'
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-parent-unsplit',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const childAdd = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(
+    childAdd.record.parentComponentName,
+    '主体组件 DN1200',
+    '父组件名称 取父件未切分的 名称及规格(老系统 754-755),不是 F1c 切出来的首段',
+  )
+  // 负控:父件没有全串时退回首段 —— 改前写进去的老行、以及源行本就没有 名称及规格 的行,
+  // 都不会因为这条规则而丢值。
+  const plain = parentChildBatch()
+  const plainPlan = planStockPreparationConflicts({
+    expandedRows: [plain.parent, plain.child],
+    existingRows: [],
+    runId: 'run-parent-fallback',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const plainChild = byDecision(plainPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(plainChild.record.parentComponentName, '主体组件', '父件没有全串时退回 componentName,不丢值')
+}
+
+function testDenormalizedParentAndSpecReachTheMainRow() {
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-parent-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const adds = byDecision(plan, DECISIONS.ADD)
+  assert.equal(adds.length, 2, 'both rows are added')
+
+  const childAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001', '父组件图号 lands on the child row')
+  assert.equal(childAdd.record.parentComponentName, '主体组件', '父组件名称 lands on the child row')
+  assert.equal(childAdd.record.componentSpec, 'DN1200', '规格 lands on the row')
+  // ALL SEVEN on one record — the claim the project export depends on.
+  for (const [fieldId, expected] of [
+    ['parentComponentCode', 'TZ-0001'],
+    ['parentComponentName', '主体组件'],
+    ['componentCode', 'GJ-0007'],
+    ['componentName', '筒体'],
+    ['componentSpec', 'DN1200'],
+    ['material', 'Steel'],
+    ['totalQuantity', 2],
+  ]) {
+    assert.equal(childAdd.record[fieldId], expected, `the seven fields are all on the main row: ${fieldId}`)
+  }
+  assertNoHumanFields(childAdd.record, 'parent/spec add record')
+
+  // A ROOT row has no parent: absence, not an empty string. `spec` still rides.
+  const rootAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-ROOT')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentCode'), false, 'a root row carries no 父组件图号 key at all')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentName'), false, 'a root row carries no 父组件名称 key at all')
+}
+
+function testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError() {
+  // The DEFAULT read plan declares no part.specField, so the expansion row has no `spec` key at
+  // all. That must be an empty column, never a crash and never a guessed source column.
+  const { parent, child } = parentChildBatch()
+  assert.equal(Object.prototype.hasOwnProperty.call(child, 'spec'), false, 'the fixture models an undeclared spec slot')
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-no-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true, 'a deployment with no declared spec slot plans cleanly')
+  for (const decision of byDecision(plan, DECISIONS.ADD)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(decision.record, 'componentSpec'), false, 'no 规格 key is invented')
+  }
+  // The parent join is unaffected by the missing spec slot.
+  const childAdd = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001')
+
+  // A blank spec is the same as an absent one — no empty-string cell.
+  for (const blank of ['', '   ', null, undefined]) {
+    const blanked = parentChildBatch({ spec: blank })
+    const blankPlan = planStockPreparationConflicts({
+      expandedRows: [blanked.parent, blanked.child],
+      existingRows: [],
+      runId: 'run-blank-spec',
+      plannedAt: '2026-09-02T00:00:00.000Z',
+    })
+    const add = byDecision(blankPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+    assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'componentSpec'), false, `blank spec ${JSON.stringify(blank)} writes no cell`)
+  }
+}
+
+function testUnresolvableParentIsAbsenceNotAGuess() {
+  // The child's parent is NOT in this batch (a partial expansion). Nothing may be invented from
+  // the OBJ_ID, and the plan must not fail.
+  const { child } = parentChildBatch()
+  const plan = planStockPreparationConflicts({
+    expandedRows: [child],
+    existingRows: [],
+    runId: 'run-orphan',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true)
+  const add = byDecision(plan, DECISIONS.ADD)[0]
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentCode'), false, 'an unresolvable parent writes no 父组件图号')
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentName'), false, 'an unresolvable parent writes no 父组件名称')
+  assert.equal(add.record.parentSourceId, 'PART-ROOT', 'the OBJ_ID lineage column itself is untouched')
+}
+
+function testExistingRowsAreBackfilledByAReRun() {
+  // The migration answer for rows written BEFORE this change: an ordinary re-pull. The row is
+  // otherwise unchanged, so before this change it was a SKIP; the three empty columns make it a
+  // plm_system refresh like any other — no migration, no backfill script.
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const stale = { ...child, notes: 'human note that must survive' }
+  delete stale.spec
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, stale],
+    runId: 'run-backfill',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const updates = byDecision(plan, DECISIONS.UPDATE)
+  assert.equal(updates.length, 1, 'only the child row needs a refresh')
+  const patch = updates[0].patch
+  assert.equal(patch.parentComponentCode, 'TZ-0001', 're-pull backfills 父组件图号')
+  assert.equal(patch.parentComponentName, '主体组件', 're-pull backfills 父组件名称')
+  assert.equal(patch.componentSpec, 'DN1200', 're-pull backfills 规格')
+  assert.deepEqual(
+    updates[0].changedFields.slice().sort(),
+    ['componentSpec', 'parentComponentCode', 'parentComponentName'],
+    'the three empty columns are exactly what changed — nothing else was touched',
+  )
+  assertNoHumanFields(patch, 'backfill patch')
+
+  // Idempotent: a SECOND run over the already-backfilled sheet is a SKIP again.
+  const backfilled = { ...stale, parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' }
+  const second = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, backfilled],
+    runId: 'run-backfill-2',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, 'a re-run over a backfilled sheet writes nothing')
+  assert.equal(byDecision(second, DECISIONS.SKIP).length, 2)
+}
+
+function testTheHumanFieldWallIsUnaffected() {
+  const humanBand = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
+    .filter((field) => field.ownership === 'human_preserved')
+    .map((field) => field.id)
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-wall',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  // The band is reported exactly as the template declares it, in template order. It is 13
+  // today: the original 8 plus 自制/外购 and the departmental response band (makeOrBuy /
+  // procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate), which grew
+  // it through the design gate — NOT through the three plm_system columns this test is about.
+  assert.deepEqual(
+    plan.summary.humanPreservedFields,
+    humanBand,
+    'the human-preserved band is untouched by three new plm_system columns',
+  )
+  assert.equal(plan.summary.humanPreservedFields.length, 13)
+  assert.deepEqual(plan.summary.humanPreservedFields.slice(0, 8), [
+    'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes',
+    'procurementReply', 'warehouseConfirmation',
+  ], 'the original eight are first and unchanged')
+  // The three newcomers are on the PLM side of the wall, and only there.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.ok(plan.summary.plmSystemFields.includes(fieldId), `${fieldId} is refreshable`)
+    assert.equal(plan.summary.humanPreservedFields.includes(fieldId), false, `${fieldId} is never human-preserved`)
+  }
+  // MUTATION CONTROL: the guard still bites. Feed a human field into a record the way a mis-scoped
+  // projection would, and the planner must refuse — if this passes silently the wall is decorative.
+  let refused = null
+  try {
+    __internals.assertNoHumanFields({ componentSpec: 'DN1200', notes: 'smuggled' }, humanBand, 'add record')
+  } catch (error) {
+    refused = error
+  }
+  assert.ok(refused instanceof StockPreparationConflictPlannerError, 'the human-field wall still throws')
+  assert.equal(refused.details.field, 'notes')
+  // ...and it does NOT fire on the three new columns.
+  __internals.assertNoHumanFields(
+    { parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' },
+    humanBand,
+    'add record',
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W3a M-03 / M-04 — THE MISSING-COMPONENT SIDE CHANNEL DOES NOT REACH THE PLANNER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// W3a gives the expander a second, VALUE-BEARING output — `expansion.missingComponents`, carrying
+// real PLM part numbers — so an operator can be told which parts to create. The planner's two
+// durable surfaces must not be able to see it:
+//
+//   M-03 THE ANONYMOUS-HOLD IDENTITY. `ANONYMOUS_LOCUS_IDENTITY_FIELDS` reads {field, depth,
+//        relation} off the ROWERROR, and the rowError did not change. Pinned against HARD-CODED
+//        baselines rather than against a re-derivation: a re-derivation moves with the recipe and
+//        would stay green through exactly the change that supersedes every pending hold in the
+//        customer's ledger.
+//   M-04 THE LEDGER PROJECTION. `details` is {field, depth, relation}, and `conflictSummary` is what
+//        the confirmation ledger's `inputFingerprint` is computed over. Asserted as an absence of the
+//        part-number literals over the WHOLE plan, not just over `details`.
+function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
+  // M-03: the recipe, frozen. These two strings were computed on the pre-W3a tree.
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 2 }),
+    'anon-hold:v1:locus:sha256:71f697ebef98612c8b12ef96093b7e01',
+    'M-03: the missing_component locus identity is byte-for-byte what it was before W3a',
+  )
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 0 }),
+    'anon-hold:v1:locus:sha256:6cbfb57eb7057856c257b2012e73796e',
+    'M-03: depth 0 (the BOM root) too',
+  )
+
+  // The expansion the route would hold at this point: BOTH arrays populated, exactly as
+  // `expandPlmProjectBom` now returns them. The planner is handed `expansion.rowErrors` — which is
+  // the only thing table-actions passes it — so the side channel is structurally out of reach.
+  const expansion = {
+    rowErrors: [
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+    ],
+    missingComponents: [
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZPARENTZZ', bomId: 'ZZBOMZZ', path: '["ZZPARENTZZ","ZZPARTZZ"]', depth: 1 },
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZOTHERPARENTZZ', bomId: 'ZZBOM2ZZ', path: '["ZZOTHERPARENTZZ","ZZPARTZZ"]', depth: 1 },
+    ],
+  }
+  const plan = planStockPreparationConflicts({
+    expandedRows: [row({ componentSourceId: 'PART-OK' })],
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-w3a',
+    plannedAt: '2026-09-05T00:00:00.000Z',
+  })
+
+  const holds = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)
+  assert.equal(holds.length, 2, 'both missing-component rowErrors still hold the run')
+  for (const hold of holds) {
+    assert.deepEqual(
+      Object.keys(hold.conflictSummary),
+      ['type', 'field', 'depth'],
+      'M-04: the ledger projection is the same key set it always was',
+    )
+  }
+
+  // M-04, stated the way it matters: not one of these literals appears ANYWHERE in the plan — not in
+  // details, not in a summary, not in an identity, not in the evidence projection.
+  const planText = JSON.stringify(plan)
+  const evidenceText = JSON.stringify(summarizeConflictPlanForEvidence(plan))
+  for (const literal of ['ZZPARTZZ', 'ZZPARENTZZ', 'ZZOTHERPARENTZZ', 'ZZBOMZZ', 'ZZBOM2ZZ']) {
+    assert.equal(planText.includes(literal), false, `M-04: the plan carries no ${literal}`)
+    assert.equal(evidenceText.includes(literal), false, `M-04: the plan evidence carries no ${literal}`)
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 规格 P(owner 2026-09-15)-- 客户包那一对 父组件图号 / 父组件名称 副本(ext_parentDrawingNo /
+// ext_parentName)已撤:「留模板对做正本,改中文名,备料包去掉那一对,导出改读模板对」。
+//
+// 来历(F1c-b,现已撤):222 上模板列 parentComponentCode / parentComponentName 在 F1c 之后 579/581
+// 行有值,而同名同义的包列 0 行有值;F1c-b 让规划器从刚写进 out 的模板对抄值派生那两列,于是客户看到
+// 两对内容相同的列、把英文那对删了(已恢复)。裁决之后规划器对这两个 id **既不派生也不读**;既有安装
+// 上的两列与其值原样保留(受管字段守卫也不允许删),只是不再有写手。
+//
+// 这几条用例钉住:①模板对照旧从批内父行解析,退回路径与缺席规则一字未动(正本;硬约束 (a));
+// ②动作声明了那两个 ext_ id、包也装着(222 今晚就是这个形状)⇒ 记录上仍然一个键都不出现 ——
+// 声明两列 / 一列 / 不声明 / 没装包四种形状同判,而可写 band 里它们还在(撤的是写手,不是列);
+// ③来料自带的映射值原样透传(测得的,不是派生的),空白不再被派生填上;④登记表与源码一致:
+// DENORMALIZED_PLM_FIELD_IDS 的 ext_ 半边只剩三列;⑤存量行:模板对已填的行不再因这两列产生 update,
+// 模板对空着的行以 update 补**模板对**且 patch 里没有那两个键(#5625 那条 installed-fields 用例的
+// 相应调整,不是删掉)。
+//
+// 变异(内存级):M1「把那两列留在 DENORMALIZED_PLM_FIELD_IDS 里 / 恢复派生」⇒ ① ② ③ ④ 全红。
+// -----------------------------------------------------------------------------
+
+// 已撤的那一对。既有部署的动作 extensionFieldIds(durable JSON)与包安装账本里今天仍然有它们,所以
+// 用例照旧把它们声明进动作、装进表 —— 证的正是「声明了、装了,也不再写」。
+const RETIRED_PARENT_PACK_COLUMN_IDS = Object.freeze(['ext_parentDrawingNo', 'ext_parentName'])
+const PARENT_PACK_COLUMN_IDS = RETIRED_PARENT_PACK_COLUMN_IDS
+
+// 包安装到表上之后的字段属性,与安装器盖的那一份同形(ownership=plm_system ⇒ 进 pickFields 的
+// 可写 band)。只列扩展列:模板列由冻结模板自己管,写进 installed 也会被 template_governed 挡掉。
+function installedPackColumn(fieldId, type = 'string') {
+  return {
+    logicalId: fieldId,
+    name: fieldId,
+    type,
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }
+}
+
+function planWithParentPackColumns(input = {}) {
+  const declared = input.extensionFieldIds === undefined ? PARENT_PACK_COLUMN_IDS : input.extensionFieldIds
+  const installPack = input.installPack !== false
+  return planStockPreparationConflicts({
+    expandedRows: input.expandedRows,
+    existingRows: input.existingRows || [],
+    runId: input.runId || 'run-parent-pack',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    ...(declared === null ? {} : { extensionFieldIds: declared }),
+    ...(installPack ? { installedFieldProperties: PARENT_PACK_COLUMN_IDS.map((id) => installedPackColumn(id)) } : {}),
+  })
+}
+
+// 四个父 + 四个子 + 一个父件不在批内的孤儿。第二个父件**没有**未切分全串,走的是模板列自己的
+// 退回路径(nameAndSpec -> componentName)—— 包列跟着同一条路径走,才叫同源。
+// 第三、第四家族钉的是「模板列缺席 ⇒ 包列也缺席,不发明空串」这条硬规则里**父件在批内、但父件
+// 自己那个字段为空**的象限:前两个家族的父件图号与名字都有值,`out.parentComponentCode !==
+// undefined` / `out.parentComponentName !== undefined` 两道守卫在它们身上永远是真,去掉守卫改写
+// 空串也照绿(反驳 B blocker 1 的 MXEMPTY / MXEMPTY2)。
+function twoFamilyBatch() {
+  const parentA = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件', nameAndSpec: '主体组件 DN1200' })
+  const childA = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+  })
+  const parentB = row({ componentSourceId: 'PART-ROOT-2', componentCode: 'TZ-0002', componentName: '副体组件' })
+  const childB = row({
+    componentSourceId: 'PART-CHILD-2',
+    parentSourceId: 'PART-ROOT-2',
+    pathTokens: ['PART-ROOT-2', 'PART-CHILD-2'],
+    componentCode: 'GJ-0008',
+    componentName: '封头',
+  })
+  // 父件在批内,但父件**自己的图号是空的** ⇒ 模板列 parentComponentCode 缺席 ⇒ 包列必须同样缺席。
+  const parentC = row({ componentSourceId: 'PART-ROOT-3', componentCode: '', componentName: '无图号组件', nameAndSpec: '无图号组件 DN800' })
+  const childC = row({
+    componentSourceId: 'PART-CHILD-3',
+    parentSourceId: 'PART-ROOT-3',
+    pathTokens: ['PART-ROOT-3', 'PART-CHILD-3'],
+    componentCode: 'GJ-0010',
+    componentName: '裙座',
+  })
+  // 父件在批内,但父件**两个名字键都空**(没有 nameAndSpec 键、componentName 为空串)
+  // ⇒ 模板列 parentComponentName 缺席 ⇒ 包列必须同样缺席。
+  const parentD = row({ componentSourceId: 'PART-ROOT-4', componentCode: 'TZ-0004', componentName: '' })
+  const childD = row({
+    componentSourceId: 'PART-CHILD-4',
+    parentSourceId: 'PART-ROOT-4',
+    pathTokens: ['PART-ROOT-4', 'PART-CHILD-4'],
+    componentCode: 'GJ-0011',
+    componentName: '法兰',
+  })
+  const orphan = row({
+    componentSourceId: 'PART-ORPHAN',
+    parentSourceId: 'PART-NOT-IN-THIS-BATCH',
+    pathTokens: ['PART-NOT-IN-THIS-BATCH', 'PART-ORPHAN'],
+    componentCode: 'GJ-0009',
+    componentName: '接管',
+  })
+  return {
+    parentA,
+    childA,
+    parentB,
+    childB,
+    parentC,
+    childC,
+    parentD,
+    childD,
+    orphan,
+    rows: [parentA, childA, parentB, childB, parentC, childC, parentD, childD, orphan],
+  }
+}
+
+// ① + ②:模板对照旧解析;已撤的那一对在任何声明形状下都不出现。
+// M1(恢复 out.ext_parentDrawingNo / out.ext_parentName 的派生)⇒ 本用例红。
+function testRetiredParentPackColumnsAreNeverDerivedWhileTheTemplatePairStillIs() {
+  const batch = twoFamilyBatch()
+  const plan = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-retired' })
+  const adds = byDecision(plan, DECISIONS.ADD)
+  assert.equal(adds.length, 9, 'nine rows are added')
+  const recordOf = (sourceId) => adds.find((decision) => decision.record.componentSourceId === sourceId).record
+
+  // 正本:模板对从批内父行解析,退回路径与缺席规则一字未动(硬约束 (a))。
+  const childA = recordOf('PART-CHILD')
+  assert.equal(childA.parentComponentCode, 'TZ-0001', '父组件图号 落进模板列')
+  assert.equal(childA.parentComponentName, '主体组件 DN1200', '父组件名称 是父件**未切分**的全串')
+  const childB = recordOf('PART-CHILD-2')
+  assert.equal(childB.parentComponentCode, 'TZ-0002')
+  assert.equal(childB.parentComponentName, '副体组件', '父件没有全串时退回 componentName —— 同一条路径')
+  const childC = recordOf('PART-CHILD-3')
+  assert.equal(Object.prototype.hasOwnProperty.call(childC, 'parentComponentCode'), false, '父件图号为空 ⇒ 模板列缺席,不写空串')
+  assert.equal(childC.parentComponentName, '无图号组件 DN800', '名字那一列不受图号缺值牵连')
+  const childD = recordOf('PART-CHILD-4')
+  assert.equal(childD.parentComponentCode, 'TZ-0004', '图号那一列不受名字缺值牵连')
+  assert.equal(Object.prototype.hasOwnProperty.call(childD, 'parentComponentName'), false, '父件两个名字键都空 ⇒ 模板列缺席,不写空串')
+  for (const sourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ROOT-3', 'PART-ROOT-4', 'PART-ORPHAN']) {
+    for (const fieldId of ['parentComponentCode', 'parentComponentName']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(recordOf(sourceId), fieldId), false, sourceId + ' 不写 ' + fieldId + ' —— 无父就是无键,不是空串')
+    }
+  }
+
+  // 已撤的那一对:声明了、包也装了,九行记录上一个键都没有 —— 不是空串,是没有。
+  for (const decision of adds) {
+    for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(decision.record, fieldId),
+        false,
+        decision.record.componentSourceId + ': 已撤的 ' + fieldId + ' 不再派生(声明了、装了也不派生)',
+      )
+    }
+    assert.deepEqual(
+      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+      [],
+      decision.record.componentSourceId + ': 只声明那两列 ⇒ 记录上没有任何 ext_ 键',
+    )
+    assertNoHumanFields(decision.record, 'retired parent pack add record')
+  }
+  // 可写 band 一字未动:装了包、声明了,它们仍在 plm_system band 里 —— 既有安装零删除,撤的是写手不是列。
+  for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+    assert.equal(plan.summary.plmSystemFields.includes(fieldId), true, fieldId + ' 仍在包感知可写 band 里')
+  }
+
+  // 四种声明形状同判:只声明一列 / 只声明另一列 / 不声明 / 没装包。
+  for (const [label, input] of [
+    ['only-drawingNo', { extensionFieldIds: ['ext_parentDrawingNo'] }],
+    ['only-name', { extensionFieldIds: ['ext_parentName'] }],
+    ['undeclared', { extensionFieldIds: null }],
+    ['no-pack', { installPack: false }],
+  ]) {
+    const shaped = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-' + label, ...input })
+    const shapedAdds = byDecision(shaped, DECISIONS.ADD)
+    assert.equal(shapedAdds.length, 9, label + ': 声明形状不改变 add 的条数')
+    for (const decision of shapedAdds) {
+      assert.deepEqual(
+        Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+        [],
+        label + ': ' + decision.record.componentSourceId + ' 上没有任何 ext_ 键',
+      )
+    }
+    const shapedChild = shapedAdds.find((d) => d.record.componentSourceId === 'PART-CHILD').record
+    assert.equal(shapedChild.parentComponentCode, 'TZ-0001', label + ': 模板列照旧')
+    assert.equal(shapedChild.parentComponentName, '主体组件 DN1200', label + ': 模板列照旧')
+  }
+}
+
+// ③ 来料自带的值原样透传 —— 那是部署自己 ext 映射测得的,pickFields 照抄;派生不再补空白。
+// M1 的另一面:恢复派生 ⇒ 空白形状被填上模板值 ⇒ 红。
+function testMappedRetiredPackValuesPassThroughAndBlanksStayBlank() {
+  const batch = twoFamilyBatch()
+  const mapped = { ...batch.childA, ext_parentDrawingNo: 'MAPPED-DWG-9', ext_parentName: '映射来的父件名' }
+  const plan = planWithParentPackColumns({ expandedRows: [batch.parentA, mapped], runId: 'run-parent-pack-mapped' })
+  const record = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+  assert.equal(record.ext_parentDrawingNo, 'MAPPED-DWG-9', '映射值原样透传 —— 测得的,不是派生的')
+  assert.equal(record.ext_parentName, '映射来的父件名')
+  assert.equal(record.parentComponentCode, 'TZ-0001', '模板列不受映射值影响')
+  assert.equal(record.parentComponentName, '主体组件 DN1200')
+
+  for (const blank of ['', '   ', null, undefined]) {
+    const blanked = { ...batch.childA, ext_parentDrawingNo: blank, ext_parentName: blank }
+    const blankedPlan = planWithParentPackColumns({ expandedRows: [batch.parentA, blanked], runId: 'run-parent-pack-blank' })
+    const blankedRecord = byDecision(blankedPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+    assert.notEqual(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白 ' + JSON.stringify(blank) + ' 不再被派生填上')
+    assert.notEqual(blankedRecord.ext_parentName, '主体组件 DN1200', '空白 ' + JSON.stringify(blank) + ' 不再被派生填上')
+    assert.equal(blankedRecord.parentComponentCode, 'TZ-0001', '模板列照旧')
+    assert.equal(blankedRecord.parentComponentName, '主体组件 DN1200')
+  }
+}
+
+// DENORMALIZED_PLM_FIELD_IDS 是「这个函数会派生哪些列」的登记表,在这条用例之前它没有任何运行时
+// 消费者,加进去两项也好、漏登记也好,整条套件照绿(反驳 B blocker 2 的 MXDEAD)。这里把它绑成
+// 真闸,两半各管一个方向:
+//  · **行为半**(一次让全部派生列同时落地的批次):记录上的 ext_ 键集合必须与登记表的 ext_ 半边
+//    逐项相同(deepEqual,不是包含),登记表里的非 ext_ 三列也必须都在 —— 登记了却派生不出来
+//    ⇒ 红,删掉一条已登记的派生 ⇒ 红。这一半**证不到「漏登记」**:没登记的新 id 不会出现在任何
+//    用例的 extensionFieldIds 里,`canDeriveExtensionField` 先把它挡掉,记录上永远不出现,
+//    deepEqual 照样相等(反驳 B blocker 2 的 MXNEWCOL)。
+//  · **结构半**(直接读 lib 源码):派生点的两种字面量 —— 闸 `canDeriveExtensionField('ext_…'`
+//    与落值 `out.ext_… =` —— 抽出来的 id 集合也必须与登记表的 ext_ 半边逐项相同。往
+//    denormalizedPlmFields 里加第六列而**不**登记 ⇒ 这里红。两种抽法都留着:只有闸没有落值
+//    (或反过来)的新列同样是漏登记,也同样是一条自相矛盾的派生。
+function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
+  // 规格 P(2026-09-15):五列回到三列 —— ext_parentDrawingNo / ext_parentName 已撤。
+  const ALL_DERIVED_EXT_IDS = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec']
+  const parent = row({
+    componentSourceId: 'PART-ROOT',
+    componentCode: 'TZ-0001',
+    componentName: '主体组件',
+    nameAndSpec: '主体组件 DN1200',
+    sortLine: 3,
+  })
+  const child = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+    nameAndSpec: '筒体 DN1200',
+    spec: 'DN1200',
+    sortLine: 7,
+  })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-denormalized-registry',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    extensionFieldIds: ALL_DERIVED_EXT_IDS,
+    installedFieldProperties: ALL_DERIVED_EXT_IDS.map((id) => installedPackColumn(id, id.endsWith('SortNo') ? 'number' : 'string')),
+  })
+  const record = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+
+  assert.deepEqual(
+    Object.keys(record).filter((key) => key.startsWith('ext_')).sort(),
+    DENORMALIZED_PLM_FIELD_IDS.filter((id) => id.startsWith('ext_')).slice().sort(),
+    '派生出来的 ext_ 列集合必须与 DENORMALIZED_PLM_FIELD_IDS 的 ext_ 半边逐项相同',
+  )
+  for (const fieldId of DENORMALIZED_PLM_FIELD_IDS) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(record, fieldId),
+      true,
+      '登记表里的 ' + fieldId + ' 必须真的派生得出来',
+    )
+  }
+  assertNoHumanFields(record, 'denormalized registry record')
+
+  // 结构半:漏登记那个方向只能从源码上抓(见函数头)。
+  const plannerSource = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'),
+    'utf8',
+  )
+  const registeredExtIds = DENORMALIZED_PLM_FIELD_IDS.filter((id) => id.startsWith('ext_')).slice().sort()
+  const gatedExtIds = [...new Set(
+    Array.from(plannerSource.matchAll(/canDeriveExtensionField\('(ext_[A-Za-z0-9_]+)'/g), (match) => match[1]),
+  )].sort()
+  const assignedExtIds = [...new Set(
+    Array.from(plannerSource.matchAll(/\bout\.(ext_[A-Za-z0-9_]+)\s*=[^=]/g), (match) => match[1]),
+  )].sort()
+  assert.deepEqual(
+    gatedExtIds,
+    registeredExtIds,
+    '源码里过 canDeriveExtensionField 的 ext_ 列必须与 DENORMALIZED_PLM_FIELD_IDS 逐项相同(漏登记 ⇒ 红)',
+  )
+  assert.deepEqual(
+    assignedExtIds,
+    registeredExtIds,
+    '源码里真的落值(out.ext_… =)的 ext_ 列必须与 DENORMALIZED_PLM_FIELD_IDS 逐项相同(漏登记 ⇒ 红)',
+  )
+
+  // 规格 P 的 M1 tripwire,按名点出来:已撤的那一对既不在登记表里,也不在源码的闸 / 落值两种字面量里。
+  for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+    assert.equal(DENORMALIZED_PLM_FIELD_IDS.includes(fieldId), false, 'M1: 已撤的 ' + fieldId + ' 不得留在 DENORMALIZED_PLM_FIELD_IDS 里')
+    assert.equal(gatedExtIds.includes(fieldId), false, 'M1: 源码里不得再有 canDeriveExtensionField(' + fieldId + ')')
+    assert.equal(assignedExtIds.includes(fieldId), false, 'M1: 源码里不得再有 out.' + fieldId + ' =')
+  }
+  assert.equal(registeredExtIds.length, 3, '派生的 ext_ 列回到 F1c 的三列')
+}
+
+// ⑤ 存量行(222 上 581 行的答案:没有迁移,也没有删除)。#5625 那条「存量行以普通 update 补包列」
+// 用例的相应调整 —— 补的对象从包列换成正本:
+//   形状 A:模板对已填、已撤的那一对 不存在 / 空串 / 人手填 —— 来料上没有那两个键(X6:缺键 ≠
+//         变更),模板对与来料相等 ⇒ 整行 SKIP,零 update;手填值原样留在表上(没人读、没人写、
+//         没人删 —— 这是「既有安装零数据删除」在规划器层的形状)。
+//   形状 B:模板对空着(#5446 之前写入、从未重拉的行)⇒ 一条 update 补**模板对**;patch 与
+//         changedFields 里只有模板对,没有那两个 ext_ 键;不挂 manual_confirm;补完再拉是 SKIP。
+// M1(恢复派生)⇒ 形状 A 的 empty-string / hand-authored 变成 update、形状 B 的 patch 多出两个键 ⇒ 红。
+function testExistingRowsAreHealedOnTheTemplatePairAndNeverOnTheRetiredPair() {
+  const batch = twoFamilyBatch()
+  const HAND_AUTHORED = { ext_parentDrawingNo: '人手填的图号', ext_parentName: '人手填的父件名' }
+  const TEMPLATE_PAIR_FILLED = { parentComponentCode: 'TZ-0001', parentComponentName: '主体组件 DN1200' }
+  for (const existingShape of ['absent', 'empty-string', 'hand-authored']) {
+    const retiredCells = existingShape === 'empty-string'
+      ? { ext_parentDrawingNo: '', ext_parentName: '' }
+      : existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}
+    const existingRoot = { ...batch.parentA, ...retiredCells }
+
+    // 形状 A —— 模板对已填。
+    const settledChild = { ...batch.childA, ...TEMPLATE_PAIR_FILLED, notes: '人工备注必须活下来', ...retiredCells }
+    const settled = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [existingRoot, settledChild],
+      runId: 'run-parent-pack-settled',
+    })
+    assert.equal(settled.valid, true, existingShape + ': 计划仍然是可执行的')
+    assert.equal(settled.counts[DECISIONS.MANUAL_CONFIRM], 0, existingShape + ': 不挂起任何一行')
+    assert.equal(byDecision(settled, DECISIONS.UPDATE).length, 0, existingShape + ': 模板对已填 ⇒ 已撤的那一对不再制造 update(手填值原样留在表上)')
+    assert.equal(byDecision(settled, DECISIONS.SKIP).length, 2, existingShape + ': 两行都是 SKIP')
+    for (const decision of settled.decisions) {
+      assert.equal(decision.conflictSummary.type, 'unchanged', existingShape + ': 理由是 unchanged,不点名任何一列')
+    }
+
+    // 形状 B —— 模板对空着(batch.childA 本身不带模板对;#5446 之前写入的行就是这个样子)。
+    const unfilledChild = { ...batch.childA, notes: '人工备注必须活下来', ...retiredCells }
+    const healing = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [existingRoot, unfilledChild],
+      runId: 'run-parent-pack-heal',
+    })
+    assert.equal(healing.valid, true)
+    assert.equal(healing.counts[DECISIONS.MANUAL_CONFIRM], 0, existingShape + ': 补模板对不挂起任何一行')
+    const updates = byDecision(healing, DECISIONS.UPDATE)
+    assert.equal(updates.length, 1, existingShape + ': 只有模板对空着的子行需要刷新')
+    assert.equal(updates[0].idempotencyKey, batch.childA.idempotencyKey, existingShape + ': 刷新的是有父的子行')
+    assert.deepEqual(
+      updates[0].changedFields.slice().sort(),
+      ['parentComponentCode', 'parentComponentName'],
+      existingShape + ': 变的只有模板对,别的一列没动',
+    )
+    assert.equal(updates[0].patch.parentComponentCode, 'TZ-0001', existingShape + ': update 把 父组件图号 填进模板列')
+    assert.equal(updates[0].patch.parentComponentName, '主体组件 DN1200', existingShape + ': update 把 父组件名称 填进模板列')
+    for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+      assert.equal(Object.prototype.hasOwnProperty.call(updates[0].patch, fieldId), false, existingShape + ': patch 里没有已撤的 ' + fieldId)
+      assert.equal(updates[0].changedFields.includes(fieldId), false, existingShape + ': changedFields 不点名已撤的 ' + fieldId)
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(updates[0].patch, 'notes'), false, existingShape + ': 真正的人工列(notes)不进 patch')
+    assertNoHumanFields(updates[0].patch, 'template pair heal patch')
+    const rootDecision = healing.decisions.find((decision) => decision.idempotencyKey === batch.parentA.idempotencyKey)
+    assert.equal(rootDecision.decision, DECISIONS.SKIP, existingShape + ': 根行来料没有这些键 ⇒ SKIP')
+
+    // 幂等:补好模板对之后再拉一次是 SKIP —— 已撤的那一对不论表上是什么都不再制造 update。
+    const second = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [existingRoot, { ...unfilledChild, ...TEMPLATE_PAIR_FILLED }],
+      runId: 'run-parent-pack-heal-2',
+    })
+    assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, existingShape + ': 补好之后重拉不再写')
+    assert.equal(byDecision(second, DECISIONS.SKIP).length, 2, existingShape + ': 两行都是 SKIP')
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// X6 — 来料没这个键 ≠ 变更(#5625 三选一里的 ②,替 owner 定的口径,可撤回)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `changedFields` 只把**来料真正给了值**的格算作变更。判据与下游 `pickFields` 的投影判据是同一个量
+// (`row[field] !== undefined`):来料上键缺席 / 键在但值为 `undefined` 的格根本写不进 patch,所以也
+// 不能算变更 —— 否则就是「说变了、什么也没写」的空 update(#5625 代价 (a)(b);F1c-b 终审 r2)。
+// `null` 与空串是值,不是缺席:键在 ⇒ 照 `valuesEqualForTemplateField` 比较。存量那一侧不看键的
+// 在与不在:来料给了值、存量没这一列 ⇒ 仍是变更(回填方向,testExistingRowsAreBackfilledByAReRun)。
+//
+// 变异(内存级):M1「把收窄去掉」⇒ 本组缺键用例红 + table-actions 的端到端计数用例红;
+// M2「把 null 也当缺席」⇒ null 用例红;M3「只在 refresh 调用点收窄、lineage/identity 不收」⇒
+// testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide 红。
+function testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide() {
+  const { changedFields } = __internals
+  const existing = { f: 'x' }
+  assert.deepEqual(changedFields({}, existing, ['f']), [], '键缺席 ⇒ 不算变更')
+  assert.deepEqual(changedFields({ f: undefined }, existing, ['f']), [], '键在但值为 undefined ⇒ 与 pickFields 同判据,不算变更')
+  assert.deepEqual(changedFields({}, { f: '' }, ['f']), [], '存量空串、来料无键 ⇒ 不算变更(F1c-b 终审 r2 那条永不收敛的空 update)')
+  assert.deepEqual(changedFields({}, { f: null }, ['f']), [], '存量 null、来料无键 ⇒ 不算变更(改前就相等,保持)')
+  assert.deepEqual(changedFields({ f: null }, existing, ['f']), ['f'], 'null 是值,不是缺席:键在且为 null ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: '' }, existing, ['f']), ['f'], '空串是值 ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'y' }, existing, ['f']), ['f'], '来料给了不同的值 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'x' }, existing, ['f']), [], '来料给了相同的值 ⇒ 相等')
+  assert.deepEqual(changedFields({ f: 'x' }, {}, ['f']), ['f'], '来料给了值、存量没这一列 ⇒ 仍是变更(回填方向不受影响)')
+  assert.deepEqual(changedFields({ f: 'x' }, { f: undefined }, ['f']), ['f'], '存量 undefined、来料有值 ⇒ 变更')
+  // 模板归一化照旧 —— 只要来料给了键,比较的那一半一个字没改。
+  const numberField = new Map([['f', { id: 'f', type: 'number' }]])
+  assert.deepEqual(changedFields({ f: '5' }, { f: 5 }, ['f'], numberField), [], '来料 "5" 与存量 5 按 number 模板相等')
+  assert.deepEqual(changedFields({ f: '6' }, { f: 5 }, ['f'], numberField), ['f'], '来料 "6" 与存量 5 按 number 模板不等')
+  // 混合列表:保持 fields 的顺序,只留下「来料给了、且不等」的那些。
+  assert.deepEqual(
+    changedFields({ b: null, c: 'same', d: 'new' }, { a: 'x', b: 'y', c: 'same', d: 'old' }, ['a', 'b', 'c', 'd']),
+    ['b', 'd'],
+    'a 缺席不算;b 给了 null 算;c 相同不算;d 不同算',
+  )
+}
+
+// refresh 调用点(:1629 那一带)——#5625 的两处代价与 F1c-b 的空 update,正向钉住。
+function testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn() {
+  const EXT = 'ext_designer'
+  const installed = [installedPackColumn(EXT)]
+  const refreshReason = (decision) => JSON.parse(decision.patch.lastPlmConflictSummary)
+
+  // (a) #5625 代价 (a):存量有值、来料上没这个键。
+  const absentIntake = row({ componentSourceId: 'PART-ABSENT', pathTokens: ['PART-ABSENT'] })
+  assert.equal(Object.prototype.hasOwnProperty.call(absentIntake, EXT), false, '前提:来料上没有这个键')
+  // (b) F1c-b 终审 r2:存量空串、来料上没这个键。
+  const absentIntakeEmpty = row({ componentSourceId: 'PART-ABSENT-EMPTY', pathTokens: ['PART-ABSENT-EMPTY'] })
+  // (c) null 是值。
+  const nullIntake = row({ componentSourceId: 'PART-NULL', pathTokens: ['PART-NULL'], [EXT]: null })
+  // (d) 值不同 / (e) 值相同。
+  const changedIntake = row({ componentSourceId: 'PART-CHANGED', pathTokens: ['PART-CHANGED'], [EXT]: '设计员乙' })
+  const sameIntake = row({ componentSourceId: 'PART-SAME', pathTokens: ['PART-SAME'], [EXT]: '设计员甲' })
+  // (f) #5625 代价 (b):别的列真变了、来料仍没这个键 ⇒ 理由只能列 patch 里真有的列。
+  const quantityIntake = row({ componentSourceId: 'PART-QTY', pathTokens: ['PART-QTY'], rawQuantity: 9, totalQuantity: 9 })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [absentIntake, absentIntakeEmpty, nullIntake, changedIntake, sameIntake, quantityIntake],
+    existingRows: [
+      { ...absentIntake, [EXT]: '设计员甲' },
+      { ...absentIntakeEmpty, [EXT]: '' },
+      { ...nullIntake, [EXT]: '设计员甲' },
+      { ...changedIntake, [EXT]: '设计员甲' },
+      { ...sameIntake },
+      { ...quantityIntake, rawQuantity: 2, totalQuantity: 2, [EXT]: '设计员甲' },
+    ],
+    runId: 'run-x6-refresh',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    installedFieldProperties: installed,
+  })
+  // 这一列**确实在**比较 band 里 —— 不然下面每一条 SKIP 都是空话(守卫没接线那类漏法)。
+  assert.ok(plan.summary.plmSystemFields.includes(EXT), '包列在 plm_system 可写/比较 band 里')
+  assert.equal(plan.valid, true)
+  assert.deepEqual(plan.counts, { add: 0, update: 3, skip: 3, inactive: 0, manual_confirm: 0 })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  for (const [intake, label] of [[absentIntake, '存量有值'], [absentIntakeEmpty, '存量空串']]) {
+    const decision = byKey.get(intake.idempotencyKey)
+    assert.equal(decision.decision, DECISIONS.SKIP, label + '、来料无键 ⇒ SKIP(X6 之前是 update:1 的空 update)')
+    assert.equal(decision.conflictSummary.type, 'unchanged', label + ': 理由是 unchanged')
+    assert.equal(Object.prototype.hasOwnProperty.call(decision, 'patch'), false, label + ': 没有 patch,一个字不写')
+    assert.equal(JSON.stringify(decision).includes(EXT), false, label + ': 决策里不点名这一列')
+  }
+
+  const nullDecision = byKey.get(nullIntake.idempotencyKey)
+  assert.equal(nullDecision.decision, DECISIONS.UPDATE, 'null 是值,不是缺席 ⇒ 仍是变更')
+  assert.deepEqual(nullDecision.changedFields, [EXT])
+  assert.equal(Object.prototype.hasOwnProperty.call(nullDecision.patch, EXT), true, 'null 进 patch(pickFields 同样投影 null)')
+  assert.equal(nullDecision.patch[EXT], null)
+  assert.deepEqual(refreshReason(nullDecision).changedFields, [EXT], '理由点名的列就是 patch 里的列')
+
+  const changedDecision = byKey.get(changedIntake.idempotencyKey)
+  assert.equal(changedDecision.decision, DECISIONS.UPDATE, '来料给了不同的值 ⇒ 仍是变更')
+  assert.deepEqual(changedDecision.changedFields, [EXT])
+  assert.equal(changedDecision.patch[EXT], '设计员乙')
+
+  const sameDecision = byKey.get(sameIntake.idempotencyKey)
+  assert.equal(sameDecision.decision, DECISIONS.SKIP, '来料给了相同的值 ⇒ 相等')
+
+  const quantityDecision = byKey.get(quantityIntake.idempotencyKey)
+  assert.equal(quantityDecision.decision, DECISIONS.UPDATE, '别的列真变了 ⇒ 照常 update')
+  assert.deepEqual(quantityDecision.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'], '理由只列真正变了的列')
+  assert.equal(Object.prototype.hasOwnProperty.call(quantityDecision.patch, EXT), false, 'patch 里没有来料没给的列')
+  assert.equal(
+    refreshReason(quantityDecision).changedFields.includes(EXT),
+    false,
+    'lastPlmConflictSummary 不点名 patch 里没有的列(#5625 代价 (b):理由与写入一致)',
+  )
+}
+
+// lineage(:1605)/ identity(:1617)两处调用点:此前来料缺键同样从不写入(pickFields 一样跳过),
+// 判成变更只会把行推进 manual_confirm;收窄后归 SKIP。键在值变 ⇒ 仍挂起。M3 ⇒ 本用例红。
+function testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide() {
+  // lineage:来料没有 `path` 键,存量的 path 是另一串 ⇒ 不算 lineage 变更。
+  const lineageAbsent = row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] })
+  delete lineageAbsent.path
+  const lineageAbsentExisting = {
+    ...row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] }),
+    path: JSON.stringify(['ELSEWHERE', 'PART-LN-ABSENT']),
+  }
+  // lineage 对照:来料给了不同的 path ⇒ 仍是 lineage_mismatch。
+  const lineageChanged = row({ componentSourceId: 'PART-LN-CHANGED', pathTokens: ['PART-LN-CHANGED'] })
+  const lineageChangedExisting = { ...lineageChanged, path: JSON.stringify(['ELSEWHERE', 'PART-LN-CHANGED']) }
+  // identity:来料没有 `material` 键,存量有 ⇒ 不算 identity 变更。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  delete identityAbsent.material
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // identity 对照:来料给了不同的 material ⇒ 仍是 component_identity_conflict。
+  const identityChanged = row({ componentSourceId: 'PART-ID-CHANGED', pathTokens: ['PART-ID-CHANGED'], material: 'Iron' })
+  const identityChangedExisting = { ...identityChanged, material: 'Steel' }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [lineageAbsent, lineageChanged, identityAbsent, identityChanged],
+    existingRows: [lineageAbsentExisting, lineageChangedExisting, identityAbsentExisting, identityChangedExisting],
+    runId: 'run-x6-lineage-identity',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  const lineageAbsentDecision = byKey.get(lineageAbsent.idempotencyKey)
+  assert.equal(lineageAbsentDecision.decision, DECISIONS.SKIP, 'lineage:来料无 path 键 ⇒ 不算变更(X6 之前是 lineage_mismatch 挂起)')
+  assert.equal(lineageAbsentDecision.conflictSummary.type, 'unchanged')
+  const lineageChangedDecision = byKey.get(lineageChanged.idempotencyKey)
+  assert.equal(lineageChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'lineage:来料给了不同的 path ⇒ 仍挂起')
+  assert.equal(lineageChangedDecision.conflictSummary.type, 'lineage_mismatch')
+  assert.deepEqual(lineageChangedDecision.changedFields, ['path'])
+
+  const identityAbsentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(identityAbsentDecision.decision, DECISIONS.SKIP, 'identity:来料无 material 键 ⇒ 不算变更(X6 之前是 component_identity_conflict 挂起)')
+  assert.equal(identityAbsentDecision.conflictSummary.type, 'unchanged')
+  const identityChangedDecision = byKey.get(identityChanged.idempotencyKey)
+  assert.equal(identityChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'identity:来料给了不同的 material ⇒ 仍挂起')
+  assert.equal(identityChangedDecision.conflictSummary.type, 'component_identity_conflict')
+  assert.deepEqual(identityChangedDecision.changedFields, ['material'])
+
+  assert.deepEqual(plan.counts, { add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 2 })
+}
+
+// 反驳 r1 blocker A1 —— **批级**后果,不只是行级。lineage / identity 调用点收窄后,那一行从
+// manual_confirm 变 SKIP 的同时,整批的「挂起必须被显式承认」闸门也跟着松开:
+//   `valid: counts[MANUAL_CONFIRM] === 0`(lib 的 return 处)由 false 翻成 true
+//   ⇒ dry-run 状态 manual_confirm_required → ready(table-actions `dryRunStatus`)
+//   ⇒ apply 不再 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED(table-actions apply 的 MANUAL_CONFIRM 闸)
+//   ⇒ 大 BOM 检查点 apply 的同一闸(large-bom-jobs LARGE_BOM_APPLY_MANUAL_CONFIRM_ACK_REQUIRED)
+//   ⇒ MVP 快照路径的 `!plan.valid` 拒绝(STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY)
+// 都不再触发 —— 同一批里那条 add 由「整批 409 拒绝」变成「直接写」。
+// 可达性是**真实配置**,不是构造:readPlan.part.materialField 是可选项(bom-expansion normalizeReadPlan
+// 的 part 可选列表);不配时 rowFromPart 照样把 `material` 键放到展开行上、值 undefined。
+// 这里把「缺身份键的行 + 同批一条 add」的 valid 与 counts 前后钉死;对照组(键在值变)证明闸门本身
+// 没丢。M1(去掉收窄)⇒ 本用例红:counts 回到 {add:1, manual_confirm:1}、valid=false。
+function testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch() {
+  const addRow = row({ componentSourceId: 'PART-NEW', pathTokens: ['PART-NEW'] })
+  // 展开行的真实形状:键在、值 undefined(readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [addRow, identityAbsent],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  // X6 之前:counts = {add:1, manual_confirm:1}、valid=false ⇒ 同批那条 add 被整批 409 拦住,要
+  // acceptManualConfirmHold=true 才能过。X6 之后:整批可执行,add 直接写。
+  assert.deepEqual(
+    plan.counts,
+    { add: 1, update: 0, skip: 1, inactive: 0, manual_confirm: 0 },
+    'X6:来料缺身份键的行是 SKIP、不是 manual_confirm(X6 之前 {add:1, manual_confirm:1})',
+  )
+  assert.equal(plan.valid, true, 'X6:整批不再挂起(X6 之前 valid=false ⇒ dry-run manual_confirm_required、apply 409)')
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+  const absentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(absentDecision.decision, DECISIONS.SKIP)
+  assert.equal(absentDecision.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(absentDecision, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+  const addDecision = byKey.get(addRow.idempotencyKey)
+  assert.equal(addDecision.decision, DECISIONS.ADD, '同批那条 add 在闸门松开后直接写')
+  assert.equal(addDecision.record.lastPlmRefreshRunId, 'run-x6-batch-gate')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样:整批 valid=false,同批的 add 仍被拦在闸后。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [addRow, identityChanged],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起(闸门本身没丢,只是缺键的行不再触发它)')
+  const heldAdd = held.decisions.find((decision) => decision.idempotencyKey === addRow.idempotencyKey)
+  assert.equal(heldAdd.decision, DECISIONS.ADD, '对照组里那条 add 的行级决策不变,变的是整批能否执行')
+}
+
+// 终审 blocker 1 —— 批级边界的**完整清单**。上一条用例只钉住了三类里的 add;`plan.valid`
+// (lib 的 `valid: counts[MANUAL_CONFIRM] === 0`)由 false 翻 true,放开的是三类写:
+//   (1) **add**:新建行(testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch 已钉);
+//   (2) **mark_inactive**:既有行的 `active` 由 true 翻成 false —— 存量里不在本批的 active 行走
+//       planner 的 existing-only 循环,补丁 = { active:false } + 四列刷新戳(makeInactiveDecision);
+//   (3) **同批其余 update**:既有行的完整 `pickFields` 补丁(全部已给值 plm 列,不只 changed 列)。
+// 生产闸 `cleanRowCount = add + update`(stock-preparation-table-actions.cjs:2191)**不数 inactive**:
+// 「X6 让闸触发量变小」这句只约束 (1)(3),**不约束 (2)** —— mark_inactive 的写本来就在 maxCleanRows
+// 覆盖面之外,X6 之前唯一拦住它的就是整批 409。
+// 形状:一条来料缺身份键的既有行(readPlan 未配 materialField ⇒ 键在、值 undefined)+ 一条**不在批内**
+// 的 active 既有行(⇒ mark_inactive)+ 一条数量真变的既有行(⇒ update)。
+// X6 之前:counts.manual_confirm=1 ⇒ valid=false ⇒ dry-run manual_confirm_required、apply 409
+// (不带 acceptManualConfirmHold)⇒ inactive 补丁与 update 补丁一起**永不落表**;X6 之后:valid=true,
+// 三类都落。对照组(键在值变)证明闸门本身没丢。M1(去掉收窄)⇒ 本用例红在 `plan.valid` 那条断言。
+function testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates() {
+  // (a) 来料缺身份键的既有行:键在、值 undefined(真实形状,readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // (b) 同批另一条既有行,数量真变 ⇒ 一次带值 update。
+  const quantityChanged = row({ componentSourceId: 'PART-UPD', pathTokens: ['PART-UPD'], rawQuantity: 5, totalQuantity: 5 })
+  const quantityChangedExisting = { ...quantityChanged, rawQuantity: 4, totalQuantity: 4 }
+  // (c) 存量里一条**不在本批**的 active 行 ⇒ mark_inactive。
+  const goneExisting = row({ componentSourceId: 'PART-GONE', pathTokens: ['PART-GONE'] })
+  assert.equal(goneExisting.active, true, '前提:这条既有行当前是 active')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [identityAbsent, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+
+  assert.equal(
+    plan.valid,
+    true,
+    'X6:整批可执行 —— mark_inactive 与同批 update 的补丁这才会落表(X6 之前 valid=false ⇒ 整批 409,两者一起永不落)',
+  )
+  assert.deepEqual(
+    plan.counts,
+    { add: 0, update: 1, skip: 1, inactive: 1, manual_confirm: 0 },
+    'X6:缺身份键的行是 SKIP(X6 之前 {update:1, skip:0, inactive:1, manual_confirm:1})',
+  )
+
+  // (2) mark_inactive:这是一次**真写**,且不在生产闸的覆盖面里。
+  const inactive = byDecision(plan, DECISIONS.INACTIVE)[0]
+  assert.equal(inactive.idempotencyKey, goneExisting.idempotencyKey)
+  assert.equal(inactive.patch.active, false, 'mark_inactive:既有行的 active 由 true 翻成 false')
+  assert.equal(typeof inactive.patch.active, 'boolean', 'active 是布尔 false,不是空串/字符串')
+  assert.deepEqual(
+    Object.keys(inactive.patch).sort(),
+    ['active', 'lastPlmConflictSummary', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmRefreshRunId'],
+    'inactive 补丁 = active + 四列刷新戳',
+  )
+  assert.equal(inactive.conflictSummary.type, 'missing_from_plm')
+
+  // (3) 同批其余 update:补丁是 pickFields 的全部已给值 plm 列,不只 changed 列。
+  const update = byDecision(plan, DECISIONS.UPDATE)[0]
+  assert.equal(update.idempotencyKey, quantityChanged.idempotencyKey)
+  assert.deepEqual(update.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'])
+  assert.equal(update.patch.rawQuantity, 5)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(update.patch, 'componentName'),
+    true,
+    '同批 update 落的是全部已给值 plm 列(componentName 没变也在补丁里),不只 changed 列',
+  )
+
+  const skip = byDecision(plan, DECISIONS.SKIP)[0]
+  assert.equal(skip.idempotencyKey, identityAbsent.idempotencyKey)
+  assert.equal(skip.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(skip, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样,inactive / update 的行级决策不变,变的是整批能否执行。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [identityChanged, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 0, update: 1, skip: 0, inactive: 1, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起:inactive 与 update 的补丁仍被整批 409 拦在闸后')
+  assert.equal(byDecision(held, DECISIONS.INACTIVE)[0].patch.active, false, '对照组里 inactive 的行级决策不变')
+  assert.equal(byDecision(held, DECISIONS.UPDATE)[0].idempotencyKey, quantityChanged.idempotencyKey, '对照组里 update 的行级决策不变')
+}
+
 function main() {
+  testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
   testDuplicatesAndConflictsFailClosed()
@@ -718,6 +1916,24 @@ function main() {
   testKeepMultipleRowsWithoutStableDiscriminatorHolds()
   testSourceCorrectionRequiredHoldsWithExplicitReason()
   testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported()
+  testO1bAnonymousFamiliesGetGranularityCorrectIdentities()
+  testO1bIdentityIsReproducibleFromTheSameInput()
+  testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
+  testDenormalizedParentAndSpecReachTheMainRow()
+  testParentComponentNameIsTheUnsplitLegacyString()
+  testRetiredParentPackColumnsAreNeverDerivedWhileTheTemplatePairStillIs()
+  testMappedRetiredPackValuesPassThroughAndBlanksStayBlank()
+  testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived()
+  testExistingRowsAreHealedOnTheTemplatePairAndNeverOnTheRetiredPair()
+  testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide()
+  testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn()
+  testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide()
+  testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch()
+  testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates()
+  testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
+  testUnresolvableParentIsAbsenceNotAGuess()
+  testExistingRowsAreBackfilledByAReRun()
+  testTheHumanFieldWallIsUnaffected()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

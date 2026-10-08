@@ -241,7 +241,7 @@ describe('ApprovalBreachNotifier', () => {
     expect(result.notified).toBe(1)
     const message = (channel.send as any).mock.calls[0][0]
     expect(message.title).toContain('审批超时告警')
-    expect(message.title).toContain('未命名模板')
+    expect(message.title).toContain('未命名表单')
     expect(message.body).toContain('未知申请人')
     expect(message.body).toContain('未知节点')
     expect(message.link).toBe('https://app.example.com/approval/orphan-1')

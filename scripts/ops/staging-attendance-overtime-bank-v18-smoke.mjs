@@ -17,6 +17,10 @@
 // poison 9999 statutory balance lot, replay idempotency (approve replay + close replay), frozen
 // cycle guards, full-attendance flag, ledger conservation, settings restore, residue=0.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
@@ -909,7 +913,20 @@ async function cleanup({ strictSettingsRestore = false } = {}) {
   await pool.query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds]).catch(() => undefined)
   await pool.query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [approvalIds]).catch(() => undefined)
   await pool.query(`DELETE FROM attendance_events WHERE org_id = $1 AND meta->>'requestId' = ANY($2::text[])`, [ORG_ID, requestIds]).catch(() => undefined)
-  await pool.query('DELETE FROM attendance_records WHERE org_id = $1 AND left(user_id, $2) = $3', [ORG_ID, USER_PREFIX.length, USER_PREFIX]).catch(() => undefined)
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-000000000018',
+    ticket: 'STAGING-OT-BANK',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIdPrefix: USER_PREFIX }, { retireRecord: opsRetirementExecutor })
   await pool.query('DELETE FROM attendance_requests WHERE org_id = $1 AND (id = ANY($2::uuid[]) OR left(user_id, $3) = $4)', [ORG_ID, requestIds, USER_PREFIX.length, USER_PREFIX]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_leave_balances WHERE org_id = $1 AND (left(user_id, $2) = $3 OR source_key = $4)', [ORG_ID, USER_PREFIX.length, USER_PREFIX, created.poisonLotKey]).catch(() => undefined)
   await pool.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [approvalIds]).catch(() => undefined)

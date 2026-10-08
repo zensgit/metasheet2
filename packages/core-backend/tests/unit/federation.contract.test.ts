@@ -2,6 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { Injector } from '@wendellhu/redi'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const rbacMocks = vi.hoisted(() => ({
   isAdmin: vi.fn(),
@@ -159,6 +160,8 @@ function createFederationApp(options: {
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('Federation contract routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -178,7 +181,8 @@ describe('Federation contract routes', () => {
       }),
     })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/federation/integration-status')
       .expect(200)
 
@@ -226,7 +230,8 @@ describe('Federation contract routes', () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
-    const productsResponse = await request(app)
+    pinned.setApp(app)
+    const productsResponse = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({
         operation: 'products',
@@ -255,7 +260,7 @@ describe('Federation contract routes', () => {
       offset: 10,
     })
 
-    const releaseReadinessResponse = await request(app)
+    const releaseReadinessResponse = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({
         operation: 'release_readiness',
@@ -290,7 +295,7 @@ describe('Federation contract routes', () => {
       }),
     )
 
-    const approvalHistoryResponse = await request(app)
+    const approvalHistoryResponse = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({
         operation: 'approval_history',
@@ -305,7 +310,7 @@ describe('Federation contract routes', () => {
       total: 1,
     })
 
-    const bomCompareResponse = await request(app)
+    const bomCompareResponse = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({
         operation: 'bom_compare',
@@ -338,7 +343,8 @@ describe('Federation contract routes', () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/federation/plm/metadata/Part')
       .expect(200)
 
@@ -357,7 +363,8 @@ describe('Federation contract routes', () => {
     })
     const app = createFederationApp({ plmAdapter })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({
         operation: 'release_readiness',
@@ -394,7 +401,8 @@ describe('Federation contract routes', () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
-    const addResponse = await request(app)
+    pinned.setApp(app)
+    const addResponse = await request(pinned.url())
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'substitutes_add',
@@ -407,7 +415,7 @@ describe('Federation contract routes', () => {
     expect(plmAdapter.addBomSubstitute).toHaveBeenCalledWith('line-1', 'part-2', { preference: 'alternate' })
     expect(addResponse.body.data).toEqual(plmContractFixtures.substituteAdded)
 
-    const missingVersionResponse = await request(app)
+    const missingVersionResponse = await request(pinned.url())
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'approval_approve',
@@ -423,7 +431,7 @@ describe('Federation contract routes', () => {
       },
     })
 
-    const approveResponse = await request(app)
+    const approveResponse = await request(pinned.url())
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'approval_approve',
@@ -440,7 +448,7 @@ describe('Federation contract routes', () => {
       comment: 'looks good',
     })
 
-    const missingCommentResponse = await request(app)
+    const missingCommentResponse = await request(pinned.url())
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'approval_reject',
@@ -457,7 +465,7 @@ describe('Federation contract routes', () => {
       },
     })
 
-    const rejectResponse = await request(app)
+    const rejectResponse = await request(pinned.url())
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'approval_reject',
@@ -479,7 +487,8 @@ describe('Federation contract routes', () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
-    const detailResponse = await request(app)
+    pinned.setApp(app)
+    const detailResponse = await request(pinned.url())
       .get('/api/federation/plm/products/prod-1001')
       .query({ itemType: 'Part' })
       .expect(200)
@@ -493,7 +502,7 @@ describe('Federation contract routes', () => {
       }),
     )
 
-    const bomResponse = await request(app)
+    const bomResponse = await request(pinned.url())
       .get('/api/federation/plm/products/prod-1001/bom')
       .query({ depth: 3, effective_at: '2026-03-06T00:00:00.000Z' })
       .expect(200)
@@ -513,7 +522,8 @@ describe('Federation contract routes', () => {
     const athenaAdapter = createAthenaAdapterMock()
     const app = createFederationApp({ athenaAdapter })
 
-    const queryResponse = await request(app)
+    pinned.setApp(app)
+    const queryResponse = await request(pinned.url())
       .post('/api/federation/athena/query')
       .send({
         operation: 'documents',
@@ -548,7 +558,7 @@ describe('Federation contract routes', () => {
       offset: 5,
     })
 
-    const detailResponse = await request(app)
+    const detailResponse = await request(pinned.url())
       .get('/api/federation/athena/documents/doc-1')
       .expect(200)
 
@@ -601,8 +611,9 @@ describe('Federation PLM documents degradation visibility', () => {
       }),
     })
     const app = createFederationApp({ plmAdapter })
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({ operation: 'documents', productId: 'prod-1' })
 
@@ -629,8 +640,9 @@ describe('Federation PLM documents degradation visibility', () => {
       }),
     })
     const app = createFederationApp({ plmAdapter })
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({ operation: 'documents', productId: 'prod-1' })
 
@@ -656,8 +668,9 @@ describe('Federation PLM documents degradation visibility', () => {
       }),
     })
     const app = createFederationApp({ plmAdapter })
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({ operation: 'documents', productId: 'prod-1' })
 
@@ -689,8 +702,9 @@ describe('Federation PLM documents degradation visibility', () => {
       }),
     })
     const app = createFederationApp({ plmAdapter })
+    pinned.setApp(app)
 
-    const res = await request(app)
+    const res = await request(pinned.url())
       .post('/api/federation/plm/query')
       .send({ operation: 'documents', productId: 'prod-1' })
 

@@ -32,6 +32,21 @@
       </div>
     </div>
 
+    <!-- 整合切片 (2026-09-09): the standalone /data-sources page folded INTO 连接管理 — the same
+         DataSourcesPanel component the (now redirecting) /data-sources route rendered, mounted
+         here in its embedded presentation. Physical connections + credentials are registered
+         here; the connection-draft editor further down only REFERENCES one by connectionId.
+         `@changed` is what keeps that reference list honest: the host refreshes the draft
+         editor's connectionId options after a source is created/updated/deleted, so a freshly
+         registered source is selectable without a page reload. -->
+    <div class="integration-workbench__data-sources" data-testid="connection-data-sources-panel">
+      <div class="integration-workbench__data-sources-head">
+        <h3>外接数据源（物理连接与凭据）</h3>
+        <p>先在这里登记源库连接并测试连通，再在下方新增连接草稿时用 connectionId 引用它；凭据只存这里，不会复制到绑定里。</p>
+      </div>
+      <DataSourcesPanel embedded @changed="handleDataSourcesChanged" @show-bindings="revealBindings" />
+    </div>
+
     <button
       type="button"
       class="integration-workbench__inventory-toggle"
@@ -61,20 +76,25 @@
             <strong>{{ system.name }}</strong>
             <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
             <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
+            <!-- 列表会把同租户的租户级连接（workspace_id IS NULL）一并列出来，而 upsert/delete 按精确作用域
+                 匹配，够不着它（服务端 409 / 404）。所以这里说明原因并把编辑/停用/启用/删除置灰，
+                 只留「复制」（复制是在当前作用域新建）。它不是「只读」：同一屏的「测试连接」仍会按行自身的
+                 作用域写回该行的 status / last_tested_at / last_error，文案里写清楚了。 -->
+            <small v-if="scopeWriteBlockFor(system)" :data-testid="`connection-scope-write-block-${system.id}`">{{ scopeWriteBlockFor(system) }}</small>
             <div class="integration-workbench__actions integration-workbench__actions--inline">
-              <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" @click="editConnection(system)">
+              <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="editConnection(system)">
                 编辑
               </button>
               <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
                 复制
               </button>
-              <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" @click="deactivateConnection(system)">
+              <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="deactivateConnection(system)">
                 停用
               </button>
-              <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" @click="activateConnection(system)">
+              <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="activateConnection(system)">
                 启用
               </button>
-              <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
+              <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id || Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || '只能删除未被 pipeline 引用的连接'" @click="deleteConnection(system)">
                 {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
               </button>
             </div>
@@ -164,8 +184,8 @@
       </div>
       <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
         <label>
-          <span>数据源(只读)</span>
-          <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
+          <span>connectionId（只读数据源）</span>
+          <select v-model="connectionDraft.connectionId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
             <option value="">请选择已配置的数据源</option>
             <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
           </select>
@@ -175,7 +195,7 @@
           <select
             v-model="connectionDraft.dataSourceObject"
             data-testid="data-source-bridge-object"
-            :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.dataSourceId || bridgeDataSourceObjectOptions.length === 0"
+            :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.connectionId || bridgeDataSourceObjectOptions.length === 0"
           >
             <option value="">{{ bridgeDataSourceObjectOptions.length > 0 ? '请选择表 / 视图' : '请先加载表 / 视图列表' }}</option>
             <option v-for="object in bridgeDataSourceObjectOptions" :key="object.value" :value="object.value">
@@ -184,9 +204,9 @@
           </select>
         </label>
         <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
-        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.dataSourceId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
+        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.connectionId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请到上方「外接数据源」面板检查权限或 schema。</p>
         <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
-        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
+        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由上方「外接数据源」面板管理,这里只在 connectionId 中引用数据源 ID，不复制账号密码。</p>
         <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
         <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
       </div>
@@ -203,6 +223,12 @@
           <router-link to="/integrations/k3-wise" data-testid="connection-draft-k3-setup-link">
             {{ bi('前往 K3 WISE 设置向导', 'Open the K3 WISE setup wizard') }}
           </router-link>
+        </p>
+        <p class="integration-workbench__hint" data-testid="connection-draft-config-patch-hint">
+          {{ bi(
+            '保存时 config 按“补丁”合并：这里没写的键会保留原值,写了的键覆盖原值,要清除某个键请显式写成 null。',
+            'On save, config is merged as a PATCH: keys you leave out keep their stored value, keys you write replace it, and clearing one means writing it as null.',
+          ) }}
         </p>
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>
@@ -275,7 +301,7 @@
 // `scope.workspaceId`) rather than a plain `ref` — Vue's `v-model` binds to any ref-like target,
 // so `v-model:workspace-input="workspaceInput"` at the call site works identically whether the
 // parent hands over a `ref` or a writable `computed`.
-import { computed } from 'vue'
+import { computed, nextTick } from 'vue'
 import type { DataSourceListItem } from '../../data-sources/types'
 import type { IntegrationAdapterMetadata, WorkbenchExternalSystem } from '../../services/integration/workbench'
 import type {
@@ -284,6 +310,7 @@ import type {
   IntegrationScopeState,
   StagingDatasetCard,
 } from './integrationWorkbenchSectionTypes'
+import DataSourcesPanel from '../data-sources/DataSourcesPanel.vue'
 import JsonAssist from './JsonAssist.vue'
 
 const props = defineProps<{
@@ -295,6 +322,13 @@ const props = defineProps<{
   systems: WorkbenchExternalSystem[]
   connectionStatusLabel: (system: WorkbenchExternalSystem | null) => string
   runtimeBlockerForSystem: (system: WorkbenchExternalSystem | null) => string
+  /**
+   * 空串 = 这行连接在当前作用域里编辑/停用/启用/删除得了；非空 = 这四个做不了，字符串是给人看的原因。
+   * 它不说「这行只读」——测试连接仍会写到该行，见服务层 externalSystemScopeWriteBlock 的注释。
+   * 父组件用 `externalSystemScopeWriteBlock(system, currentScope())` 算出来；没有传时按「写得动」处理，
+   * 这样其它挂载点（以及既有测试）不受影响，而工作台这块唯一带写按钮的清单一定会传。
+   */
+  connectionScopeWriteBlock?: (system: WorkbenchExternalSystem) => string
   editConnection: (system: WorkbenchExternalSystem) => void
   copyConnection: (system: WorkbenchExternalSystem) => void
   deactivateConnection: (system: WorkbenchExternalSystem) => Promise<void>
@@ -324,7 +358,34 @@ const props = defineProps<{
   saveConnectionDraft: () => Promise<void>
   resetConnectionDraft: () => void
   scope: IntegrationScopeState
+  // Optional so the section stays mountable standalone (its own spec mounts it without a
+  // workbench). Same `on*`-named plain-function-prop shape the section already uses for
+  // `onBridgeDataSourceChange` — a declared prop, not an emit listener.
+  onDataSourcesChanged?: () => void | Promise<void>
 }>()
+
+// The embedded 外接数据源 panel mutated the source list; tell the host so the connection-draft
+// editor's connectionId options stop showing the pre-mutation list. Fire-and-forget by design:
+// the panel already reported its own success/failure, and this section owns no refresh state.
+function handleDataSourcesChanged(): void {
+  void props.onDataSourcesChanged?.()
+}
+
+// The panel's 被引用 column asked to show the bindings that hold a source. Those bindings are the
+// 已配置连接 inventory below, which starts COLLAPSED — an anchor jump alone would land the
+// operator on a section whose answer is hidden. Expanding is presentation only: this list is
+// already rendered from the systems the host fetched for this caller, so revealing it grants
+// nothing that was not already loaded for them.
+async function revealBindings(): Promise<void> {
+  inventoryExpanded.value = true
+  await nextTick()
+  const inventory = typeof document === 'undefined'
+    ? null
+    : document.querySelector('[data-testid="inventory-overview"]')
+  if (inventory && typeof (inventory as HTMLElement).scrollIntoView === 'function') {
+    (inventory as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
 
 const inventoryExpanded = defineModel<boolean>('inventoryExpanded', { default: false })
 const showAdvancedConnectors = defineModel<boolean>('showAdvancedConnectors', { default: false })
@@ -337,6 +398,11 @@ const workspaceInput = defineModel<string>('workspaceInput', { default: '' })
 // disposition calls for — a hint pointing at the dedicated K3 WISE setup wizard (existing route,
 // see router/appRoutes.ts) when that adapter kind is selected, since that kind has its own
 // full-page config flow and the raw JSON editor here is a rarely-needed advanced override.
+// 见 props 上 `connectionScopeWriteBlock` 的说明：空串 = 这四个写动作做得了；没传 prop 时按做得了处理，不改其它挂载点的行为。
+function scopeWriteBlockFor(system: WorkbenchExternalSystem): string {
+  return props.connectionScopeWriteBlock ? props.connectionScopeWriteBlock(system) : ''
+}
+
 const K3_WISE_WEBAPI_KIND = 'erp:k3-wise-webapi'
 const K3_WISE_SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 
@@ -367,6 +433,19 @@ const connectionCapabilitiesExample = JSON.stringify({
 </script>
 
 <style scoped>
+/* 整合切片: wrapper chrome for the embedded 外接数据源 panel. Token-only (this file is in the
+   UF-6 style-guard target set) — no hex/rgb literals. */
+.integration-workbench__data-sources {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: 8px;
+}
+
+.integration-workbench__data-sources-head {
+  margin-bottom: 8px;
+}
+
 /* Verbatim copies of the rules in IntegrationWorkbenchView.vue's <style scoped> block that
    target markup now rendered by this component — see IntegrationMonitoringSection.vue's style
    block comment for why duplication (not relocation) is the correct approach here. */

@@ -31,6 +31,18 @@ const VERSION_POLICIES = Object.freeze({
   MANUAL: 'manual',
 })
 
+// OD2 round-1 hardening: exactly these three policies have an implementation branch below.
+// `category_rule` stays RESERVED in the wider vocabulary (stock-preparation-mvp-generation.cjs
+// VERSION_POLICIES) but has NO branch — so it, like any unknown stored string, must NEVER
+// auto-match and never fall into the tail heuristic (fail-closed; #4391 doctrine: stored legacy
+// rows are not trusted either). Enumerated EXPLICITLY (never derived from the enum object) so a
+// future vocabulary widening cannot silently widen this guard without adding a matcher branch.
+const IMPLEMENTED_VERSION_POLICIES = Object.freeze(new Set([
+  VERSION_POLICIES.DRAWING_AND_VERSION,
+  VERSION_POLICIES.DRAWING_ONLY,
+  VERSION_POLICIES.MANUAL,
+]))
+
 class StockPreparationMaterialMatchError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -116,6 +128,9 @@ function activeRows(rows) {
 function mappingMatchesLine(mapping, drawingNo, version) {
   if (!sameText(mapping.plmDrawingNo, drawingNo)) return false
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
+  // OD2 fail-closed match guard: an UNIMPLEMENTED policy value (category_rule or any junk string)
+  // never auto-matches — the line degrades to a visible missing-mapping exception instead.
+  if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
   if (policy === VERSION_POLICIES.DRAWING_ONLY) return true
   if (policy === VERSION_POLICIES.DRAWING_AND_VERSION) {
     return optionalString(version) !== null && sameText(mapping.plmVersion, version)
@@ -127,8 +142,12 @@ function mappingMatchesLine(mapping, drawingNo, version) {
 
 function mappingIsVersionConflict(mapping, drawingNo, version) {
   if (!sameText(mapping.plmDrawingNo, drawingNo)) return false
-  if (mapping.matchStatus === MATCH_STATUSES.VERSION_CONFLICT) return true
   const policy = optionalString(mapping.versionPolicy) || VERSION_POLICIES.MANUAL
+  // OD2 fail-closed (round 2): the policy guard runs BEFORE the stored-status short-circuit — a
+  // legacy row carrying an unimplemented policy must not force version_conflict via a stored
+  // matchStatus either. It never participates at all; the visible exception is the missing path.
+  if (!IMPLEMENTED_VERSION_POLICIES.has(policy)) return false
+  if (mapping.matchStatus === MATCH_STATUSES.VERSION_CONFLICT) return true
   if (policy !== VERSION_POLICIES.DRAWING_AND_VERSION) return false
   const mappingVersion = optionalString(mapping.plmVersion)
   return Boolean(mappingVersion && version && !sameText(mappingVersion, version))
@@ -275,11 +294,18 @@ function buildValuesFreeEvidence(input, rows) {
 }
 
 function normalizeInput(input = {}) {
+  const defaultVersionPolicy = optionalString(input.defaultVersionPolicy)
+  // OD2 input boundary (engine-level backstop; the route validator rejects first with 422): a
+  // SUPPLIED defaultVersionPolicy outside the implemented set is refused — it would be stamped
+  // onto every generated candidate row. Details carry the field NAME only (values-free).
+  if (defaultVersionPolicy && !IMPLEMENTED_VERSION_POLICIES.has(defaultVersionPolicy)) {
+    throw new StockPreparationMaterialMatchError('defaultVersionPolicy is not an implemented version policy', { field: 'defaultVersionPolicy' })
+  }
   return {
     plmBomLines: normalizeRows(input.plmBomLines, 'plmBomLines'),
     erpMaterials: normalizeRows(input.erpMaterials, 'erpMaterials'),
     confirmedMappings: normalizeRows(input.confirmedMappings, 'confirmedMappings'),
-    defaultVersionPolicy: optionalString(input.defaultVersionPolicy) || VERSION_POLICIES.DRAWING_AND_VERSION,
+    defaultVersionPolicy: defaultVersionPolicy || VERSION_POLICIES.DRAWING_AND_VERSION,
   }
 }
 
@@ -355,6 +381,7 @@ module.exports = {
   MATCH_METHODS,
   MATCH_STATUSES,
   VERSION_POLICIES,
+  IMPLEMENTED_VERSION_POLICIES,
   StockPreparationMaterialMatchError,
   generateMaterialMappingCandidates,
   __internals: {

@@ -93,14 +93,19 @@
             <el-select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
               <el-option value="*/5 * * * *" data-value="*/5 * * * *" :label="automationCronPresetLabel('*/5 * * * *', isZh)" />
               <el-option value="0 * * * *" data-value="0 * * * *" :label="automationCronPresetLabel('0 * * * *', isZh)" />
-              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh)" />
-              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh)" />
+              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh, scheduleTriggerTimezone)" />
+              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh, scheduleTriggerTimezone)" />
               <el-option value="custom" data-value="custom" :label="automationCronPresetLabel('custom', isZh)" />
             </el-select>
             <template v-if="cronPreset === 'custom'">
               <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
               <el-input v-model="(draft.triggerConfig.cron as string)" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
+            <div class="meta-rule-editor__hint" data-field="cronTimezoneHint">{{ automationCronTimezoneHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.cron', cron: cronSwitchImpact }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- schedule.interval config -->
@@ -123,9 +128,28 @@
               <el-option value="before" data-value="before" :label="isZh ? '日期之前' : 'Before the date'" />
               <el-option value="after" data-value="after" :label="isZh ? '日期之后' : 'After the date'" />
             </el-select>
-            <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
-            <el-input v-model="(draft.triggerConfig.timeOfDay as string)" type="time" placeholder="09:00" data-field="timeOfDay" />
-            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
+            <!--
+              A7a (客户反馈 2026-09-24 #4c): a 24-hour picker that does not follow the browser locale (the old
+              native type="time" input rendered am/pm), on the rule's schedule timezone — the business timezone
+              for new rules; a legacy rule stays on UTC until the explicit switch below.
+            -->
+            <label class="meta-rule-editor__label" data-field="timeOfDayLabel">{{ automationReminderTimeLabel(scheduleTriggerTimezone, isZh) }}</label>
+            <el-select
+              v-model="timeOfDayModel"
+              class="meta-rule-editor__select"
+              clearable
+              filterable
+              :placeholder="automationReminderTimePlaceholder(isZh)"
+              data-field="timeOfDay"
+            >
+              <el-option v-for="t in timeOfDayOptions" :key="t" :value="t" :data-value="t" :label="t" />
+            </el-select>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ automationReminderTimeHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeExample">{{ dateReminderExampleText }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.date_field', timeOfDay: effectiveTriggerTimeOfDay(draft.triggerConfig.timeOfDay) }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- webhook.received (signed inbound) config -->
@@ -140,8 +164,8 @@
             />
             <div class="meta-rule-editor__hint" data-field="webhookEndpointHint">
               {{ isZh
-                ? `保存后向 POST /api/multitable/automation/webhooks/${props.rule?.id || '<规则ID>'} 发送 JSON 对象请求；请求头需携带 X-MS-Webhook-Timestamp（Unix 秒）与 X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "时间戳.请求体")，时间戳新鲜窗口 ±300 秒。密钥保存后只写不读（读取接口返回打码值）。`
-                : `After saving, POST a JSON object to /api/multitable/automation/webhooks/${props.rule?.id || '<ruleId>'} with X-MS-Webhook-Timestamp (unix seconds) and X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "timestamp.body"); freshness window is ±300s. The secret is write-only after save (reads return a redacted value).` }}
+                ? `调用方须持有效会话 JWT（Authorization: Bearer <token>）——匿名调用会被全局会话门拒绝（401）。保存后向 POST /api/multitable/automation/webhooks/${props.rule?.id || '<规则ID>'} 发送 JSON 对象请求；请求头需携带 X-MS-Webhook-Timestamp（Unix 秒）与 X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "时间戳.请求体")，时间戳新鲜窗口 ±300 秒。密钥保存后只写不读（读取接口返回打码值）。`
+                : `The caller must present a valid session JWT (Authorization: Bearer <token>) — anonymous calls are rejected (401) by the global session gate. After saving, POST a JSON object to /api/multitable/automation/webhooks/${props.rule?.id || '<ruleId>'} with X-MS-Webhook-Timestamp (unix seconds) and X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "timestamp.body"); freshness window is ±300s. The secret is write-only after save (reads return a redacted value).` }}
             </div>
           </template>
 
@@ -254,76 +278,41 @@
                 :data-condition-index="entry.pathKey"
                 :data-condition-path="entry.pathKey"
               >
+                <!-- 客户反馈 2026-09-24 #4b: field → operator → typed value. Until a field is chosen the
+                     operator and value stay disabled and ask for a field (the row used to seed `equals`,
+                     which the field-less operator select showed as the raw code). -->
                 <el-select
                   :model-value="entry.condition.fieldId"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
                   :placeholder="automationLabel('condition.selectField', isZh)"
+                  data-condition-field=""
                   @change="onConditionFieldChange(entry.condition, $event)"
                 >
                   <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                    <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                    <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
+                  </el-option>
                 </el-select>
                 <el-select
                   :model-value="entry.condition.operator"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
+                  :disabled="!entry.condition.fieldId"
+                  :placeholder="automationLabel('condition.selectFieldFirst', isZh)"
+                  data-condition-operator=""
                   @change="onConditionOperatorChange(entry.condition, $event as ConditionOperator)"
                 >
-                  <el-option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                  <el-option v-for="op in conditionOperatorOptionsForRow(entry.condition)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(entry.condition, op.value)" />
                 </el-select>
-                <template v-if="!isUnaryOperator(entry.condition.operator)">
-                  <el-select
-                    v-if="conditionValueWidget(entry.condition) === 'booleanMultiSelect'"
-                    :model-value="booleanMultiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="boolean-multi-select"
-                    multiple
-                    @change="onBooleanMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'boolean'"
-                    :model-value="booleanConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="boolean"
-                    @change="onBooleanConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'select'"
-                    :model-value="singleSelectConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="select"
-                    @change="entry.condition.value = $event"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'multiSelect'"
-                    :model-value="multiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="multi-select"
-                    multiple
-                    @change="onMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-input
-                    v-else
-                    v-model="(entry.condition.value as string)"
-                    class="meta-rule-editor__input--sm"
-                    :type="conditionValueInputType(entry.condition)"
-                    :inputmode="conditionValueInputMode(entry.condition)"
-                    :placeholder="conditionValuePlaceholder(entry.condition)"
-                  />
-                </template>
+                <ConditionValueInput
+                  v-if="!isUnaryOperator(entry.condition.operator)"
+                  :model-value="entry.condition.value"
+                  :operator="entry.condition.operator"
+                  :field="conditionField(entry.condition) ?? null"
+                  :pending="isConditionRowPending(entry.condition)"
+                  :sheet-id="sheetId"
+                  @update:model-value="entry.condition.value = $event"
+                />
                 <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</el-button>
               </div>
             </template>
@@ -351,7 +340,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type)"
+                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -381,6 +370,57 @@
                   <span class="meta-rule-editor__action-summary" data-field="actionSummary">{{ actionSummaries[idx] }}</span>
                 </template>
 
+            <!-- #5739 泛化 round-2: the cross-base target triple is not authored here but IS preserved on
+                 save, so the screen must say so — otherwise the delete warning ("the trigger record in this
+                 table") is simply false for such a rule. An incomplete triple is called out too: the
+                 backend rejects it at save (400) and the executor fails the step at run.
+                 #5756 follow-up: create_record opts in with `targetBaseId` ALONE (its target sheet is
+                 `sheetId`, there is no target record), so it renders the same banner with create-shaped
+                 copy, and its target-sheet dropdown below is SCOPED to the declared base.
+                 round-3: that copy no longer promises "creates in ANOTHER base" / "the run fails". The
+                 executor picks the destination from the target SHEET, not from this declaration
+                 (executeCreateRecord -> evaluateCrossBaseWriteGate returns `{crossBase:false}` as soon as
+                 the target sheet's REAL base equals the trigger base, before the claim is ever compared),
+                 so a blank/local sheet id creates the record HERE and the step succeeds - pinned by the
+                 integration test XW-3b (same-base create carrying targetBaseId, actor with base-write
+                 nowhere, asserts success). -->
+            <div
+              v-if="crossBaseTargets[action.draftId]"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="crossBaseTarget"
+            >
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'">{{ automationLabel('actionConfig.crossBaseCreateTargetWarning', isZh) }}</div>
+              <div v-else>{{ automationLabel('actionConfig.crossBaseTargetWarning', isZh) }}</div>
+              <div v-if="crossBaseTargets[action.draftId].kind === 'create'" data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                sheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }}
+              </div>
+              <div v-else data-field="crossBaseTargetIds">
+                targetBaseId: {{ crossBaseTargets[action.draftId].targetBaseId }} ·
+                targetSheetId: {{ crossBaseTargets[action.draftId].targetSheetId || '—' }} ·
+                targetRecordId: {{ crossBaseTargets[action.draftId].targetRecordId || '—' }}
+              </div>
+              <div
+                v-if="crossBaseTargetIncomplete(crossBaseTargets[action.draftId])"
+                data-field="crossBaseTargetIncomplete"
+              >
+                {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
+              </div>
+            </div>
+
+            <!-- 客户反馈 2026-09-24 #3 (裁定 PR #6074): under `record.deleted` the trigger record is already gone, so a
+                 same-base update/delete/lock of it (top level or inside a branch) can only no-op — and used to
+                 self-chain into three execution logs. The option is disabled in the selects above/below; a
+                 LOADED rule keeps its action visible (loadable) and shows this hint, and the same sentence blocks
+                 save (automationSaveBlockReasons.ts) exactly as the backend refuses it (DELETED_TRIGGER_SELF_MUTATION). -->
+            <div
+              v-if="deletedTriggerSelfMutationOf(action)"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="deletedTriggerSelfMutationHint"
+            >
+              {{ automationLabel('actionConfig.deletedTriggerSelfMutation', isZh) }}
+            </div>
+
             <!-- update_record config -->
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
@@ -402,8 +442,25 @@
                    may omit cross-base/future sheets (isManualTargetSheetEntry defaults to manual when
                    the currently-configured id isn't in the fetched list, so a stale/foreign value is
                    never silently hidden). A missing/failed/empty listSheets() falls all the way back
-                   to the plain text input in the v-else branch below. -->
-              <template v-if="targetSheetOptions.length > 0">
+                   to the plain text input in the v-else branch below.
+                   #5756 follow-up (round-3): the REQUEST is not scoped to `targetBaseId` - client.listSheets()
+                   takes no baseId and GET /api/multitable/sheets returns every readable sheet across bases -
+                   but every row carries `baseId` (univer-meta.ts GET /sheets; MetaSheet.baseId); only
+                   automationTargetSheetOptions drops it. So for a create that declares `targetBaseId` the
+                   list is SCOPED to that base here (targetSheetOptionsFor) rather than taken away: every
+                   offered option is provably inside the declared base, and a declaration equal to THIS base
+                   - a legal same-base shape the backend explicitly supports (XW-3b) - keeps its ordinary
+                   picker instead of losing the control. When no readable sheet is in that base the scoped
+                   list is empty and the field degrades to the v-else free-text input below, which stays the
+                   only way to author an id you cannot see; the hint states the scoping in both states. -->
+              <div
+                v-if="crossBaseTargets[action.draftId]"
+                class="meta-rule-editor__hint"
+                data-field="createRecordCrossBaseSheetHint"
+              >
+                {{ automationLabel('actionConfig.crossBaseCreateSheetScoped', isZh) }}
+              </div>
+              <template v-if="targetSheetOptionsFor(action).length > 0">
                 <el-select
                   v-if="!isManualTargetSheetEntry(action)"
                   v-model="(action.config.targetSheetId as string)"
@@ -413,7 +470,7 @@
                   data-field="createRecordTargetSheetId"
                 >
                   <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
-                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                  <el-option v-for="opt in targetSheetOptionsFor(action)" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
                 </el-select>
                 <el-input
                   v-else
@@ -457,10 +514,155 @@
 
             <!-- send_notification config -->
             <div v-if="action.type === 'send_notification'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.userId', isZh) }}</label>
-              <el-input v-model="action.config.userId" type="text" :placeholder="automationLabel('actionConfig.userId', isZh)" />
+              <!--
+                Recipient picker: search sheet members by name/email (same roster the save gate
+                validates against) and pick them; the draft keeps a comma-joined user-id string
+                (action.config.userId) so the persisted shape stays actionConfig.userIds: string[].
+                Ids that cannot be resolved (e.g. a hand-typed "4") stay visible as raw chips with an
+                "unmatched" badge and can be removed; the manual textarea remains for users the
+                search cannot reach (no search permission, e-learning projection sheets, top-8 cap).
+              -->
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipients', isZh) }}</label>
+              <el-input
+                v-model="notificationRecipientSearch[action.draftId]"
+                type="text"
+                :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                data-field="notificationRecipientSearch"
+                @input="void loadNotificationRecipientSuggestions(action.draftId)"
+              />
+              <div v-if="notificationRecipientLoading[action.draftId]" class="meta-rule-editor__hint">{{ automationLabel('actionConfig.recipientSearching', isZh) }}</div>
+              <div v-else-if="notificationRecipientErrors[action.draftId]" class="meta-rule-editor__hint meta-rule-editor__hint--error" data-field="notificationRecipientSearchError">{{ notificationRecipientErrors[action.draftId] }}</div>
+              <div v-else-if="availableNotificationRecipientSuggestions(action.draftId, action.config).length" class="meta-rule-editor__recipient-list">
+                <button
+                  v-for="candidate in availableNotificationRecipientSuggestions(action.draftId, action.config)"
+                  :key="candidate.subjectId"
+                  class="meta-rule-editor__recipient-option"
+                  type="button"
+                  :disabled="isInactivePersonRecipientCandidate(candidate)"
+                  :data-notification-recipient-suggestion="candidate.subjectId"
+                  @click="addNotificationRecipient(action.draftId, action.config, candidate)"
+                >
+                  <strong>{{ candidate.label }}</strong>
+                  <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                  <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ automationLabel('actionConfig.recipientInactive', isZh) }}</span>
+                </button>
+              </div>
+              <div v-else-if="notificationRecipientSearchActive(action.draftId)" class="meta-rule-editor__hint" data-field="notificationRecipientNoMatch">{{ automationLabel('actionConfig.recipientNoMatch', isZh) }}</div>
+              <div v-if="selectedNotificationRecipients(action.config).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                <button
+                  v-for="recipient in selectedNotificationRecipients(action.config)"
+                  :key="recipient.id"
+                  class="meta-rule-editor__recipient-chip"
+                  :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                  type="button"
+                  :data-notification-recipient="recipient.id"
+                  :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                  @click="removeNotificationRecipient(action.config, recipient.id)"
+                >
+                  <strong>{{ recipient.label }}</strong>
+                  <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                  <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                  <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                </button>
+              </div>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipientIdsManual', isZh) }}</label>
+              <el-input
+                v-model="action.config.userId"
+                type="textarea"
+                :rows="2"
+                :placeholder="automationLabel('actionConfig.recipientIdsManualPlaceholder', isZh)"
+                data-field="notificationUserIds"
+                @blur="void resolveNotificationRecipientIds(parseUserIdsText(action.config.userId))"
+              />
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.message', isZh) }}</label>
-              <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" />
+              <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" data-field="notificationMessage" />
+            </div>
+
+            <!-- write_approval_form_values (FWB create/update from approval) config -->
+            <div
+              v-if="action.type === 'write_approval_form_values'"
+              class="meta-rule-editor__action-config"
+              data-field="fwbActionConfig"
+              data-testid="fwb-action-config"
+            >
+              <label class="meta-rule-editor__label">{{ isZh ? '写入方式' : 'Write mode' }}</label>
+              <el-select
+                :model-value="fwbWriteModeFor(action)"
+                class="meta-rule-editor__select"
+                data-testid="fwb-write-mode"
+                :aria-label="isZh ? '审批数据写入方式' : 'Approval data write mode'"
+                :disabled="fwbActionReadOnly(action)"
+                @update:model-value="onFwbWriteModeChange(action, $event)"
+              >
+                <el-option value="create" data-value="create" :label="isZh ? '在当前表新建记录' : 'Create a record in this sheet'" />
+                <el-option value="update" data-value="update" :label="isZh ? '更新审批表单关联的记录' : 'Update the record linked in the approval form'" />
+              </el-select>
+              <template v-if="fwbWriteModeFor(action) === 'update'">
+                <label class="meta-rule-editor__label">{{ isZh ? '关联记录字段' : 'Record-link field' }}</label>
+                <el-select
+                  :model-value="typeof action.config.recordLinkFieldId === 'string' ? action.config.recordLinkFieldId : ''"
+                  class="meta-rule-editor__select"
+                  data-testid="fwb-record-link-field"
+                  :aria-label="isZh ? '审批表单关联记录字段' : 'Approval-form record-link field'"
+                  :disabled="fwbActionReadOnly(action)"
+                  :placeholder="isZh ? '选择审批表单中的关联记录字段' : 'Select an approval-form record-link field'"
+                  @update:model-value="onFwbRecordLinkFieldChange(action, $event)"
+                >
+                  <el-option
+                    v-for="field in fwbRecordLinkOptionsFor(action)"
+                    :key="field.id"
+                    :value="field.id"
+                    :data-value="field.id"
+                    :label="field.label"
+                    :disabled="!field.baseId || !field.sheetId"
+                  />
+                </el-select>
+              </template>
+              <div class="meta-rule-editor__hint" data-testid="fwb-target-sheet-hint">
+                {{ fwbTargetHint(action) }}
+              </div>
+              <p
+                v-if="fwbLinkedTargetErrorFor(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--danger"
+                data-testid="fwb-linked-target-error"
+                role="alert"
+              >
+                {{ fwbLinkedTargetErrorFor(action) }}
+                <el-button
+                  link
+                  type="primary"
+                  data-testid="fwb-linked-target-retry"
+                  @click="retryFwbLinkedTargetFields(action)"
+                >{{ isZh ? '重试' : 'Retry' }}</el-button>
+              </p>
+              <p
+                v-if="fwbActionReadOnly(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+                data-testid="fwb-readonly-status"
+              >{{ fwbReadOnlyMessage(action) }}</p>
+              <p
+                v-else-if="!fwbTemplateFields.length"
+                class="meta-rule-editor__hint"
+                data-testid="fwb-template-fields-missing"
+              >{{ isZh ? '请先选择审批完成触发器的模板，以加载可映射的表单字段。' : 'Select an approval-completed template first so form fields can load for mapping.' }}</p>
+              <p
+                v-if="fwbConfirmErrorFor(action)"
+                class="meta-rule-editor__hint meta-rule-editor__hint--danger"
+                data-testid="fwb-confirm-error"
+                role="alert"
+              >{{ fwbConfirmErrorFor(action) }}</p>
+              <ApprovalFwbMappingEditor
+                :template-fields="fwbTemplateFields"
+                :target-fields="fwbTargetFieldsFor(action)"
+                :model-value="(action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? []"
+                :disabled="fwbActionReadOnly(action)"
+                :loading="fwbConfirmingDraftId === action.draftId || fwbLinkedTargetLoadingFor(action)"
+                :is-zh="isZh"
+                :confirmation-state="fwbConfirmationStateFor(action)"
+                @update:model-value="onFwbMappingsUpdate(action, $event)"
+                @request-confirmation="onFwbRequestConfirmation(action, $event)"
+                @invalidate-confirmation="onFwbInvalidateConfirmation(action)"
+              />
             </div>
 
             <!-- start_approval config -->
@@ -491,6 +693,50 @@
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
                 <el-option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
               </el-select>
+
+              <!-- #5742. The 非通过结果也写回 checkbox is shown whenever ANY writeback field is mapped: it gates
+                   the WHOLE backwrite (approver/completedAt included, automation-service writeApprovalResultBack),
+                   so hiding it behind the status picker would leave a live key the author cannot see or edit.
+                   The 审批结果 → 写入值 rows need a status field — that is the only field the mapping applies to.
+                   An empty row keeps the legacy behaviour — the RAW outcome literal. -->
+              <div v-if="resultWritebackAnyFieldSelected(action)" class="meta-rule-editor__writeback-outcomes" data-field="resultWritebackOutcomeValues">
+                <el-checkbox
+                  class="meta-rule-editor__toggle-label"
+                  data-field="resultWritebackOnNonApproved"
+                  :model-value="action.config.resultWritebackOnNonApproved === true"
+                  @change="setResultWritebackOnNonApproved(action, $event === true)"
+                >
+                  {{ automationLabel('resultWriteback.onNonApproved', isZh) }}
+                </el-checkbox>
+                <template v-if="resultWritebackStatusFieldSelected(action)">
+                <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.outcomeValuesTitle', isZh) }}</label>
+                <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.outcomeValuesHint', isZh) }}</div>
+                <div v-for="outcome in resultWritebackOutcomeRows(action)" :key="outcome" class="meta-rule-editor__field-pair">
+                  <span class="meta-rule-editor__preset-label">{{ automationResultWritebackOutcomeLabel(outcome, isZh) }}</span>
+                  <el-select
+                    v-if="resultWritebackStatusIsSelect(action)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  >
+                    <el-option value="" data-value="" :label="resultWritebackRawOutcomeLabel(outcome)" />
+                    <el-option v-for="opt in resultWritebackOutcomeOptions(action, outcome)" :key="opt.value" :value="opt.value" :data-value="opt.value" :data-marked="opt.marked || undefined" :label="opt.label" />
+                  </el-select>
+                  <el-input
+                    v-else
+                    class="meta-rule-editor__input--sm"
+                    type="text"
+                    :model-value="resultWritebackOutcomeValue(action, outcome)"
+                    :placeholder="resultWritebackRawOutcomeLabel(outcome)"
+                    :data-field="`resultWritebackOutcomeValue-${outcome}`"
+                    @update:model-value="setResultWritebackOutcomeValue(action, outcome, $event)"
+                  />
+                </div>
+                </template>
+              </div>
+
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
               <el-select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackApproverField">
                 <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
@@ -1127,10 +1373,12 @@
               </el-checkbox>
             </div>
 
-            <!-- delete_record config (T0-3): same-base trigger-record only; acknowledgement is UI-only. -->
+            <!-- delete_record config (T0-3): authors the same-base trigger-record delete; acknowledgement is
+                 UI-only. A config LOADED with the cross-base triple keeps it (#5739 泛化) and switches the
+                 warning + ack to the cross-base wording, with the ack re-asked. -->
             <div v-if="action.type === 'delete_record'" class="meta-rule-editor__action-config" data-action-config="delete_record">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordWarning">
-                {{ automationLabel('actionConfig.deleteRecordWarning', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordWarningCrossBase' : 'actionConfig.deleteRecordWarning', isZh) }}
               </div>
               <el-checkbox
                 class="meta-rule-editor__toggle-label"
@@ -1138,7 +1386,7 @@
                 :model-value="isDeleteRecordAcknowledged(action)"
                 @change="setDeleteRecordAcknowledged(action, $event === true)"
               >
-                {{ automationLabel('actionConfig.deleteRecordAck', isZh) }}
+                {{ automationLabel(crossBaseTargets[action.draftId] ? 'actionConfig.deleteRecordAckCrossBase' : 'actionConfig.deleteRecordAck', isZh) }}
               </el-checkbox>
             </div>
 
@@ -1165,21 +1413,43 @@
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" :type="branch.conjunction === 'AND' ? 'primary' : 'default'" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</el-button>
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" :type="branch.conjunction === 'OR' ? 'primary' : 'default'" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</el-button>
                   </div>
-                  <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
-                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" @change="onConditionFieldChange(cond, $event)">
-                      <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
-                    </el-select>
-                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
-                      <el-option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
-                    </el-select>
-                    <el-input v-if="!isUnaryOperator(cond.operator)" v-model="(cond.value as string)" class="meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
-                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
-                  </div>
+                  <template v-for="(cond, cIdx) in branch.conditions" :key="cIdx">
+                    <div class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
+                      <!-- 客户反馈 2026-09-24 #4b: the same field → operator → typed value row as the rule-level
+                           conditions (was a bare text box whose values were saved as strings). -->
+                      <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-condition-field="" @change="onConditionFieldChange(cond, $event)">
+                        <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                        <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                          <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                          <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
+                        </el-option>
+                      </el-select>
+                      <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
+                        <el-option v-for="op in conditionOperatorOptionsForRow(cond)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(cond, op.value)" />
+                      </el-select>
+                      <ConditionValueInput
+                        v-if="!isUnaryOperator(cond.operator)"
+                        :model-value="cond.value"
+                        :operator="cond.operator"
+                        :field="conditionField(cond) ?? null"
+                        :pending="isConditionRowPending(cond)"
+                        :sheet-id="sheetId"
+                        @update:model-value="cond.value = $event"
+                      />
+                      <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
+                    </div>
+                    <!-- #4b (review of #6107): a row whose field is not on the sheet any more. The backend refuses it
+                         on EVERY save of the rule (even a rename), so the row says why and the save is blocked. -->
+                    <div
+                      v-if="isBranchConditionFieldMissing(cond)"
+                      class="meta-rule-editor__hint meta-rule-editor__hint--error"
+                      :data-branch-condition-field-missing="cIdx"
+                    >{{ automationLabel('condition.fieldMissing', isZh) }}</div>
+                  </template>
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1193,7 +1463,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'cb', bIdx, aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'cb', bIdx, aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'cb', bIdx, aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'cb', bIdx, aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback: zero-param suspend point (no fields to author) -->
@@ -1213,7 +1522,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1227,7 +1536,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'db', aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'db', aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'db', aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'db', aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'db', aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback (default branch): zero-param suspend point -->
@@ -1258,7 +1606,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1272,7 +1620,46 @@
                       <el-button size="small" class="meta-rule-editor__btn" data-action="add-parallel-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('parallelBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" />
+                      <el-input
+                        v-model="notificationRecipientSearch[notificationPickerKey(action, 'pb', bIdx, aIdx)]"
+                        class="meta-rule-editor__input--sm"
+                        :placeholder="automationLabel('actionConfig.recipientSearchPlaceholder', isZh)"
+                        data-field="branchNotificationRecipientSearch"
+                        @input="void loadNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx))"
+                      />
+                      <div v-if="notificationRecipientErrors[notificationPickerKey(action, 'pb', bIdx, aIdx)]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ notificationRecipientErrors[notificationPickerKey(action, 'pb', bIdx, aIdx)] }}</div>
+                      <div v-else-if="availableNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct).length" class="meta-rule-editor__recipient-list">
+                        <button
+                          v-for="candidate in availableNotificationRecipientSuggestions(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct)"
+                          :key="candidate.subjectId"
+                          class="meta-rule-editor__recipient-option"
+                          type="button"
+                          :disabled="isInactivePersonRecipientCandidate(candidate)"
+                          :data-notification-recipient-suggestion="candidate.subjectId"
+                          @click="addNotificationRecipient(notificationPickerKey(action, 'pb', bIdx, aIdx), bAct, candidate)"
+                        >
+                          <strong>{{ candidate.label }}</strong>
+                          <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                        </button>
+                      </div>
+                      <div v-if="selectedNotificationRecipients(bAct).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                        <button
+                          v-for="recipient in selectedNotificationRecipients(bAct)"
+                          :key="recipient.id"
+                          class="meta-rule-editor__recipient-chip"
+                          :class="{ 'meta-rule-editor__recipient-chip--unresolved': recipient.unresolved }"
+                          type="button"
+                          :data-notification-recipient="recipient.id"
+                          :data-notification-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                          @click="removeNotificationRecipient(bAct, recipient.id)"
+                        >
+                          <strong>{{ recipient.label }}</strong>
+                          <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                          <span v-if="recipient.unresolved" class="meta-rule-editor__recipient-badge">{{ automationLabel('actionConfig.recipientUnresolved', isZh) }}</span>
+                          <em>{{ automationLabel('actionConfig.recipientRemove', isZh) }}</em>
+                        </button>
+                      </div>
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" data-field="branchNotificationUserIds" @blur="void resolveNotificationRecipientIds(parseUserIdsText(bAct.userId))" />
                       <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.message', isZh)" />
                     </template>
                     <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchAction(branch, aIdx)">&times;</el-button>
@@ -1329,6 +1716,9 @@
           <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
             {{ automationLabel('testRun.unsavedHint', isZh) }}
           </div>
+          <div v-if="testRunBlockedBySavedRuleDirty" class="meta-rule-editor__hint" data-field="testRunSavedDirtyHint">
+            {{ automationLabel('testRun.savedDirtyHint', isZh) }}
+          </div>
           <div
             v-if="props.testRunState"
             class="meta-rule-editor__test-run-status"
@@ -1344,7 +1734,7 @@
         </el-button>
         <el-button
           class="meta-rule-editor__btn"
-          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running'"
+          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running' || testRunBlockedBySavedRuleDirty"
           @click="onTestRun"
           data-action="test"
         >
@@ -1360,6 +1750,10 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { getTemplate } from '../../approvals/api'
+import ApprovalFwbMappingEditor from '../../approvals/components/ApprovalFwbMappingEditor.vue'
+import type { FwbMappingDraft } from '../../approvals/fwbMappingConfig'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -1374,6 +1768,23 @@ import type {
   MetaSheet,
   MetaView,
 } from '../types'
+import {
+  FWB_ACTION_TYPE,
+  buildFwbActionConfigForSave,
+  canSelectNewFwbAction,
+  draftConfigFromFwbAction,
+  emptyFwbDraftConfig,
+  fwbReadOnlyStatusMessage,
+  isFwbActionReadOnly,
+  isFwbActionSelectable,
+  isFwbActionType,
+  sheetFieldsToFwbTargets,
+  templateSchemaToFwbFields,
+  templateSchemaToFwbRecordLinks,
+  type FwbExecutorMapping,
+  type FwbMappingConfirmationState,
+  type FwbRecordLinkOption,
+} from '../fwbRuleAuthoring'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 import {
   appendTemplateToken,
@@ -1401,8 +1812,9 @@ import {
 import {
   automationActionTypeLabel,
   automationConditionOperatorLabel,
-  automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationCronTimezoneHint,
+  automationDateReminderExampleText,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
@@ -1410,9 +1822,32 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationLegacyUtcScheduleNotice,
+  automationReminderTimeHint,
+  automationReminderTimeLabel,
+  automationReminderTimePlaceholder,
+  automationResultWritebackOptionMissingMessage,
+  automationResultWritebackOutcomeLabel,
+  automationSwitchToBusinessTimezoneConfirm,
+  automationSwitchToBusinessTimezoneLabel,
+  automationSwitchToBusinessTimezoneTitle,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
+  AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
+  type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
+import {
+  analyzeCronForBusinessSwitch,
+  automationBusinessTimezone,
+  dateReminderExample,
+  effectiveTriggerTimeOfDay,
+  effectiveTriggerTimezone,
+  isTimezoneAwareTriggerType,
+  isUtcTriggerTimezone,
+  legacyUtcSwitchImpact,
+  triggerTimeOfDayOptions,
+  triggerTimezoneForSave,
+} from '../utils/automation-trigger-timezone'
 import {
   type BranchActionDraft,
   type BranchDraft,
@@ -1434,18 +1869,46 @@ import {
 } from '../utils/parallelBranchAuthoring'
 import {
   computeSaveBlockReasons,
+  hasCompleteCrossBaseTarget,
+  isDeletedTriggerSelfMutation,
+  rawBranchActionTypes,
+  TRIGGER_RECORD_MUTATING_ACTION_TYPES,
   type SaveBlockActionSnapshot,
   type SaveBlockReason,
+  type StartApprovalOutcomeValueBlock,
 } from '../automationSaveBlockReasons'
 import {
   summarizeAutomationAction,
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
-import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
+import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
+import {
+  PENDING_CONDITION_OPERATOR,
+  coerceConditionValue,
+  conditionFieldDisplayType,
+  isArrayConditionOperator,
+  isConditionLeafComplete as isConditionValueComplete,
+  isPendingConditionOperator,
+  isUnaryConditionOperator,
+} from '../utils/automation-condition-values'
+import ConditionValueInput from './ConditionValueInput.vue'
 
 interface FieldPair {
   fieldId: string
   value: string
+  // #5739 泛化 round-2 — the RAW loaded value plus the row identity it was parsed from.
+  // `update_record.fields` / `create_record.data` are `Record<string, unknown>` server-side
+  // (automation-actions.ts), and the backend's own legacy fold writes a `null` into `fields`
+  // (automation-service.ts normalizeLegacyActionPair), but this editor's value control is a plain text
+  // box. Re-deriving the saved value from that text rewrote 42 → "42", false → "false", null → "" and
+  // ["a","b"] → "a,b" on a load → save that changed NOTHING: the #4196 fingerprint hashes the RAW config,
+  // and "clear this cell" (null) silently became "write an empty string". So the raw value rides along and
+  // is re-emitted VERBATIM while the row is untouched (same fieldId AND same text); the moment the author
+  // edits either, the text box becomes authoritative and the value is the string they see.
+  rawFieldId?: string
+  rawText?: string
+  rawValue?: unknown
 }
 
 type DraftActionConfig = Record<string, unknown> & {
@@ -1472,10 +1935,17 @@ type DraftActionConfig = Record<string, unknown> & {
   bodyTemplate?: string
   publicFormViewId?: string
   internalViewId?: string
+  // (#5739 泛化) The raw-config snapshot that used to live here as `startApprovalOriginal` now lives on
+  // DraftAction.originalConfig — one field for EVERY action type, and outside `config` so the passthrough
+  // branch of buildPayload cannot leak it into a saved config. See DraftAction below.
   // W7 start_approval result-writeback pickers (UI-only bindings; assembled into config.resultWriteback on save).
   resultWritebackStatusField?: string
   resultWritebackApproverField?: string
   resultWritebackCompletedAtField?: string
+  // #5742: 审批结果 → 写入值. Both are MODELLED now, so they OVERRIDE the preserved-original spread on save
+  // (clearing the checkbox must delete resultWriteback.onNonApproved, not silently re-emit the loaded true).
+  resultWritebackOnNonApproved?: boolean
+  resultWritebackOutcomeValues?: Record<string, string>
   locked?: boolean
   // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
   branches?: BranchDraft[]
@@ -1486,6 +1956,16 @@ type DraftActionConfig = Record<string, unknown> & {
   parallelBranches?: ParallelBranchDraft[]
   parallelBranchUnsupportedReason?: string | null
   parallelBranchOriginal?: Record<string, unknown> | null
+  // FWB write_approval_form_values authoring (server-owned confirmationHash; mapping editor is UX only)
+  fwbMappings?: FwbMappingDraft[]
+  fwbWriteMode?: 'create' | 'update'
+  recordLinkFieldId?: string
+  sourceTemplateVersionId?: string
+  confirmationHash?: string
+  fwbConfirmationState?: FwbMappingConfirmationState
+  fwbPersistedMappings?: FwbExecutorMapping[] | null
+  fwbPersistedRawConfig?: Record<string, unknown> | null
+  fwbWasPersisted?: boolean
 }
 
 interface DraftAction {
@@ -1493,6 +1973,18 @@ interface DraftAction {
   type: AutomationActionType
   config: DraftActionConfig
   persisted?: boolean
+  // #5739 泛化: the RAW persisted config of this action as loaded (deep-cloned), for EVERY action type.
+  // buildPayload rebuilds each action's config from THIS snapshot and overlays only the keys the UI owns
+  // (ACTION_OWNED_CONFIG_KEYS), so every key the backend accepts but this editor does not model — the
+  // cross-base triples on update/delete/lock/create, send_webhook headers/body/secret, wait_for_callback's
+  // `reason`, customer extension keys, anything a newer backend adds — survives an untouched load → save
+  // BYTE-IDENTICALLY. That matters beyond data loss: the #4196 action fingerprint hashes the RAW config, so
+  // a rebuild that silently drops keys makes an unrelated edit look like a config change.
+  // Lives on the ACTION, not inside `config`: the passthrough branch of buildPayload emits `action.config`
+  // as the saved config, so a snapshot stored there would be persisted as a config key of its own.
+  // `null` for a brand-new action and for one whose type the author just switched (the previous type's
+  // config must never bleed into the new type's payload).
+  originalConfig?: Record<string, unknown> | null
 }
 
 interface Draft {
@@ -1537,7 +2029,36 @@ const saving = ref(false)
 // G-B2-22: root of the drawer's scrollable body, scoped so scroll-to-reason navigation never
 // reaches outside this editor instance.
 const editorBodyRef = ref<HTMLElement | null>(null)
-const cronPreset = ref('0 * * * *')
+const featureFlags = useFeatureFlags()
+// FWB production authoring — surfaces APPROVAL_FWB_WRITEBACK_ENABLED (default OFF).
+const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbWriteback'))
+const fwbTemplateFields = ref<Array<{ id: string; label: string }>>([])
+const fwbRecordLinkFields = ref<FwbRecordLinkOption[]>([])
+type FwbTargetField = ReturnType<typeof sheetFieldsToFwbTargets>[number]
+const fwbLinkedTargetFields = ref<Record<string, FwbTargetField[]>>({})
+const fwbLinkedTargetErrors = ref<Record<string, string>>({})
+const fwbLinkedTargetLoading = ref<Record<string, true>>({})
+const fwbActiveVersionId = ref('')
+const fwbConfirmingDraftId = ref<string | null>(null)
+const fwbConfirmErrors = ref<Record<string, string>>({})
+const fwbConfirmationGeneration = new Map<string, number>()
+const fwbConfirmingRequestGeneration = new Map<string, number>()
+let fwbTemplateLoadGeneration = 0
+const fwbCreateTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
+const DEFAULT_CRON_PRESET = '0 * * * *'
+const CRON_PRESET_VALUES: readonly string[] = ['*/5 * * * *', '0 * * * *', '0 0 * * *', '0 0 * * 1']
+const cronPreset = ref(DEFAULT_CRON_PRESET)
+/**
+ * A7a: the preset select must open on the SAVED cron. It used to keep whatever the previous open left
+ * (initially hourly), and buildPayload writes the preset over `cron`, so renaming a saved daily rule silently
+ * turned it hourly. A saved expression that is not a preset opens as 'custom' (edited in place, not rewritten).
+ */
+function cronPresetForDraft(d: Draft): string {
+  if (d.triggerType !== 'schedule.cron') return DEFAULT_CRON_PRESET
+  const cron = typeof d.triggerConfig.cron === 'string' ? d.triggerConfig.cron.trim() : ''
+  if (!cron) return props.rule?.id ? 'custom' : DEFAULT_CRON_PRESET
+  return CRON_PRESET_VALUES.includes(cron) ? cron : 'custom'
+}
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
@@ -1555,12 +2076,34 @@ const targetSheetOptions = computed(() => automationTargetSheetOptions(available
 // is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
 const manualTargetSheetOverride = ref<Record<string, boolean>>({})
 
+/**
+ * The target-sheet options for ONE create_record action. Default: the whole readable-sheet roster
+ * (unchanged G-B2-27 behaviour). #5756 follow-up round-3 - when the action declares `targetBaseId`, the
+ * roster is SCOPED to that base: GET /api/multitable/sheets returns sheets from every base the author can
+ * read, but each row carries `baseId`, which `automationTargetSheetOptions` drops. Scoping here makes an
+ * offered option provably inside the declared base (a pick cannot silently address a different one)
+ * WITHOUT withholding the control from the legal `targetBaseId == this base` shape (XW-3b). Rows with no
+ * baseId (legacy/null) are excluded rather than assumed local: unprovable is not the same as local. An
+ * empty result degrades the field to the free-text input below - the only way to author an id you cannot
+ * see. Hoisted `function` (not a computed) so it can call the equally hoisted crossBaseTargetOf without a
+ * TDZ on the consts declared further down.
+ */
+function targetSheetOptionsFor(action: DraftAction): AutomationTargetSheetOption[] {
+  const target = crossBaseTargetOf(action)
+  if (!target || target.kind !== 'create') return targetSheetOptions.value
+  return automationTargetSheetOptions(
+    availableSheets.value.filter((sheet) => typeof sheet.baseId === 'string' && sheet.baseId.trim() === target.targetBaseId),
+  )
+}
+
 function isManualTargetSheetEntry(action: DraftAction): boolean {
   const override = manualTargetSheetOverride.value[action.draftId]
   if (override !== undefined) return override
   const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
   if (!current) return false
-  return !targetSheetOptions.value.some((opt) => opt.value === current)
+  // Against the SCOPED list for a cross-base create: an id that is not provably in the declared base
+  // must stay visible in the text box, not be swallowed by a dropdown that cannot represent it.
+  return !targetSheetOptionsFor(action).some((opt) => opt.value === current)
 }
 
 function toggleManualTargetSheetEntry(action: DraftAction) {
@@ -1579,6 +2122,20 @@ type PersonRecipientDirectoryEntry = {
 }
 
 const personRecipientDirectory = ref<Record<string, PersonRecipientDirectoryEntry>>({})
+// send_notification recipient picker state, keyed by picker key (top-level: action.draftId;
+// branch rows: see notificationPickerKey). Search text lives here rather than in the draft so
+// typing a query never dirties the rule. Resolved names/emails are read from
+// personRecipientDirectory (shared with the DingTalk person picker; same candidate endpoint).
+const notificationRecipientSearch = ref<Record<string, string>>({})
+const notificationRecipientSuggestions = ref<Record<string, MetaSheetPermissionCandidate[]>>({})
+const notificationRecipientLoading = ref<Record<string, boolean>>({})
+const notificationRecipientErrors = ref<Record<string, string>>({})
+// ids looked up by exact id against the sheet roster and NOT found — their chip carries the
+// "unmatched" badge. An id whose lookup failed (e.g. no search permission) is neither resolved nor
+// a miss: it renders as a plain raw-id chip, still removable.
+const notificationRecipientMisses = ref<Record<string, boolean>>({})
+const notificationRecipientResolveInFlight = new Set<string>()
+let notificationRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
@@ -1589,18 +2146,28 @@ const APPROVAL_COMPLETED_OUTCOME_OPTIONS = ['approved', 'rejected', 'revoked', '
 type ApprovalCompletedOutcome = (typeof APPROVAL_COMPLETED_OUTCOME_OPTIONS)[number]
 // FE mirror of the backend save allowlist (record-less v1): non-notification actions are save-rejected
 // server-side; mirroring here blocks a doomed save with a visible reason instead of a round-trip error.
-const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
+// FWB (write_approval_form_values) is admitted on approval.completed when the flag is ON, and also
+// when a persisted FWB action is present so a flag-OFF re-open never claims the action is "disallowed"
+// and silently blocks a lossless re-save of the rest of the rule.
+const APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES = new Set<string>([
   'send_notification',
   'send_webhook',
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
 ])
+const approvalCompletedAllowedActionTypes = computed(() => {
+  const allowed = new Set<string>(APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES)
+  if (fwbWritebackEnabled.value || draft.value.actions.some((action) => isFwbActionType(action.type))) {
+    allowed.add(FWB_ACTION_TYPE)
+  }
+  return allowed
+})
 // A-2b: the approval card additionally mounts on the pending-task trigger (and ONLY there).
-const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = new Set<string>([
-  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = computed(() => new Set<string>([
+  ...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES,
   'send_dingtalk_approval_card',
-])
+]))
 
 function approvalCompletedOutcomeLabel(outcome: ApprovalCompletedOutcome): string {
   const zh = isZh.value
@@ -1637,7 +2204,7 @@ const approvalTaskCreatedBlockReason = computed<string>(() => {
   if (draft.value.conditions.conditions.length > 0) {
     return zh ? '审批待办触发器不支持触发条件，请先移除所有条件。' : 'The approval-task trigger does not support conditions — remove them first.'
   }
-  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.has(action.type))
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.value.has(action.type))
   if (disallowed) {
     const label = automationActionTypeLabel(disallowed.type, zh)
     return zh
@@ -1645,6 +2212,16 @@ const approvalTaskCreatedBlockReason = computed<string>(() => {
       : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions and the approval card only).`
   }
   return ''
+})
+
+// FWB placement: write_approval_form_values is only legal on approval.completed. Surface a block
+// when the draft still carries FWB under any other trigger (e.g. the author switched triggers).
+const fwbWrongTriggerBlockReason = computed<string>(() => {
+  if (draft.value.triggerType === 'approval.completed') return ''
+  if (!draft.value.actions.some((action) => isFwbActionType(action.type))) return ''
+  return isZh.value
+    ? '审批数据回写仅可用于「审批完成」触发器，请切换触发器或移除该动作。'
+    : 'Approval-data writeback is only allowed on the approval.completed trigger — switch the trigger or remove the action.'
 })
 
 const approvalCompletedBlockReason = computed<string>(() => {
@@ -1655,12 +2232,21 @@ const approvalCompletedBlockReason = computed<string>(() => {
   if (draft.value.conditions.conditions.length > 0) {
     return zh ? '审批完成触发器不支持触发条件，请先移除所有条件。' : 'The approval-completed trigger does not support conditions — remove them first.'
   }
-  const disallowed = draft.value.actions.find((action) => !APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(action.type))
+  const disallowed = draft.value.actions.find((action) => !approvalCompletedAllowedActionTypes.value.has(action.type))
   if (disallowed) {
     const label = automationActionTypeLabel(disallowed.type, zh)
     return zh
-      ? `动作「${label}」不可用于审批完成触发器（仅支持通知类动作）。`
-      : `Action "${label}" is not allowed on the approval-completed trigger (notification-family actions only).`
+      ? `动作「${label}」不可用于审批完成触发器（仅支持通知类动作${fwbWritebackEnabled.value ? '与审批回写' : ''}）。`
+      : `Action "${label}" is not allowed on the approval-completed trigger (notification-family actions${fwbWritebackEnabled.value ? ' and approval writeback' : ''} only).`
+  }
+  // FWB D1: when a writeback action is present, outcomes must be approved-only (or default).
+  if (draft.value.actions.some((action) => isFwbActionType(action.type))) {
+    const outcomes = approvalCompletedOutcomes.value
+    if (!(outcomes.length === 1 && outcomes[0] === 'approved')) {
+      return zh
+        ? '审批数据回写仅支持「通过」结果，请将完成结果设为仅通过。'
+        : 'Approval-data writeback only supports the approved outcome — set completion outcomes to approved only.'
+    }
   }
   return ''
 })
@@ -1684,8 +2270,12 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_dingtalk_person_message',
   // A-2b: approval card — recipient comes from the approval.task_created event, config is empty.
   'send_dingtalk_approval_card',
-  // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
-  // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
+  // T0-3: the editor AUTHORS only the safe shape — a same-base trigger-record delete; there are no
+  // cross-base target inputs here. #5739 泛化 changed what a SAVE does, not what it authors: a config
+  // loaded with the cross-base triple (targetBaseId/targetSheetId/targetRecordId) is now PRESERVED
+  // verbatim instead of being flattened to `{}` (flattening silently retargeted a foreign delete onto
+  // the local trigger record). Such an action renders the cross-base banner + the cross-base warning and
+  // ack wording, and its acknowledgement is NOT pre-checked — see crossBaseTargetOf().
   'delete_record',
   'wait_for_callback',
   'condition_branch',
@@ -1708,10 +2298,409 @@ function isUnsupportedSelectableActionType(type: AutomationActionType): boolean 
 }
 
 function selectableActionTypes(currentType: AutomationActionType): AutomationActionType[] {
-  if (isUnsupportedSelectableActionType(currentType)) {
-    return [...SUPPORTED_SELECTABLE_ACTION_TYPES, currentType]
+  const types: AutomationActionType[] = [...SUPPORTED_SELECTABLE_ACTION_TYPES]
+  // FWB: newly selectable only when flag ON + approval.completed; a loaded FWB action always remains
+  // in the option list so it is never silently dropped from the UI.
+  if (isFwbActionSelectable(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    currentType,
+    approvalCompletedOutcomes.value,
+  )) {
+    if (!types.includes(FWB_ACTION_TYPE)) types.push(FWB_ACTION_TYPE)
   }
-  return SUPPORTED_SELECTABLE_ACTION_TYPES
+  if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
+    types.push(currentType)
+  }
+  return types
+}
+
+function fwbActionReadOnly(action: DraftAction): boolean {
+  return isFwbActionReadOnly(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    action.config.fwbWasPersisted === true,
+    approvalCompletedOutcomes.value,
+  )
+}
+
+function fwbReadOnlyMessage(_action: DraftAction): string {
+  return fwbReadOnlyStatusMessage(
+    isZh.value,
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    approvalCompletedOutcomes.value,
+  )
+}
+
+function fwbConfirmationStateFor(action: DraftAction): FwbMappingConfirmationState {
+  const state = action.config.fwbConfirmationState
+  if (state === 'confirming' || state === 'confirmed' || state === 'unconfirmed') return state
+  return action.config.confirmationHash ? 'confirmed' : 'unconfirmed'
+}
+
+function fwbWriteModeFor(action: DraftAction): 'create' | 'update' {
+  return action.config.fwbWriteMode === 'update' ? 'update' : 'create'
+}
+
+function fwbConfiguredRecordLinkFieldId(action: DraftAction): string {
+  return typeof action.config.recordLinkFieldId === 'string'
+    ? action.config.recordLinkFieldId.trim()
+    : ''
+}
+
+function fwbRecordLinkFor(action: DraftAction): FwbRecordLinkOption | null {
+  const fieldId = fwbConfiguredRecordLinkFieldId(action)
+  return fwbRecordLinkFields.value.find((field) => field.id === fieldId) ?? null
+}
+
+function fwbRecordLinkOptionsFor(action: DraftAction): FwbRecordLinkOption[] {
+  const options = [...fwbRecordLinkFields.value]
+  const configuredId = fwbConfiguredRecordLinkFieldId(action)
+  if (configuredId && !options.some((field) => field.id === configuredId)) {
+    options.push({
+      id: configuredId,
+      label: isZh.value ? '不可用关联字段' : 'Unavailable record-link field',
+      baseId: '',
+      sheetId: '',
+    })
+  }
+  return options
+}
+
+function fwbTargetFieldsFor(action: DraftAction): FwbTargetField[] {
+  if (fwbWriteModeFor(action) === 'create') return fwbCreateTargetFields.value
+  const link = fwbRecordLinkFor(action)
+  return link ? (fwbLinkedTargetFields.value[link.sheetId] ?? []) : []
+}
+
+function fwbTargetSchemaSignatureFor(action: DraftAction): string {
+  const link = fwbRecordLinkFor(action)
+  return JSON.stringify({
+    mode: fwbWriteModeFor(action),
+    recordLinkFieldId: link?.id ?? '',
+    baseId: link?.baseId ?? '',
+    sheetId: link?.sheetId ?? props.sheetId,
+    fields: fwbTargetFieldsFor(action),
+  })
+}
+
+function fwbTargetHint(action: DraftAction): string {
+  if (fwbWriteModeFor(action) === 'create') {
+    return isZh.value
+      ? '目标表：当前规则所属表（新建记录）'
+      : 'Target sheet: this rule’s sheet (creates a new record)'
+  }
+  const link = fwbRecordLinkFor(action)
+  if (!link) {
+    if (fwbConfiguredRecordLinkFieldId(action)) {
+      return isZh.value
+        ? '原关联记录字段已失效，请重新选择；切换后需重新配置字段映射。'
+        : 'The previous record-link field is unavailable. Select another field and reconfigure the mappings.'
+    }
+    return isZh.value
+      ? '请选择审批表单中的关联记录字段。'
+      : 'Select a record-link field from the approval form.'
+  }
+  return isZh.value
+    ? `目标表：由「${link.label}」固定关联的表（更新所选记录）`
+    : `Target sheet: the sheet pinned by “${link.label}” (updates the selected record)`
+}
+
+async function loadFwbLinkedTargetFields(sheetId: string): Promise<void> {
+  const id = sheetId.trim()
+  if (!id || fwbLinkedTargetFields.value[id] || fwbLinkedTargetLoading.value[id] || !props.client) return
+  const templateGeneration = fwbTemplateLoadGeneration
+  fwbLinkedTargetLoading.value = { ...fwbLinkedTargetLoading.value, [id]: true }
+  const nextErrors = { ...fwbLinkedTargetErrors.value }
+  delete nextErrors[id]
+  fwbLinkedTargetErrors.value = nextErrors
+  try {
+    const result = await props.client.listFields(id)
+    if (templateGeneration !== fwbTemplateLoadGeneration) return
+    fwbLinkedTargetFields.value = {
+      ...fwbLinkedTargetFields.value,
+      [id]: sheetFieldsToFwbTargets(Array.isArray(result.fields) ? result.fields : []),
+    }
+  } catch {
+    if (templateGeneration !== fwbTemplateLoadGeneration) return
+    // Do not cache a transient failure as an empty schema. Confirmation and save stay fail-closed,
+    // while the explicit retry lets the author recover without closing the drawer.
+    fwbLinkedTargetErrors.value = {
+      ...fwbLinkedTargetErrors.value,
+      [id]: isZh.value
+        ? '目标表字段加载失败，无法确认映射。'
+        : 'Target-sheet fields could not be loaded, so the mapping cannot be confirmed.',
+    }
+  } finally {
+    if (templateGeneration === fwbTemplateLoadGeneration) {
+      const nextLoading = { ...fwbLinkedTargetLoading.value }
+      delete nextLoading[id]
+      fwbLinkedTargetLoading.value = nextLoading
+    }
+  }
+}
+
+function fwbLinkedTargetErrorFor(action: DraftAction): string {
+  const link = fwbRecordLinkFor(action)
+  return link ? (fwbLinkedTargetErrors.value[link.sheetId] ?? '') : ''
+}
+
+function fwbLinkedTargetLoadingFor(action: DraftAction): boolean {
+  const link = fwbRecordLinkFor(action)
+  return !!(link && fwbLinkedTargetLoading.value[link.sheetId])
+}
+
+function retryFwbLinkedTargetFields(action: DraftAction): void {
+  const link = fwbRecordLinkFor(action)
+  if (link) void loadFwbLinkedTargetFields(link.sheetId)
+}
+
+function fwbConfirmErrorFor(action: DraftAction): string {
+  return fwbConfirmErrors.value[action.draftId] ?? ''
+}
+
+function setFwbConfirmError(action: DraftAction, message: string): void {
+  const next = { ...fwbConfirmErrors.value }
+  if (message) next[action.draftId] = message
+  else delete next[action.draftId]
+  fwbConfirmErrors.value = next
+}
+
+async function confirmFwbMappingReset(action: DraftAction): Promise<boolean> {
+  if (!Array.isArray(action.config.fwbMappings) || action.config.fwbMappings.length === 0) return true
+  try {
+    await ElMessageBox.confirm(
+      isZh.value
+        ? '切换写入方式或关联字段会清空当前字段映射，是否继续？'
+        : 'Changing the write mode or record-link field clears the current field mappings. Continue?',
+      isZh.value ? '确认清空映射' : 'Clear field mappings?',
+      {
+        type: 'warning',
+        confirmButtonText: isZh.value ? '清空并切换' : 'Clear and switch',
+        cancelButtonText: isZh.value ? '取消' : 'Cancel',
+      },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resetFwbConfirmation(action: DraftAction): void {
+  advanceFwbConfirmationGeneration(action.draftId)
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+async function onFwbWriteModeChange(action: DraftAction, value: unknown): Promise<void> {
+  if (fwbActionReadOnly(action)) return
+  const nextMode = value === 'update' ? 'update' : 'create'
+  if (nextMode === fwbWriteModeFor(action) || !await confirmFwbMappingReset(action)) return
+  action.config.fwbWriteMode = nextMode
+  if (action.config.fwbWriteMode === 'create') action.config.recordLinkFieldId = ''
+  action.config.fwbMappings = []
+  setFwbConfirmError(action, '')
+  resetFwbConfirmation(action)
+}
+
+async function onFwbRecordLinkFieldChange(action: DraftAction, value: unknown): Promise<void> {
+  if (fwbActionReadOnly(action)) return
+  const nextFieldId = typeof value === 'string' ? value : ''
+  if (nextFieldId === fwbConfiguredRecordLinkFieldId(action) || !await confirmFwbMappingReset(action)) return
+  action.config.recordLinkFieldId = nextFieldId
+  action.config.fwbMappings = []
+  setFwbConfirmError(action, '')
+  resetFwbConfirmation(action)
+  const link = fwbRecordLinkFor(action)
+  if (link) void loadFwbLinkedTargetFields(link.sheetId)
+}
+
+function advanceFwbConfirmationGeneration(draftId: string): number {
+  const next = (fwbConfirmationGeneration.get(draftId) ?? 0) + 1
+  fwbConfirmationGeneration.set(draftId, next)
+  return next
+}
+
+function onFwbMappingsUpdate(action: DraftAction, next: FwbMappingDraft[]): void {
+  if (fwbActionReadOnly(action)) return
+  advanceFwbConfirmationGeneration(action.draftId)
+  action.config.fwbMappings = next
+  setFwbConfirmError(action, '')
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+function onFwbInvalidateConfirmation(action: DraftAction): void {
+  if (fwbActionReadOnly(action)) return
+  advanceFwbConfirmationGeneration(action.draftId)
+  setFwbConfirmError(action, '')
+  action.config.confirmationHash = ''
+  action.config.fwbConfirmationState = 'unconfirmed'
+}
+
+async function onFwbRequestConfirmation(action: DraftAction, mappings: FwbExecutorMapping[]): Promise<void> {
+  if (fwbActionReadOnly(action) || !props.client) return
+  if (!canSelectNewFwbAction(
+    fwbWritebackEnabled.value,
+    draft.value.triggerType,
+    approvalCompletedOutcomes.value,
+  ) && !action.config.fwbWasPersisted) {
+    return
+  }
+  const templateId = typeof draft.value.triggerConfig.templateId === 'string'
+    ? draft.value.triggerConfig.templateId.trim()
+    : ''
+  const sourceTemplateVersionId = (typeof action.config.sourceTemplateVersionId === 'string'
+    && action.config.sourceTemplateVersionId.trim())
+    || fwbActiveVersionId.value
+  if (!templateId || !sourceTemplateVersionId) {
+    setFwbConfirmError(action, isZh.value
+      ? '请先选择审批模板（需有已发布版本）。'
+      : 'Select an approval template with an active published version first.')
+    return
+  }
+  const writeMode = fwbWriteModeFor(action)
+  const recordLink = writeMode === 'update' ? fwbRecordLinkFor(action) : null
+  if (writeMode === 'update' && !recordLink) {
+    setFwbConfirmError(action, isZh.value
+      ? '请先选择审批表单中的关联记录字段。'
+      : 'Select an approval-form record-link field first.')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      isZh.value
+        ? (writeMode === 'update'
+            ? '审批表单中的已映射值将更新关联记录，并按目标表的现有权限向读者可见。确认继续吗？'
+            : '审批表单中的已映射值将写入当前多维表，并按该表的现有权限向读者可见。确认继续吗？')
+        : (writeMode === 'update'
+            ? 'Mapped approval-form values will update the linked record and become visible under the target sheet’s access rules. Continue?'
+            : 'Mapped approval-form values will be written to this table and become visible under its current access rules. Continue?'),
+      isZh.value ? '确认审批数据回写' : 'Confirm approval data writeback',
+      {
+        type: 'warning',
+        confirmButtonText: isZh.value ? '确认并生成凭据' : 'Confirm and generate confirmation',
+        cancelButtonText: isZh.value ? '取消' : 'Cancel',
+      },
+    )
+  } catch {
+    return
+  }
+  setFwbConfirmError(action, '')
+  const requestGeneration = advanceFwbConfirmationGeneration(action.draftId)
+  const requestSubject = {
+    templateId,
+    sourceTemplateVersionId,
+    targetSchemaSignature: fwbTargetSchemaSignatureFor(action),
+    writeMode,
+    recordLinkFieldId: recordLink?.id ?? '',
+    draftMappings: JSON.stringify(action.config.fwbMappings ?? []),
+    executorMappings: JSON.stringify(mappings),
+  }
+  fwbConfirmingDraftId.value = action.draftId
+  fwbConfirmingRequestGeneration.set(action.draftId, requestGeneration)
+  action.config.fwbConfirmationState = 'confirming'
+  action.config.sourceTemplateVersionId = sourceTemplateVersionId
+  try {
+    // Server owns the hash — never compute confirmationHash on the client.
+    const result = await props.client.confirmFwbWriteback(props.sheetId, {
+      templateId,
+      sourceTemplateVersionId,
+      mappings,
+      ...(writeMode === 'update'
+        ? { mode: 'update' as const, recordLinkFieldId: recordLink!.id }
+        : {}),
+    })
+    const currentAction = draft.value.actions.find((candidate) => candidate.draftId === action.draftId)
+    const currentTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+      ? draft.value.triggerConfig.templateId.trim()
+      : ''
+    const subjectStillCurrent =
+      currentAction === action
+      && isFwbActionType(currentAction.type)
+      && fwbConfirmationGeneration.get(action.draftId) === requestGeneration
+      && currentTemplateId === requestSubject.templateId
+      && currentAction.config.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
+      && JSON.stringify(currentAction.config.fwbMappings ?? []) === requestSubject.draftMappings
+      && JSON.stringify(mappings) === requestSubject.executorMappings
+      && fwbWriteModeFor(currentAction) === requestSubject.writeMode
+      && (typeof currentAction.config.recordLinkFieldId === 'string'
+        ? currentAction.config.recordLinkFieldId
+        : '') === requestSubject.recordLinkFieldId
+      && fwbTargetSchemaSignatureFor(currentAction) === requestSubject.targetSchemaSignature
+      && result.templateId === requestSubject.templateId
+      && result.sourceTemplateVersionId === requestSubject.sourceTemplateVersionId
+      && result.targetSheetId === (recordLink?.sheetId ?? props.sheetId)
+    if (!subjectStillCurrent) return
+    action.config.confirmationHash = result.confirmationHash
+    action.config.sourceTemplateVersionId = result.sourceTemplateVersionId
+    action.config.fwbConfirmationState = 'confirmed'
+    // Keep a snapshot of the confirmed executor mappings for lossless re-save if the flag later flips off.
+    action.config.fwbPersistedMappings = mappings
+  } catch (e: unknown) {
+    if (fwbConfirmationGeneration.get(action.draftId) !== requestGeneration) return
+    action.config.confirmationHash = ''
+    action.config.fwbConfirmationState = 'unconfirmed'
+    setFwbConfirmError(action, e instanceof Error
+      ? e.message
+      : (isZh.value ? '确认失败，请重试。' : 'Confirmation failed — try again.'))
+  } finally {
+    if (fwbConfirmingRequestGeneration.get(action.draftId) === requestGeneration) {
+      fwbConfirmingRequestGeneration.delete(action.draftId)
+    }
+    if (fwbConfirmingDraftId.value === action.draftId && !fwbConfirmingRequestGeneration.has(action.draftId)) {
+      fwbConfirmingDraftId.value = null
+    }
+  }
+}
+
+async function loadFwbTemplateSource(templateId: string): Promise<void> {
+  const loadGeneration = ++fwbTemplateLoadGeneration
+  const id = templateId.trim()
+  if (!id) {
+    fwbTemplateFields.value = []
+    fwbRecordLinkFields.value = []
+    fwbActiveVersionId.value = ''
+    return
+  }
+  try {
+    const detail = await getTemplate(id)
+    const currentTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+      ? draft.value.triggerConfig.templateId.trim()
+      : ''
+    if (loadGeneration !== fwbTemplateLoadGeneration || currentTemplateId !== id) return
+    fwbTemplateFields.value = templateSchemaToFwbFields(detail.formSchema)
+    fwbRecordLinkFields.value = templateSchemaToFwbRecordLinks(detail.formSchema)
+    fwbActiveVersionId.value = typeof detail.activeVersionId === 'string' ? detail.activeVersionId : ''
+    // Bind every FWB draft that lacks a version to the currently active one; a version drift
+    // invalidates confirmation (hash subject includes sourceTemplateVersionId).
+    for (const action of draft.value.actions) {
+      if (!isFwbActionType(action.type)) continue
+      if (!fwbActionReadOnly(action)) {
+        const current = typeof action.config.sourceTemplateVersionId === 'string'
+          ? action.config.sourceTemplateVersionId
+          : ''
+        if (!current && fwbActiveVersionId.value) {
+          action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+        } else if (current && fwbActiveVersionId.value && current !== fwbActiveVersionId.value) {
+          advanceFwbConfirmationGeneration(action.draftId)
+          action.config.sourceTemplateVersionId = fwbActiveVersionId.value
+          action.config.confirmationHash = ''
+          action.config.fwbConfirmationState = 'unconfirmed'
+        }
+      }
+      const link = fwbRecordLinkFor(action)
+      if (fwbWriteModeFor(action) === 'update' && link) {
+        void loadFwbLinkedTargetFields(link.sheetId)
+      }
+    }
+  } catch {
+    if (loadGeneration !== fwbTemplateLoadGeneration) return
+    fwbTemplateFields.value = []
+    fwbRecordLinkFields.value = []
+    fwbActiveVersionId.value = ''
+  }
 }
 
 const formViews = computed(() => (props.views ?? []).filter((view) =>
@@ -1722,14 +2711,102 @@ const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
+
+// A7a (客户反馈 2026-09-24 #4c): the timezone this schedule trigger will be SAVED with, i.e. the clock the
+// backend will run it on. The UI labels and buildPayload read the same helper, so what the editor shows is
+// what gets saved: new schedule config → the business timezone; a saved rule of this schedule type with no
+// stored timezone → stays UTC (legacy-preserve) until the explicit switch below.
+const scheduleTriggerTimezone = computed(() => effectiveTriggerTimezone({
+  triggerType: draft.value.triggerType,
+  draftTimezone: draft.value.triggerConfig.timezone,
+  storedRule: props.rule ?? null,
+}))
+// The cron expression that will be saved (buildPayload writes a non-custom preset over `cron`).
+const effectiveCronExpression = computed(() => (
+  cronPreset.value !== 'custom'
+    ? cronPreset.value
+    : (typeof draft.value.triggerConfig.cron === 'string' ? draft.value.triggerConfig.cron.trim() : '')
+))
+const cronSwitchImpact = computed(() => analyzeCronForBusinessSwitch(effectiveCronExpression.value, automationBusinessTimezone()))
+const scheduleOnLegacyUtc = computed(() =>
+  isTimezoneAwareTriggerType(draft.value.triggerType)
+  && isUtcTriggerTimezone(scheduleTriggerTimezone.value)
+  && !isUtcTriggerTimezone(automationBusinessTimezone())
+  // N1: a cron expression that fires at the same instants on either clock (every 5 minutes, hourly, …)
+  // needs no warning and no switch — the rule stays exactly as it is.
+  && !(draft.value.triggerType === 'schedule.cron' && cronSwitchImpact.value.timezoneIndependent),
+)
+const dateReminderFieldType = computed(() => {
+  const fieldId = typeof draft.value.triggerConfig.dateFieldId === 'string' ? draft.value.triggerConfig.dateFieldId : ''
+  const type = props.fields.find((field) => field.id === fieldId)?.type
+  return type === 'date' || type === 'dateTime' ? type : null
+})
+const timeOfDayModel = computed<string>({
+  get: () => (typeof draft.value.triggerConfig.timeOfDay === 'string' ? draft.value.triggerConfig.timeOfDay : ''),
+  // Cleared (Element Plus emits undefined/null) → '' = the backend's 09:00 default, as the old input saved.
+  set: (value) => { draft.value.triggerConfig.timeOfDay = typeof value === 'string' ? value : '' },
+})
+const timeOfDayOptions = computed(() => triggerTimeOfDayOptions(draft.value.triggerConfig.timeOfDay))
+const dateReminderExampleText = computed(() => automationDateReminderExampleText(
+  dateReminderExample({
+    offsetDays: draft.value.triggerConfig.offsetDays,
+    direction: draft.value.triggerConfig.direction,
+    timeOfDay: draft.value.triggerConfig.timeOfDay,
+    timezone: scheduleTriggerTimezone.value,
+    businessTimezone: automationBusinessTimezone(),
+  }),
+  scheduleTriggerTimezone.value,
+  isZh.value,
+))
+
+/**
+ * The ONLY path that moves a legacy UTC schedule onto the business timezone: explicit, confirmed, and for a
+ * date reminder it re-expresses the stored time as the same instant ((hh + 8) mod 24 for Asia/Shanghai; an
+ * empty time was the 09:00 UTC default → 17:00). A cron expression is kept verbatim and re-read on the
+ * business clock (the confirm text says so).
+ */
+async function switchScheduleToBusinessTimezone(): Promise<void> {
+  const triggerType = draft.value.triggerType
+  if (triggerType !== 'schedule.date_field' && triggerType !== 'schedule.cron') return
+  const businessTimezone = automationBusinessTimezone()
+  const impact = triggerType === 'schedule.date_field'
+    ? legacyUtcSwitchImpact(draft.value.triggerConfig.timeOfDay, businessTimezone)
+    : null
+  try {
+    await ElMessageBox.confirm(
+      impact
+        ? automationSwitchToBusinessTimezoneConfirm({
+          triggerType: 'schedule.date_field',
+          impact,
+          fieldType: dateReminderFieldType.value,
+        }, isZh.value)
+        : automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: cronSwitchImpact.value }, isZh.value),
+      automationSwitchToBusinessTimezoneTitle(isZh.value),
+      {
+        type: 'warning',
+        confirmButtonText: automationSwitchToBusinessTimezoneLabel(isZh.value),
+        cancelButtonText: automationLabel('editor.cancel', isZh.value),
+      },
+    )
+  } catch {
+    return
+  }
+  if (impact) draft.value.triggerConfig.timeOfDay = impact.toTimeOfDay
+  draft.value.triggerConfig.timezone = businessTimezone
+}
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
+// #5859: Test Run always executes the PERSISTED rule (client.testAutomationRule sends no body),
+// so an already-saved rule with unsaved draft edits must not offer Test Run — it would silently
+// run the stale saved version (e.g. empty notification recipients) instead of what's on screen.
+// Reuses the B1-07 open-time snapshot as the dirty baseline (same one requestClose() uses).
+const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftSnapshot.value)
+const testRunBlockedBySavedRuleDirty = computed(() => !!props.rule?.id && isDraftDirty.value)
 function dingTalkTestRunConfirmMessage(): string {
   const separator = isZh.value ? '' : ' '
   return `${automationLabel('testRun.warning', isZh.value)}${separator}${automationLabel('testRun.confirmSuffix', isZh.value)}`
 }
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
-type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
 type ConditionPath = number[]
 type ConditionEditorEntry =
   | {
@@ -1847,93 +2924,34 @@ function conditionField(condition: AutomationCondition): AutomationRuleEditorFie
   return props.fields.find((field) => field.id === condition.fieldId)
 }
 
-function conditionFieldOptions(condition: AutomationCondition): FieldOption[] {
-  return conditionField(condition)?.options ?? []
+// 客户反馈 2026-09-24 #4b: the value control (ConditionValueInput.vue) and the saved value shape per field
+// type (../utils/automation-condition-values.ts) are shared by the rule-level rows and the condition_branch
+// rows, so both kinds of row save the same value for the same input.
+/** A row with no field chosen yet: operator and value stay disabled and ask for a field first. */
+function isConditionRowPending(condition: AutomationCondition): boolean {
+  return !condition.fieldId || isPendingConditionOperator(condition.operator)
 }
 
-function optionLabel(option: FieldOption): string {
-  return option.label ?? option.value
+/**
+ * The operator choices of a row: the field type's operators, plus the row's current operator when the field
+ * no longer allows it (a deleted / retyped field) so the select shows its label instead of the raw code.
+ */
+function conditionOperatorOptionsForRow(condition: AutomationCondition): ConditionOperatorOption[] {
+  const options = conditionOperatorsForField(condition.fieldId)
+  if (!condition.fieldId || isPendingConditionOperator(condition.operator)) return options
+  if (options.some((option) => option.value === condition.operator)) return options
+  const current = CONDITION_OPERATOR_LOOKUP.get(condition.operator)
+  return current ? [...options, current] : options
 }
 
-function conditionValueWidget(condition: AutomationCondition): ConditionValueWidget {
-  const field = conditionField(condition)
-  if (!field) return 'text'
-  if (field.type === 'boolean') return isArrayOperator(condition.operator) ? 'booleanMultiSelect' : 'boolean'
-  if (isNumericConditionFieldType(field.type)) return 'number'
-  if (field.type === 'date') return 'date'
-  if (field.type === 'dateTime' || field.type === 'createdTime' || field.type === 'modifiedTime') return 'dateTime'
-  if ((field.type === 'select' || field.type === 'multiSelect') && conditionFieldOptions(condition).length > 0) {
-    return isArrayOperator(condition.operator) ? 'multiSelect' : 'select'
-  }
-  return 'text'
-}
-
-function conditionValueInputType(condition: AutomationCondition): string {
-  if (isArrayOperator(condition.operator)) return 'text'
-  const widget = conditionValueWidget(condition)
-  if (widget === 'number') return 'number'
-  if (widget === 'date') return 'date'
-  if (widget === 'dateTime') return 'datetime-local'
-  return 'text'
-}
-
-function conditionValueInputMode(condition: AutomationCondition): 'decimal' | undefined {
-  if (isArrayOperator(condition.operator)) return undefined
-  return conditionValueWidget(condition) === 'number' ? 'decimal' : undefined
-}
-
-function booleanConditionValue(condition: AutomationCondition): string {
-  if (condition.value === true) return 'true'
-  if (condition.value === false) return 'false'
-  if (condition.value === 'true' || condition.value === 'false') return condition.value
-  return ''
-}
-
-function booleanMultiSelectConditionValues(condition: AutomationCondition): string[] {
-  return (parseBooleanConditionArrayValue(condition.value) ?? [])
-    .map((entry) => entry ? 'true' : 'false')
-}
-
-function singleSelectConditionValue(condition: AutomationCondition): string {
-  return typeof condition.value === 'string' ? condition.value : ''
-}
-
-function multiSelectConditionValues(condition: AutomationCondition): string[] {
-  return parseConditionArrayValue(condition.value).map(String)
-}
-
-function onBooleanConditionValueChange(condition: AutomationCondition, value: string) {
-  if (value === 'true') {
-    condition.value = true
-  } else if (value === 'false') {
-    condition.value = false
-  } else {
-    condition.value = ''
-  }
-}
-
-function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function onMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function isNumericConditionFieldType(fieldType: string | undefined): boolean {
-  return fieldType === 'number' ||
-    fieldType === 'currency' ||
-    fieldType === 'percent' ||
-    fieldType === 'rating' ||
-    fieldType === 'duration' ||
-    fieldType === 'autoNumber'
+/** Operator label for a row: on a date / date-time field the ordering operators read 晚于 / 早于 (after / before). */
+function conditionOperatorLabelForRow(condition: AutomationCondition, operator: ConditionOperator): string {
+  return automationConditionOperatorLabel(operator, isZh.value, conditionField(condition)?.type)
 }
 
 function resetConditionValue(condition: AutomationCondition) {
   if (isUnaryOperator(condition.operator)) {
     delete condition.value
-  } else if (isArrayOperator(condition.operator)) {
-    condition.value = ''
   } else {
     condition.value = ''
   }
@@ -1942,8 +2960,18 @@ function resetConditionValue(condition: AutomationCondition) {
 function onConditionFieldChange(condition: AutomationCondition, fieldId: string) {
   const previousFieldId = condition.fieldId
   condition.fieldId = fieldId
+  if (!fieldId) {
+    // Back to "-- field --": the row is pending again (no operator, no value) until a field is chosen.
+    condition.operator = PENDING_CONDITION_OPERATOR
+    condition.value = ''
+    return
+  }
   const allowedOperators = conditionOperatorsForField(fieldId)
-  if (!previousFieldId || !allowedOperators.some((operator) => operator.value === condition.operator)) {
+  if (
+    !previousFieldId
+    || isPendingConditionOperator(condition.operator)
+    || !allowedOperators.some((operator) => operator.value === condition.operator)
+  ) {
     condition.operator = firstOperatorForField(fieldId)
   }
   if (previousFieldId !== fieldId) {
@@ -1957,15 +2985,11 @@ function onConditionOperatorChange(condition: AutomationCondition, operator: Con
 }
 
 function isUnaryOperator(op: ConditionOperator): boolean {
-  return op === 'is_empty' || op === 'is_not_empty'
+  return isUnaryConditionOperator(op)
 }
 
 function isArrayOperator(op: ConditionOperator): boolean {
-  return op === 'in' || op === 'not_in'
-}
-
-function conditionValuePlaceholder(condition: AutomationCondition): string {
-  return automationConditionValuePlaceholder(conditionValueWidget(condition), isArrayOperator(condition.operator), isZh.value)
+  return isArrayConditionOperator(op)
 }
 
 function isConditionGroupNode(node: AutomationConditionNode): node is ConditionGroup {
@@ -2009,83 +3033,15 @@ function conditionGroupFromRule(group: ConditionGroup | undefined): Draft['condi
   }
 }
 
-function parseConditionArrayValue(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => typeof entry === 'string' ? entry.trim() : entry)
-      .filter((entry) => typeof entry === 'string' ? entry.length > 0 : entry !== null && entry !== undefined)
-  }
-  if (typeof value !== 'string') return []
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-}
-
-function parseNumberConditionValue(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function parseNumericConditionArrayValue(value: unknown): number[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const numbers = values.map(parseNumberConditionValue)
-  return numbers.every((entry): entry is number => entry !== null) ? numbers : null
-}
-
-function parseBooleanConditionValue(value: unknown): boolean | null {
-  if (value === true || value === false) return value
-  if (value === 'true') return true
-  if (value === 'false') return false
-  return null
-}
-
-function parseBooleanConditionArrayValue(value: unknown): boolean[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const booleans = values.map(parseBooleanConditionValue)
-  return booleans.every((entry): entry is boolean => entry !== null) ? booleans : null
-}
-
-function conditionFieldType(fieldId: string): string | undefined {
-  return props.fields.find((field) => field.id === fieldId)?.type
-}
-
+/** The value a rule-level condition is saved with, in its field type's shape (automation-condition-values.ts). */
 function buildConditionValuePayload(condition: AutomationCondition): unknown {
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) ?? []
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) ?? []
-    return parseConditionArrayValue(condition.value)
-  }
-  if (isNumericConditionFieldType(fieldType)) {
-    return parseNumberConditionValue(condition.value)
-  }
-  if (fieldType === 'boolean') {
-    return parseBooleanConditionValue(condition.value)
-  }
-  return typeof condition.value === 'string' ? condition.value.trim() : condition.value
+  const result = coerceConditionValue(condition, conditionField(condition))
+  // Not coercible → save is blocked (isConditionLeafComplete); never invent a null / [] in its place.
+  return result.ok ? result.value : condition.value
 }
 
 function isConditionLeafComplete(condition: AutomationCondition): boolean {
-  if (!condition.fieldId.trim()) return false
-  if (isUnaryOperator(condition.operator)) return true
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) !== null
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) !== null
-    return parseConditionArrayValue(condition.value).length > 0
-  }
-  if (isNumericConditionFieldType(fieldType)) return parseNumberConditionValue(condition.value) !== null
-  if (fieldType === 'boolean') return parseBooleanConditionValue(condition.value) !== null
-  return typeof condition.value === 'string'
-    ? condition.value.trim().length > 0
-    : condition.value !== undefined && condition.value !== null
+  return isConditionValueComplete(condition, conditionField(condition))
 }
 
 function areConditionsComplete(node: AutomationConditionNode): boolean {
@@ -2128,9 +3084,11 @@ function createDraftAction(
   type: AutomationActionType,
   config: DraftActionConfig = defaultConfigForActionType(type),
   persisted = false,
+  // #5739 泛化: raw loaded config snapshot; null for actions the author just added (nothing to preserve).
+  originalConfig: Record<string, unknown> | null = null,
 ): DraftAction {
   draftActionIdSequence += 1
-  return { draftId: `draft-action-${draftActionIdSequence}`, type, config, persisted }
+  return { draftId: `draft-action-${draftActionIdSequence}`, type, config, persisted, originalConfig }
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
@@ -2160,7 +3118,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldUpdates = Array.isArray(config.fieldUpdates)
       ? config.fieldUpdates
-      : Object.entries(fields).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(fields).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return { ...config, fieldUpdates }
   }
   if (type === 'create_record') {
@@ -2171,7 +3129,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : {}
     const fieldValues = Array.isArray(config.fieldValues)
       ? config.fieldValues
-      : Object.entries(data).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+      : Object.entries(data).map(([fieldId, value]) => fieldPairFromStored(fieldId, value))
     return {
       ...config,
       targetSheetId: typeof config.sheetId === 'string' ? config.sheetId : typeof config.targetSheetId === 'string' ? config.targetSheetId : '',
@@ -2205,6 +3163,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       resultWritebackStatusField: typeof writeback.statusField === 'string' ? writeback.statusField : '',
       resultWritebackApproverField: typeof writeback.approverField === 'string' ? writeback.approverField : '',
       resultWritebackCompletedAtField: typeof writeback.completedAtField === 'string' ? writeback.completedAtField : '',
+      // #5742: the non-approved opt-in and the outcome→value mapping are now edited by the UI.
+      resultWritebackOnNonApproved: writeback.onNonApproved === true,
+      resultWritebackOutcomeValues: readResultWritebackOutcomeValues(writeback.outcomeValues),
+      // (#5739 泛化) The loaded-config snapshot that the save rebuild spreads back is no longer stored here:
+      // `draftActionFromStored` puts it on DraftAction.originalConfig for every action type.
     }
   }
   if (type === 'send_dingtalk_group_message') {
@@ -2249,7 +3212,53 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : '',
     }
   }
+  if (type === 'write_approval_form_values') {
+    // Spread into a plain record so the draft config stays assignable to DraftActionConfig
+    // (FwbDraftActionConfig is a closed interface without a string index signature).
+    return { ...draftConfigFromFwbAction(config, { persisted: true }) }
+  }
   return { ...config }
+}
+
+/**
+ * F9: fold the v0 aliases onto the canonical action the editor can actually render. A stored `notify`
+ * matches NO option in the action select (UNSUPPORTED_SELECTABLE_ACTION_TYPES is empty) and the backend
+ * rejects it on save (validateActionObject accepts canonical types only), so a legacy rule used to be
+ * neither runnable nor editable. Mirrors the backend's normalizeLegacyActionPair — including its refusal
+ * to convert an `update_field` that has no fieldId (never guess the target field).
+ */
+function normalizeLegacyEditorAction(
+  type: AutomationActionType,
+  config: Record<string, unknown> | null | undefined,
+): { type: AutomationActionType; config: Record<string, unknown> } {
+  const raw = isPlainRecord(config) ? config : {}
+  if (type === 'notify') {
+    const userIds = Array.isArray(raw.userIds)
+      ? (raw.userIds as unknown[]).filter((entry): entry is string => typeof entry === 'string' && !!entry.trim())
+      : []
+    return { type: 'send_notification', config: { ...raw, userIds } }
+  }
+  if (type === 'update_field') {
+    const fieldId = typeof raw.fieldId === 'string' ? raw.fieldId.trim() : ''
+    if (!fieldId) return { type, config: raw }
+    const fields = isPlainRecord(raw.fields) ? raw.fields : {}
+    return { type: 'update_record', config: { ...raw, fields: { ...fields, [fieldId]: raw.value ?? null } } }
+  }
+  return { type, config: raw }
+}
+
+function draftActionFromStored(type: AutomationActionType, config: Record<string, unknown> | null | undefined): DraftAction {
+  const normalized = normalizeLegacyEditorAction(type, config)
+  return createDraftAction(
+    normalized.type,
+    draftConfigFromAction(normalized.type, normalized.config),
+    true,
+    // #5739 泛化: snapshot the config BEFORE the per-type draft overlay — `draftConfigFromAction` returns
+    // `{ ...config, <UI-only draft keys> }` for most types, so the draft config is NOT a clean original.
+    // Taken from the NORMALIZED config so a folded v0 alias (notify / update_field) preserves the keys of
+    // the shape the editor actually renders.
+    cloneRawActionConfig(normalized.config),
+  )
 }
 
 function draftFromRule(rule: AutomationRule): Draft {
@@ -2263,8 +3272,8 @@ function draftFromRule(rule: AutomationRule): Draft {
     triggerConfig,
     conditions: conditionGroupFromRule(rule.conditions),
     actions: rule.actions && rule.actions.length
-      ? rule.actions.map((a) => createDraftAction(a.type, draftConfigFromAction(a.type, a.config), true))
-      : [createDraftAction(rule.actionType, draftConfigFromAction(rule.actionType, rule.actionConfig), true)],
+      ? rule.actions.map((a) => draftActionFromStored(a.type, a.config))
+      : [draftActionFromStored(rule.actionType, rule.actionConfig)],
     executionMode: rule.executionMode ?? null,
   }
 }
@@ -2321,6 +3330,37 @@ const conditionBranchReadOnlyReason = computed<string | null>(() => {
   }
   return null
 })
+/**
+ * #4b (review of #6107): a condition_branch row whose field is not among the sheet's fields. The backend save
+ * gate (#6107 `validateConditionGroupAgainstFields`) refuses such a row with a 400 on EVERY save of the rule,
+ * even a rename, and its message is an English JSON path. The editor instead flags the row (its own message)
+ * and counts it as incomplete, so save is blocked with the row anchored. Caveat: `fields` is the grid's field
+ * list, which omits a field hidden at the property level (layer-2 `hidden` / `visible: false`), so a row on
+ * such a field is flagged too — the message says 已删除（或已被隐藏）. An empty `fields` (not loaded yet)
+ * flags nothing: every row would otherwise read as deleted.
+ */
+function isBranchConditionFieldMissing(condition: AutomationCondition): boolean {
+  if (!condition.fieldId || props.fields.length === 0) return false
+  return conditionField(condition) === undefined
+}
+
+// 客户反馈 2026-09-24 #4b: a condition_branch condition row must be complete (field + operator + a value in its
+// field type's shape) exactly like a rule-level row — the branch rows used to save whatever the text box held
+// (and a blank row reached the backend as a 400). A row on a field the sheet no longer has is incomplete too
+// (isBranchConditionFieldMissing). Anchor = the first incomplete branch row, in render order.
+const firstIncompleteBranchConditionAnchor = computed<string | undefined>(() => {
+  for (const [actionIndex, action] of draft.value.actions.entries()) {
+    if (action.type !== 'condition_branch' || action.config.branchUnsupportedReason) continue
+    for (const [branchIndex, branch] of (action.config.branches ?? []).entries()) {
+      for (const [conditionIndex, condition] of branch.conditions.entries()) {
+        if (isBranchConditionFieldMissing(condition) || !isConditionLeafComplete(condition)) {
+          return `[data-action-index="${actionIndex}"] [data-branch-index="${branchIndex}"] [data-branch-condition-index="${conditionIndex}"]`
+        }
+      }
+    }
+  }
+  return undefined
+})
 const conditionBranchKeyError = computed<string | null>(() => {
   for (const a of draft.value.actions) {
     if (a.type === 'condition_branch' && !a.config.branchUnsupportedReason) {
@@ -2367,7 +3407,8 @@ function removeBranch(action: DraftAction, index: number): void {
   action.config.branches?.splice(index, 1)
 }
 function addBranchCondition(branch: BranchDraft): void {
-  branch.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+  // #4b: pending until a field is chosen (see createBlankCondition).
+  branch.conditions.push({ fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' })
 }
 function removeBranchCondition(branch: BranchDraft, index: number): void {
   branch.conditions.splice(index, 1)
@@ -2433,8 +3474,10 @@ function conditionIndentStyle(depth: number): Record<string, string> {
   return { '--condition-depth': String(Math.max(0, depth)) }
 }
 
+// 客户反馈 2026-09-24 #4b: a new row has NO operator until a field is chosen — seeding 'equals' made the
+// field-less operator select show the raw code. The row is incomplete (save blocked) while pending.
 function createBlankCondition(): AutomationCondition {
-  return { fieldId: '', operator: 'equals', value: '' }
+  return { fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' }
 }
 
 function createBlankConditionGroup(): ConditionGroup {
@@ -2507,14 +3550,35 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
       saving.value = false
+      fwbConfirmErrors.value = {}
+      fwbConfirmingDraftId.value = null
+      fwbConfirmationGeneration.clear()
+      fwbConfirmingRequestGeneration.clear()
+      fwbLinkedTargetFields.value = {}
+      fwbLinkedTargetErrors.value = {}
+      fwbLinkedTargetLoading.value = {}
       dingTalkDestinationsError.value = ''
       personRecipientSuggestions.value = {}
       personRecipientLoading.value = {}
       personRecipientErrors.value = {}
+      notificationRecipientSearch.value = {}
+      notificationRecipientSuggestions.value = {}
+      notificationRecipientLoading.value = {}
+      notificationRecipientErrors.value = {}
+      notificationRecipientMisses.value = {}
+      // Resolve persisted notification recipient ids to names/emails so an existing rule opens with
+      // readable chips; ids the roster does not know get the "unmatched" badge.
+      void resolveNotificationRecipientIds(collectDraftNotificationRecipientIds())
+      // FWB template source: load active version + form fields for the mapping editor.
+      const triggerTemplateId = typeof draft.value.triggerConfig.templateId === 'string'
+        ? draft.value.triggerConfig.templateId
+        : ''
+      void loadFwbTemplateSource(triggerTemplateId)
       if (props.client) {
         try {
           dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
@@ -2547,6 +3611,43 @@ watch(
   { immediate: true },
 )
 
+// FWB: template/version is part of the confirmation subject — reload fields and drop stale hashes
+// whenever the approval.completed template id changes.
+watch(
+  () => (typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId : ''),
+  (templateId, previous) => {
+    if (templateId === previous) return
+    fwbLinkedTargetFields.value = {}
+    fwbLinkedTargetErrors.value = {}
+    fwbLinkedTargetLoading.value = {}
+    void loadFwbTemplateSource(templateId)
+    for (const action of draft.value.actions) {
+      if (!isFwbActionType(action.type) || fwbActionReadOnly(action)) continue
+      action.config.confirmationHash = ''
+      action.config.fwbConfirmationState = 'unconfirmed'
+      action.config.sourceTemplateVersionId = ''
+      advanceFwbConfirmationGeneration(action.draftId)
+    }
+  },
+)
+
+// Target sheet/schema is part of the server confirmation subject. Clear any editable confirmation
+// as soon as the host replaces the sheet field model; the save gate remains the final race-safe
+// authority if the schema changes after this client-side observation.
+watch(() => JSON.stringify(fwbCreateTargetFields.value), (next, previous) => {
+  if (next === previous) return
+  for (const action of draft.value.actions) {
+    if (
+      !isFwbActionType(action.type)
+      || fwbActionReadOnly(action)
+      || fwbWriteModeFor(action) !== 'create'
+    ) continue
+    action.config.confirmationHash = ''
+    action.config.fwbConfirmationState = 'unconfirmed'
+    advanceFwbConfirmationGeneration(action.draftId)
+  }
+})
+
 // UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6 "确认一律 ElMessageBox").
 // CFG-3 precedent (DirectoryManagementView.vue confirmApprovalCardSecretRegenerate): service-style
 // import works even off the EP-managed overlay chrome; the promise rejects on cancel/overlay-click.
@@ -2566,15 +3667,20 @@ async function confirmDiscardChanges(): Promise<boolean> {
 // B1-07: discard protection — all three close paths (overlay click, ×, cancel) route here.
 // A successful save is closed by the parent on the 'save' emit and never passes through this guard.
 async function requestClose(): Promise<void> {
-  const dirty = JSON.stringify(draft.value) !== draftSnapshot.value
-  if (dirty && !(await confirmDiscardChanges())) return
+  if (isDraftDirty.value && !(await confirmDiscardChanges())) return
   emit('close')
 }
 
 function resetDeleteRecordAcknowledgements(): void {
   const next: Record<string, boolean> = {}
   for (const action of draft.value.actions) {
-    if (action.type === 'delete_record') next[action.draftId] = action.persisted === true
+    // #5739 泛化 round-2: a persisted same-base delete keeps its acknowledgement (the author already
+    // confirmed exactly this action). A CROSS-BASE delete does not: the confirmation the author gave was
+    // for "the trigger record in this table" — the wording this screen showed while the triple was being
+    // dropped on save — so it must be re-asked against the cross-base wording before the rule can be saved.
+    if (action.type === 'delete_record') {
+      next[action.draftId] = action.persisted === true && !crossBaseTargetOf(action)
+    }
   }
   deleteRecordAcknowledgements.value = next
 }
@@ -2596,9 +3702,113 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
 // that can be unit-tested without this 3000+ line component. The parsing calls themselves
 // (parseGroupDestinationIds etc.) stay here unchanged: this is exactly what canSave read before,
 // just captured instead of immediately branching on it.
+// #5739 泛化 round-2 — the T3-5 cross-base target triple. update_record / delete_record / lock_record may
+// carry `targetBaseId` (+ the required `targetSheetId`/`targetRecordId`) to mutate a record in ANOTHER base
+// (automation-actions.ts, gated by automation-service.ts validateCrossBaseWriteConfig and re-checked per run
+// by the executor write-gate). This editor authors none of the three and preserves all three on save, so it
+// must at least TELL the author the action leaves this table — the delete warning/ack text is otherwise a
+// false statement, and an incomplete triple would arrive as an opaque 400.
+// #5756 follow-up — create_record is the FOURTH cross-base writer and it opts in with `targetBaseId`
+// ALONE: automation-actions.ts CreateRecordConfig types no targetSheetId/targetRecordId siblings (the
+// target sheet is its own `sheetId`, and there is no target record — the run creates one), and
+// automation-service.ts validateCrossBaseWriteConfig lists only update/delete/lock, so the server saves
+// `targetBaseId` without demanding anything else. `kind` keeps the two shapes apart everywhere the
+// mutate wording would be false for a create (no record id, and the sheet id IS editable on this screen).
+interface CrossBaseTarget {
+  kind: 'mutate' | 'create'
+  targetBaseId: string
+  targetSheetId: string
+  /** Always '' for kind === 'create': the record does not exist yet. */
+  targetRecordId: string
+}
+
+/**
+ * The cross-base target of a LOADED action config, or null for a same-base / newly authored action.
+ * Deliberately a hoisted function over a literal list (NOT a module-level `const Set`): the immediate
+ * `props.rule` watcher calls this through resetDeleteRecordAcknowledgements during setup, i.e. before a
+ * const declared further down would be initialized (TDZ ReferenceError, caught the first time by the
+ * "pre-checks the destructive acknowledgement" spec).
+ */
+function crossBaseTargetOf(action: DraftAction): CrossBaseTarget | null {
+  const isMutate = action.type === 'update_record' || action.type === 'delete_record' || action.type === 'lock_record'
+  if (!isMutate && action.type !== 'create_record') return null
+  const config = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  if (!config) return null
+  const text = (key: string): string => (typeof config[key] === 'string' ? (config[key] as string).trim() : '')
+  const targetBaseId = text('targetBaseId')
+  if (!targetBaseId) return null
+  if (!isMutate) {
+    // create_record: the target sheet is `sheetId` (CreateRecordConfig.sheetId), which the draft loads
+    // into `config.targetSheetId` (see draftConfigFromAction) and this editor DOES author — so read
+    // the LIVE draft value, not the loaded one, or the banner would keep quoting a sheet id the author
+    // just replaced. targetBaseId itself is unauthorable here and stays read from originalConfig.
+    const draftSheetId = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
+    return { kind: 'create', targetBaseId, targetSheetId: draftSheetId, targetRecordId: '' }
+  }
+  return { kind: 'mutate', targetBaseId, targetSheetId: text('targetSheetId'), targetRecordId: text('targetRecordId') }
+}
+
+/**
+ * Is the cross-base target missing an id the RUN needs? The mutate triple needs both siblings (and the
+ * server 400s without them); a create needs only the target sheet id (the server accepts it either way —
+ * see the 'actionConfig.crossBaseCreateTargetIncomplete' copy for what the run does instead).
+ */
+function crossBaseTargetIncomplete(target: CrossBaseTarget): boolean {
+  if (target.kind === 'create') return !target.targetSheetId
+  return !target.targetSheetId || !target.targetRecordId
+}
+
+const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
+  const out: Record<string, CrossBaseTarget> = {}
+  for (const action of draft.value.actions) {
+    const target = crossBaseTargetOf(action)
+    if (target) out[action.draftId] = target
+  }
+  return out
+})
+
+// 客户反馈 2026-09-24 #3 (裁定 PR #6074) — under a `record.deleted` trigger the trigger record no longer exists,
+// so a SAME-BASE update_record / delete_record / lock_record (which the executor addresses at
+// `context.recordId`) can only be a 0-row no-op; before the executor fix it also re-emitted a ghost
+// record.deleted and chained itself to the depth cap (ONE user delete ⇒ THREE execution logs). The backend
+// now refuses that shape at save (automation-service.ts validateDeletedTriggerSelfMutation, code
+// DELETED_TRIGGER_SELF_MUTATION); this editor mirrors it three ways: the option is disabled while the trigger
+// is record.deleted, the action card shows the same sentence as a hint, and save is blocked with an anchored
+// reason. A LOADED rule of that shape stays loadable (its type is still rendered/selected) — it just cannot be
+// saved forward until the action or the trigger changes; switching it off and back on goes through the manager
+// toggle, which the backend lets through (#6155). The decision itself lives in automationSaveBlockReasons.ts
+// (isDeletedTriggerSelfMutation), shared with the manager's notice so the two cannot drift.
+
+function isDeletedTriggerBlockedActionType(type: string): boolean {
+  return draft.value.triggerType === 'record.deleted' && TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type)
+}
+
+/**
+ * Does this draft action (or a branch sub-action inside it) mutate the trigger record under a
+ * `record.deleted` trigger? The draft's adapter onto the shared rule: the cross-base triple is read from the
+ * config AS LOADED (this editor never authors it — see crossBaseTargetOf), and branch sub-actions are
+ * editor-authored and carry no cross-base target, so their type alone decides.
+ */
+function deletedTriggerSelfMutationOf(action: DraftAction): boolean {
+  return isDeletedTriggerSelfMutation(draft.value.triggerType, {
+    type: action.type,
+    completeCrossBaseTarget: hasCompleteCrossBaseTarget(action.originalConfig),
+    nestedActionTypes: [
+      ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+      ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
+      ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+      // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
+      // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
+      ...rawBranchActionTypes(action.config.branchOriginal),
+      ...rawBranchActionTypes(action.config.parallelBranchOriginal),
+    ],
+  })
+}
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
+    if (deletedTriggerSelfMutationOf(action)) snapshot.deletedTriggerSelfMutation = true
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
@@ -2635,8 +3845,25 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
         bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
       }
     }
+    if (action.type === 'send_notification') {
+      snapshot.notification = { userIdCount: parseUserIdsText(action.config.userId).length }
+    }
     if (action.type === 'delete_record') {
       snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
+    }
+    const crossBaseTarget = crossBaseTargetOf(action)
+    // Only the MUTATE triple is a SAVE blocker. computeSaveBlockReasons blocks on "targetBaseId without
+    // BOTH siblings" because automation-service.ts validateCrossBaseWriteConfig 400s exactly that shape —
+    // and that validator skips create_record, so a cross-base create (targetBaseId alone, no targetRecordId
+    // ever) saves fine on the server. Handing it to the save gate would make such a rule permanently
+    // unsavable in this editor; the create case is surfaced by the banner instead (#5756 follow-up).
+    if (crossBaseTarget && crossBaseTarget.kind === 'mutate') snapshot.crossBaseTarget = crossBaseTarget
+    if (action.type === 'write_approval_form_values') {
+      snapshot.fwbWriteback = {
+        mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
+        confirmed: fwbConfirmationStateFor(action) === 'confirmed',
+        readOnly: fwbActionReadOnly(action),
+      }
     }
     return snapshot
   })
@@ -2692,6 +3919,12 @@ function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot 
     snapshot.startApproval = {
       templateLabel: templateName || templateId,
       mappingCount: countAuthoredFieldPairs(action.config.formDataMappingPairs),
+    }
+  } else if (action.type === 'write_approval_form_values') {
+    snapshot.fwbWriteback = {
+      mappingCount: Array.isArray(action.config.fwbMappings) ? action.config.fwbMappings.length : 0,
+      confirmed: fwbConfirmationStateFor(action) === 'confirmed',
+      mode: fwbWriteModeFor(action),
     }
   } else if (action.type === 'send_email') {
     snapshot.email = {
@@ -2792,6 +4025,7 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
     approvalCompletedBlockReason: approvalCompletedBlockReason.value,
     approvalTaskCreatedBlockReason: approvalTaskCreatedBlockReason.value,
+    fwbWrongTriggerBlockReason: fwbWrongTriggerBlockReason.value,
     // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret
     // may leave the field blank to keep it.
     webhookSecretPresent: !!secret,
@@ -2804,7 +4038,12 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     parallelBranchActionError: parallelBranchActionError.value, // W3-2a: nested branch actions must be executable, not executor-failing shells
     conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
     firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
+    // #4b: condition_branch rows must be complete like the rule-level rows.
+    branchConditionsComplete: firstIncompleteBranchConditionAnchor.value === undefined,
+    firstIncompleteBranchConditionAnchor: firstIncompleteBranchConditionAnchor.value,
     actions: saveBlockActionSnapshots.value,
+    // #5742: client mirror of the backend select-option check on the approval-result writeback.
+    startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
   })
 })
 
@@ -2875,6 +4114,30 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+/**
+ * #5739 泛化 round-2: one editable row for a stored `fields` / `data` entry. The row SHOWS the value as
+ * text (this editor has no typed value control), but remembers what was actually stored so an untouched
+ * row saves back exactly that — see the FieldPair comment for why the stringification is lossy.
+ */
+function fieldPairFromStored(fieldId: string, value: unknown): FieldPair {
+  const text = String(value ?? '')
+  return { fieldId, value: text, rawFieldId: fieldId, rawText: text, rawValue: value }
+}
+
+/**
+ * The value one row contributes to the saved config: the RAW loaded value while the row is UNTOUCHED
+ * (same fieldId, same text as loaded), otherwise the text the author typed. Rows the author added have no
+ * raw value and always save as text, exactly as before.
+ */
+function savedFieldPairValue(pair: Record<string, unknown>, fieldId: string): unknown {
+  const rawText = typeof pair.rawText === 'string' ? pair.rawText : null
+  const rawFieldId = typeof pair.rawFieldId === 'string' ? pair.rawFieldId : null
+  if (rawText !== null && rawFieldId === fieldId && pair.value === rawText && pair.rawValue !== undefined) {
+    return pair.rawValue
+  }
+  return pair.value ?? ''
+}
+
 function fieldPairsToRecord(value: unknown): Record<string, unknown> {
   if (!Array.isArray(value)) return {}
   const fields: Record<string, unknown> = {}
@@ -2882,7 +4145,7 @@ function fieldPairsToRecord(value: unknown): Record<string, unknown> {
     if (!isPlainRecord(pair)) continue
     const fieldId = typeof pair.fieldId === 'string' ? pair.fieldId.trim() : ''
     if (!fieldId) continue
-    fields[fieldId] = pair.value ?? ''
+    fields[fieldId] = savedFieldPairValue(pair, fieldId)
   }
   return fields
 }
@@ -3068,6 +4331,146 @@ function removePersonRecipient(action: DraftAction, userId: string) {
   action.config.userIdsText = parseUserIdsText(action.config.userIdsText)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+// ---------------------------------------------------------------------------
+// send_notification recipient picker. Works over any "holder" that carries the comma-joined
+// user-id string — the top-level action config (`action.config.userId`) and branch-row drafts
+// (`bAct.userId`) — so the top-level and nested notification actions share one implementation.
+// Data source: the same form-share candidate endpoint the DingTalk person picker uses, filtered
+// to users; the backend save gate validates against exactly that roster.
+// ---------------------------------------------------------------------------
+type NotificationRecipientHolder = { userId?: string }
+
+function notificationPickerKey(action: DraftAction, ...parts: Array<string | number>): string {
+  return [action.draftId, ...parts].join(':')
+}
+
+function notificationRecipientSearchActive(key: string): boolean {
+  return (notificationRecipientSearch.value[key] ?? '').trim().length > 0
+}
+
+function selectedNotificationRecipients(holder: NotificationRecipientHolder) {
+  return Array.from(new Set(parseUserIdsText(holder.userId))).map((id) => {
+    const directoryEntry = personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    return {
+      id,
+      label: directoryEntry?.label ?? id,
+      subtitle: directoryEntry?.subtitle,
+      unresolved: !directoryEntry && notificationRecipientMisses.value[id] === true,
+    }
+  })
+}
+
+function availableNotificationRecipientSuggestions(key: string, holder: NotificationRecipientHolder) {
+  const selected = new Set(parseUserIdsText(holder.userId))
+  return (notificationRecipientSuggestions.value[key] ?? []).filter(
+    (candidate) => candidate.subjectType === 'user' && !selected.has(candidate.subjectId),
+  )
+}
+
+async function loadNotificationRecipientSuggestions(key: string) {
+  const query = (notificationRecipientSearch.value[key] ?? '').trim()
+  if (!props.client || !query) {
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+    notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+    notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: false }
+    return
+  }
+
+  const requestId = ++notificationRecipientSuggestionLoadId
+  notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: true }
+  notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+  try {
+    const response = await props.client.listFormShareCandidates(props.sheetId, { q: query, limit: 8 })
+    if (requestId !== notificationRecipientSuggestionLoadId) return
+    const users = response.items.filter((candidate) => candidate.subjectType === 'user')
+    rememberPersonRecipientSuggestions(users)
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: users }
+  } catch (error) {
+    if (requestId !== notificationRecipientSuggestionLoadId) return
+    notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+    notificationRecipientErrors.value = {
+      ...notificationRecipientErrors.value,
+      [key]: error instanceof Error ? error.message : 'Failed to search users',
+    }
+  } finally {
+    if (requestId === notificationRecipientSuggestionLoadId) {
+      notificationRecipientLoading.value = { ...notificationRecipientLoading.value, [key]: false }
+    }
+  }
+}
+
+function addNotificationRecipient(key: string, holder: NotificationRecipientHolder, candidate: MetaSheetPermissionCandidate) {
+  if (candidate.subjectType !== 'user') return
+  if (isInactivePersonRecipientCandidate(candidate)) return
+  const ids = new Set(parseUserIdsText(holder.userId))
+  ids.add(candidate.subjectId)
+  holder.userId = Array.from(ids).join(', ')
+  rememberPersonRecipientSuggestions([candidate])
+  if (notificationRecipientMisses.value[candidate.subjectId]) {
+    const rest = { ...notificationRecipientMisses.value }
+    delete rest[candidate.subjectId]
+    notificationRecipientMisses.value = rest
+  }
+  notificationRecipientSearch.value = { ...notificationRecipientSearch.value, [key]: '' }
+  notificationRecipientSuggestions.value = { ...notificationRecipientSuggestions.value, [key]: [] }
+  notificationRecipientErrors.value = { ...notificationRecipientErrors.value, [key]: '' }
+}
+
+function removeNotificationRecipient(holder: NotificationRecipientHolder, userId: string) {
+  holder.userId = parseUserIdsText(holder.userId)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
+
+function collectDraftNotificationRecipientIds(): string[] {
+  const ids: string[] = []
+  for (const action of draft.value.actions) {
+    if (action.type === 'send_notification') ids.push(...parseUserIdsText(action.config.userId))
+    const branchGroups: Array<{ actions: BranchActionDraft[] } | null | undefined> = [
+      ...(Array.isArray(action.config.branches) ? action.config.branches : []),
+      action.config.defaultBranch,
+      ...(Array.isArray(action.config.parallelBranches) ? action.config.parallelBranches : []),
+    ]
+    for (const group of branchGroups) {
+      if (!group || !Array.isArray(group.actions)) continue
+      for (const branchAction of group.actions) {
+        if (branchAction.type === 'send_notification') ids.push(...parseUserIdsText(branchAction.userId))
+      }
+    }
+  }
+  return Array.from(new Set(ids))
+}
+
+// Look each id up by exact match (the candidate search matches on id/email/name substrings, so
+// q=id with the max page size finds the id itself when it is a roster member). Found → directory
+// entry (name + email chip); not found → miss (raw chip + "unmatched" badge); lookup error → left
+// undecided so the chip stays a plain raw id. Never retried within one open of the dialog.
+async function resolveNotificationRecipientIds(ids: string[]) {
+  const client = props.client
+  if (!client) return
+  const pending = Array.from(new Set(ids)).filter((id) =>
+    !personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]
+    && notificationRecipientMisses.value[id] === undefined
+    && !notificationRecipientResolveInFlight.has(id),
+  )
+  await Promise.all(pending.map(async (id) => {
+    notificationRecipientResolveInFlight.add(id)
+    try {
+      const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
+      const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
+      if (matches.length) {
+        rememberPersonRecipientSuggestions(matches)
+      } else {
+        notificationRecipientMisses.value = { ...notificationRecipientMisses.value, [id]: true }
+      }
+    } catch {
+      // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+    } finally {
+      notificationRecipientResolveInFlight.delete(id)
+    }
+  }))
 }
 
 function groupDestinationScope(destination?: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {
@@ -3442,14 +4845,25 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return { locked: true }
     case 'wait_for_callback':
       return {} // A6-2: zero-param suspend point (no webhook-URL/timer/manual-task fields)
+    case 'write_approval_form_values':
+      return {
+        ...emptyFwbDraftConfig(),
+        // Bind the currently known active version if the trigger template already loaded.
+        sourceTemplateVersionId: fwbActiveVersionId.value,
+      }
     default:
       return {}
   }
 }
 
 function onDraftActionTypeChange(action: DraftAction) {
+  advanceFwbConfirmationGeneration(action.draftId)
   action.config = defaultConfigForActionType(action.type)
   action.persisted = false
+  // #5739 泛化: the raw-config snapshot belongs to the type it was LOADED as. Switching the type must drop
+  // it, or buildPayload's preserve-unmodelled-keys spread would carry the old type's keys (an update_record
+  // cross-base triple, a webhook secret, …) into a config of a completely different action type.
+  action.originalConfig = null
   // G-B2-25: a type change clears any manual collapse override so isActionExpanded() falls back
   // to its persisted-based default — which just went false, so the card re-expands to show the
   // (now empty) config for the newly-picked type instead of staying collapsed on stale text.
@@ -3466,6 +4880,7 @@ function onDraftActionTypeChange(action: DraftAction) {
 
 function removeAction(idx: number) {
   const [removed] = draft.value.actions.splice(idx, 1)
+  if (removed?.draftId) advanceFwbConfirmationGeneration(removed.draftId)
   if (removed?.draftId) clearActionExpandOverride(removed.draftId)
   if (removed?.draftId && deleteRecordAcknowledgements.value[removed.draftId] !== undefined) {
     const next = { ...deleteRecordAcknowledgements.value }
@@ -3488,6 +4903,40 @@ function addFieldUpdate(action: DraftAction) {
 
 function removeFieldUpdate(action: DraftAction, idx: number) {
   ;(action.config.fieldUpdates as FieldPair[]).splice(idx, 1)
+}
+
+// #5739 泛化 (was cloneStartApprovalOriginal, start_approval only): deep-clone an action config as LOADED so
+// the save-time rebuild can spread it back without aliasing — later draft edits must not mutate the snapshot,
+// and two saves in a row must produce two independent objects. No key filtering happens here: the UI-only
+// draft keys a legacy rule may carry are removed at SAVE time by that type's ACTION_OWNED_CONFIG_KEYS entry,
+// which is the single place the owned/unowned split is declared.
+// (A function DECLARATION, not a const: it runs from the `rule` watcher's immediate pass, which fires before
+// later top-level consts in <script setup> are initialized.)
+function cloneRawActionConfig(config: unknown): Record<string, unknown> {
+  if (!isPlainRecord(config)) return {}
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    clone[key] = value === null || typeof value !== 'object' ? value : JSON.parse(JSON.stringify(value))
+  }
+  return clone
+}
+
+// #5742: read the persisted `resultWriteback.outcomeValues` into the editable draft object. Only the four
+// known outcomes with non-empty string values are taken — an unknown key would be rejected by the backend
+// validator anyway, so carrying it into the picker model would build an unsaveable draft. (A function
+// DECLARATION, like cloneStartApprovalOriginal above: this runs from the `rule` watcher's immediate pass,
+// before later top-level consts in <script setup> are initialized.)
+function readResultWritebackOutcomeValues(raw: unknown): Record<string, string> {
+  const source = isPlainRecord(raw) ? raw : {}
+  const values: Record<string, string> = {}
+  for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+    const value = source[outcome]
+    // TRIMMED on the way in, exactly as the save trims on the way out and as the backend resolver trims
+    // before writing/validating — one canonical form for the draft, the picker options, the blocker and the
+    // payload, so a stored ' 已通过 ' does not render an unmatched el-select modelValue.
+    if (typeof value === 'string' && value.trim()) values[outcome] = value.trim()
+  }
+  return values
 }
 
 // start_approval: formDataMapping rows reuse the FieldPair shape (fieldId = the approval-form field key,
@@ -3538,6 +4987,167 @@ function resultWritebackFieldOptions(
   return options
 }
 
+// ── #5742 审批结果 → 写入值 ────────────────────────────────────────────────────────────────────────
+// The optional declared outcome → written-value mapping (`resultWriteback.outcomeValues`). Same posture as
+// the pickers above: the editor AUTHORS it, the backend validator is the authority. An empty row means the
+// RAW outcome literal is written, which is exactly what every rule saved before #5742 already does.
+type ResultWritebackOutcomeOption = { value: string; label: string; marked: boolean }
+
+function resultWritebackStatusFieldId(action: DraftAction): string {
+  return typeof action.config.resultWritebackStatusField === 'string'
+    ? action.config.resultWritebackStatusField.trim()
+    : ''
+}
+
+function resultWritebackStatusFieldSelected(action: DraftAction): boolean {
+  return resultWritebackStatusFieldId(action).length > 0
+}
+
+// Is ANY of the three writeback pickers filled? (Same condition as the save-time `hasMappedWritebackField`:
+// with none of them set the whole resultWriteback object is dropped, so nothing below it applies either.)
+function resultWritebackAnyFieldSelected(action: DraftAction): boolean {
+  return (['resultWritebackStatusField', 'resultWritebackApproverField', 'resultWritebackCompletedAtField'] as const)
+    .some((key) => typeof action.config[key] === 'string' && (action.config[key] as string).trim().length > 0)
+}
+
+// T3-5 cross-base target. The editor does not MODEL the triple, so it is read off the preserved original
+// config (#5724) — the same place an unedited load→save carries it from.
+const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
+
+function resultWritebackIsCrossBase(action: DraftAction): boolean {
+  const original = isPlainRecord(action.originalConfig) ? action.originalConfig : {}
+  const writeback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+  return RESULT_WRITEBACK_TARGET_KEYS.some((key) => {
+    const value = writeback[key]
+    return typeof value === 'string' && value.trim().length > 0
+  })
+}
+
+function resultWritebackStatusField(action: DraftAction): AutomationRuleEditorField | undefined {
+  const id = resultWritebackStatusFieldId(action)
+  return id ? props.fields.find((field) => field.id === id) : undefined
+}
+
+function resultWritebackStatusIsSelect(action: DraftAction): boolean {
+  return resultWritebackStatusField(action)?.type === 'select'
+}
+
+// The declared option set of the chosen select status field. Read from `options` (the shape this editor's
+// `fields` prop uses) with a `property.options` fallback (the raw field-property shape). An UNKNOWN option
+// set (neither present) returns [] — callers treat that as "cannot judge", never as "no options".
+function resultWritebackStatusOptions(action: DraftAction): ResultWritebackOutcomeOption[] {
+  const field = resultWritebackStatusField(action)
+  if (!field || field.type !== 'select') return []
+  const property = field.property as { options?: unknown } | undefined
+  const raw = Array.isArray(field.options)
+    ? (field.options as unknown[])
+    : Array.isArray(property?.options)
+      ? (property?.options as unknown[])
+      : []
+  const options: ResultWritebackOutcomeOption[] = []
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue
+    const value = item.value
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    const text = String(value)
+    if (!text) continue
+    const label = typeof item.label === 'string' && item.label ? item.label : text
+    options.push({ value: text, label, marked: false })
+  }
+  return options
+}
+
+function resultWritebackOutcomeOptions(action: DraftAction, outcome: string): ResultWritebackOutcomeOption[] {
+  const options = resultWritebackStatusOptions(action)
+  const current = resultWritebackOutcomeValue(action, outcome).trim()
+  if (current && !options.some((option) => option.value === current)) {
+    // Same P2 rule as resultWritebackFieldOptions: a configured value that is not (or no longer) an option
+    // is appended as a MARKED option so the picker never renders empty and an unedited save carries it back.
+    // NOTE the marker key: this entry is a written VALUE, so it uses 'markUnknownOption' ("not an option"),
+    // NOT the field pickers' 'markUnknown' ("unknown field") — that one would mislabel a value as a field.
+    const marker = automationLabel('resultWriteback.markUnknownOption', isZh.value)
+    options.push({
+      value: current,
+      label: isZh.value ? `${current}（${marker}）` : `${current} (${marker})`,
+      marked: true,
+    })
+  }
+  return options
+}
+
+function resultWritebackOutcomeRows(action: DraftAction): AutomationResultWritebackOutcome[] {
+  return action.config.resultWritebackOnNonApproved === true
+    ? [...AUTOMATION_RESULT_WRITEBACK_OUTCOMES]
+    : ['approved']
+}
+
+function resultWritebackRawOutcomeLabel(outcome: string): string {
+  return `${automationLabel('resultWriteback.rawValuePrefix', isZh.value)} ${outcome}`
+}
+
+function resultWritebackOutcomeValue(action: DraftAction, outcome: string): string {
+  const values = action.config.resultWritebackOutcomeValues
+  const value = isPlainRecord(values) ? values[outcome] : undefined
+  return typeof value === 'string' ? value : ''
+}
+
+function setResultWritebackOutcomeValue(action: DraftAction, outcome: string, raw: unknown): void {
+  const next: Record<string, string> = { ...(action.config.resultWritebackOutcomeValues ?? {}) }
+  const value = typeof raw === 'string' ? raw : ''
+  // Empty ⇒ REMOVE the entry (the row then means "write the raw outcome"), never persist an empty string —
+  // the backend rejects one and the resolver would fall back to the raw outcome anyway.
+  if (value.trim()) next[outcome] = value
+  else delete next[outcome]
+  action.config.resultWritebackOutcomeValues = next
+}
+
+function setResultWritebackOnNonApproved(action: DraftAction, value: boolean): void {
+  action.config.resultWritebackOnNonApproved = value
+}
+
+/**
+ * Client mirror of the backend select-option check (resultWritebackFieldTypeError): if the status field is a
+ * select and the value that WOULD be written for an outcome is not one of its options, the save is blocked
+ * with an actionable message instead of a server 400.
+ *
+ * Scope, stated plainly: only 'approved' (always) and 'rejected' (when 非通过结果也写回 is on) — the pair the
+ * backend checks at SAVE time (on createRule; updateRule does not run that gate at all, so on the edit path
+ * this blocker is a HINT that is strictly stronger than the server). 'revoked'/'cancelled' are authored here
+ * but only enforced at fire time. Two more cases are deliberately NOT blocked, because the server accepts
+ * them and a blocker the server disagrees with is an unfixable dead end:
+ *   - a select whose option set this editor does not know (no `options` on the field);
+ *   - a T3-5 CROSS-BASE writeback — its status field lives in the TARGET sheet, not in `props.fields`, and
+ *     the backend gate skips it for exactly that reason (assertResultWritebackFieldsAtSave →
+ *     `if (isCrossBaseWriteback(writeback)) continue`), deferring to the runtime cross-base check.
+ */
+const resultWritebackOutcomeBlocks = computed<StartApprovalOutcomeValueBlock[]>(() => {
+  const blocks: StartApprovalOutcomeValueBlock[] = []
+  for (const [index, action] of draft.value.actions.entries()) {
+    if (action.type !== 'start_approval') continue
+    if (resultWritebackIsCrossBase(action)) continue
+    const field = resultWritebackStatusField(action)
+    if (!field || field.type !== 'select') continue
+    const optionValues = resultWritebackStatusOptions(action).map((option) => option.value)
+    if (optionValues.length === 0) continue
+    const outcomes: AutomationResultWritebackOutcome[] = action.config.resultWritebackOnNonApproved === true
+      ? ['approved', 'rejected']
+      : ['approved']
+    for (const outcome of outcomes) {
+      const value = resultWritebackOutcomeValue(action, outcome).trim() || outcome
+      if (optionValues.includes(value)) continue
+      blocks.push({
+        actionIndex: index,
+        outcome,
+        message: automationResultWritebackOptionMissingMessage(
+          { fieldName: field.name, value, outcome },
+          isZh.value,
+        ),
+      })
+    }
+  }
+  return blocks
+})
+
 function addCreateFieldValue(action: DraftAction) {
   if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
   ;(action.config.fieldValues as FieldPair[]).push({ fieldId: '', value: '' })
@@ -3545,6 +5155,165 @@ function addCreateFieldValue(action: DraftAction) {
 
 function removeCreateFieldValue(action: DraftAction, idx: number) {
   ;(action.config.fieldValues as FieldPair[]).splice(idx, 1)
+}
+
+// #5739 泛化 — the ONE place that declares, per action type, which config keys this editor OWNS.
+//
+// "Owns" = buildPayload re-derives the key from the draft below. Everything else in the loaded config is
+// the backend's/another client's business and must pass through untouched: the cross-base triples
+// (targetBaseId/targetSheetId/targetRecordId on update_record/delete_record/lock_record, targetBaseId on
+// create_record), send_webhook headers/body/secret, wait_for_callback `reason`, customer extension keys,
+// and every key a newer backend adds before this editor learns to model it.
+//
+// Save-time semantics (buildActionConfigFromOriginal):
+//   1. start from a deep clone of the RAW loaded config (DraftAction.originalConfig);
+//   2. DELETE every owned key — so a key the UI cleared can never be resurrected from the original;
+//   3. overlay the values the UI produced, skipping `undefined` (= "the author cleared this" → stays absent).
+// An untouched load → save therefore round-trips byte-identically (the #4196 action fingerprint hashes the
+// RAW config, so an unrelated edit must not drift it), while clearing a modelled field still drops its key.
+//
+// Each list also contains that type's UI-ONLY draft mirrors (fieldUpdates / targetSheetId / userId /
+// userIdsText / recipientsText / …): a legacy or hand-authored rule may have them PERSISTED, and they must
+// not ride back out alongside the canonical key they were parsed into (that was the pre-#5739 behaviour and
+// several specs pin it).
+//
+// Types with NO entry are the passthrough types (send_webhook, lock_record, wait_for_callback,
+// send_dingtalk_approval_card, record_click): buildPayload has no rebuild branch for them, it emits the
+// draft config — which IS the loaded config plus the few keys the template writes in place — so they are
+// already lossless. write_approval_form_values runs the same pattern inside
+// fwbRuleAuthoring.ts::buildFwbActionConfigForSave (its own fwbPersistedRawConfig snapshot + explicit
+// delete of the keys create-mode must not resurrect).
+const ACTION_OWNED_CONFIG_KEYS: Partial<Record<AutomationActionType, readonly string[]>> = {
+  // `fieldId`/`value` are the v0 `update_field` pair that normalizeLegacyEditorAction FOLDS into `fields`
+  // (F9). The fold consumes them, so they are owned and dropped on save — re-emitting them would leave a
+  // stale duplicate of the same instruction the moment the author edits the row it was folded into.
+  update_record: ['fields', 'fieldUpdates', 'fieldId', 'value'],
+  create_record: ['sheetId', 'data', 'targetSheetId', 'fieldValues'],
+  // The destructive-acknowledgement checkbox is component state, never a config key → the UI owns NOTHING
+  // here and the save is a pure passthrough of whatever was loaded.
+  delete_record: [],
+  send_notification: ['userIds', 'message', 'userId'],
+  send_email: ['recipients', 'subjectTemplate', 'bodyTemplate', 'recipientsText'],
+  send_dingtalk_group_message: [
+    // `title` / `content` are the LEGACY aliases of titleTemplate / bodyTemplate: the backend promotes
+    // them into the modelled keys whenever those are blank (dingtalk-automation-link-validation.ts), so
+    // leaving them unowned would let a cleared title be re-published from the alias. The editor owns the
+    // message text → the aliases are consumed by the same rebuild (this is also the pre-#5739 behaviour).
+    'title',
+    'content',
+    'destinationId',
+    'destinationIds',
+    'destinationIdFieldPath',
+    'destinationIdFieldPaths',
+    'titleTemplate',
+    'bodyTemplate',
+    'publicFormViewId',
+    'internalViewId',
+    'destinationFieldPath',
+    'destinationPickerId',
+  ],
+  send_dingtalk_person_message: [
+    // See the group entry: legacy titleTemplate / bodyTemplate aliases, owned by the message-text UI.
+    'title',
+    'content',
+    'userIds',
+    'memberGroupIds',
+    'userIdFieldPath',
+    'userIdFieldPaths',
+    'memberGroupIdFieldPath',
+    'memberGroupIdFieldPaths',
+    'titleTemplate',
+    'bodyTemplate',
+    'publicFormViewId',
+    'internalViewId',
+    'userIdsText',
+    'memberGroupIdsText',
+    'recipientFieldPath',
+    'memberGroupRecipientFieldPath',
+    'userIdsSearch',
+  ],
+  // `requester` is deliberately NOT owned (no UI in this slice → it must pass through); the writeback
+  // sub-object's own owned/unowned split is handled inside the start_approval branch.
+  start_approval: [
+    'templateId',
+    'formDataMapping',
+    'resultWriteback',
+    'formDataMappingPairs',
+    'resultWritebackStatusField',
+    'resultWritebackApproverField',
+    'resultWritebackCompletedAtField',
+    'resultWritebackOnNonApproved',
+    'resultWritebackOutcomeValues',
+    'startApprovalOriginal',
+  ],
+  condition_branch: ['branches', 'defaultBranch', 'branchUnsupportedReason', 'branchOriginal'],
+  parallel_branch: [
+    'joinMode',
+    'branches',
+    'parallelBranches',
+    'parallelBranchUnsupportedReason',
+    'parallelBranchOriginal',
+  ],
+}
+
+/**
+ * #5739 泛化 round-2: "did the LOADED config carry this key?" — the question every no-key-may-be-ADDED
+ * rule below asks. A newly authored action has no snapshot and therefore no loaded shape to preserve, so
+ * it answers YES for every key: such an action keeps emitting the editor's canonical shape unchanged.
+ */
+function originalConfigHasKey(action: DraftAction, key: string): boolean {
+  if (!isPlainRecord(action.originalConfig)) return true
+  return Object.prototype.hasOwnProperty.call(action.originalConfig, key)
+}
+
+/**
+ * #5739 泛化 round-2 — singular/plural TWIN keys (destinationId/destinationIds,
+ * userIdFieldPath/userIdFieldPaths, memberGroupIdFieldPath/memberGroupIdFieldPaths). BOTH members are
+ * optional server-side (automation-actions.ts SendDingTalk*MessageConfig), so an API / quick-form / older
+ * rule may legitimately carry only one of them. This editor parses either into ONE list; writing both
+ * back would ADD a key on a save nobody meant as an edit — and the #4196 action fingerprint hashes the RAW
+ * config, so an untouched load → save would drift exactly the way this slice exists to prevent.
+ *
+ * Rule: emit the twin(s) the loaded config had, and add the missing twin only once the list is no longer
+ * the plain mirror of what was loaded (i.e. the author actually changed that control). An empty list emits
+ * NEITHER key — both are owned, so both stay deleted, which is the pre-existing "cleared → dropped" shape.
+ */
+function twinListKeys(
+  action: DraftAction,
+  singularKey: string,
+  pluralKey: string,
+  values: string[],
+): Record<string, unknown> {
+  if (!values.length) return {}
+  const original = isPlainRecord(action.originalConfig) ? action.originalConfig : null
+  const hadSingular = originalConfigHasKey(action, singularKey)
+  const hadPlural = originalConfigHasKey(action, pluralKey)
+  const mirrorsLoadedSingular = hadSingular
+    && !hadPlural
+    && values.length === 1
+    && values[0] === original?.[singularKey]
+  const out: Record<string, unknown> = {}
+  if (hadSingular || !hadPlural) out[singularKey] = values[0]
+  if (!mirrorsLoadedSingular) out[pluralKey] = values
+  return out
+}
+
+/**
+ * #5739 泛化: rebuild one action's saved config = raw loaded config − owned keys + what the UI produced.
+ * `undefined` in `modelled` means the author cleared that key: it stays DELETED (never restored from the
+ * original). Every unowned key of the original passes through untouched.
+ */
+function buildActionConfigFromOriginal(
+  action: DraftAction,
+  modelled: Record<string, unknown>,
+): Record<string, unknown> {
+  const config = cloneRawActionConfig(action.originalConfig)
+  for (const key of ACTION_OWNED_CONFIG_KEYS[action.type] ?? []) delete config[key]
+  for (const [key, value] of Object.entries(modelled)) {
+    if (value === undefined) continue
+    config[key] = value
+  }
+  return config
 }
 
 function buildPayload(): Partial<AutomationRule> {
@@ -3557,6 +5326,16 @@ function buildPayload(): Partial<AutomationRule> {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
+  }
+  if (isTimezoneAwareTriggerType(d.triggerType)) {
+    // A7a: new schedule config is saved on the business timezone. `undefined` = a legacy UTC rule (saved
+    // with this schedule type and no timezone) — write nothing, so an edit never shifts its fire time.
+    const timezone = triggerTimezoneForSave({
+      triggerType: d.triggerType,
+      draftTimezone: triggerConfig.timezone,
+      storedRule: props.rule ?? null,
+    })
+    if (timezone) triggerConfig.timezone = timezone
   }
   if (d.triggerType === 'approval.task_created') {
     // A-2a: trimmed templateId is the only config key.
@@ -3584,24 +5363,40 @@ function buildPayload(): Partial<AutomationRule> {
       if (action.config.branchUnsupportedReason && action.config.branchOriginal) {
         return { type: action.type, config: action.config.branchOriginal }
       }
+      // #5739 泛化: the editable path owns `branches` + `defaultBranch` only — a top-level key the v1 UI
+      // does not model (conditionBranchUnsupportedReason does NOT reject unknown top-level keys, so such a
+      // config opens EDITABLE) rides through instead of being dropped. Removing a defaultBranch still
+      // deletes the key, because buildConditionBranchConfig simply omits it.
       return {
         type: action.type,
-        config: buildConditionBranchConfig({
-          branches: action.config.branches ?? [],
-          defaultBranch: action.config.defaultBranch ?? null,
-        }),
+        config: buildActionConfigFromOriginal(
+          action,
+          buildConditionBranchConfig(
+            {
+              branches: action.config.branches ?? [],
+              defaultBranch: action.config.defaultBranch ?? null,
+            },
+            // #4b: branch condition values are saved in their field type's shape, like the rule-level rows.
+            { fields: props.fields },
+          ),
+        ),
       }
     }
     if (action.type === 'update_record') {
+      // #5739 泛化: `fields` is the only key the UI owns; the T3-5 cross-base triple
+      // (targetBaseId/targetSheetId/targetRecordId — automation-actions.ts UpdateRecordConfig, gated by
+      // validateCrossBaseWriteConfig) and any other stored key survive an untouched save.
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           fields: fieldPairsToRecord(action.config.fieldUpdates),
-        },
+        }),
       }
     }
     if (action.type === 'delete_record') {
-      return { type: action.type, config: {} }
+      // #5739 泛化: was a literal `{}` — which discarded EVERY key, cross-base triple included. The UI owns
+      // nothing here (the ack checkbox is component state), so the loaded config passes straight through.
+      return { type: action.type, config: buildActionConfigFromOriginal(action, {}) }
     }
     if (action.type === 'start_approval') {
       // Assemble the {key: value} formDataMapping the backend requires from the editable rows. templateId +
@@ -3613,20 +5408,66 @@ function buildPayload(): Partial<AutomationRule> {
       // load→save silently drops it (the lossy round-trip the W7 lock exists to fix). Assemble resultWriteback
       // from the three pickers, emit only non-empty trimmed fields, and OMIT the key entirely when all three are
       // empty — the backend rejects an empty `{}` mapping, so "nothing configured" must round-trip to ABSENCE.
-      const resultWriteback: Record<string, string> = {}
+      // #5724 第一期: the rebuild now starts from the PRESERVED ORIGINAL config, so every key the backend
+      // accepts but this editor does not model (resultWriteback.onNonApproved, the T3-5 cross-base triple
+      // targetBaseId/targetSheetId/targetRecordId, and anything a newer backend adds) survives a
+      // load → edit-something-else → save round-trip byte-equal. Modelled fields are overlaid AFTER the
+      // spread, so the UI still wins for what it does edit.
+      const original = cloneRawActionConfig(action.originalConfig)
+      const originalWriteback = isPlainRecord(original.resultWriteback) ? original.resultWriteback : {}
+      const resultWriteback: Record<string, unknown> = {}
       const statusField = typeof action.config.resultWritebackStatusField === 'string' ? action.config.resultWritebackStatusField.trim() : ''
       const approverField = typeof action.config.resultWritebackApproverField === 'string' ? action.config.resultWritebackApproverField.trim() : ''
       const completedAtField = typeof action.config.resultWritebackCompletedAtField === 'string' ? action.config.resultWritebackCompletedAtField.trim() : ''
       if (statusField) resultWriteback.statusField = statusField
       if (approverField) resultWriteback.approverField = approverField
       if (completedAtField) resultWriteback.completedAtField = completedAtField
-      const config: Record<string, unknown> = {
+      // A writeback with no mapped FIELD is invalid server-side, so the field pickers alone decide whether the
+      // object is emitted at all — onNonApproved / outcomeValues can never resurrect it on their own.
+      const hasMappedWritebackField = Object.keys(resultWriteback).length > 0
+      // #5742: onNonApproved + outcomeValues are MODELLED now, so they are emitted from the DRAFT and never
+      // from the preserved original — unchecking 非通过结果也写回 must DELETE resultWriteback.onNonApproved,
+      // and an emptied mapping must drop resultWriteback.outcomeValues entirely (absence = write the raw
+      // outcome, which is the pre-#5742 behaviour).
+      // The mapping applies to the STATUS field only (the backend validator rejects one without a
+      // statusField), so a cleared status picker drops it. onNonApproved is NOT dropped with it — it gates
+      // the WHOLE backwrite, approver/completedAt included — and its checkbox stays visible for exactly that
+      // reason, so an approver-only rule keeps its opt-in instead of silently losing it here.
+      const outcomeValues: Record<string, string> = {}
+      if (statusField) {
+        for (const outcome of AUTOMATION_RESULT_WRITEBACK_OUTCOMES) {
+          const value = resultWritebackOutcomeValue(action, outcome).trim()
+          if (value) outcomeValues[outcome] = value
+        }
+      }
+      if (action.config.resultWritebackOnNonApproved === true) resultWriteback.onNonApproved = true
+      // An EXPLICIT stored `false` is re-emitted verbatim: it is inert server-side (`onNonApproved === true`
+      // is what runtime reads), but the #4196 action fingerprint hashes the RAW config, so silently dropping
+      // it on an unrelated edit would change the persisted JSON of a rule nobody touched.
+      else if (originalWriteback.onNonApproved === false) resultWriteback.onNonApproved = false
+      if (Object.keys(outcomeValues).length > 0) resultWriteback.outcomeValues = outcomeValues
+      // #5739 泛化: the spread-the-original rebuild this branch pioneered is now the shared
+      // buildActionConfigFromOriginal + ACTION_OWNED_CONFIG_KEYS path (same snapshot, one declaration of the
+      // owned keys). "nothing configured" must round-trip to ABSENCE — the backend rejects an empty `{}`
+      // mapping — so when all three pickers are empty `resultWriteback` is simply left out of `modelled`,
+      // and the owned-key delete drops the loaded one, its unmodelled siblings included.
+      const modelled: Record<string, unknown> = {
         templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
         formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
       }
-      if (Object.keys(resultWriteback).length > 0) config.resultWriteback = resultWriteback
-      // W7 §6: no `requester` UI in this slice, but carry a backend-valid hand-authored `requester` through so
-      // the from-scratch rebuild stays lossless for any valid config (not just the keys this slice surfaces).
+      if (hasMappedWritebackField) {
+        const preservedWriteback: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(originalWriteback)) {
+          // Modelled keys are rebuilt above; preserving the ORIGINAL here would make clearing them impossible.
+          if (key === 'statusField' || key === 'approverField' || key === 'completedAtField') continue
+          if (key === 'onNonApproved' || key === 'outcomeValues') continue
+          preservedWriteback[key] = value
+        }
+        modelled.resultWriteback = { ...preservedWriteback, ...resultWriteback }
+      }
+      const config = buildActionConfigFromOriginal(action, modelled)
+      // W7 §6: no `requester` UI in this slice — a hand-authored `requester` rides through on the spread above;
+      // an explicit draft value (if a later slice adds the UI) still wins.
       if (action.config.requester !== undefined) config.requester = action.config.requester
       return { type: action.type, config }
     }
@@ -3636,29 +5477,39 @@ function buildPayload(): Partial<AutomationRule> {
       }
       return {
         type: action.type,
-        config: buildParallelBranchConfig({
-          branches: action.config.parallelBranches ?? [],
-        }),
+        config: buildActionConfigFromOriginal(
+          action,
+          buildParallelBranchConfig({
+            branches: action.config.parallelBranches ?? [],
+          }),
+        ),
       }
     }
     if (action.type === 'create_record') {
+      // #5739 泛化: `targetBaseId` (cross-base create; the executor re-verifies base-WRITE on it) is not
+      // modelled here and must survive. #5756 follow-up: it stays OUT of ACTION_OWNED_CONFIG_KEYS above
+      // deliberately — this screen has no control that clears it (the banner only REPORTS it), so there is
+      // no "cleared to empty" state to translate into a delete; making the editor own a key it cannot
+      // author would turn every save of a legacy cross-base create into a silent downgrade to same-base.
+      // A cleared sheet picker still DELETES `sheetId` (undefined is skipped
+      // by the overlay), instead of falling back to the loaded one.
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           sheetId: typeof action.config.targetSheetId === 'string' && action.config.targetSheetId.trim()
             ? action.config.targetSheetId.trim()
             : undefined,
           data: fieldPairsToRecord(action.config.fieldValues),
-        },
+        }),
       }
     }
     if (action.type === 'send_notification') {
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           userIds: parseUserIdsText(action.config.userId),
           message: typeof action.config.message === 'string' ? action.config.message.trim() : '',
-        },
+        }),
       }
     }
     if (action.type === 'send_dingtalk_group_message') {
@@ -3667,11 +5518,11 @@ function buildPayload(): Partial<AutomationRule> {
         .map((path) => `record.${path}`)
       return {
         type: action.type,
-        config: {
-          destinationId: destinationIds[0] || undefined,
-          destinationIds: destinationIds.length ? destinationIds : undefined,
-          ...(destinationIdFieldPaths[0] ? { destinationIdFieldPath: destinationIdFieldPaths[0] } : {}),
-          ...(destinationIdFieldPaths.length ? { destinationIdFieldPaths } : {}),
+        config: buildActionConfigFromOriginal(action, {
+          // #5739 泛化 round-2: singular + plural are TWINS — emit the shape that was loaded, never grow it
+          // on an untouched save (see twinListKeys).
+          ...twinListKeys(action, 'destinationId', 'destinationIds', destinationIds),
+          ...twinListKeys(action, 'destinationIdFieldPath', 'destinationIdFieldPaths', destinationIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -3680,7 +5531,7 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
-        },
+        }),
       }
     }
     if (action.type === 'send_dingtalk_person_message') {
@@ -3702,13 +5553,14 @@ function buildPayload(): Partial<AutomationRule> {
         .map((path) => `record.${path}`)
       return {
         type: action.type,
-        config: {
-          userIds,
+        config: buildActionConfigFromOriginal(action, {
+          // `userIds` is required in SendDingTalkPersonMessageConfig, so a newly authored action still
+          // emits it even when empty; a PERSISTED config that legitimately never carried it (recipients
+          // come from a record field path) must not GROW the key on an untouched save.
+          userIds: userIds.length || originalConfigHasKey(action, 'userIds') ? userIds : undefined,
           memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
-          ...(userIdFieldPaths[0] ? { userIdFieldPath: userIdFieldPaths[0] } : {}),
-          ...(userIdFieldPaths.length ? { userIdFieldPaths } : {}),
-          ...(memberGroupIdFieldPaths[0] ? { memberGroupIdFieldPath: memberGroupIdFieldPaths[0] } : {}),
-          ...(memberGroupIdFieldPaths.length ? { memberGroupIdFieldPaths } : {}),
+          ...twinListKeys(action, 'userIdFieldPath', 'userIdFieldPaths', userIdFieldPaths),
+          ...twinListKeys(action, 'memberGroupIdFieldPath', 'memberGroupIdFieldPaths', memberGroupIdFieldPaths),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -3717,20 +5569,60 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
-        },
+        }),
       }
     }
     if (action.type === 'send_email') {
       return {
         type: action.type,
-        config: {
+        config: buildActionConfigFromOriginal(action, {
           recipients: parseEmailRecipientsText(action.config.recipientsText),
           subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
-        },
+        }),
       }
     }
-    return { type: action.type, config: action.config }
+    if (action.type === 'write_approval_form_values') {
+      const draftConfig = {
+        fwbWriteMode: fwbWriteModeFor(action),
+        recordLinkFieldId: typeof action.config.recordLinkFieldId === 'string'
+          ? action.config.recordLinkFieldId
+          : '',
+        fwbMappings: (action.config.fwbMappings as FwbMappingDraft[] | undefined) ?? [],
+        sourceTemplateVersionId: typeof action.config.sourceTemplateVersionId === 'string'
+          ? action.config.sourceTemplateVersionId
+          : '',
+        confirmationHash: typeof action.config.confirmationHash === 'string'
+          ? action.config.confirmationHash
+          : '',
+        fwbConfirmationState: fwbConfirmationStateFor(action),
+        fwbPersistedMappings: action.config.fwbPersistedMappings ?? null,
+        fwbPersistedRawConfig: action.config.fwbPersistedRawConfig ?? null,
+        fwbWasPersisted: action.config.fwbWasPersisted === true,
+      }
+      const built = buildFwbActionConfigForSave(draftConfig, fwbTargetFieldsFor(action), {
+        flagEnabled: fwbWritebackEnabled.value,
+        readOnly: fwbActionReadOnly(action),
+      })
+      if (!built.ok) {
+        throw new Error(
+          isZh.value
+            ? '审批数据回写需先完成服务端确认，且映射配置必须有效。'
+            : 'Approval-data writeback requires a server confirmation and a valid mapping config.',
+        )
+      }
+      return {
+        type: action.type,
+        config: built.config,
+      }
+    }
+    // Passthrough types (send_webhook, lock_record, wait_for_callback, send_dingtalk_approval_card,
+    // record_click): there is NO rebuild, so nothing can be dropped — `draftConfigFromAction` returns
+    // `{ ...loadedConfig }` for them and the template edits the few modelled keys (url/method/locked) in
+    // place. Copied rather than emitted by reference so the saved payload can never alias (and be mutated
+    // by) live draft state. #5739 泛化 note: the raw-config snapshot deliberately lives on DraftAction, not
+    // in `config` — a snapshot stored in `config` would be persisted as a config key by THIS line.
+    return { type: action.type, config: { ...action.config } }
   })
   const payload: Partial<AutomationRule> = {
     name: d.name.trim(),
@@ -3795,6 +5687,7 @@ async function confirmDingTalkTestRun(): Promise<boolean> {
 
 async function onTestRun(): Promise<void> {
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
+  if (testRunBlockedBySavedRuleDirty.value) return
   if (savedRuleHasDingTalkActions.value && !(await confirmDingTalkTestRun())) return
   emit('test', props.rule.id)
 }
@@ -3902,6 +5795,13 @@ async function onTestRun(): Promise<void> {
 .meta-rule-editor__condition-row,
 .meta-rule-editor__condition-group {
   margin-left: calc(var(--condition-depth, 0) * 18px);
+}
+
+/* #4b: the field type next to each field name in a condition row's field dropdown. */
+.meta-rule-editor__field-type-hint {
+  margin-left: 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .meta-rule-editor__condition-group {
@@ -4046,6 +5946,14 @@ async function onTestRun(): Promise<void> {
   font-size: 12px;
   color: var(--ms-text-3);
   font-style: normal;
+}
+
+.meta-rule-editor__recipient-chip--unresolved {
+  border-color: var(--el-color-danger);
+}
+
+.meta-rule-editor__recipient-chip .meta-rule-editor__recipient-badge {
+  color: var(--el-color-danger-dark-2);
 }
 
 .meta-rule-editor__toggle-label {

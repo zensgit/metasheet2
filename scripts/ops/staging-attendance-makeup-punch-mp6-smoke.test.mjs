@@ -1,3 +1,4 @@
+import { cleanupStagingAttendanceScope } from './staging-attendance-tooling-teardown.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -166,18 +167,21 @@ test('MP-6 helper cleanup is stamped, LIKE-free, and FK-safe (approval children 
   const approvalRecords = idx('DELETE FROM approval_records')
   const approvalAssignments = idx('DELETE FROM approval_assignments')
   const events = idx('DELETE FROM attendance_events')
-  const records = idx('DELETE FROM attendance_records')
+  // W4C-3c: attendance_records cleanup is via cleanupStagingAttendanceScope (ops_retirement /
+  // tooling-only guard), not a bare DELETE FROM attendance_records.
+  const records = idx('await cleanupStagingAttendanceScope')
   const requests = idx('DELETE FROM attendance_requests')
   const approvalInstances = idx('DELETE FROM approval_instances')
   const userOrgs = idx('DELETE FROM user_orgs')
   const users = idx('DELETE FROM users')
   for (const [name, value] of Object.entries({ approvalRecords, approvalAssignments, events, records, requests, approvalInstances, userOrgs, users })) {
-    assert.ok(value !== -1, `${name} delete exists`)
+    assert.ok(value !== -1, `${name} cleanup exists`)
   }
   assert.ok(approvalRecords < approvalInstances && approvalAssignments < approvalInstances, 'approval children deleted before their instance')
   assert.ok(requests < approvalInstances, 'attendance_requests (FK approval_instance_id) deleted before approval_instances')
-  assert.ok(events < requests && records < requests, 'events + records deleted before requests')
+  assert.ok(events < requests && records < requests, 'events + records cleaned before requests')
   assert.ok(userOrgs < users, 'user_orgs (FK users) deleted before users')
+  assert.doesNotMatch(script, /^\s*await\s+.*DELETE FROM attendance_records/m, 'no bare live DELETE of attendance_records')
 })
 
 test('MP-6 residue categories cover every table the smoke can dirty (incl attendance_events + approval tables)', () => {
@@ -194,6 +198,12 @@ test('MP-6 residue categories cover every table the smoke can dirty (incl attend
   ]) {
     assert.match(script, new RegExp(`to_regclass\\('public\\.${table}'\\)`), `${table} is preflighted`)
     assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted`)
+    if (table === 'attendance_records') {
+      // W4C-3c: records cleaned via cleanupStagingAttendanceScope (ops_retirement / tooling guard).
+      assert.match(script, /await cleanupStagingAttendanceScope/, 'attendance_records cleaned via guarded helper')
+      assert.doesNotMatch(script, /^\s*await\s+.*DELETE FROM attendance_records/m, 'no bare live DELETE of attendance_records')
+      continue
+    }
     assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
   }
   // counted-only surface: deliveries must be zero (makeup writes none) and must NOT be deleted.

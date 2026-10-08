@@ -17,6 +17,7 @@ import {
 } from '../guards/egress-dispatcher'
 import { defaultEgressPolicy, type EgressPolicy } from '../guards/egress-guard'
 import { createPinnedHttpsJsonTransport } from '../guards/egress-pinned-transport'
+import { BpmnTimerPollerDisabledError, isBpmnTimerPollerEnabled } from './bpmnTimerPollerConfig'
 
 // Types for optional dependencies
 type ScheduledTaskType = { start: () => void; stop: () => void }
@@ -136,6 +137,12 @@ function httpTaskError(reason: string): Error {
   return new Error(`BPMN_HTTP_EGRESS_DENIED: ${reason}`)
 }
 
+// `startTimerProcessor`'s minute poller is registered under this key in `timerJobs` so
+// `shutdown()`'s existing sweep also stops it. Never a prefix of a real `instanceId`
+// (UUID-shaped), so `cleanupInstanceTimers`'s `key.startsWith(instanceId)` check can never
+// match and delete it early.
+const TIMER_PROCESSOR_JOB_KEY = '__timer_processor_poller__'
+
 // Dynamic imports for optional dependencies
 let xml2js: Xml2JsModule | null = null
 let cron: CronModule | null = null
@@ -217,6 +224,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private timerJobs: Map<string, ScheduledTaskType>
   private messageSubscriptions: Map<string, Set<string>>
   private signalSubscriptions: Map<string, Set<string>>
+  // Tracks the currently in-flight `startTimerProcessor` tick (or a resolved promise when
+  // none is running/the poller is env-gated off) so `shutdown()` can drain it before returning.
+  private timerProcessorTick: Promise<void> = Promise.resolve()
   private httpTaskEgressPolicy: EgressPolicy
   private httpTaskResolveAddresses: EgressAddressResolver
   private httpTaskTransport: PinnedEgressTransport
@@ -341,6 +351,38 @@ export class BPMNWorkflowEngine extends EventEmitter {
         throw new Error(`Process definition not found: ${processKey}`)
       }
 
+      // Parse definition BEFORE any write (moved up from below the `bpmn_process_instances`
+      // insert that used to follow it — owner P1 batch 2, #4783 review; see the fail-closed
+      // check immediately below for why this ordering matters).
+      const parsed = this.processDefinitions.get(definition.id) || await this.parseBPMN(definition.bpmn_xml)
+
+      // Fail-closed at the ENTRY, zero writes (owner P1 batch 2, #4783 review; batch 1's
+      // write gate on `createTimerJob` below was too late — by the time that throw fires,
+      // this method has ALREADY persisted the `bpmn_process_instances` row plus whatever
+      // `executeStartEvents`/`executeActivity` wrote on the way to the timer, and this
+      // method's own catch block only logs and rethrows, never marks anything terminated.
+      // Net result pre-fix: the instance is stuck `ACTIVE` forever with an `OPEN` incident
+      // nobody resolves — owner-reproduced at `243db11f1`).
+      //
+      // Owner's ruling (#4783 review, batch 2): fail-closed BEFORE any write if
+      // date/duration-timer reachability can be determined at the entry; only fall back to
+      // wrapping the whole start in one atomically-rolled-back transaction if it cannot.
+      // It CAN be determined here, exactly (not just conservatively): `createTimerJob`'s
+      // 'date'/'duration' branch has exactly ONE call site in this class
+      // (`handleIntermediateEvent`), itself reachable only from `executeActivity`'s
+      // `'intermediateCatchEvent'` case, whose `activityDef.properties.timerDefinition`
+      // `findActivity` extracts from this EXACT SAME static parse. So: if this scan finds
+      // no date/duration `bpmn:timerEventDefinition` anywhere in the definition, no
+      // execution path through it — whichever gateway branches get taken, whatever the
+      // input variables, however deep in a `bpmn:subProcess` — can EVER reach that throw,
+      // this call or any future one, for this process definition. (It may still reject a
+      // start whose timer branch would never actually have executed at runtime — that
+      // conservative direction is the correct tradeoff for a zero-write gate over a false
+      // "safe to start.") No transaction-wrap fallback is needed.
+      if (!isBpmnTimerPollerEnabled() && this.definitionHasPollerDependentTimer(parsed)) {
+        throw new BpmnTimerPollerDisabledError()
+      }
+
       // Create process instance
       await db
         .insertInto('bpmn_process_instances')
@@ -371,9 +413,6 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
       // Cache the instance
       this.runningInstances.set(instanceId, instance)
-
-      // Parse definition
-      const parsed = this.processDefinitions.get(definition.id) || await this.parseBPMN(definition.bpmn_xml)
 
       // Execute start events
       await this.executeStartEvents(instanceId, parsed)
@@ -1450,6 +1489,17 @@ export class BPMNWorkflowEngine extends EventEmitter {
         return
     }
 
+    // Fail-closed (owner P1-1, #4783 review — see `bpmnTimerPollerConfig.ts` for the full
+    // rationale): a 'date'/'duration' `bpmn_timer_jobs` row is only ever read back by
+    // `startTimerProcessor`'s poller. Persisting it while that poller is env-gated off
+    // would silently create a timer that can never fire — an orphan created AFTER this
+    // deploy's poller-off state took effect, not a paused pre-existing one. Reject the
+    // write instead of the caller (deploy/start/task-complete/message/signal — any path
+    // that can drive process execution into a timer event) getting a silent no-op.
+    if (!isBpmnTimerPollerEnabled()) {
+      throw new BpmnTimerPollerDisabledError()
+    }
+
     await db
       .insertInto('bpmn_timer_jobs')
       .values({
@@ -1520,42 +1570,88 @@ export class BPMNWorkflowEngine extends EventEmitter {
   }
 
   private startTimerProcessor(): void {
+    // Env-gate (owner ruling 2026-08-05, Plan B — refs #4770/#4779): this poller is a
+    // dormant-subsystem side-effect channel (unconditional per-minute `bpmn_timer_jobs`
+    // query against the shared `db` pool) and stays OFF unless explicitly enabled. See
+    // `bpmnTimerPollerConfig.ts` for why this is its own dedicated flag rather than reusing
+    // `DISABLE_WORKFLOW` (opt-OUT, default-on, gates the whole engine) or `WORKFLOW_ENABLED`
+    // (frontend-display-only, never read by engine lifecycle code).
+    if (!isBpmnTimerPollerEnabled()) {
+      this.logger.info('BPMN timer poller disabled by default (set ENABLE_BPMN_TIMER_POLLER=true to enable)')
+      return
+    }
+
     if (!cron) {
       this.logger.warn('node-cron not available, timer processor not started')
       return
     }
 
-    // Process due timer jobs every minute
-    cron.schedule('* * * * *', async () => {
-      const dueJobs = await db
-        .selectFrom('bpmn_timer_jobs')
-        .selectAll()
-        .where('state', '=', 'WAITING')
-        .where('due_date', '<=', sql<Date>`now()`)
-        .execute()
+    // Process due timer jobs every minute. The returned task is stored under
+    // `TIMER_PROCESSOR_JOB_KEY` in `timerJobs` (previously discarded here, which meant
+    // nothing could ever `.stop()` it — it kept firing against the shared `db` pool for
+    // the life of the process, independent of any single engine instance's own
+    // `shutdown()`). Each tick's own promise is stashed in `timerProcessorTick` so
+    // `shutdown()` can await it — `.stop()` only prevents FUTURE dispatches, it does not
+    // abort a callback already executing. The try/catch mirrors `startHealthCheck`'s own
+    // guard: without it, a tick whose connection is severed mid-query (e.g. a test's
+    // scratch-database teardown) rejects with no catch anywhere in the call chain, which
+    // surfaces as an unhandled rejection instead of a caught, logged, values-free error.
+    const pollerJob = cron.schedule('* * * * *', async () => {
+      this.timerProcessorTick = (async () => {
+        try {
+          const dueJobs = await db
+            .selectFrom('bpmn_timer_jobs')
+            .selectAll()
+            .where('state', '=', 'WAITING')
+            .where('due_date', '<=', sql<Date>`now()`)
+            .execute()
 
-      for (const job of dueJobs) {
-        const timerJob: BPMNTimerJob = {
-          id: job.id,
-          process_instance_id: job.process_instance_id,
-          activity_id: job.activity_instance_id || '',
-          retries: 0
+          for (const job of dueJobs) {
+            const timerJob: BPMNTimerJob = {
+              id: job.id,
+              process_instance_id: job.process_instance_id,
+              activity_id: job.activity_instance_id || '',
+              retries: 0
+            }
+            await this.processTimerJob(timerJob)
+          }
+        } catch (error: unknown) {
+          this.logger.error('Timer job processor tick failed:', error as Error)
         }
-        await this.processTimerJob(timerJob)
-      }
+      })()
+      await this.timerProcessorTick
     })
+    this.timerJobs.set(TIMER_PROCESSOR_JOB_KEY, pollerJob)
   }
 
   private async processTimerJob(job: BPMNTimerJob): Promise<void> {
     try {
-      // Lock job
-      await db
+      // Atomic WAITING -> LOCKED claim (owner P1-2, #4783 review — same class as #4774's
+      // SKIP LOCKED finding). The poller's own `SELECT ... WHERE state = 'WAITING'`
+      // (startTimerProcessor) is not itself a lock: `routes/workflow.ts` and
+      // `routes/workflow-designer.ts` each construct their OWN independent
+      // `BPMNWorkflowEngine` instance, both sharing the same `db` pool, and both run this
+      // same poller when `ENABLE_BPMN_TIMER_POLLER=true` — two overlapping ticks (across
+      // instances, or across minutes of the same instance) can each read the identical
+      // WAITING row before either writes. Gating the UPDATE itself on `state = 'WAITING'`
+      // and checking `numUpdatedRows` makes the UPDATE the single atomic claim point:
+      // whichever call's UPDATE commits first flips the row's state away from 'WAITING',
+      // so every other concurrent claimant's WHERE clause matches zero rows.
+      const claim = await db
         .updateTable('bpmn_timer_jobs')
         .set({
           state: 'LOCKED'
         })
         .where('id', '=', job.id)
-        .execute()
+        .where('state', '=', 'WAITING')
+        .executeTakeFirst()
+
+      if (!claim || Number(claim.numUpdatedRows) === 0) {
+        // Lost the race: another claimant already owns this job. Exactly one caller must
+        // win the claim — backing off silently here is that invariant holding, not an
+        // error condition, so this returns without touching FAILED/metrics.
+        return
+      }
 
       // Fire timer
       await this.fireTimer(job.process_instance_id, job.activity_id)
@@ -1804,6 +1900,28 @@ export class BPMNWorkflowEngine extends EventEmitter {
   }
 
   /**
+   * Owner P1 batch 2 (#4783 review): true iff this parsed process definition contains ANY
+   * 'date' or 'duration' `bpmn:timerEventDefinition` anywhere in its element tree, at any
+   * nesting depth (`bpmn:subProcess` included — `findElementsByType`'s unconditional
+   * recursive `Object.values` walk does not stop at any particular element type),
+   * regardless of whether that element is actually reachable from the start event under
+   * any given set of gateway conditions/variables. Used by `startProcess()` to fail-closed
+   * BEFORE any write when the poller is disabled — see that method's own comment for the
+   * soundness argument.
+   *
+   * Deliberately does NOT flag 'cycle' timers: those use a separate in-memory
+   * `scheduleRecurringTimer`/`cron.schedule` path (see `createTimerJob`) that never
+   * touches `bpmn_timer_jobs` and is unaffected by the poller being off.
+   */
+  private definitionHasPollerDependentTimer(parsed: BPMNParsedDefinition): boolean {
+    const process = parsed.definitions?.process?.[0]
+    if (!process) return false
+
+    const timerDefs = this.findElementsByType(process, 'bpmn:timerEventDefinition')
+    return timerDefs.some((timerDef) => Boolean(timerDef?.['bpmn:timeDuration'] || timerDef?.['bpmn:timeDate']))
+  }
+
+  /**
    * Get latest version of process definition
    */
   private async getLatestVersion(key: string, _tenantId?: string): Promise<number> {
@@ -1938,10 +2056,18 @@ export class BPMNWorkflowEngine extends EventEmitter {
   async shutdown(): Promise<void> {
     this.logger.info('Shutting down BPMN Workflow Engine')
 
-    // Stop all timer jobs
+    // Stop all timer jobs — including the minute poller registered by
+    // `startTimerProcessor` under `TIMER_PROCESSOR_JOB_KEY` (only present when the poller
+    // was env-gated on; harmless no-op loop otherwise).
     for (const job of this.timerJobs.values()) {
       job.stop()
     }
+
+    // Drain whatever poller tick was already in flight the moment `.stop()` ran above —
+    // `.stop()` only prevents FUTURE dispatches, it does not abort a callback already
+    // executing. Waiting here keeps a caller that closes the DB pool / drops the database
+    // right after `shutdown()` resolves from racing that tick's own in-flight query.
+    await this.timerProcessorTick.catch(() => undefined)
 
     // Clear caches
     this.processDefinitions.clear()

@@ -235,6 +235,7 @@ export function auditSafetyOperation(operationType: OperationType) {
               statusCode: res.statusCode,
               path: req.path,
               method: req.method,
+              ...(req.methodOverride ? { methodOverride: req.methodOverride } : {}),
               params: req.params,
               bodyKeys: Object.keys(req.body || {})
             },

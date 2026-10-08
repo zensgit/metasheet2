@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager mock.
 const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn() }))
@@ -135,6 +136,8 @@ const REOPEN_URL = (threadId = 't1') => `/api/plm-embed/discussion/threads/${thr
 const CREATE_BODY = { target_type: 'item', target_id: 'P1', body: 'hello' }
 
 describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Option A)', () => {
+  const pinned = usePinnedServer()
+
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     jtiMocks.consume.mockReset()
@@ -144,6 +147,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     process.env.PLM_EMBED_AUDIENCE = AUD
     process.env.PLM_EMBED_ALLOWED_ORIGINS = ORIGIN
     process.env.PLM_EMBED_DATA_SOURCE_ID = DS_ID
+    pinned.setApp(buildApp())
   })
   afterEach(() => {
     for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
@@ -162,7 +166,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn().mockResolvedValue(credentialResult())
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread, exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(THREAD_DETAIL)
@@ -182,11 +186,11 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const createDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession, createDiscussionThread }))
 
-    const app = buildApp()
+    pinned.setApp(buildApp())
     const token1 = mint()
     const token2 = mint()
-    const res1 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', token1).send(CREATE_BODY)
-    const res2 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', token2).send(CREATE_BODY)
+    const res1 = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', token1).send(CREATE_BODY)
+    const res2 = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', token2).send(CREATE_BODY)
 
     expect(res1.status).toBe(200)
     expect(res2.status).toBe(200)
@@ -204,7 +208,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const createDiscussionThread = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession, createDiscussionThread }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_SESSION_EXCHANGE_FAILED')
@@ -215,7 +219,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn().mockResolvedValue({ data: [] })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_SESSION_EXCHANGE_FAILED')
@@ -227,7 +231,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const createDiscussionThread = vi.fn().mockResolvedValue({ data: [], error: providerError(403) })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
 
     expect(res.status).toBe(403)
     expect(res.body.ok).toBe(false)
@@ -237,7 +241,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const addDiscussionComment = vi.fn().mockResolvedValue({ data: [], error: providerError(404) })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
 
-    const res = await request(buildApp()).post(COMMENTS_URL('missing-thread')).set('X-PLM-Embed-Token', mint()).send({ body: 'hi' })
+    const res = await request(pinned.url()).post(COMMENTS_URL('missing-thread')).set('X-PLM-Embed-Token', mint()).send({ body: 'hi' })
 
     expect(res.status).toBe(404)
   })
@@ -246,7 +250,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const editDiscussionComment = vi.fn().mockResolvedValue({ data: [], error: providerError(422) })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ editDiscussionComment }))
 
-    const res = await request(buildApp()).patch(COMMENT_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'edited' })
+    const res = await request(pinned.url()).patch(COMMENT_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'edited' })
 
     expect(res.status).toBe(422)
   })
@@ -255,7 +259,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const resolveDiscussionThread = vi.fn().mockResolvedValue({ data: [], error: new Error('fetch failed') })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ resolveDiscussionThread }))
 
-    const res = await request(buildApp()).post(RESOLVE_URL()).set('X-PLM-Embed-Token', mint()).send({})
+    const res = await request(pinned.url()).post(RESOLVE_URL()).set('X-PLM-Embed-Token', mint()).send({})
 
     expect(res.status).toBe(502)
   })
@@ -267,7 +271,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('EMBED_TOKEN_REPLAYED')
@@ -278,7 +282,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ jti: undefined })).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ jti: undefined })).send(CREATE_BODY)
 
     expect(res.status).toBe(401)
     expect(jtiMocks.consume).not.toHaveBeenCalled()
@@ -291,7 +295,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' })).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ feature_key: 'approval_automation' })).send(CREATE_BODY)
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_FEATURE_MISMATCH')
@@ -300,7 +304,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
 
   it('embed_origin not in the allowlist -> 403', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter())
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' })).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example.com' })).send(CREATE_BODY)
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
   })
@@ -309,7 +313,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const exchangeDiscussionSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ tenant: 'tenant-b', exchangeDiscussionSession }))
 
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' })).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint({ tenant_id: 'tenant-a' })).send(CREATE_BODY)
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
@@ -318,7 +322,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   })
 
   it('no embed token -> 401 (embedTokenAuth itself)', async () => {
-    const res = await request(buildApp()).post(THREADS_URL).send(CREATE_BODY)
+    const res = await request(pinned.url()).post(THREADS_URL).send(CREATE_BODY)
     expect(res.status).toBe(401)
   })
 
@@ -327,7 +331,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('thread create missing target_type -> 422, nothing downstream called', async () => {
     const exchangeDiscussionSession = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ target_id: 'P1', body: 'hi' })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ target_id: 'P1', body: 'hi' })
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('EMBED_DISCUSSION_INVALID_BODY')
     expect(exchangeDiscussionSession).not.toHaveBeenCalled()
@@ -335,19 +339,19 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
 
   it('thread create with an unknown target_type -> 422', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter())
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ target_type: 'bogus', target_id: 'P1', body: 'hi' })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ target_type: 'bogus', target_id: 'P1', body: 'hi' })
     expect(res.status).toBe(422)
   })
 
   it('comment missing body -> 422', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter())
-    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({})
+    const res = await request(pinned.url()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({})
     expect(res.status).toBe(422)
   })
 
   it('edit comment missing body -> 422', async () => {
     dsMocks.getDataSource.mockReturnValue(fullAdapter())
-    const res = await request(buildApp()).patch(COMMENT_URL()).set('X-PLM-Embed-Token', mint()).send({})
+    const res = await request(pinned.url()).patch(COMMENT_URL()).set('X-PLM-Embed-Token', mint()).send({})
     expect(res.status).toBe(422)
   })
 
@@ -359,7 +363,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('create with a non-string title -> 422, write never called (not silently dropped)', async () => {
     const createDiscussionThread = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, title: 123 })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, title: 123 })
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('EMBED_DISCUSSION_INVALID_BODY')
     expect(createDiscussionThread).not.toHaveBeenCalled()
@@ -368,7 +372,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('create with a non-array mentioned_user_ids -> 422, write never called', async () => {
     const createDiscussionThread = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: 'not-an-array' })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: 'not-an-array' })
     expect(res.status).toBe(422)
     expect(createDiscussionThread).not.toHaveBeenCalled()
   })
@@ -376,7 +380,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('create with mentioned_user_ids containing a non-number -> 422, write never called', async () => {
     const createDiscussionThread = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: [1, 'two', 3] })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: [1, 'two', 3] })
     expect(res.status).toBe(422)
     expect(createDiscussionThread).not.toHaveBeenCalled()
   })
@@ -384,7 +388,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('create with a non-object anchor -> 422, write never called', async () => {
     const createDiscussionThread = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: 'not-an-object' })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: 'not-an-object' })
     expect(res.status).toBe(422)
     expect(createDiscussionThread).not.toHaveBeenCalled()
   })
@@ -392,7 +396,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('create with anchor: null is VALID (explicit no-anchor) -> 200, NOT over-rejected', async () => {
     const createDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
-    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: null })
+    const res = await request(pinned.url()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: null })
     expect(res.status).toBe(200)
     expect(createDiscussionThread).toHaveBeenCalled()
   })
@@ -400,7 +404,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('add-comment with a non-string parent_comment_id -> 422, write never called', async () => {
     const addDiscussionComment = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
-    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', parent_comment_id: 42 })
+    const res = await request(pinned.url()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', parent_comment_id: 42 })
     expect(res.status).toBe(422)
     expect(addDiscussionComment).not.toHaveBeenCalled()
   })
@@ -408,7 +412,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('add-comment with a bad mentioned_user_ids -> 422, write never called', async () => {
     const addDiscussionComment = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
-    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', mentioned_user_ids: [{}] })
+    const res = await request(pinned.url()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', mentioned_user_ids: [{}] })
     expect(res.status).toBe(422)
     expect(addDiscussionComment).not.toHaveBeenCalled()
   })
@@ -416,7 +420,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   it('add-comment with a non-object anchor -> 422, write never called', async () => {
     const addDiscussionComment = vi.fn()
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
-    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', anchor: ['array-not-object'] })
+    const res = await request(pinned.url()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', anchor: ['array-not-object'] })
     expect(res.status).toBe(422)
     expect(addDiscussionComment).not.toHaveBeenCalled()
   })
@@ -427,7 +431,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const deleteDiscussionComment = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ deleteDiscussionComment }))
 
-    const res = await request(buildApp()).delete(COMMENT_URL('t9', 'c9')).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).delete(COMMENT_URL('t9', 'c9')).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(200)
     expect(deleteDiscussionComment).toHaveBeenCalledWith(SESSION_TOKEN, 't9', 'c9')
@@ -437,7 +441,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const resolveDiscussionThread = vi.fn().mockResolvedValue({ data: [{ ...THREAD_DETAIL, status: 'resolved' }], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ resolveDiscussionThread }))
 
-    const res = await request(buildApp()).post(RESOLVE_URL('t9')).set('X-PLM-Embed-Token', mint()).send({ comment: 'done' })
+    const res = await request(pinned.url()).post(RESOLVE_URL('t9')).set('X-PLM-Embed-Token', mint()).send({ comment: 'done' })
 
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('resolved')
@@ -448,7 +452,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     const reopenDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ reopenDiscussionThread }))
 
-    const res = await request(buildApp()).post(REOPEN_URL('t9')).set('X-PLM-Embed-Token', mint())
+    const res = await request(pinned.url()).post(REOPEN_URL('t9')).set('X-PLM-Embed-Token', mint())
 
     expect(res.status).toBe(200)
     expect(reopenDiscussionThread).toHaveBeenCalledWith(SESSION_TOKEN, 't9', {})

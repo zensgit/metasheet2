@@ -1,0 +1,161 @@
+# Approval attachment round-trip guard (SLICE A, #4195 design-lock §7/§11/§12 — TESTS ONLY).
+#
+# EVIDENCE LANE for tests/integration/approval-attachment-roundtrip-guard.db.test.ts, which proves —
+# over a real booted server + real PostgreSQL, with the flag forced ON in-process — the form-attachment
+# round trip (upload -> unbound row -> bind-at-create freezes form_snapshot -> auth-proxied download
+# returns byte-exact bytes with the hardened headers, including `Content-Security-Policy:
+# default-src 'none'`, which the sibling real-DB suite below does not assert) plus the negative
+# controls that sibling suite does not cover at real-DB altitude:
+#   - upload missing templateId and/or fieldId -> 400 (today only mocked, tests/unit/approval-attachment-routes.test.ts)
+#   - upload naming a field that exists but is NOT attachment-typed -> 400 not_an_attachment_field (same gap)
+#   - download by a non-participant -> 404 (refused by the existing canReadApprovalInstance predicate)
+#   - with the flag forced OFF, upload / download / delete are ALL THREE measured and pinned to their
+#     CURRENT status code in the SAME suite (the sibling suite pins upload only) — against a REAL
+#     pre-existing attachment id, so the pinned 404 proves "route not mounted", never "row not found"
+#
+# This lane adds NO behavior: it is a tests-only slice. It does not flip APPROVAL_ATTACHMENTS_ENABLED's
+# shipped default, does not touch staging/production, and does not make `attachment` an
+# AuthorableFieldType (design-lock §7 rung 4 remains gated on a separate owner ratify).
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so every
+# edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
+# approval-realdb-list-scope.yml / approval-realdb-history-guard.yml / approval-realdb-node-operation-policy.yml
+# lanes and the precedent they cite. plugin-tests.yml is left byte-identical.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job cannot collect-and-skip-green it. EXPECT_DB=1 below arms the suite's
+# top-level anti-skip-green sentinel (modeled on approval-list-scope-server-side.db.test.ts's own): a
+# run in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
+# file as skipped.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the sibling approval-realdb-* evidence lanes (a
+  # `merge_group` event does not honour the `paths` filter the way `pull_request` does, so declaring
+  # it would spin up this PostgreSQL job for every merge group regardless of relevance).
+  pull_request:
+    # No `branches:` filter (mirrors the sibling approval-realdb-* precedents): a brand-new workflow
+    # cannot be workflow_dispatch-ed until it has run once via a trigger it responds to. The `paths`
+    # filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-attachment-roundtrip-guard.db.test.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/services/approval-attachment-validation.ts'
+      - 'packages/core-backend/src/services/approval-attachment-scan.ts'
+      - 'packages/core-backend/src/services/approval-attachment-reconciler.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715210000_create_approval_attachments.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721120000_approval_attachments_scan_and_purge_dedup.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-attachment-roundtrip-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-attachment-roundtrip-guard.db.test.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/services/approval-attachment-validation.ts'
+      - 'packages/core-backend/src/services/approval-attachment-scan.ts'
+      - 'packages/core-backend/src/services/approval-attachment-reconciler.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715210000_create_approval_attachments.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721120000_approval_attachments_scan_and_purge_dedup.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-attachment-roundtrip-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-attachment-roundtrip-guard:
+    name: approval-attachment-roundtrip-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_attachment_roundtrip
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_attachment_roundtrip"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_attachment_roundtrip
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run, never a
+      # silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md).
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run attachment round-trip guard (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and hide
+        # regressions; verbose prints every collected test so an empty collection shows in the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-attachment-roundtrip-guard.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-attachment-roundtrip-guard.db.test.ts"
+            echo "scope=form-attachment round trip (upload/bind-at-create/form_snapshot freeze/byte-exact auth-proxied download with hardened headers/delete) with the flag forced ON; upload missing-templateId-or-fieldId and non-attachment-fieldId negative controls at real-DB altitude; download-by-non-participant refusal; flag forced OFF pins upload+download+delete against a real pre-existing attachment id"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

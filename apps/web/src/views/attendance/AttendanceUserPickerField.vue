@@ -31,6 +31,8 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useAttendanceAdminUsers } from './useAttendanceAdminUsers'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { apiFetch } from '../../utils/api'
 
 type Translate = (en: string, zh: string) => string
 
@@ -45,6 +47,8 @@ const props = withDefaults(defineProps<{
   fullWidth?: boolean
   inputId?: string
   endpoint?: string
+  orgId?: string
+  globalScope?: boolean
 }>(), {
   disabled: false,
   fullWidth: false,
@@ -53,12 +57,15 @@ const props = withDefaults(defineProps<{
   searchPlaceholder: '',
   helpText: '',
   endpoint: undefined,
+  orgId: undefined,
+  globalScope: false,
 })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
+const sessionGuard = useAttendanceSessionGuard()
 const {
   formatUserLabel,
   loading,
@@ -66,7 +73,14 @@ const {
   searchQuery,
   statusMessage,
   users,
-} = useAttendanceAdminUsers({ tr: props.tr, endpoint: props.endpoint })
+} = useAttendanceAdminUsers({
+  apiFetch: sessionGuard.wrapFetch(apiFetch),
+  isSessionCurrent: sessionGuard.isCurrent,
+  tr: props.tr,
+  endpoint: props.endpoint,
+  orgId: computed(() => props.orgId),
+  globalScope: computed(() => props.globalScope),
+})
 
 const displayUsers = computed(() => {
   const selectedId = props.modelValue.trim()

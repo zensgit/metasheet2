@@ -22,6 +22,9 @@ import {
   parseDigestSourceKey,
   buildRestoreDigestPolicyBody,
   classifySendOutcome,
+  describeStuckDelivery,
+  RECOGNIZED_STRUCTURAL_SKIPS,
+  DIRECTORY_FIXTURE_INSERT_SQL,
   resolveEnvConfig,
 } from './staging-attendance-report-digest-rd45-smoke.mjs'
 
@@ -183,16 +186,28 @@ test('rd45 settings restore body never PUTs an empty snapshot (deep-merge lesson
   assert.deepEqual(fromNull.attendanceReportDigestPolicy, DISABLED_DIGEST_POLICY_DEFAULT)
 })
 
-test('rd45 send-outcome classifier: sent / recognized visible failure = proven; stuck or unexplained = not proven', () => {
-  assert.deepEqual(RECOGNIZED_TERMINAL_FAILURES, ['dingtalk_recipient_not_bound', 'attendance_delivery_channel_not_configured'])
+test('rd45 send-outcome classifier: sent / recognized visible failure or structural skip = proven; stuck or unexplained = not proven', () => {
+  // H1 hardening (review #3920 P3-1): unbound-recipient is a structural SKIP (status='skipped'), no
+  // longer a terminal 'failed' — the recognized sets are split accordingly.
+  assert.deepEqual(RECOGNIZED_TERMINAL_FAILURES, ['attendance_delivery_channel_not_configured'])
+  assert.deepEqual(RECOGNIZED_STRUCTURAL_SKIPS, ['dingtalk_recipient_not_bound'])
 
   const allSent = classifySendOutcome([{ status: 'sent' }, { status: 'sent' }])
   assert.equal(allSent.visiblyProven, true)
   assert.equal(allSent.sent, 2)
 
-  const mixed = classifySendOutcome([{ status: 'sent' }, { status: 'failed', last_error: 'dingtalk_recipient_not_bound' }])
-  assert.equal(mixed.visiblyProven, true, 'unbound-recipient failure is a documented VISIBLE worker outcome')
-  assert.equal(mixed.failedRecognized, 1)
+  const mixed = classifySendOutcome([{ status: 'sent' }, { status: 'skipped', last_error: 'dingtalk_recipient_not_bound' }])
+  assert.equal(mixed.visiblyProven, true, 'unbound-recipient structural skip is a documented VISIBLE worker outcome (H1)')
+  assert.equal(mixed.skippedRecognized, 1)
+
+  const preH1NotBoundAsFailed = classifySendOutcome([{ status: 'failed', last_error: 'dingtalk_recipient_not_bound' }])
+  assert.equal(preH1NotBoundAsFailed.visiblyProven, false, 'failed/not_bound is NOT a recognized posture post-H1 (a deployed worker producing it deserves investigation, not a pass)')
+  assert.equal(preH1NotBoundAsFailed.failedOther.length, 1)
+
+  const skippedUnrecognized = classifySendOutcome([{ status: 'skipped', last_error: 'mystery_skip' }])
+  assert.equal(skippedUnrecognized.visiblyProven, false, 'an unrecognized skipped reason is not a posture')
+  assert.equal(skippedUnrecognized.skippedOther.length, 1)
+  assert.equal(skippedUnrecognized.skippedOther[0].lastError, 'mystery_skip', 'unrecognized skip surfaces its last_error, not an anonymous unknown')
 
   const channelMissing = classifySendOutcome([{ status: 'failed', last_error: 'attendance_delivery_channel_not_configured' }])
   assert.equal(channelMissing.visiblyProven, true, 'channel-not-configured is terminal and visible (weakest posture; runbook prefers the deterministic fake channel)')
@@ -206,6 +221,33 @@ test('rd45 send-outcome classifier: sent / recognized visible failure = proven; 
   assert.equal(stuck.terminal, 1)
 
   assert.equal(classifySendOutcome([]).visiblyProven, false, 'zero rows prove nothing')
+})
+
+test('rd45 classifier captures direct evidence (last_error/attempt_count/next_attempt_at) for every non-terminal row', () => {
+  const retrying = classifySendOutcome([{
+    id: 'd1', status: 'retrying', last_error: 'dingtalk_request_500: upstream busy',
+    attempt_count: 2, next_attempt_at: '2026-07-17T01:42:00Z',
+  }])
+  assert.equal(retrying.retrying, 1)
+  assert.equal(retrying.visiblyProven, false)
+  // The last hammer: the retrying row's evidence is captured, not discarded (the pre-fix gap).
+  assert.equal(retrying.nonTerminal.length, 1)
+  assert.deepEqual(retrying.nonTerminal[0], {
+    id: 'd1', status: 'retrying', lastError: 'dingtalk_request_500: upstream busy',
+    attemptCount: 2, nextAttemptAt: '2026-07-17T01:42:00Z',
+  })
+  // pending and sending rows are captured too; terminal rows (sent / failed) are NOT in nonTerminal.
+  const mix = classifySendOutcome([
+    { id: 'p', status: 'pending' },
+    { id: 's', status: 'sending', attempt_count: 1 },
+    { id: 'ok', status: 'sent' },
+    { id: 'f', status: 'failed', last_error: 'dingtalk_recipient_not_bound' },
+  ])
+  assert.deepEqual(mix.nonTerminal.map(d => d.id).sort(), ['p', 's'])
+  // describeStuckDelivery null-safety: absent numeric/timestamp fields normalize to null, not NaN/'undefined'.
+  assert.deepEqual(describeStuckDelivery({ id: 'x', status: 'retrying' }), {
+    id: 'x', status: 'retrying', lastError: null, attemptCount: null, nextAttemptAt: null,
+  })
 })
 
 test('rd45 helper does not claim the final staging pass and prints the exact API/DB pass-line shape', () => {
@@ -241,6 +283,38 @@ test('rd45 helper residue triple-check covers every table the smoke can dirty; s
   // this smoke writes no other attendance business rows
   assert.doesNotMatch(script, /DELETE FROM attendance_records/)
   assert.doesNotMatch(script, /DELETE FROM attendance_requests/)
+  // The seam directory fixture (deterministic dingtalk_recipient_not_bound) dirties two SHARED directory_*
+  // tables — so the "every table the smoke can dirty" invariant must extend to them: both are counted in
+  // residue AND cleaned (integration delete FK-cascades to accounts; the member-link delete is explicit).
+  for (const table of ['directory_integrations', 'directory_account_links']) {
+    assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted in residue`)
+    assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
+  }
+  // Directory ops are HARD-SCOPED: seam track + stamped disposable org only, never the default/real org.
+  assert.match(script, /if \(TRIGGER_MODE !== 'seam'\) return/, 'directory fixture is seam-only')
+  assert.match(script, /is not the stamped disposable org/, 'directory fixture refuses a non-disposable org')
+  assert.match(script, /function isDisposableOrg\(\)/, 'a disposable-org gate exists for the shared directory_* deletes')
+})
+
+test('rd45 directory-fixture INSERT satisfies the committed schema and the seed is fail-closed (review #4422 P1/P2)', () => {
+  // The exported constant IS what pool.query executes — pinning it here is mutation-coupled, not a
+  // source-text regex over dead code. corp_id is NOT NULL with no default (zzzz20260324150000:20); an
+  // INSERT without it fails, and review #4422 proved the pre-fix draft silently never seeded (the .catch
+  // swallowed the violation), reproducing the exact Day-2 retrying trap.
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /INSERT INTO directory_integrations \(org_id, corp_id, provider, name, status, sync_enabled\)/,
+    'column list names every NOT-NULL-without-default column, corp_id included')
+  const placeholders = DIRECTORY_FIXTURE_INSERT_SQL.match(/\$\d+/g) ?? []
+  assert.deepEqual([...new Set(placeholders)].sort(), ['$1', '$2', '$3'], 'exactly $1=org_id, $2=corp_id, $3=name are parameterized')
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /'active', false/, 'fixture pins status=active (H1 skip branch) + sync_enabled=false (no sync worker can link the member)')
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /ON CONFLICT \(org_id, provider, name\)/, 'conflict target matches idx_directory_integrations_org_provider_name')
+  assert.match(script, /pool\.query\(DIRECTORY_FIXTURE_INSERT_SQL, \[ORG_ID, `\$\{STAMP\}-corp`, DIRECTORY_FIXTURE_NAME\]\)/,
+    'the runtime executes THIS constant with org/corp/name bound in order')
+  // Fail-closed seed: no .catch swallow on the three seed statements, and a read-back positive control
+  // (exactly ONE active integration, ZERO member links) that throws before the send-proof can run.
+  assert.match(script, /directory fixture read-back/, 'read-back positive control exists')
+  assert.match(script, /directory fixture failed read-back/, 'read-back failure aborts the smoke (throw), not a warning')
+  const seedBlock = script.slice(script.indexOf('async function seedDirectoryFixture'), script.indexOf('async function resolveExpectedSubjects'))
+  assert.doesNotMatch(seedBlock, /\.catch\(\(\) => undefined\)/, 'seed statements must not swallow errors (a silent seed failure flips the H1 branch or risks a real send)')
 })
 
 test('rd45 helper cleanup is stamped/prefix-scoped, LIKE-free, and restores settings BEFORE deleting rows (re-insert trap)', () => {

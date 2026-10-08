@@ -1,0 +1,187 @@
+name: DingTalk OAuth Staging Config
+
+run-name: "DingTalk OAuth staging: ${{ inputs.action }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'status (read-only) | prepare (configure MetaSheetCanary OAuth)'
+        required: true
+        type: choice
+        options: [status, prepare]
+        default: status
+      deploy_sha:
+        description: 'Exact 40-character staging deploy SHA; required for prepare'
+        required: false
+        default: ''
+      expected_current_mode:
+        description: 'Must be off for prepare'
+        required: false
+        default: 'off'
+      confirmation:
+        description: 'prepare requires CONFIGURE_METASHEETCANARY_OAUTH'
+        required: false
+        default: ''
+
+concurrency:
+  group: attendance-staging-window-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate workflow contract
+        env:
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          EXPECTED_CURRENT_MODE: ${{ inputs.expected_current_mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$ACTION" == status || "$ACTION" == prepare ]]
+          [[ -z "$DEPLOY_SHA" || "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_CURRENT_MODE" == off ]]
+          [[ -z "$CONFIRMATION" || "$CONFIRMATION" == CONFIGURE_METASHEETCANARY_OAUTH ]]
+          if [[ "$ACTION" == prepare ]]; then
+            [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$CONFIRMATION" == CONFIGURE_METASHEETCANARY_OAUTH ]]
+          fi
+          bash -n scripts/ops/dingtalk-oauth-staging-config-remote.sh
+          node --test scripts/ops/dingtalk-oauth-staging-config-contract.test.mjs
+
+      - name: Prepare pinned SSH transport
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2'; then
+            printf '%s\n' "$decoded" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+      - name: Run remote action
+        id: remote
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          STAGING_DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || 'metasheet2-dingtalk-staging' }}
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          EXPECTED_CURRENT_MODE: ${{ inputs.expected_current_mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          OAUTH_CLIENT_ID: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_OAUTH_CLIENT_ID || '' }}
+          OAUTH_CLIENT_SECRET: ${{ inputs.action == 'prepare' && secrets.STAGING_DINGTALK_OAUTH_CLIENT_SECRET || '' }}
+        run: |
+          set -euo pipefail
+          _CLIENT_ID="${OAUTH_CLIENT_ID-}"
+          _CLIENT_SECRET="${OAUTH_CLIENT_SECRET-}"
+          unset OAUTH_CLIENT_ID OAUTH_CLIENT_SECRET
+          ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
+          for pair in "DEPLOY_PATH=${DEPLOY_PATH:-metasheet2}" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
+            [[ "${pair#*=}" =~ ^[A-Za-z0-9._/~-]+$ ]] || exit 2
+          done
+          [[ "$ACTION" == status || "$ACTION" == prepare ]]
+          [[ -z "$DEPLOY_SHA" || "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_CURRENT_MODE" == off ]]
+          [[ -z "$CONFIRMATION" || "$CONFIRMATION" == CONFIGURE_METASHEETCANARY_OAUTH ]]
+          runner_dir="/tmp/dingtalk-oauth-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          output_dir="/tmp/dingtalk-oauth-config-out-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="dingtalk-oauth-staging-config-${ACTION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          mkdir -p output/dingtalk-oauth
+          cleanup() {
+            set +e
+            rm -rf "${local_secret_dir:-}"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "rm -rf '$runner_dir' '$output_dir'" >/dev/null 2>&1
+          }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          tar -czf - scripts/ops/dingtalk-oauth-staging-config-remote.sh \
+            | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$runner_dir' && tar -xzf - -C '$runner_dir' --strip-components=2"
+
+          secret_exports=""
+          if [[ "$ACTION" == prepare ]]; then
+            [[ -n "$_CLIENT_ID" && -n "$_CLIENT_SECRET" ]] || { echo 'OAuth secrets are required' >&2; exit 2; }
+            local_secret_dir="$(mktemp -d "${RUNNER_TEMP}/dingtalk-oauth.XXXXXX")"; chmod 700 "$local_secret_dir"; umask 077
+            printf '%s' "$_CLIENT_ID" > "$local_secret_dir/client.id"
+            printf '%s' "$_CLIENT_SECRET" > "$local_secret_dir/client.secret"
+            unset _CLIENT_ID _CLIENT_SECRET
+            chmod 600 "$local_secret_dir/client.id" "$local_secret_dir/client.secret"
+            remote_secret_dir="$runner_dir/.secrets"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$remote_secret_dir' && chmod 700 '$remote_secret_dir'"
+            scp $ssh_opts "$local_secret_dir/client.id" "$local_secret_dir/client.secret" "$DEPLOY_USER@$DEPLOY_HOST:$remote_secret_dir/"
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "chmod 600 '$remote_secret_dir/client.id' '$remote_secret_dir/client.secret'"
+            secret_exports="export OAUTH_CLIENT_ID_FILE='$remote_secret_dir/client.id'; export OAUTH_CLIENT_SECRET_FILE='$remote_secret_dir/client.secret';"
+          else
+            unset _CLIENT_ID _CLIENT_SECRET
+          fi
+
+          remote_script="set -euo pipefail
+          export ACTION='$ACTION' DEPLOY_SHA='$DEPLOY_SHA' EXPECTED_CURRENT_MODE='$EXPECTED_CURRENT_MODE'
+          export CONFIRMATION='$CONFIRMATION' STAGING_DEPLOY_PATH='$STAGING_DEPLOY_PATH' DEPLOY_PATH='${DEPLOY_PATH:-metasheet2}'
+          export OUTPUT_DIR='$output_dir' RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
+          $secret_exports
+          rm -rf '$output_dir'; mkdir -p '$output_dir'
+          bash '$runner_dir/dingtalk-oauth-staging-config-remote.sh'"
+          escaped="$(printf '%s' "$remote_script" | sed "s/'/'\\\\''/g")"
+          set +e
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "bash -o pipefail -c '$escaped'" 2>&1 | tee output/dingtalk-oauth/ssh.log
+          rc=${PIPESTATUS[0]}
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:$output_dir/." output/dingtalk-oauth/ >> output/dingtalk-oauth/ssh.log 2>&1
+          scp_rc=$?
+          set -e
+          if [[ "$ACTION" == prepare && -f "$local_secret_dir/client.secret" ]]; then
+            # Scan the complete artifact payload against the real secret bytes.
+            # Only file paths enter argv; neither the secret nor its digest is logged.
+            python3 - "$local_secret_dir/client.secret" output/dingtalk-oauth <<'PY'
+          import pathlib, shutil, sys
+          secret = pathlib.Path(sys.argv[1]).read_bytes()
+          if not secret:
+              raise SystemExit("empty secret scan input")
+          root = pathlib.Path(sys.argv[2])
+          for path in root.rglob("*"):
+              if path.is_file() and secret in path.read_bytes():
+                  shutil.rmtree(root)
+                  raise SystemExit(f"secret bytes found in artifact file: {path.name}")
+          PY
+          fi
+          [[ "$rc" != 0 || "$scp_rc" == 0 ]] || rc="$scp_rc"
+          echo "remote_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.remote.outputs.artifact_name || format('dingtalk-oauth-staging-config-{0}-{1}', inputs.action, github.run_id) }}
+          path: output/dingtalk-oauth
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on remote error
+        if: always()
+        env:
+          REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
+        run: |
+          set -euo pipefail
+          [[ "$REMOTE_RC" =~ ^[0-9]+$ && "$REMOTE_RC" == 0 ]] || exit "${REMOTE_RC:-1}"

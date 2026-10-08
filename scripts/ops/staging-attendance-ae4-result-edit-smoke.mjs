@@ -7,6 +7,10 @@
 // UI probe in docs/development/attendance-ae4-anomaly-result-edit-staging-smoke-runbook-20260701.md
 // remains required before closing AE-4.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import { randomUUID } from 'node:crypto'
 
 const BASE_URL = (process.env.BASE_URL || process.env.BASE || '').replace(/\/$/, '')
@@ -616,7 +620,20 @@ async function cleanup({ strictSettingsRestore = false } = {}) {
   const editKeys = Object.values(idempotencyKeys)
   await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = $1 AND source_type = $2 AND source_key LIKE ANY($3::text[])', [ORG_ID, 'attendance_result_edit', deliveryPatterns]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_record_result_edits WHERE org_id = $1 AND (record_id = ANY($2::uuid[]) OR idempotency_key = ANY($3::text[]))', [ORG_ID, ids, editKeys]).catch(() => undefined)
-  await pool.query('DELETE FROM attendance_records WHERE org_id = $1 AND (id = ANY($2::uuid[]) OR meta->>$3 = $4)', [ORG_ID, ids, 'smokeStamp', STAMP]).catch(() => undefined)
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-0000000000ae',
+    ticket: 'STAGING-AE4',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIdPrefix: USER_PREFIX, recordIds: ids }, { retireRecord: opsRetirementExecutor })
   await pool.query('DELETE FROM attendance_events WHERE org_id = $1 AND meta->>$2 = $3', [ORG_ID, 'smokeStamp', STAMP]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_requests WHERE org_id = $1 AND metadata->>$2 = $3', [ORG_ID, 'smokeStamp', STAMP]).catch(() => undefined)
   if (batchIds.length) {

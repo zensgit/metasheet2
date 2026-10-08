@@ -5,7 +5,14 @@ vi.mock('../../src/rbac/service', () => ({
   listUserPermissions: vi.fn(),
 }))
 
-import { deriveCapabilities } from '../../src/multitable/access'
+import { deriveCapabilities, type MultitableCapabilities, type ResolvedRequestAccess } from '../../src/multitable/access'
+import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
+import { MULTITABLE_MANAGE_SCHEMA_PERMISSION } from '../../src/multitable/manage-schema-permission'
+import {
+  resolveDatabaseRecoverySheetAuthority,
+  resolveRecoverySheetAuthority,
+} from '../../src/multitable/recovery-authorization-stability'
+import { MULTITABLE_SUBMIT_APPROVAL_PERMISSION } from '../../src/multitable/submit-approval-permission'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
 import {
   applyContextSheetReadGrant,
@@ -33,6 +40,11 @@ import {
   requiresOwnWriteRowPolicy,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
+  resolveSheetCapabilitiesForAccess,
+  SHEET_ADMIN_PERMISSION_CODES,
+  SHEET_OWN_WRITE_PERMISSION_CODES,
+  SHEET_READ_PERMISSION_CODES,
+  SHEET_WRITE_PERMISSION_CODES,
   summarizeSheetPermissionCodes,
   type QueryFn,
   type SheetPermissionScope,
@@ -320,6 +332,20 @@ describe('permission-service: row-actions and write-allowed', () => {
     expect(
       ensureRecordWriteAllowed(editorCaps, writeOwnScope, access, 'user_2', 'edit'),
     ).toBe(false)
+    expect(
+      ensureRecordWriteAllowed(editorCaps, writeOwnScope, access, 'user_2', 'edit', new Map(), 'rec_other'),
+    ).toBe(false)
+    expect(
+      ensureRecordWriteAllowed(
+        editorCaps,
+        writeOwnScope,
+        access,
+        'user_2',
+        'edit',
+        new Map([['some_other_record', { recordId: 'some_other_record', accessLevel: 'admin' as const }]]),
+        'rec_other',
+      ),
+    ).toBe(false)
   })
 })
 
@@ -484,6 +510,16 @@ describe('permission-service: request-keyed resolvers', () => {
     expect(Array.from(readable)).toEqual(['sheet_2'])
   })
 
+  it('resolveReadableSheetIds accepts explicit worker authority without request claims', async () => {
+    const { query } = makeQuery([
+      () => ({ rows: [{ sheet_id: 'sheet_2', perm_code: 'multitable:read', subject_type: 'user' }] }),
+    ])
+    const access = { userId: 'worker', permissions: [], isAdminRole: false }
+    const readable = await resolveReadableSheetIds(undefined, query, ['sheet_1', 'sheet_2'], access)
+    expect([...readable]).toEqual(['sheet_2'])
+    await expect(resolveReadableSheetIds(undefined, query, ['sheet_1'])).rejects.toThrow('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
+  })
+
   it('resolveReadableSheetIds trims before deduplication', async () => {
     vi.mocked(listUserPermissions).mockResolvedValue([])
     vi.mocked(isAdmin).mockResolvedValue(false)
@@ -586,6 +622,9 @@ describe('permission-service: request-keyed resolvers', () => {
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
     vi.mocked(isAdmin).mockResolvedValue(false)
     const { query } = makeQuery([
+      // The resolver now establishes SHEET LIVENESS first (soft delete): a deleted sheet must not be
+      // invisible to a path that only ever asked "may this actor?". This sheet is live.
+      () => ({ rows: [{ deleted_at: null }] }),
       () => ({
         rows: [
           { sheet_id: 'sheet_1', perm_code: 'multitable:admin', subject_type: 'user' },
@@ -594,9 +633,299 @@ describe('permission-service: request-keyed resolvers', () => {
     ])
     const req = { user: { id: 'user_1', roles: ['user'] } } as any
     const res = await resolveSheetCapabilities(req, query, 'sheet_1')
+    expect(res.sheetLiveness).toBe('live')
     expect(res.capabilities.canManageFields).toBe(true)
     expect(res.capabilities.canManageSheetAccess).toBe(true)
     expect(res.capabilityOrigin.source).toBe('sheet-grant')
     expect(res.sheetScope?.canAdmin).toBe(true)
   })
+
+  it('resolves the e-learning aggregate sheet as same-org admin read-only', async () => {
+    const orgId = 'org-elearning-stats'
+    const sheetId = deriveElearningProjectionSheetId(orgId)
+    const query = vi.fn(async (sql: string) => {
+      if (sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') {
+        return { rows: [{ deleted_at: null }] }
+      }
+      if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+        return { rows: [{ id: sheetId }] }
+      }
+      if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+        return { rows: [{ org_id: orgId, sheet_id: sheetId }] }
+      }
+      return { rows: [] }
+    }) as QueryFn
+    const req = {
+      authenticatedTenantId: orgId,
+      user: { id: 'elearning-admin', perms: ['elearning:admin'], roles: ['user'] },
+    } as any
+    const result = await resolveSheetCapabilities(req, query, sheetId)
+    expect(result.sheetLiveness).toBe('live')
+    expect(result.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canManageViews: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canComment: false,
+      canManageAutomation: false,
+      canSendNotification: false,
+    })
+
+    const crossOrg = await resolveSheetCapabilities(
+      { ...req, authenticatedTenantId: 'org-other' } as any,
+      query,
+      sheetId,
+    )
+    expect(crossOrg.capabilities.canRead).toBe(false)
+    expect(crossOrg.capabilities.canManageViews).toBe(false)
+  })
+})
+
+// ── The full-read premise (Refs #6139) ─────────────────────────────────────────────────────────────────────────
+// `hasFullTableReadAccess` (routes/univer-meta.ts) refuses when `capabilities.canRead` is false. Fourteen of its 22
+// callers gate on `canManageSheetAccess` first and never on `canRead`, so they are unaffected ONLY because the
+// resolvers never yield `canManageSheetAccess` with `canRead` false. These cases pin that premise over the REAL
+// resolver functions (mocked query, no database); if it ever breaks, those callers would start refusing people.
+type PremiseSheetKind =
+  | 'plain'
+  | 'approval-projection-nonparticipant'
+  | 'approval-projection-participant'
+  | 'elearning-projection-mapped'
+  | 'elearning-projection-unmapped'
+
+const PREMISE_ORG = 'org-premise'
+const PREMISE_PLAIN_SHEET = 'sheet_premise'
+const PREMISE_ELEARNING_SHEET = deriveElearningProjectionSheetId(PREMISE_ORG)
+
+function premiseSheetId(kind: PremiseSheetKind): string {
+  return kind.startsWith('elearning') ? PREMISE_ELEARNING_SHEET : PREMISE_PLAIN_SHEET
+}
+
+/**
+ * One mocked query that answers every statement `resolveSheetCapabilitiesForAccess` issues (liveness, the sheet
+ * permission rows, the approval-projection membership and participant lookups, the e-learning mapping and
+ * system-kind lookups) plus the two `loadDatabaseFreshRecoveryAccess` reads. Anything else answers no rows.
+ */
+function premiseQuery(opts: {
+  kind: PremiseSheetKind
+  sheetCodes?: readonly string[]
+  /** e-learning mapping row's org (defaults to the org the sheet id derives from). */
+  mappedOrg?: string
+  /** e-learning mapping present but the meta_sheets row is not the projection system kind. */
+  notSystemKind?: boolean
+  dbUser?: { role: string; permissions: readonly string[] }
+}): QueryFn {
+  const sheetId = premiseSheetId(opts.kind)
+  return (async (sql: string) => {
+    if (sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') return { rows: [{ deleted_at: null }] }
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: (opts.sheetCodes ?? []).map((code) => ({ sheet_id: sheetId, perm_code: code, subject_type: 'user' })) }
+    }
+    if (sql.includes('JOIN meta_records r')) {
+      return { rows: opts.kind === 'approval-projection-participant' ? [{ id: sheetId }] : [] }
+    }
+    if (sql.includes('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2')) {
+      return { rows: opts.kind.startsWith('approval-projection') ? [{ id: sheetId }] : [] }
+    }
+    if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+      return { rows: opts.kind === 'elearning-projection-mapped' ? [{ sheet_id: sheetId, org_id: opts.mappedOrg ?? PREMISE_ORG }] : [] }
+    }
+    if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+      return { rows: opts.kind === 'elearning-projection-mapped' && !opts.notSystemKind ? [{ id: sheetId }] : [] }
+    }
+    if (sql.includes('FROM users') && sql.includes('rbac_admin')) {
+      return { rows: opts.dbUser ? [{ role: opts.dbUser.role, permissions: [...opts.dbUser.permissions], is_active: true, rbac_admin: false }] : [] }
+    }
+    if (sql.includes('FROM user_permissions')) return { rows: [] } // the DB-fresh codes ride on users.permissions
+    return { rows: [] }
+  }) as QueryFn
+}
+
+function premiseAccess(permissions: readonly string[], isAdminRole: boolean): ResolvedRequestAccess {
+  return { userId: 'u_premise', permissions: [...permissions], isAdminRole, authenticatedTenantId: PREMISE_ORG }
+}
+
+async function resolvePremise(
+  kind: PremiseSheetKind,
+  permissions: readonly string[],
+  isAdminRole: boolean,
+  sheetCodes: readonly string[] = [],
+  extra: { mappedOrg?: string; notSystemKind?: boolean } = {},
+): Promise<MultitableCapabilities> {
+  const query = premiseQuery({ kind, sheetCodes, ...extra })
+  return (await resolveSheetCapabilitiesForAccess(query, premiseSheetId(kind), premiseAccess(permissions, isAdminRole))).capabilities
+}
+
+/**
+ * Every permission code the capability and sheet-scope derivations read (multitable/access.ts deriveCapabilities,
+ * manage-schema-permission.ts, submit-approval-permission.ts, the SHEET_* code sets in permission-service.ts, the
+ * e-learning authority codes) plus the wildcards `hasPermission` honours. 27 codes.
+ */
+const PREMISE_CODES: readonly string[] = [...new Set([
+  ...SHEET_READ_PERMISSION_CODES,
+  ...SHEET_WRITE_PERMISSION_CODES,
+  ...SHEET_OWN_WRITE_PERMISSION_CODES,
+  ...SHEET_ADMIN_PERMISSION_CODES,
+  'multitable:share',
+  MULTITABLE_MANAGE_SCHEMA_PERMISSION,
+  MULTITABLE_SUBMIT_APPROVAL_PERMISSION,
+  'comments:read', 'comments:write',
+  'workflow:all', 'workflow:write', 'workflow:create', 'workflow:execute',
+  'elearning:admin', 'elearning:*',
+  'multitable:*', 'comments:*', 'workflow:*', '*:*',
+])].sort()
+
+const PREMISE_KINDS: readonly PremiseSheetKind[] = [
+  'plain',
+  'approval-projection-nonparticipant',
+  'approval-projection-participant',
+  'elearning-projection-mapped',
+  'elearning-projection-unmapped',
+]
+
+function subsetsUpTo<T>(items: readonly T[], maxSize: number): T[][] {
+  const out: T[][] = [[]]
+  const walk = (start: number, current: T[]) => {
+    for (let i = start; i < items.length; i += 1) {
+      const next = [...current, items[i]!]
+      out.push(next)
+      if (next.length < maxSize) walk(i + 1, next)
+    }
+  }
+  walk(0, [])
+  return out
+}
+
+/** Each code of a subset goes to the global permissions, to the sheet assignment, or to both (3^k placements). */
+function placements(codes: readonly string[]): Array<{ global: string[]; sheet: string[] }> {
+  let out: Array<{ global: string[]; sheet: string[] }> = [{ global: [], sheet: [] }]
+  for (const code of codes) {
+    out = out.flatMap((p) => [
+      { global: [...p.global, code], sheet: p.sheet },
+      { global: p.global, sheet: [...p.sheet, code] },
+      { global: [...p.global, code], sheet: [...p.sheet, code] },
+    ])
+  }
+  return out
+}
+
+describe('permission-service: canManageSheetAccess never comes without canRead (the full-read premise, Refs #6139)', () => {
+  beforeEach(() => {
+    vi.mocked(listUserPermissions).mockReset()
+    vi.mocked(isAdmin).mockReset()
+    vi.mocked(listUserPermissions).mockResolvedValue([])
+    vi.mocked(isAdmin).mockResolvedValue(false)
+  })
+
+  it('(a) multitable:share alone, no sheet assignment, not admin -> canManageSheetAccess false (the share code needs read)', async () => {
+    const caps = await resolvePremise('plain', ['multitable:share'], false)
+    expect(caps.canRead).toBe(false)
+    expect(caps.canManageSheetAccess).toBe(false)
+    // …and with read added, the same code does grant it (so the case above is refused for the right reason).
+    const withRead = await resolvePremise('plain', ['multitable:share', 'multitable:read'], false)
+    expect(withRead).toMatchObject({ canRead: true, canManageSheetAccess: true })
+  })
+
+  it.each(['multitable:admin', 'spreadsheet:admin'])(
+    '(b) no global multitable code, sheet assignment %s, not admin -> canRead true AND canManageSheetAccess true',
+    async (code) => {
+      const caps = await resolvePremise('plain', [], false, [code])
+      expect(caps.canRead).toBe(true)
+      expect(caps.canManageSheetAccess).toBe(true)
+    },
+  )
+
+  it('(c) admin on an e-learning projection sheet it may not access -> canRead false AND canManageSheetAccess false', async () => {
+    // For an admin the role itself counts as e-learning authority (hasElearningProjectionAdminAuthority), so "without
+    // authority" means the projection access check fails: the sheet is unmapped, mapped to another org, or its row is
+    // not the projection system kind. The mapped-and-valid control reads, and still never manages sheet access.
+    for (const [label, caps] of [
+      ['unmapped', await resolvePremise('elearning-projection-unmapped', [], true)],
+      ['mapped to another org', await resolvePremise('elearning-projection-mapped', [], true, [], { mappedOrg: 'org-other' })],
+      ['not the system kind', await resolvePremise('elearning-projection-mapped', [], true, [], { notSystemKind: true })],
+    ] as const) {
+      expect({ label, canRead: caps.canRead, canManageSheetAccess: caps.canManageSheetAccess })
+        .toEqual({ label, canRead: false, canManageSheetAccess: false })
+    }
+    const control = await resolvePremise('elearning-projection-mapped', [], true)
+    expect(control).toMatchObject({ canRead: true, canManageSheetAccess: false })
+  })
+
+  it('(c) non-admin, non-participant on an approval projection sheet, holding share + read + a sheet admin grant -> both false', async () => {
+    const caps = await resolvePremise('approval-projection-nonparticipant', ['multitable:read', 'multitable:share'], false, ['multitable:admin'])
+    expect(caps.canRead).toBe(false)
+    expect(caps.canManageSheetAccess).toBe(false)
+    // A participant keeps the read plane only.
+    const participant = await resolvePremise('approval-projection-participant', ['multitable:read', 'multitable:share'], false, ['multitable:admin'])
+    expect(participant).toMatchObject({ canRead: true, canManageSheetAccess: false })
+  })
+
+  it('(d) the recovery authority resolvers never yield canManageSheetAccess without canRead for the same inputs', async () => {
+    const cases: Array<{ label: string; kind: PremiseSheetKind; dbPerms: string[]; admin: boolean; sheetCodes: string[]; claimPerms?: string[]; claimAdmin?: boolean }> = [
+      { label: '(a) share only', kind: 'plain', dbPerms: ['multitable:share'], admin: false, sheetCodes: [] },
+      { label: '(a) share + read', kind: 'plain', dbPerms: ['multitable:share', 'multitable:read'], admin: false, sheetCodes: [] },
+      { label: '(b) multitable:admin grant', kind: 'plain', dbPerms: [], admin: false, sheetCodes: ['multitable:admin'] },
+      { label: '(b) spreadsheet:admin grant', kind: 'plain', dbPerms: [], admin: false, sheetCodes: ['spreadsheet:admin'] },
+      { label: '(c) admin, unmapped e-learning sheet', kind: 'elearning-projection-unmapped', dbPerms: [], admin: true, sheetCodes: [] },
+      { label: '(c) approval non-participant', kind: 'approval-projection-nonparticipant', dbPerms: ['multitable:read', 'multitable:share'], admin: false, sheetCodes: ['multitable:admin'] },
+      // Request claims and DB-fresh authority disagree: the intersection must still keep the pairing.
+      { label: 'claim share+read, DB share only', kind: 'plain', dbPerms: ['multitable:share'], admin: false, sheetCodes: [], claimPerms: ['multitable:share', 'multitable:read'] },
+      { label: 'claim share only, DB share+read', kind: 'plain', dbPerms: ['multitable:share', 'multitable:read'], admin: false, sheetCodes: [], claimPerms: ['multitable:share'] },
+      { label: 'claim admin, DB share only', kind: 'plain', dbPerms: ['multitable:share'], admin: false, sheetCodes: [], claimAdmin: true },
+      { label: 'claim share only, DB admin', kind: 'plain', dbPerms: [], admin: true, sheetCodes: [], claimPerms: ['multitable:share'] },
+    ]
+    for (const c of cases) {
+      const query = premiseQuery({ kind: c.kind, sheetCodes: c.sheetCodes, dbUser: { role: c.admin ? 'admin' : 'user', permissions: c.dbPerms } })
+      const sheetId = premiseSheetId(c.kind)
+      const db = (await resolveDatabaseRecoverySheetAuthority(query, sheetId, 'u_premise')).capabilities
+      const claimAdmin = c.claimAdmin ?? c.admin
+      const req = {
+        authenticatedTenantId: PREMISE_ORG,
+        user: { id: 'u_premise', role: claimAdmin ? 'admin' : 'user', roles: claimAdmin ? ['admin'] : ['user'], perms: c.claimPerms ?? c.dbPerms },
+      } as any
+      const intersected = (await resolveRecoverySheetAuthority(req, query, sheetId)).capabilities
+      for (const [which, caps] of [['database', db], ['intersected', intersected]] as const) {
+        expect({ label: c.label, which, violation: caps.canManageSheetAccess && !caps.canRead })
+          .toEqual({ label: c.label, which, violation: false })
+      }
+    }
+  })
+
+  // 27 codes -> 3,304 subsets of size <= 3 -> 82,216 placements (each code global, sheet-assigned, or both)
+  // x 2 (admin or not) x 5 sheet kinds = 822,160 resolver runs. canManageFields is deliberately NOT in the
+  // checked set: it is the capability whose missing read pairing was the defect this premise sits beside.
+  it('property: 822,160 combinations (every subset of <= 3 of 27 codes x global/sheet/both placement x admin x 5 sheet kinds) never yield canManageSheetAccess without canRead', async () => {
+    expect(PREMISE_CODES).toHaveLength(27)
+    const subsets = subsetsUpTo(PREMISE_CODES, 3)
+    expect(subsets).toHaveLength(3304)
+    const violations: string[] = []
+    const managingByKind = new Map<PremiseSheetKind, number>()
+    let checked = 0
+    for (const subset of subsets) {
+      for (const { global, sheet } of placements(subset)) {
+        for (const isAdminRole of [false, true]) {
+          for (const kind of PREMISE_KINDS) {
+            const caps = await resolvePremise(kind, global, isAdminRole, sheet)
+            checked += 1
+            if (caps.canManageSheetAccess) managingByKind.set(kind, (managingByKind.get(kind) ?? 0) + 1)
+            if (caps.canManageSheetAccess && !caps.canRead && violations.length < 10) {
+              violations.push(`${kind} admin=${isAdminRole} global=[${global.join(',')}] sheet=[${sheet.join(',')}]`)
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
+    expect(checked).toBe(822_160)
+    // Not vacuous: the positive side is reached (sheet grants, the share code with read, admins), and the
+    // projection sheets only ever grant it to an admin on the approval projection.
+    expect(managingByKind.get('plain') ?? 0).toBeGreaterThan(100_000)
+    expect(managingByKind.get('approval-projection-nonparticipant') ?? 0).toBeGreaterThan(0)
+    expect(managingByKind.get('elearning-projection-mapped') ?? 0).toBe(0)
+    expect(managingByKind.get('elearning-projection-unmapped') ?? 0).toBe(0)
+  }, 600_000)
 })

@@ -1,0 +1,1565 @@
+/**
+ * E-learning L3 paper-bound exam rules gate against fully migrated PostgreSQL.
+ * DATABASE_URL is mandatory; missing infrastructure must fail, never skip.
+ */
+import { randomUUID } from 'node:crypto'
+
+import { afterAll, describe, expect, it } from 'vitest'
+import { Pool, type PoolClient } from 'pg'
+
+import {
+  EXAMS_STATE_TRIGGER,
+  EXAM_QUESTIONS_DRAFT_TRIGGER,
+} from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
+import { EXAMS_PUBLISH_POINTS_TRIGGER } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
+import {
+  ELEARNING_EXAM_AFTER_WINDOW_CHECK,
+  ELEARNING_EXAM_DISCLOSURE_CHECK,
+  ELEARNING_EXAM_DURATION_CHECK,
+  ELEARNING_EXAM_PAPER_FK,
+  ELEARNING_EXAM_PAPER_INDEX,
+  ELEARNING_EXAM_WINDOW_CHECK,
+} from '../../src/db/migrations/zzzz20260826230000_extend_elearning_exam_rules'
+import {
+  ELEARNING_ATTEMPT_DEADLINE_CHECK,
+  ELEARNING_ATTEMPT_DUE_INDEX,
+  ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK,
+} from '../../src/db/migrations/zzzz20260826235900_add_elearning_exam_attempt_deadlines'
+import {
+  createElearningBankQuestion,
+  createElearningQuestionBank,
+  publishElearningFixedPaper,
+  type ElearningAssessmentCatalogDb,
+  type ElearningAssessmentCatalogQueryable,
+} from '../../src/services/elearning-assessment-catalog'
+import {
+  ElearningExamError,
+  saveElearningExamAnswers,
+  settleExpiredElearningExamAttempt,
+  startElearningExam,
+  submitElearningExam,
+  type ElearningExamDb,
+  type ElearningExamQueryable,
+} from '../../src/services/elearning-exam'
+import { getElearningExamReview } from '../../src/services/elearning-exam-review'
+import {
+  ElearningPaperExamError,
+  publishElearningPaperExam,
+  type ElearningPaperExamDb,
+  type ElearningPaperExamQueryable,
+  type PublishElearningPaperExamInput,
+} from '../../src/services/elearning-paper-exam'
+
+const DATABASE_URL = process.env.DATABASE_URL
+if (!DATABASE_URL) {
+  throw new Error(
+    'e-learning paper-exam DB gate requires DATABASE_URL; refusing skip-shaped green',
+  )
+}
+
+const pool = new Pool({ connectionString: DATABASE_URL, max: 4 })
+const NS = `el-paper-exam-${Date.now().toString(36)}`
+const MIGRATION_NAME = 'zzzz20260826230000_extend_elearning_exam_rules'
+const DEADLINE_MIGRATION_NAME =
+  'zzzz20260826235900_add_elearning_exam_attempt_deadlines'
+
+class ClientDb implements ElearningAssessmentCatalogDb, ElearningPaperExamDb, ElearningExamDb {
+  private savepoint = 0
+
+  constructor(private readonly client: PoolClient) {}
+
+  async query(sql: string, params?: unknown[]) {
+    const result = await this.client.query(sql, params as never)
+    return {
+      rows: result.rows as Array<Record<string, unknown>>,
+      rowCount: result.rowCount,
+    }
+  }
+
+  async transaction<T>(
+    handler: (
+      tx: ElearningAssessmentCatalogQueryable
+        & ElearningPaperExamQueryable
+        & ElearningExamQueryable,
+    ) => Promise<T>,
+  ): Promise<T> {
+    const name = `elearning_paper_exam_${++this.savepoint}`
+    await this.client.query(`SAVEPOINT ${name}`)
+    try {
+      const result = await handler({
+        query: async (sql, params) => {
+          const queryResult = await this.client.query(sql, params as never)
+          return {
+            rows: queryResult.rows as Array<Record<string, unknown>>,
+            rowCount: queryResult.rowCount,
+          }
+        },
+      })
+      await this.client.query(`RELEASE SAVEPOINT ${name}`)
+      return result
+    } catch (error) {
+      await this.client.query(`ROLLBACK TO SAVEPOINT ${name}`)
+      await this.client.query(`RELEASE SAVEPOINT ${name}`)
+      throw error
+    }
+  }
+}
+
+async function withRolledBackDb(
+  run: (client: PoolClient, db: ClientDb) => Promise<void>,
+): Promise<void> {
+  const client = await pool.connect()
+  await client.query('BEGIN')
+  try {
+    await run(client, new ClientDb(client))
+  } finally {
+    await client.query('ROLLBACK')
+    client.release()
+  }
+}
+
+async function expectSqlState(
+  client: PoolClient,
+  expected: string,
+  action: () => Promise<unknown>,
+): Promise<void> {
+  const name = `negative_${randomUUID().replaceAll('-', '')}`
+  await client.query(`SAVEPOINT ${name}`)
+  let caught: unknown
+  try {
+    await action()
+  } catch (error) {
+    caught = error
+  }
+  await client.query(`ROLLBACK TO SAVEPOINT ${name}`)
+  await client.query(`RELEASE SAVEPOINT ${name}`)
+  expect(caught).toBeDefined()
+  expect((caught as { code?: string }).code).toBe(expected)
+}
+
+function org(label: string): string {
+  return `${NS}-${label}`
+}
+
+function actor(label: string): string {
+  return `${NS}-actor-${label}`
+}
+
+async function seedPublishedPaper(
+  db: ClientDb,
+  orgId: string,
+  label: string,
+  points = 10,
+) {
+  const bank = await createElearningQuestionBank(db, {
+    orgId,
+    actorId: actor(`bank-${label}`),
+    title: `Bank ${label}`,
+  })
+  const revision = await createElearningBankQuestion(db, {
+    orgId,
+    actorId: actor(`question-${label}`),
+    bankId: bank.bankId,
+    question: {
+      questionType: 'single_choice',
+      prompt: `Question ${label}`,
+      options: [
+        { id: 'a', text: 'Alpha' },
+        { id: 'b', text: 'Beta' },
+      ],
+      correctOptionIds: ['a'],
+      points,
+      explanation: 'Internal explanation',
+    },
+  })
+  const paper = await publishElearningFixedPaper(db, {
+    orgId,
+    actorId: actor(`paper-${label}`),
+    title: `Paper ${label}`,
+    items: [{ questionRevisionId: revision.questionRevisionId, points }],
+  })
+  return { ...bank, ...revision, ...paper }
+}
+
+async function seedPublishedMixedPaper(
+  db: ClientDb,
+  orgId: string,
+  label: string,
+) {
+  const bank = await createElearningQuestionBank(db, {
+    orgId,
+    actorId: actor(`bank-${label}`),
+    title: `Bank ${label}`,
+  })
+  const objective = await createElearningBankQuestion(db, {
+    orgId,
+    actorId: actor(`objective-${label}`),
+    bankId: bank.bankId,
+    question: {
+      questionType: 'single_choice',
+      prompt: `Objective ${label}`,
+      options: [
+        { id: 'a', text: 'Alpha' },
+        { id: 'b', text: 'Beta' },
+      ],
+      correctOptionIds: ['a'],
+      points: 10,
+      explanation: null,
+    },
+  })
+  const manual = await createElearningBankQuestion(db, {
+    orgId,
+    actorId: actor(`manual-${label}`),
+    bankId: bank.bankId,
+    question: {
+      questionType: 'short_answer',
+      prompt: `Manual ${label}`,
+      options: [],
+      correctOptionIds: [],
+      points: 10,
+      explanation: null,
+    },
+  })
+  const paper = await publishElearningFixedPaper(db, {
+    orgId,
+    actorId: actor(`paper-${label}`),
+    title: `Paper ${label}`,
+    items: [
+      { questionRevisionId: objective.questionRevisionId, points: 10 },
+      { questionRevisionId: manual.questionRevisionId, points: 10 },
+    ],
+  })
+  return {
+    paperId: paper.paperId,
+    objectiveRevisionId: objective.questionRevisionId,
+    shortAnswerRevisionId: manual.questionRevisionId,
+  }
+}
+
+function paperExamInput(
+  orgId: string,
+  paperId: string,
+  overrides: Partial<PublishElearningPaperExamInput> = {},
+): PublishElearningPaperExamInput {
+  return {
+    orgId,
+    actorId: actor('exam-author'),
+    paperId,
+    title: 'Fixed-paper exam',
+    passScore: 6,
+    maxAttempts: 2,
+    windowStartsAt: '2026-09-01T01:00:00+08:00',
+    windowEndsAt: '2026-09-02T01:00:00+08:00',
+    durationSeconds: 1800,
+    shuffleQuestions: true,
+    shuffleOptions: true,
+    disclosurePolicy: 'correctness_after_window',
+    ...overrides,
+  }
+}
+
+async function mountExamForLearner(
+  client: PoolClient,
+  orgId: string,
+  examId: string,
+  label: string,
+): Promise<{
+  assignmentId: string
+  assignmentMemberId: string
+  courseId: string
+  courseVersionId: string
+  itemId: string
+  userId: string
+}> {
+  const courseId = randomUUID()
+  const versionId = randomUUID()
+  const mediaId = randomUUID()
+  const videoItemId = randomUUID()
+  const itemId = randomUUID()
+  const assignmentId = randomUUID()
+  const memberId = randomUUID()
+  const userId = actor(`learner-${label}`)
+  await client.query(
+    `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+     VALUES ($1, $2, 'Paper exam course', 'active', $3)`,
+    [courseId, orgId, actor(`course-${label}`)],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_versions
+       (id, org_id, course_id, version, status, title, created_by)
+     VALUES ($1, $2, $3, 1, 'draft', 'Version 1', $4)`,
+    [versionId, orgId, courseId, actor(`version-${label}`)],
+  )
+  await client.query(
+    `INSERT INTO elearning_media (
+       id, org_id, storage_key, mime_type, magic_mime_type,
+       size_bytes, sha256, duration_ms, status, created_by
+     ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 10000, 'ready', $5)`,
+    [
+      mediaId,
+      orgId,
+      `${NS}/runtime-media/${mediaId}`,
+      'a'.repeat(64),
+      actor(`uploader-${label}`),
+    ],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_version_items (
+       id, org_id, course_version_id, item_type, position, media_id, exam_id,
+       completion_policy_version, completion_threshold_bps
+     ) VALUES ($1, $2, $3, 'video', 1, $4, NULL, 'video-v1-90pct', 9000)`,
+    [videoItemId, orgId, versionId, mediaId],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_version_items (
+       id, org_id, course_version_id, item_type, position, media_id, exam_id,
+       completion_policy_version, completion_threshold_bps
+     ) VALUES ($1, $2, $3, 'exam', 2, NULL, $4, NULL, NULL)`,
+    [itemId, orgId, versionId, examId],
+  )
+  await client.query(
+    `UPDATE elearning_course_versions
+        SET status = 'published', updated_at = now()
+      WHERE org_id = $1 AND id = $2`,
+    [orgId, versionId],
+  )
+  await client.query(
+    `INSERT INTO elearning_assignments (
+       id, org_id, course_version_id, source_key, request_hash,
+       request_hash_version, deadline, assigned_by
+     ) VALUES ($1, $2, $3, $4, $5, 1, NULL, $6)`,
+    [
+      assignmentId,
+      orgId,
+      versionId,
+      `${orgId}-source-${assignmentId}`,
+      `hash-${assignmentId}`,
+      actor(`assigner-${label}`),
+    ],
+  )
+  await client.query(
+    `INSERT INTO elearning_assignment_members (
+       id, org_id, assignment_id, course_version_id, user_id, source
+     ) VALUES ($1, $2, $3, $4, $5, 'manual')`,
+    [memberId, orgId, assignmentId, versionId, userId],
+  )
+  await client.query(
+    `INSERT INTO elearning_progress (
+       org_id, assignment_member_id, course_version_id, course_version_item_id,
+       user_id, status, effective_ms, max_position_ms, completed_at,
+       required_at_completion
+     ) VALUES ($1, $2, $3, $4, $5, 'completed', 9000, 10000, now(), TRUE)`,
+    [orgId, memberId, versionId, videoItemId, userId],
+  )
+  return {
+    assignmentId,
+    assignmentMemberId: memberId,
+    courseId,
+    courseVersionId: versionId,
+    itemId,
+    userId,
+  }
+}
+
+afterAll(async () => {
+  await pool.end()
+})
+
+describe('e-learning L3 paper-bound exam rules', () => {
+  it('runs on the named schema with same-org binding, closed rules, and active DB guards', async () => {
+    const migration = await pool.query(
+      'SELECT name FROM kysely_migration WHERE name = $1',
+      [MIGRATION_NAME],
+    )
+    expect(migration.rows).toHaveLength(1)
+    const deadlineMigration = await pool.query(
+      'SELECT name FROM kysely_migration WHERE name = $1',
+      [DEADLINE_MIGRATION_NAME],
+    )
+    expect(deadlineMigration.rows).toHaveLength(1)
+
+    const columns = await pool.query<{
+      column_name: string
+      is_nullable: string
+      column_default: string | null
+    }>(
+      `SELECT column_name, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'elearning_exams'
+          AND column_name = ANY($1::text[])
+        ORDER BY column_name`,
+      [
+        [
+          'paper_id',
+          'window_starts_at',
+          'window_ends_at',
+          'duration_seconds',
+          'shuffle_questions',
+          'shuffle_options',
+          'disclosure_policy',
+        ],
+      ],
+    )
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      'disclosure_policy',
+      'duration_seconds',
+      'paper_id',
+      'shuffle_options',
+      'shuffle_questions',
+      'window_ends_at',
+      'window_starts_at',
+    ])
+    expect(
+      columns.rows.find((row) => row.column_name === 'shuffle_questions'),
+    ).toMatchObject({
+      is_nullable: 'NO',
+      column_default: 'false',
+    })
+    expect(
+      columns.rows.find((row) => row.column_name === 'shuffle_options'),
+    ).toMatchObject({
+      is_nullable: 'NO',
+      column_default: 'false',
+    })
+    expect(
+      columns.rows.find((row) => row.column_name === 'disclosure_policy'),
+    ).toMatchObject({
+      is_nullable: 'NO',
+      column_default: "'no_review'::text",
+    })
+
+    const constraintNames = [
+      ELEARNING_EXAM_PAPER_FK,
+      ELEARNING_EXAM_WINDOW_CHECK,
+      ELEARNING_EXAM_DURATION_CHECK,
+      ELEARNING_EXAM_DISCLOSURE_CHECK,
+      ELEARNING_EXAM_AFTER_WINDOW_CHECK,
+    ]
+    const constraints = await pool.query<{
+      conname: string
+      definition: string
+    }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname = ANY($1::text[])
+        ORDER BY conname`,
+      [constraintNames],
+    )
+    expect(constraints.rows).toHaveLength(constraintNames.length)
+    const byName = new Map(
+      constraints.rows.map((row) => [row.conname, row.definition]),
+    )
+    expect(byName.get(ELEARNING_EXAM_PAPER_FK)).toContain(
+      'FOREIGN KEY (org_id, paper_id)',
+    )
+    expect(byName.get(ELEARNING_EXAM_WINDOW_CHECK)).toContain(
+      'window_starts_at < window_ends_at',
+    )
+    expect(byName.get(ELEARNING_EXAM_DURATION_CHECK)).toContain(
+      'duration_seconds >= 1',
+    )
+
+    const attemptColumns = await pool.query<{
+      column_name: string
+      is_nullable: string
+    }>(
+      `SELECT column_name, is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name = ANY($1::text[])
+        ORDER BY column_name`,
+      [['deadline_at', 'expired_at']],
+    )
+    expect(attemptColumns.rows).toEqual([
+      { column_name: 'deadline_at', is_nullable: 'YES' },
+      { column_name: 'expired_at', is_nullable: 'YES' },
+    ])
+    const attemptConstraints = await pool.query<{
+      conname: string
+      definition: string
+    }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname = ANY($1::text[])
+        ORDER BY conname`,
+      [[ELEARNING_ATTEMPT_DEADLINE_CHECK, ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK]],
+    )
+    expect(attemptConstraints.rows).toHaveLength(2)
+    const attemptChecks = new Map(
+      attemptConstraints.rows.map((row) => [row.conname, row.definition]),
+    )
+    expect(attemptChecks.get(ELEARNING_ATTEMPT_DEADLINE_CHECK)).toContain(
+      'deadline_at > started_at',
+    )
+    expect(attemptChecks.get(ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK)).toContain(
+      "status = ANY (ARRAY['expired'::text, 'awaiting_manual'::text, 'graded'::text])",
+    )
+    const attemptIndex = await pool.query(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = $1`,
+      [ELEARNING_ATTEMPT_DUE_INDEX],
+    )
+    expect(attemptIndex.rows).toHaveLength(1)
+
+    const index = await pool.query(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = $1`,
+      [ELEARNING_EXAM_PAPER_INDEX],
+    )
+    expect(index.rows).toEqual([{ indexname: ELEARNING_EXAM_PAPER_INDEX }])
+
+    const triggers = await pool.query<{ tgname: string; tgenabled: string }>(
+      `SELECT tgname, tgenabled
+         FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgname = ANY($1::text[])
+        ORDER BY tgname`,
+      [
+        [
+          EXAMS_STATE_TRIGGER,
+          EXAM_QUESTIONS_DRAFT_TRIGGER,
+          EXAMS_PUBLISH_POINTS_TRIGGER,
+        ],
+      ],
+    )
+    expect(triggers.rows).toEqual(
+      [
+        EXAM_QUESTIONS_DRAFT_TRIGGER,
+        EXAMS_STATE_TRIGGER,
+        EXAMS_PUBLISH_POINTS_TRIGGER,
+      ]
+        .sort()
+        .map((tgname) => ({ tgname, tgenabled: 'O' })),
+    )
+
+    const functions = await pool.query<{ proname: string; definition: string }>(
+      `SELECT p.proname, pg_get_functiondef(p.oid) AS definition
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname = ANY($1::text[])`,
+      [
+        [
+          'elearning_exams_state_guard',
+          'elearning_exam_questions_draft_parent',
+          'elearning_exams_publish_points_guard',
+        ],
+      ],
+    )
+    const functionByName = new Map(
+      functions.rows.map((row) => [row.proname, row.definition]),
+    )
+    expect(functionByName.get('elearning_exams_state_guard')).toContain(
+      'NEW.paper_id IS DISTINCT FROM OLD.paper_id',
+    )
+    expect(
+      functionByName.get('elearning_exam_questions_draft_parent'),
+    ).toContain('parent_paper_id IS NOT NULL')
+    expect(
+      functionByName.get('elearning_exams_publish_points_guard'),
+    ).toContain('FROM elearning_paper_questions')
+  })
+
+  it('publishes one paper-bound exam atomically and preserves its immutable binding', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('publish')
+      const paper = await seedPublishedPaper(db, orgId, 'publish')
+      const result = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId),
+      )
+      expect(result).toEqual({
+        examId: expect.any(String),
+        paperId: paper.paperId,
+        status: 'published',
+        totalPoints: 10,
+      })
+
+      const stored = await client.query(
+        `SELECT paper_id, status, pass_score::integer, max_attempts,
+                window_starts_at, window_ends_at, duration_seconds,
+                shuffle_questions, shuffle_options, disclosure_policy,
+                (SELECT count(*)::integer
+                   FROM elearning_exam_questions q
+                  WHERE q.org_id = e.org_id AND q.exam_id = e.id) AS inline_count
+           FROM elearning_exams e
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, result.examId],
+      )
+      expect(stored.rows).toHaveLength(1)
+      expect(stored.rows[0]).toMatchObject({
+        paper_id: paper.paperId,
+        status: 'published',
+        pass_score: 6,
+        max_attempts: 2,
+        duration_seconds: 1800,
+        shuffle_questions: true,
+        shuffle_options: true,
+        disclosure_policy: 'correctness_after_window',
+        inline_count: 0,
+      })
+      expect((stored.rows[0]?.window_starts_at as Date).toISOString()).toBe(
+        '2026-08-31T17:00:00.000Z',
+      )
+      expect((stored.rows[0]?.window_ends_at as Date).toISOString()).toBe(
+        '2026-09-01T17:00:00.000Z',
+      )
+
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `UPDATE elearning_exams
+            SET paper_id = NULL
+          WHERE org_id = $1 AND id = $2`,
+          [orgId, result.examId],
+        ),
+      )
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `UPDATE elearning_exams
+            SET status = 'retired', disclosure_policy = 'no_review', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+          [orgId, result.examId],
+        ),
+      )
+
+      await client.query(
+        `UPDATE elearning_papers
+            SET status = 'retired', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, paper.paperId],
+      )
+      await client.query(
+        `UPDATE elearning_exams
+            SET status = 'retired', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, result.examId],
+      )
+      const retired = await client.query(
+        `SELECT status, paper_id
+           FROM elearning_exams
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, result.examId],
+      )
+      expect(retired.rows).toEqual([
+        { status: 'retired', paper_id: paper.paperId },
+      ])
+
+      await expect(
+        publishElearningPaperExam(
+          db,
+          paperExamInput(orgId, paper.paperId, { title: 'Second binding' }),
+        ),
+      ).rejects.toMatchObject({
+        name: 'ElearningPaperExamError',
+        code: 'not_found',
+        message: 'not_found',
+      })
+    })
+  })
+
+  it('keeps legacy inline exams compatible with safe rule defaults', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('legacy')
+      const paper = await seedPublishedPaper(db, orgId, 'legacy')
+      const examId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_exams
+           (id, org_id, title, status, pass_score, max_attempts, created_by)
+         VALUES ($1, $2, 'Legacy inline exam', 'draft', 5, 1, $3)`,
+        [examId, orgId, actor('legacy')],
+      )
+      const defaults = await client.query(
+        `SELECT paper_id, window_starts_at, window_ends_at, duration_seconds,
+                shuffle_questions, shuffle_options, disclosure_policy
+           FROM elearning_exams
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, examId],
+      )
+      expect(defaults.rows).toEqual([
+        {
+          paper_id: null,
+          window_starts_at: null,
+          window_ends_at: null,
+          duration_seconds: null,
+          shuffle_questions: false,
+          shuffle_options: false,
+          disclosure_policy: 'no_review',
+        },
+      ])
+      await client.query(
+        `INSERT INTO elearning_exam_questions
+           (org_id, exam_id, question_revision_id, position, points)
+         VALUES ($1, $2, $3, 1, 10)`,
+        [orgId, examId, paper.questionRevisionId],
+      )
+      await client.query(
+        `UPDATE elearning_exams
+            SET status = 'published', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, examId],
+      )
+      const published = await client.query(
+        'SELECT status FROM elearning_exams WHERE org_id = $1 AND id = $2',
+        [orgId, examId],
+      )
+      expect(published.rows).toEqual([{ status: 'published' }])
+    })
+  })
+
+  it('enforces exactly one immutable content source in the database', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('source')
+      const paper = await seedPublishedPaper(db, orgId, 'source')
+
+      const emptyExamId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_exams
+           (id, org_id, title, status, pass_score, max_attempts, created_by)
+         VALUES ($1, $2, 'No source', 'draft', 1, 1, $3)`,
+        [emptyExamId, orgId, actor('empty')],
+      )
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `UPDATE elearning_exams
+            SET status = 'published', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+          [orgId, emptyExamId],
+        ),
+      )
+
+      const boundExamId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by, paper_id
+         ) VALUES ($1, $2, 'Paper source', 'draft', 1, 1, $3, $4)`,
+        [boundExamId, orgId, actor('bound'), paper.paperId],
+      )
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `INSERT INTO elearning_exam_questions
+           (org_id, exam_id, question_revision_id, position, points)
+         VALUES ($1, $2, $3, 1, 10)`,
+          [orgId, boundExamId, paper.questionRevisionId],
+        ),
+      )
+
+      const inlineExamId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_exams
+           (id, org_id, title, status, pass_score, max_attempts, created_by)
+         VALUES ($1, $2, 'Inline source', 'draft', 1, 1, $3)`,
+        [inlineExamId, orgId, actor('inline')],
+      )
+      await client.query(
+        `INSERT INTO elearning_exam_questions
+           (org_id, exam_id, question_revision_id, position, points)
+         VALUES ($1, $2, $3, 1, 10)`,
+        [orgId, inlineExamId, paper.questionRevisionId],
+      )
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `UPDATE elearning_exams
+            SET paper_id = $1
+          WHERE org_id = $2 AND id = $3`,
+          [paper.paperId, orgId, inlineExamId],
+        ),
+      )
+    })
+  })
+
+  it('rejects cross-org, unpublished-paper, and over-score bindings', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const sourceOrg = org('binding-source')
+      const otherOrg = org('binding-other')
+      const paper = await seedPublishedPaper(db, sourceOrg, 'binding')
+
+      await expectSqlState(client, '23503', () =>
+        client.query(
+          `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by, paper_id
+         ) VALUES ($1, $2, 'Cross-org', 'draft', 1, 1, $3, $4)`,
+          [randomUUID(), otherOrg, actor('cross-org'), paper.paperId],
+        ),
+      )
+      await expect(
+        publishElearningPaperExam(db, paperExamInput(otherOrg, paper.paperId)),
+      ).rejects.toMatchObject({ code: 'not_found' })
+
+      const draftPaperId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_papers
+           (id, org_id, title, composition_mode, status, created_by)
+         VALUES ($1, $2, 'Draft paper', 'fixed', 'draft', $3)`,
+        [draftPaperId, sourceOrg, actor('draft-paper')],
+      )
+      await expect(
+        publishElearningPaperExam(db, paperExamInput(sourceOrg, draftPaperId)),
+      ).rejects.toMatchObject({ code: 'not_found' })
+
+      await expect(
+        publishElearningPaperExam(
+          db,
+          paperExamInput(sourceOrg, paper.paperId, { passScore: 11 }),
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_input' })
+
+      const overScoreExamId = randomUUID()
+      await client.query(
+        `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by, paper_id
+         ) VALUES ($1, $2, 'Over score', 'draft', 11, 1, $3, $4)`,
+        [overScoreExamId, sourceOrg, actor('over-score'), paper.paperId],
+      )
+      await expectSqlState(client, 'P0001', () =>
+        client.query(
+          `UPDATE elearning_exams
+            SET status = 'published', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+          [sourceOrg, overScoreExamId],
+        ),
+      )
+    })
+  })
+
+  it('fails closed on malformed rule combinations in service and SQL paths', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('rules')
+      const paper = await seedPublishedPaper(db, orgId, 'rules')
+
+      const invalidInputs: PublishElearningPaperExamInput[] = [
+        paperExamInput(orgId, paper.paperId, { windowEndsAt: null }),
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: '2026-09-02T00:00:00Z',
+          windowEndsAt: '2026-09-01T00:00:00Z',
+        }),
+        paperExamInput(orgId, paper.paperId, { durationSeconds: 0 }),
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          disclosurePolicy: 'correctness_after_window',
+        }),
+      ]
+      for (const input of invalidInputs) {
+        await expect(
+          publishElearningPaperExam(db, input),
+        ).rejects.toBeInstanceOf(ElearningPaperExamError)
+        await expect(
+          publishElearningPaperExam(db, input),
+        ).rejects.toMatchObject({
+          code: 'invalid_input',
+          message: 'invalid_input',
+        })
+      }
+      await expect(
+        publishElearningPaperExam(db, {
+          ...paperExamInput(orgId, paper.paperId),
+          unexpected: true,
+        } as never),
+      ).rejects.toMatchObject({ code: 'invalid_input' })
+
+      const baseParams = [
+        randomUUID(),
+        orgId,
+        actor('sql-rules'),
+        paper.paperId,
+      ]
+      await expectSqlState(client, '23514', () =>
+        client.query(
+          `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by,
+           paper_id, window_starts_at
+         ) VALUES ($1, $2, 'Half window', 'draft', 1, 1, $3, $4, now())`,
+          baseParams,
+        ),
+      )
+      await expectSqlState(client, '23514', () =>
+        client.query(
+          `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by,
+           paper_id, duration_seconds
+         ) VALUES ($1, $2, 'Bad duration', 'draft', 1, 1, $3, $4, 0)`,
+          [randomUUID(), orgId, actor('sql-duration'), paper.paperId],
+        ),
+      )
+      await expectSqlState(client, '23514', () =>
+        client.query(
+          `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by,
+           paper_id, disclosure_policy
+         ) VALUES ($1, $2, 'Bad policy', 'draft', 1, 1, $3, $4, 'answer_key')`,
+          [randomUUID(), orgId, actor('sql-policy'), paper.paperId],
+        ),
+      )
+      await expectSqlState(client, '23514', () =>
+        client.query(
+          `INSERT INTO elearning_exams (
+           id, org_id, title, status, pass_score, max_attempts, created_by,
+           paper_id, disclosure_policy
+         ) VALUES (
+           $1, $2, 'Missing window end', 'draft', 1, 1, $3, $4,
+           'correctness_after_window'
+         )`,
+          [randomUUID(), orgId, actor('sql-after-window'), paper.paperId],
+        ),
+      )
+    })
+  })
+
+  it('starts and grades a retired fixed paper from its pinned attempt snapshot', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: null,
+          shuffleQuestions: true,
+          shuffleOptions: true,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime',
+      )
+      await client.query(
+        `UPDATE elearning_papers
+            SET status = 'retired', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, paper.paperId],
+      )
+
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(started).toMatchObject({
+        status: 'started',
+        attemptNo: 1,
+        duplicate: false,
+        paper: {
+          questions: [{
+            questionRevisionId: paper.questionRevisionId,
+            points: 10,
+          }],
+        },
+      })
+      expect(JSON.stringify(started)).not.toContain('answerKey')
+      expect(JSON.stringify(started)).not.toContain('explanation')
+
+      const replayed = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(replayed).toEqual({
+        ...started,
+        duplicate: true,
+      })
+
+      const stored = await client.query(
+        `SELECT paper_snapshot
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(stored.rows[0]?.paper_snapshot).toMatchObject({
+        examId: exam.examId,
+        questions: [{
+          questionRevisionId: paper.questionRevisionId,
+          answerKey: { correct: ['a'] },
+          explanation: 'Internal explanation',
+        }],
+      })
+      expect(stored.rows).toHaveLength(1)
+
+      const submitted = await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })
+      expect(submitted).toEqual({
+        attemptId: started.attemptId,
+        attemptNo: 1,
+        status: 'graded',
+        autoScore: 10,
+        totalScore: 10,
+        passed: true,
+        duplicate: false,
+      })
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({
+        code: 'review_unavailable',
+        message: 'review_unavailable',
+      })
+    })
+  })
+
+  it('returns only the learner wrong-item review and preserves tenant and course lifecycle boundaries', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-review')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-review')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: null,
+          shuffleQuestions: false,
+          shuffleOptions: false,
+          disclosurePolicy: 'wrong_items_after_submit',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-review',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['b'] },
+      })
+
+      const expected = {
+        attemptId: started.attemptId,
+        attemptNo: 1,
+        status: 'graded',
+        disclosurePolicy: 'wrong_items_after_submit',
+        autoScore: 0,
+        totalScore: 10,
+        passed: false,
+        questions: [{
+          position: 1,
+          questionRevisionId: paper.questionRevisionId,
+          questionType: 'single_choice',
+          prompt: 'Question runtime-review',
+          options: [
+            { id: 'a', text: 'Alpha' },
+            { id: 'b', text: 'Beta' },
+          ],
+          points: 10,
+          selected: ['b'],
+          correct: false,
+          awarded: 0,
+        }],
+      }
+      const review = await getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })
+      expect(review).toEqual(expected)
+      expect(JSON.stringify(review)).not.toMatch(
+        /answerKey|correctOptionIds|explanation|examId|passScore/,
+      )
+      const otherUserId = actor('other-review-user')
+      await client.query(
+        `INSERT INTO elearning_assignment_members (
+           id, org_id, assignment_id, course_version_id, user_id, source
+         ) VALUES ($1, $2, $3, $4, $5, 'manual')`,
+        [
+          randomUUID(),
+          orgId,
+          mount.assignmentId,
+          mount.courseVersionId,
+          otherUserId,
+        ],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: otherUserId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+      await expect(getElearningExamReview(db, {
+        orgId: org('other-review-org'),
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+
+      await client.query(
+        `UPDATE elearning_courses
+            SET status = 'archived', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.courseId],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual(expected)
+
+      await client.query(
+        `UPDATE elearning_assignment_members
+            SET revoked_at = now(),
+                revoked_by = $3,
+                revocation_reason = 'review access test'
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.assignmentMemberId, actor('review-revoker')],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+
+      await client.query(
+        `UPDATE elearning_courses
+            SET status = 'withdrawn', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.courseId],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'course_withdrawn' })
+    })
+  })
+
+  it('uses the database clock to keep after-window review closed', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-review-window')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-review-window')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(Date.now() - 60_000).toISOString(),
+          windowEndsAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+          durationSeconds: null,
+          disclosurePolicy: 'correctness_after_window',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-review-window',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })
+
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({
+        code: 'review_unavailable',
+        message: 'review_unavailable',
+      })
+    })
+  })
+
+  it('uses the database clock to reject exams before and after their window without residue', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-window')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-window')
+      const now = Date.now()
+      const future = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(now + 10 * 60_000).toISOString(),
+          windowEndsAt: new Date(now + 20 * 60_000).toISOString(),
+          durationSeconds: 60,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const futureMount = await mountExamForLearner(
+        client,
+        orgId,
+        future.examId,
+        'runtime-window-future',
+      )
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: futureMount.userId,
+        itemId: futureMount.itemId,
+      })).rejects.toBeInstanceOf(ElearningExamError)
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: futureMount.userId,
+        itemId: futureMount.itemId,
+      })).rejects.toMatchObject({
+        code: 'exam_not_open',
+        message: 'exam_not_open',
+      })
+
+      const past = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(now - 20 * 60_000).toISOString(),
+          windowEndsAt: new Date(now - 10 * 60_000).toISOString(),
+          durationSeconds: 60,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const pastMount = await mountExamForLearner(
+        client,
+        orgId,
+        past.examId,
+        'runtime-window-past',
+      )
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: pastMount.userId,
+        itemId: pastMount.itemId,
+      })).rejects.toMatchObject({
+        code: 'exam_closed',
+        message: 'exam_closed',
+      })
+      const attempts = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND exam_id = ANY($2::uuid[])`,
+        [orgId, [future.examId, past.examId]],
+      )
+      expect(attempts.rows).toEqual([{ count: 0 }])
+      const jobs = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_jobs
+          WHERE org_id = $1 AND kind = 'exam_attempt_expiry'`,
+        [orgId],
+      )
+      expect(jobs.rows).toEqual([{ count: 0 }])
+    })
+  })
+
+  it('freezes the tighter duration/window deadline and enqueues one exact expiry job', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-deadline')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-deadline')
+      const windowEnd = new Date(Date.now() + 10 * 60_000)
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(Date.now() - 60_000).toISOString(),
+          windowEndsAt: windowEnd.toISOString(),
+          durationSeconds: 60,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-deadline',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(started.deadlineAt).not.toBeNull()
+      const attempt = await client.query<{
+        started_at: Date
+        deadline_at: Date
+        expired_at: Date | null
+      }>(
+        `SELECT started_at, deadline_at, expired_at
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      const row = attempt.rows[0]
+      expect(row).toBeDefined()
+      expect(started.deadlineAt).toBe(row.deadline_at.toISOString())
+      expect(row.deadline_at.getTime() - row.started_at.getTime()).toBe(60_000)
+      expect(row.deadline_at.getTime()).toBeLessThan(windowEnd.getTime())
+      expect(row.expired_at).toBeNull()
+
+      const jobs = await client.query<{
+        kind: string
+        occurrence_key: string
+        ref: string
+        payload: Record<string, unknown>
+        due_at: Date
+      }>(
+        `SELECT kind, occurrence_key, ref, payload, due_at
+           FROM elearning_jobs
+          WHERE org_id = $1 AND kind = 'exam_attempt_expiry'`,
+        [orgId],
+      )
+      expect(jobs.rows).toEqual([{
+        kind: 'exam_attempt_expiry',
+        occurrence_key: `attempt:${started.attemptId}`,
+        ref: started.attemptId,
+        payload: {},
+        due_at: row.deadline_at,
+      }])
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'not_due' })
+      expect((await client.query(
+        `SELECT status
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ status: 'started' }])
+      expect((await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ count: 0 }])
+    })
+  })
+
+  it('rejects late API answers, grades only the last accepted save, and stays idempotent', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-api-expiry')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-api-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-api-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['b'] },
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+
+      await expect(submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })).rejects.toMatchObject({ code: 'attempt_expired' })
+      await expect(saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })).rejects.toMatchObject({ code: 'attempt_expired' })
+
+      const attempt = await client.query<{
+        status: string
+        answers: Record<string, string[]>
+        auto_score: string
+        total_score: string
+        passed: boolean
+        submitted_at: Date
+        deadline_at: Date
+        expired_at: Date
+      }>(
+        `SELECT status, answers, auto_score::text, total_score::text, passed,
+                submitted_at, deadline_at, expired_at
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(attempt.rows[0]).toMatchObject({
+        status: 'graded',
+        answers: { [paper.questionRevisionId]: ['b'] },
+        auto_score: '0',
+        total_score: '10',
+        passed: false,
+      })
+      expect(attempt.rows[0].submitted_at).toEqual(attempt.rows[0].deadline_at)
+      expect(attempt.rows[0].expired_at.getTime()).toBeGreaterThanOrEqual(
+        attempt.rows[0].deadline_at.getTime(),
+      )
+      const grades = await client.query(
+        `SELECT score::text, max_score::text
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(grades.rows).toEqual([{ score: '0', max_score: '10' }])
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+      expect((await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ count: 1 }])
+    })
+  })
+
+  it('parks an expired mixed paper for manual grading without leaking its answer into the ledger', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-manual-expiry')
+      const paper = await seedPublishedMixedPaper(db, orgId, 'runtime-manual-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          passScore: 15,
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-manual-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(started.paper.version).toBe(2)
+      await saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: {
+          [paper.objectiveRevisionId]: ['a'],
+          [paper.shortAnswerRevisionId]: 'manual answer must stay private',
+        },
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'settled' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+
+      const attempt = await client.query(
+        `SELECT status, answers, auto_score::text, manual_score::text,
+                total_score, passed, graded_at, submitted_at, deadline_at, expired_at
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(attempt.rows[0]).toMatchObject({
+        status: 'awaiting_manual',
+        answers: {
+          [paper.objectiveRevisionId]: ['a'],
+          [paper.shortAnswerRevisionId]: 'manual answer must stay private',
+        },
+        auto_score: '10',
+        manual_score: '0',
+        total_score: null,
+        passed: null,
+        graded_at: null,
+      })
+      expect(attempt.rows[0].submitted_at).toEqual(attempt.rows[0].deadline_at)
+      expect(attempt.rows[0].expired_at).toBeInstanceOf(Date)
+
+      const ledger = await client.query(
+        `SELECT score::text, max_score::text, details
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(ledger.rows).toHaveLength(1)
+      expect(ledger.rows[0]).toMatchObject({ score: '10', max_score: '10' })
+      expect(JSON.stringify(ledger.rows[0].details)).not.toContain(
+        'manual answer must stay private',
+      )
+    })
+  })
+
+  it('materializes an expired attempt without API traffic and rejects a cross-org job ref', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-worker-expiry')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-worker-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-worker-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'settled' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId: org('other'),
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+      const rows = await client.query(
+        `SELECT a.status, a.expired_at IS NOT NULL AS expired,
+                count(g.id)::integer AS grade_count
+           FROM elearning_exam_attempts a
+           LEFT JOIN elearning_grading_records g
+             ON g.org_id = a.org_id AND g.attempt_id = a.id
+          WHERE a.org_id = $1 AND a.id = $2
+          GROUP BY a.status, a.expired_at`,
+        [orgId, started.attemptId],
+      )
+      expect(rows.rows).toEqual([{
+        status: 'graded',
+        expired: true,
+        grade_count: 1,
+      }])
+    })
+  })
+})

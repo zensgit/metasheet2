@@ -1,0 +1,4492 @@
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import http from 'node:http'
+import net from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+// F22 (2026-08-31): the live r7 upgrade used `Get-ChildItem -Exclude 'node_modules'`
+// during a recursive copy. `-Exclude` does not filter directories in recursion, so an
+// entire plugin lib/ directory was silently skipped — the deployment was missing
+// stock-preparation-preflight.cjs until a hand-check against the package caught it.
+// See docs/development/takeover-beiliao-20260821/first-deployment-lessons-20260831.md
+// (Appendix A, F22) and r7-build-manifest.md §2.
+//
+// Adversarial verification of the first version of this file/script (2026-08-31)
+// refuted three of four guarantee lanes with empirical replays:
+//   P0 — this test file was wired into no workflow and no package.json script: a
+//        dead tripwire. Fixed by a one-line addition to an existing, unpinned
+//        `node --test` list in the REQUIRED `test` job of plugin-tests.yml (see
+//        that file's "Global History flag manifest contract (R12-C)" step).
+//   P1 — the static -Exclude tripwire was evadable by a legal PowerShell parameter
+//        abbreviation (-Ex/-Excl/-Exclu, ...) or a splatted `@{ Exclude = ... }`
+//        hashtable key. Fixed by findForbiddenExcludeTokens below, plus an evasion
+//        battery.
+//   P1 — a broken deployment could be left running (pm2 restarted, health check
+//        failed, pm2 never stopped), and a mid-swap exception died raw, with no
+//        restore-block printed. Fixed by wrapping the whole mutation window in one
+//        handler (Write-RestoreBlock + Stop-Pm2App) in the script's Main.
+//   P1 — the count-comparison "gate" was advisory and chronically wrong (an overlay
+//        copy never deletes stale files, so deployed > package is normal). Fixed by
+//        Assert-PluginTreesMatchPackage (per-file SHA-256) and
+//        Assert-NoNodeModulesContentLeaked (the negative half — content leaking to
+//        an unexpected location, which the positive hash check alone cannot see).
+// The verifiers also noted the original fixtures were too shallow to reproduce F22
+// (both canonical -Exclude patterns passed against them). The acid fixture below
+// (buildAcidPackageStage / buildAcidLiveRoot) replaces those fixtures everywhere.
+
+const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
+const scriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-upgrade-inplace.ps1')
+const workflowPath = path.join(repoRoot, '.github/workflows/plugin-tests.yml')
+// The one Windows job (stock-prep-powershell51) lives in its own workflow file, which the
+// sealed-export provenance pins whole; the ubuntu `test` job stays in plugin-tests.yml.
+const windowsWorkflowPath = path.join(repoRoot, '.github/workflows/stock-prep-powershell51.yml')
+const runbookPath = path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')
+const scriptSource = fs.readFileSync(scriptPath, 'utf8')
+
+// The PowerShell every harness and every end-to-end run of this file uses.
+// Default 'pwsh' (the ubuntu `test` job: pwsh 7). Set UPGRADE_INPLACE_TEST_SHELL
+// to Windows PowerShell 5.1's powershell.exe to run this same file under 5.1, the
+// demo host's shell -- some of the script's behaviour only exists there: pwsh 7.2+
+// never turns redirected native stderr into an ErrorRecord, so a revert of
+// Invoke-Pm2's `$ErrorActionPreference = 'Continue'` (R59: pm2's "not found" on
+// stderr becomes a terminating NativeCommandError) is red at runtime only on 5.1.
+// The pwsh 7 CI lane still catches that revert through the static pin in the
+// "R59 wiring" test. The Windows lanes (5.1 and pwsh 7 on windows-latest) run this
+// file through scripts/ops/__tests__/multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1
+// -- see the "CI wiring" test.
+const PWSH = process.env.UPGRADE_INPLACE_TEST_SHELL || 'pwsh'
+// Windows PowerShell 5.1 decodes a BOM-less script in the machine's ANSI code page;
+// under 1252 (windows-latest) the em-dashes the script used to carry inside its
+// strings ended them early and the script did not parse. Since R60 review (#6079)
+// the script is pure ASCII (pinned by the "encoding" test), so it parses under any
+// code page. The copy deployed to the demo host still gets a BOM prepended (handoff
+// §3 step 1), so under 5.1 every run executes a byte-identical copy of the script with
+// a UTF-8 BOM prepended, as deployed; the static checks below always read the repo
+// file itself.
+const PWSH_IS_WINDOWS_POWERSHELL = /(^|[\\/])powershell(\.exe)?$/i.test(PWSH)
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf])
+function writeRunnableScript(filePath, source) {
+  const body = Buffer.from(source.replace(/^﻿/, ''), 'utf8')
+  fs.writeFileSync(filePath, PWSH_IS_WINDOWS_POWERSHELL ? Buffer.concat([UTF8_BOM, body]) : body)
+}
+let scriptExecDir = null
+function scriptExecPathFor(sourcePath) {
+  if (!PWSH_IS_WINDOWS_POWERSHELL) return sourcePath
+  if (!scriptExecDir) {
+    scriptExecDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-script-'))
+    process.on('exit', () => fs.rmSync(scriptExecDir, { recursive: true, force: true }))
+  }
+  const copyPath = path.join(scriptExecDir, path.basename(sourcePath))
+  writeRunnableScript(copyPath, fs.readFileSync(sourcePath, 'utf8'))
+  return copyPath
+}
+// What every harness dot-sources and every end-to-end run executes.
+const scriptExecPath = scriptExecPathFor(scriptPath)
+// A Windows PowerShell 5.1 started (via node) from a pwsh 7 session -- e.g. a CI step
+// whose host shell is pwsh -- inherits pwsh 7's PSModulePath and then cannot load its own core
+// modules: "The term 'Get-FileHash' is not recognized", Compress-Archive likewise.
+// Without PSModulePath it builds its own default. Every child of this file inherits
+// process.env (childEnv copies it), so dropping it here covers every spawn.
+if (process.env.UPGRADE_INPLACE_TEST_SHELL) delete process.env.PSModulePath
+// GitHub's windows-latest TEMP is C:\Users\RUNNER~1\AppData\Local\Temp, an 8.3 SHORT
+// spelling. The script's walk-based relative paths (Copy-TreeExcludingNodeModules,
+// Assert-PluginTreesMatchPackage, ...) take `$_.FullName.Substring($root.Length)`
+// with $root from Resolve-Path, which keeps a short spelling, while Get-ChildItem
+// returns long FullNames (both 5.1 and pwsh 7 on Windows): every relative path comes
+// out shifted. That is a pre-existing limit of the script for GIVEN paths that contain
+// 8.3 segments -- the pre-R59 script fails the same five tests the same way under a
+// short TEMP -- and not what this file tests, so on Windows every fixture lives under
+// the long spelling of the temp dir (children inherit it).
+if (process.platform === 'win32') {
+  const longTempDir = fs.realpathSync.native(os.tmpdir())
+  process.env.TEMP = longTempDir
+  process.env.TMP = longTempDir
+}
+
+// Strips PowerShell `<# ... #>` block comments (used here for rich, deliberately
+// quotes-the-forbidden-syntax documentation of WHY -Exclude is banned) before the
+// static tripwire below scans for live code. Without this, the script's own
+// explanation of F22 ("do not rewrite this as ... -Exclude ...") would trip its
+// own tripwire — the goal is banning the pattern from CODE, not from prose that
+// quotes it as a warning.
+function stripPowerShellBlockComments(source) {
+  return source.replace(/<#[\s\S]*?#>/g, '')
+}
+const scriptCodeOnly = stripPowerShellBlockComments(scriptSource)
+
+const PREFLIGHT_FILE = 'plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs'
+const MANIFEST_FILE = 'plugins/plugin-integration-core/app.manifest.json'
+// One level deeper than the real repo path (lib/adapters/k3-wise-document-templates.cjs,
+// per scripts/ops/multitable-onprem-package-build.sh's BUILD_PROVENANCE marker file) so
+// the acid fixture exercises depth>=3 under lib/, as the verifiers required.
+const DEEP_ADAPTER_FILE = 'plugins/plugin-integration-core/lib/adapters/legacy/k3-wise-document-templates.cjs'
+const DECOY_FILE = 'plugins/plugin-integration-core/lib/legacy-node_modules-shim.cjs'
+const LOOSE_ROOT_FILE = 'plugins/README.txt'
+const PACKAGE_NODE_MODULES_FILE = 'plugins/plugin-integration-core/node_modules/left-pad/index.js'
+const LIVE_NODE_MODULES_SURVIVOR = 'plugins/plugin-integration-core/node_modules/existing-dep/index.js'
+const PACKAGE_LEAK_MARKER = 'PACKAGE_NODE_MODULES_LEAK_MARKER_CONTENT_MUST_NEVER_BE_COPIED_ANYWHERE_OUTSIDE_NODE_MODULES'
+const LIVE_SURVIVOR_CONTENT = 'LIVE_NODE_MODULES_SURVIVOR_CONTENT_MUST_NOT_BE_TOUCHED'
+
+// ── Hardened static -Exclude scanner (mirrors what the script must never contain) ─
+
+// PowerShell accepts ANY unambiguous prefix of a parameter name. Neither
+// Get-ChildItem nor Copy-Item has another parameter starting "Ex", so all of these
+// are legal, working spellings of -Exclude on both cmdlets — the naive `/-Exclude/i`
+// regex the first version of this file used is blind to every one of them except
+// the last.
+const EXCLUDE_PREFIXES = ['Exclude', 'Exclud', 'Exclu', 'Excl', 'Exc', 'Ex']
+const EXCLUDE_DASH_PATTERN = new RegExp(`-(?:${EXCLUDE_PREFIXES.join('|')})\\b`, 'gi')
+// Splatted hashtable key form has no dash at all: `@{ Exclude = 'node_modules' }` or
+// `@{ Excl = ... }`. Deliberately NOT anchored to "must follow { or ; or ," — a
+// PowerShell hashtable/pscustomobject commonly separates entries with a bare
+// newline, not a semicolon, which would have produced a false negative on the
+// second-or-later key in a multi-line splat. Scoped to this one script file, where
+// none of these six short tokens are legitimate identifiers, so the broader match
+// is the correct tradeoff for a tripwire.
+const EXCLUDE_SPLAT_KEY_PATTERN = new RegExp(`\\b(?:${EXCLUDE_PREFIXES.join('|')})\\s*=(?!=)`, 'gi')
+
+function findForbiddenExcludeTokens(text) {
+  const hits = []
+  for (const re of [EXCLUDE_DASH_PATTERN, EXCLUDE_SPLAT_KEY_PATTERN]) {
+    const matches = text.match(re)
+    if (matches) hits.push(...matches)
+  }
+  return hits
+}
+
+// ── 1. STATIC ────────────────────────────────────────────────────────────────────
+
+test('hardened tripwire: the real script contains zero forbidden Exclude tokens (dash-abbreviated or splatted)', () => {
+  const hits = findForbiddenExcludeTokens(scriptCodeOnly)
+  assert.deepEqual(
+    hits,
+    [],
+    'the script must not use -Exclude, any unambiguous abbreviation of it (-Ex/-Exc/-Excl/-Exclu/-Exclud), ' +
+      'or a splatted Exclude/Excl/... hashtable key anywhere in live code',
+  )
+})
+
+test('evasion battery: every legal spelling of the forbidden pattern is caught', () => {
+  const evasions = [
+    ["Get-ChildItem -Recurse -Ex 'node_modules' | Copy-Item -Destination $d -Recurse -Force", '2-char dash abbreviation on Get-ChildItem'],
+    ["Get-ChildItem -Recurse -Excl 'node_modules' | Copy-Item -Destination $d -Recurse -Force", '4-char dash abbreviation on Get-ChildItem'],
+    ["Copy-Item -Path $s -Destination $d -Recurse -Exclu 'node_modules'", '5-char dash abbreviation on Copy-Item'],
+    ["Copy-Item -Path $s -Destination $d -Recurse -EXCLUDE 'node_modules'", 'uppercase full word on Copy-Item'],
+    ["get-childitem -recurse -exc 'node_modules' | copy-item -destination $d -recurse", 'lowercase 3-char abbreviation, lowercase cmdlets'],
+    ["Get-ChildItem -Recurse -Ex:'node_modules'", 'colon parameter-value syntax'],
+    ["$splat = @{ Exclude = 'node_modules' }\nGet-ChildItem @splat -Recurse", 'splatted full-word hashtable key, single-line hashtable'],
+    ["$splat = @{ Excl = 'node_modules' }\nCopy-Item @splat -Recurse", 'splatted abbreviated hashtable key'],
+    [
+      "$splat = @{\n  Recurse = $true\n  Exclude = 'node_modules'\n}\nGet-ChildItem @splat",
+      'splatted key on the SECOND line of a multi-line hashtable with no semicolon before it',
+    ],
+  ]
+
+  for (const [snippet, label] of evasions) {
+    const hits = findForbiddenExcludeTokens(snippet)
+    assert.ok(hits.length > 0, `evasion not caught (${label}): ${JSON.stringify(snippet)}`)
+  }
+})
+
+test('evasion battery: legitimate identifiers containing "Exclu" as a mid-word substring are NOT false-flagged', () => {
+  const clean = [
+    "function Copy-TreeExcludingNodeModules {",
+    "$result = Copy-TreeExcludingNodeModules -Source $s -Destination $d",
+    "# excluding node_modules from the walk",
+    "Test-IsNodeModulesRelativePath -RelativePath $relative",
+  ]
+  for (const snippet of clean) {
+    const hits = findForbiddenExcludeTokens(snippet)
+    assert.deepEqual(hits, [], `false positive on legitimate text: ${JSON.stringify(snippet)} -> ${JSON.stringify(hits)}`)
+  }
+})
+
+test('walk-files copy is implemented by enumerating files, not by filtering a recursive listing', () => {
+  assert.match(
+    scriptSource,
+    /function Copy-TreeExcludingNodeModules/,
+    'the F22-safe copy helper must exist as a named, testable function',
+  )
+  assert.match(
+    scriptSource,
+    /Get-ChildItem -LiteralPath \$sourceFull -Recurse -File -Force/,
+    'the copy helper must enumerate FILES (not directories) recursively and test each one individually',
+  )
+  assert.match(
+    scriptSource,
+    /Test-IsNodeModulesRelativePath/,
+    'the copy helper must delegate the node_modules decision to the standalone, unit-testable predicate',
+  )
+})
+
+test('must-exist manifest defaults to the exact file F22 lost, plus the app manifest', () => {
+  const manifestBlock = scriptSource.match(
+    /\[string\[\]\]\$MustExistManifest = @\(([\s\S]*?)\)/,
+  )
+  assert.ok(manifestBlock, 'the script must declare a parameterized $MustExistManifest default array')
+
+  assert.match(
+    manifestBlock[1],
+    /plugins\/plugin-integration-core\/lib\/stock-preparation-preflight\.cjs/,
+    'the default manifest must include the exact file F22 silently dropped',
+  )
+  assert.match(
+    manifestBlock[1],
+    /plugins\/plugin-integration-core\/app\.manifest\.json/,
+    'the default manifest must include app.manifest.json',
+  )
+})
+
+test('the F22 tripwire assertion refuses to proceed on any missing file', () => {
+  assert.match(scriptSource, /function Assert-MustExistFiles/)
+  assert.match(scriptSource, /throw "UPGRADE_ASSERTION_MISSING_FILES/)
+})
+
+test('the real F22 net is a per-file SHA-256 gate, not just the file-count comparison', () => {
+  assert.match(
+    scriptSource,
+    /function Assert-PluginTreesMatchPackage/,
+    'a per-file hash-verification function must exist',
+  )
+  assert.match(scriptSource, /throw "UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED/)
+  assert.match(
+    scriptSource,
+    /Assert-PluginTreesMatchPackage -PackageRoot \$packageRoot -RootDir \$resolvedRoot/,
+    'the hash gate must actually be called in Main, not just defined',
+  )
+  assert.match(
+    scriptSource,
+    /INFORMATIONAL ONLY[\s\S]{0,400}chronically false-MISMATCH/,
+    'the count comparison must be explicitly demoted to informational, not presented as a gate',
+  )
+})
+
+test('the negative half of the net (node_modules leak detection) exists and is wired into Main', () => {
+  assert.match(scriptSource, /function Assert-NoNodeModulesContentLeaked/)
+  assert.match(scriptSource, /throw "UPGRADE_NODE_MODULES_LEAK_DETECTED/)
+  assert.match(
+    scriptSource,
+    /Assert-NoNodeModulesContentLeaked -PackageRoot \$packageRoot -RootDir \$resolvedRoot/,
+    'the leak-detection gate must actually be called in Main, not just defined',
+  )
+})
+
+test('package checksum is verified before anything else runs', () => {
+  const step1Index = scriptSource.indexOf('Step 1/8: verify package checksum')
+  const step2Index = scriptSource.indexOf('Step 2/8: stop pm2 app')
+  assert.ok(step1Index > -1 && step2Index > -1)
+  assert.ok(step1Index < step2Index, 'checksum verification must run before the pm2 app is stopped')
+  assert.match(scriptSource, /throw "PACKAGE_CHECKSUM_MISMATCH/)
+})
+
+test('the entire mutation window is wrapped in one failure handler that stops pm2 and prints a restore block', () => {
+  assert.match(
+    scriptSource,
+    /function Write-RestoreBlock/,
+    'a dedicated, boxed restore-instructions function must exist',
+  )
+  const mainStart = scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {")
+  assert.ok(mainStart > -1)
+  const main = scriptSource.slice(mainStart)
+
+  // One OUTER try/catch wraps steps 3 through 7 (backup through health check) —
+  // not one handler per assertion. It also nests exactly ONE defensive try/catch
+  // of its own, around the Stop-Pm2App call inside it (so a failure THERE cannot
+  // prevent the restore block from still printing) — so exactly two `} catch {`
+  // occurrences are expected in Main, not one flat handler and not a patchwork of
+  // several.
+  const catchCount = (main.match(/\}\s*catch\s*\{/g) || []).length
+  assert.equal(
+    catchCount,
+    2,
+    'Main must have exactly the outer mutation-window handler plus its one nested defensive pm2-stop catch',
+  )
+
+  const outerCatchStart = main.indexOf('Write-Err $_.Exception.Message')
+  assert.ok(outerCatchStart > -1, 'the outer catch must start by reporting the original error')
+  const outerCatchBlock = main.slice(outerCatchStart)
+  assert.match(
+    outerCatchBlock,
+    /Stop-Pm2App -Pm2Command \$pm2Command -Name \$Pm2AppName/,
+    'the catch handler must attempt to stop pm2 — a broken deployment must not be left running',
+  )
+  assert.match(
+    outerCatchBlock,
+    /Write-RestoreBlock -BackupPath \$backupPath -RootDir \$resolvedRoot -ReplacedRelativePaths \$restoredRelativePaths -Pm2AppName \$Pm2AppName/,
+    'the catch handler must print the restore block',
+  )
+  assert.match(outerCatchBlock, /\bthrow\b/, 'the catch handler must rethrow, never swallow the failure')
+
+  // Health failure must be raised as an exception INSIDE the try, so it flows
+  // through the SAME handler — not handled by a separate, easily-desynced branch.
+  const tryBlock = main.slice(main.indexOf('try {'), main.indexOf('} catch {'))
+  assert.match(
+    tryBlock,
+    /if \(-not \$health\.Ok\) \{\s*throw "HEALTHCHECK_FAILED/,
+    'a failed healthcheck must throw inside the try block, not just print and continue',
+  )
+})
+
+test('the nginx example ships the maintenance gate, and both the flag and the maintenance page live OUTSIDE every replaced directory', () => {
+  const conf = fs.readFileSync(path.join(repoRoot, 'ops/nginx/multitable-onprem.conf.example'), 'utf8')
+  const page = fs.readFileSync(path.join(repoRoot, 'ops/maintenance/maintenance.html'), 'utf8')
+
+  // The gate must be the FIRST rule inside location /api — after proxy_pass it
+  // would never be reached for proxied requests.
+  const apiBlock = conf.slice(conf.indexOf('location /api'), conf.indexOf('location @maintenance_json'))
+  const apiDirectives = apiBlock.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
+  assert.match(apiDirectives[1] || '', /^if \(-f .*maintenance\.flag\) \{$/, 'the flag check must be the first directive in location /api')
+  const flagDirectiveIdx = apiDirectives.findIndex((l) => l.includes('maintenance.flag'))
+  const proxyDirectiveIdx = apiDirectives.findIndex((l) => l.startsWith('proxy_pass'))
+  assert.ok(flagDirectiveIdx > -1 && proxyDirectiveIdx > -1, 'location /api must have both the flag check and proxy_pass')
+  assert.ok(flagDirectiveIdx < proxyDirectiveIdx, 'the flag check must precede proxy_pass')
+
+  // The browser path gets a real page, the API path gets JSON with Retry-After.
+  assert.match(conf, /error_page 503 @maintenance_json;/)
+  assert.match(conf, /error_page 503 \/maintenance\.html;/)
+  assert.match(conf, /add_header Retry-After 90 always;/)
+  assert.match(conf, /return 503 '\{"error":\{"code":"SERVICE_UNAVAILABLE"/)
+
+  // Neither the flag nor the page may sit under a directory the upgrade deletes
+  // and recopies (the ReplaceDirs defaults in the upgrade script).
+  const replacedDirs = ['apps/web/dist', 'packages/core-backend/dist', 'packages/core-backend/migrations']
+  const flagPaths = conf.match(/-f\s+(\S+maintenance\.flag)/g) || []
+  assert.ok(flagPaths.length >= 2, 'both location / and location /api must test the flag')
+  for (const hit of flagPaths) {
+    for (const replaced of replacedDirs) {
+      assert.ok(!hit.includes(replaced), `the maintenance flag must not live under ${replaced}: ${hit}`)
+    }
+  }
+  const pageRoot = (conf.match(/root\s+(\S*ops\/maintenance)\s*;/) || [])[1]
+  assert.ok(pageRoot, 'the maintenance page must be served from an ops/maintenance root')
+  for (const replaced of replacedDirs) {
+    assert.ok(!pageRoot.includes(replaced), `the maintenance page root must not live under ${replaced}`)
+  }
+
+  // ── The two sides must name the SAME file ────────────────────────────────────
+  // Adversarial verification (2026-09-11) refuted the assertions above with a
+  // mutation: renaming the flag in the conf to a path the script never writes
+  // kept every assertion green. "Both locations agree with each other" is not
+  // "nginx reads the file the upgrade script raises" — the gate can silently
+  // decouple from the script and the whole suite stays green while the real
+  // upgrade window goes unshielded. So pin the conf to the script's own default,
+  // parsed from its single source of truth (Resolve-MaintenanceFlagPath).
+  const scriptDefaultRelative = (scriptSource.match(/-Relative '([^']*maintenance\.flag)'/) || [])[1]
+  assert.ok(
+    scriptDefaultRelative,
+    'the upgrade script must derive its default flag path from one literal (Resolve-MaintenanceFlagPath -Relative ...) so this contract has something to pin against',
+  )
+  assert.equal(scriptDefaultRelative, 'output/maintenance.flag')
+  for (const hit of flagPaths) {
+    assert.ok(
+      hit.replace(/\\/g, '/').endsWith(`/${scriptDefaultRelative}`),
+      `the nginx example must test the very file the upgrade script raises (<RootDir>/${scriptDefaultRelative}), not merely a path both nginx locations happen to agree on: ${hit}`,
+    )
+  }
+
+  // A missing maintenance page must degrade to 503, never to 404. error_page is
+  // an internal redirect: with the file absent the static handler fails open to
+  // 404 and recursive_error_pages (off by default) will not map it back to 503 —
+  // and the page is NOT in the deployment package, so "absent" is the default
+  // state of any freshly-built host.
+  const pageBlock = conf.slice(conf.indexOf('location = /maintenance.html'))
+  assert.match(
+    pageBlock.slice(0, pageBlock.indexOf('}')),
+    /try_files \$uri =503;/,
+    'location = /maintenance.html must fall back to =503 when the page file is missing, otherwise the client gets a 404 during the upgrade window',
+  )
+
+  // Whoever ships the page inside the package may delete the hand-copy step; but
+  // as long as it is NOT in the package, the runbook must say so in the same
+  // breath as the `/` verification, or the operator verifies a page that was
+  // never deployed and concludes the gate is broken.
+  const buildScript = fs.readFileSync(path.join(repoRoot, 'scripts/ops/multitable-onprem-package-build.sh'), 'utf8')
+  const pageIsPackaged = /"ops\/maintenance\/maintenance\.html"/.test(buildScript)
+  if (!pageIsPackaged) {
+    assert.match(
+      fs.readFileSync(runbookPath, 'utf8'),
+      /\*\*手工\*\*把仓库的 `ops\/maintenance\/maintenance\.html` 复制到/,
+      'ops/maintenance/maintenance.html is not in the package REQUIRED_PATHS, so the runbook must tell the operator to copy it by hand',
+    )
+  }
+
+  // Zero external references: during the window the backend is down and any
+  // outbound asset request would hang or fail, defeating the page's purpose.
+  assert.doesNotMatch(page, /<(?:script|link|img|iframe)\b/i, 'the maintenance page must not reference any external asset')
+  assert.doesNotMatch(page, /https?:\/\//i, 'the maintenance page must not contain any absolute URL')
+})
+
+test('the runbook never tells an operator to expect 503 from / on 222, where only location /api has the gate', () => {
+  // Adversarial verification (2026-09-11) found the runbook's "verify the gate
+  // on 222" recipe asking for `curl.exe -i http://127.0.0.1/` -> 503, while the
+  // SAME section documents that the only hand-synced blocks on 222 are the
+  // /api/ gate, the server-level error_page and the named location. On 222 `/`
+  // returns the SPA with 200, so the recipe would make an operator conclude,
+  // mid upgrade window, that the gate is broken and start editing the live
+  // nginx.conf — the single most dangerous thing to do in that window.
+  const runbook = fs.readFileSync(runbookPath, 'utf8')
+  const sectionStart = runbook.indexOf('## 升级窗口的维护门')
+  assert.ok(sectionStart > -1, 'the runbook must keep the maintenance gate section')
+  const section = runbook.slice(sectionStart, runbook.indexOf('\n## ', sectionStart + 10))
+
+  const recipeStart = section.indexOf('**怎么验证这道门真的在')
+  assert.ok(recipeStart > -1, 'the 222 verification recipe must exist')
+  const newHostStart = section.indexOf('**新机器', recipeStart)
+  assert.ok(newHostStart > recipeStart, 'the "new host, after syncing the example" expectations must be a SEPARATE sub-section from the 222 recipe')
+  const liveRecipe = section.slice(recipeStart, newHostStart)
+
+  // Only the copy-pasteable blocks matter here: the prose around them is free to
+  // (and must) discuss `/` in order to warn that it answers 200 on 222.
+  const copyPasteable = (liveRecipe.match(/```[\s\S]*?```/g) || []).join('\n')
+  assert.ok(copyPasteable.includes('curl.exe'), 'the 222 recipe must still contain a runnable check')
+  for (const line of copyPasteable.split('\n')) {
+    if (!line.includes('curl.exe')) continue
+    assert.ok(
+      /127\.0\.0\.1\/api\//.test(line),
+      `the 222 recipe may only probe /api/* — 222 has no gate on /, so any other URL here teaches a false expectation: ${line.trim()}`,
+    )
+  }
+  assert.match(
+    liveRecipe,
+    /http:\/\/127\.0\.0\.1\/` 在 222 上期望的是 200,不是 503/,
+    'the recipe must state outright that / answers 200 on 222 while the flag is up, so nobody "fixes" the live nginx.conf during a window',
+  )
+})
+
+test('CI wiring: this test file is actually invoked by the required `test` job (P0 fix)', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8')
+  const testJobMatch = workflow.match(/\n {2}test:\n[\s\S]*?(?=\n {2}\S)/)
+  assert.ok(testJobMatch, 'the required `test` job must exist in plugin-tests.yml')
+  assert.match(
+    testJobMatch[0],
+    /node --test[^\n]*multitable-onprem-package-upgrade-inplace\.test\.mjs/,
+    'this test file must be invoked by a `node --test` step inside the required `test` (18.x/20.x) job — ' +
+      'a workflow that never runs it is a dead tripwire, the exact class of gap adversarial verification found',
+  )
+})
+
+// Part of this file only means something on Windows: the real \\.\pipe\ query
+// behind the fallback's daemon check, the task-scheduler folder semantics, and
+// Windows PowerShell 5.1's native-stderr behaviour (the R59 incident itself). The
+// ubuntu `test` job cannot reach any of it. The one Windows job, stock-prep-powershell51
+// (windows-latest; .github/workflows/stock-prep-powershell51.yml), runs
+// scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+// under BOTH Windows PowerShell 5.1 and pwsh 7; that file first runs the co-hosted
+// runner below with its own host shell, which runs THIS file with
+// UPGRADE_INPLACE_TEST_SHELL pointed at that same shell. (The runner lives outside
+// .github so it can be wired without the `workflow` token scope; a dedicated workflow
+// step is still the cleaner home -- see the PR's open items.)
+const WINDOWS_SHELL_RUNNER = 'scripts/ops/__tests__/multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
+const WINDOWS_ACL_SUITE = 'scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1'
+
+// What decides whether a Windows lane CAN fail, pinned here VERBATIM (comment and
+// blank lines aside, line endings normalised) because only the Linux lane sees a
+// change to it before it lands:
+//   - the Windows job's header (no job-level if / continue-on-error / needs / env /
+//     strategy) and its ACL step (both runs of the ACL suite, each followed by the
+//     exit-code check; no step-level if / continue-on-error);
+//   - the ACL suite from its first line down to the end of the co-hosted block, which
+//     is the first thing the suite runs and exits 1 at once on a failed runner: no
+//     line below it can turn that into exit 0, and no line can be added above it;
+//   - the runner, whose exit code comes from node's exit code, the TAP counts and the
+//     three required tests.
+// Changing any of them means changing these lines in the same commit. NOT pinned: the
+// job's other steps (checkout, setup-node, the smoke step), the workflow's triggers
+// and top-level env -- a change there could still keep this lane from running.
+const WINDOWS_JOB_HEADER_CODE = `
+  stock-prep-powershell51:
+    name: stock-prep PowerShell 5.1 acceptance
+    runs-on: windows-latest
+    steps:
+`
+const WINDOWS_ACL_STEP_NAME = '      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)'
+const WINDOWS_ACL_STEP_CODE = String.raw`
+      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File ${'`'}
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ${'`'}
+            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+`
+const WINDOWS_SHELL_RUNNER_CODE = String.raw`
+$ErrorActionPreference = 'Stop'
+$isWindowsHost = ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+if (-not $isWindowsHost) {
+  Write-Host 'SKIP multitable-onprem-package-upgrade-inplace Windows-shell lane (not Windows)'
+  exit 0
+}
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).ProviderPath
+$testFile = Join-Path $repoRoot 'scripts\ops\multitable-onprem-package-upgrade-inplace.test.mjs'
+$node = (Get-Command -Name 'node' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$env:UPGRADE_INPLACE_TEST_SHELL = (Get-Process -Id $PID).Path
+$env:UPGRADE_INPLACE_TEST_EXPECT_EDITION = $PSVersionTable.PSEdition
+$env:PSExecutionPolicyPreference = 'Bypass'
+Write-Host ("== multitable-onprem-package-upgrade-inplace suite under {0} {1} ({2})" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, $env:UPGRADE_INPLACE_TEST_SHELL)
+Push-Location -LiteralPath $repoRoot
+$ErrorActionPreference = 'Continue'
+try {
+  $global:LASTEXITCODE = -1
+  $output = & $node --test $testFile 2>&1
+  $nodeExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = 'Stop'
+  Pop-Location
+}
+$lines = @($output | ForEach-Object { [string]$_ })
+foreach ($line in $lines) {
+  Write-Host $line
+}
+function Get-TapCount {
+  param([string[]]$Lines, [string]$Name)
+  foreach ($line in $Lines) {
+    if ($line -match ('^# ' + $Name + ' (\d+)\s*$')) {
+      return [int]$Matches[1]
+    }
+  }
+  return -1
+}
+$tests = Get-TapCount -Lines $lines -Name 'tests'
+$pass = Get-TapCount -Lines $lines -Name 'pass'
+$fail = Get-TapCount -Lines $lines -Name 'fail'
+$skipped = Get-TapCount -Lines $lines -Name 'skipped'
+$todo = Get-TapCount -Lines $lines -Name 'todo'
+$cancelled = Get-TapCount -Lines $lines -Name 'cancelled'
+$requiredOk = @(
+  '^ok \d+ - shell under test:',
+  '^ok \d+ - Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed:',
+  '^ok \d+ - end-to-end \(acid fixture, R59 replay\):'
+)
+$missing = @()
+foreach ($pattern in $requiredOk) {
+  if (-not ($lines | Where-Object { $_ -match $pattern })) {
+    $missing += $pattern
+  }
+}
+$problems = @()
+if ($nodeExit -ne 0) { $problems += "node --test exit=$nodeExit" }
+if ($tests -le 0) { $problems += "no test count reported (tests=$tests)" }
+if ($pass -ne $tests) { $problems += "pass=$pass of tests=$tests" }
+if ($fail -ne 0) { $problems += "fail=$fail" }
+if ($skipped -ne 0) { $problems += "skipped=$skipped" }
+if ($todo -ne 0) { $problems += "todo=$todo" }
+if ($cancelled -ne 0) { $problems += "cancelled=$cancelled" }
+foreach ($pattern in $missing) { $problems += "required test not ok: $pattern" }
+if ($problems.Count -gt 0) {
+  Write-Host ("FAILED multitable-onprem-package-upgrade-inplace suite under {0} {1}: {2}" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, ($problems -join '; '))
+  exit 1
+}
+Write-Host ("PASSED multitable-onprem-package-upgrade-inplace suite under {0} {1}: {2}/{3} tests" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, $pass, $tests)
+exit 0
+`
+// The ACL suite from its first line to the end of the co-hosted block (#requires and
+// the header are comment lines).
+const ACL_PREFIX_CODE = String.raw`
+$ErrorActionPreference = 'Stop'
+if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+  $cohostedRunner = Join-Path $PSScriptRoot 'multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
+  $cohostedShell = (Get-Process -Id $PID).Path
+  $savedErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $global:LASTEXITCODE = -1
+    & $cohostedShell -NoProfile -ExecutionPolicy Bypass -File $cohostedRunner
+    $cohostedExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+  if ($cohostedExit -ne 0) {
+    Write-Host "  FAIL  co-hosted: multitable-onprem-package-upgrade-inplace suite under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=$cohostedExit)"
+    Write-Host 'FAILED: the co-hosted suite failed; the S6-A ACL checks were not run'
+    exit 1
+  }
+  Write-Host "  PASS  co-hosted: multitable-onprem-package-upgrade-inplace suite under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=0)"
+} else {
+  Write-Host '  SKIP  co-hosted: multitable-onprem-package-upgrade-inplace suite (Windows only; the ubuntu test job runs it under pwsh 7)'
+}
+`
+
+// PowerShell (or YAML) source -> its code lines: no comment-only lines, no blank
+// lines, no trailing whitespace, CRLF or LF. Leading indentation is kept.
+function psCodeLines(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/, ''))
+    .filter((line) => line !== '' && !/^\s*#/.test(line))
+}
+
+test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite under 5.1 AND pwsh 7 -> the co-hosted runner -> this file, under that same shell', () => {
+  const workflow = fs.readFileSync(windowsWorkflowPath, 'utf8')
+  // The job is the last one in its file, so its block may also end at end of input
+  // (no `m` flag, so `$` matches only there).
+  const winJobMatch = workflow.match(/\n {2}stock-prep-powershell51:\n[\s\S]*?(?=\n {2}\S|\n*$)/)
+  assert.ok(winJobMatch, 'the stock-prep-powershell51 job must exist in stock-prep-powershell51.yml')
+  const winJob = winJobMatch[0]
+  // The job itself: runs on windows-latest, and nothing at job level can skip it or
+  // make its failure non-blocking (if, continue-on-error, needs, strategy, env, ...).
+  const winJobHeader = winJob.slice(0, winJob.indexOf('\n    steps:\n') + '\n    steps:\n'.length)
+  assert.deepEqual(psCodeLines(winJobHeader), psCodeLines(WINDOWS_JOB_HEADER_CODE), 'the Windows job header is pinned verbatim')
+  assert.deepEqual(
+    winJob.split('\n').filter((line) => /^ {4}\S/.test(line) && !/^ {4}#/.test(line)).map((line) => line.replace(/\s+$/, '')),
+    psCodeLines(WINDOWS_JOB_HEADER_CODE).slice(1),
+    'no other job-level key anywhere in the Windows job (YAML keys may follow the steps list too)',
+  )
+  // Its ACL step, verbatim: the 5.1 run and the pwsh 7 run of the ACL suite, each
+  // followed at once by the exit-code check (without it the 5.1 run's failure would be
+  // overwritten by the pwsh 7 run), no step-level if / continue-on-error, nothing
+  // commented out (a commented-out run is a missing line here).
+  const aclStepStart = winJob.indexOf(`\n${WINDOWS_ACL_STEP_NAME}\n`)
+  assert.ok(aclStepStart > -1, 'the Windows job must carry the S6-A ACL step')
+  assert.equal(winJob.split(`\n${WINDOWS_ACL_STEP_NAME}\n`).length, 2, 'exactly one S6-A ACL step')
+  const nextStep = winJob.indexOf('\n      - ', aclStepStart + 1)
+  const aclStep = winJob.slice(aclStepStart, nextStep === -1 ? winJob.length : nextStep)
+  assert.deepEqual(psCodeLines(aclStep), psCodeLines(WINDOWS_ACL_STEP_CODE), 'the S6-A ACL step is pinned verbatim')
+  assert.doesNotMatch(winJob, /^\s*continue-on-error\s*:/m, 'no step of the Windows job may be made non-blocking')
+
+  // The ACL suite, from its first line down to the end of the co-hosted block,
+  // verbatim: the block is the first thing the suite runs, it runs the runner with the
+  // suite's OWN host shell, and exits 1 at once when the runner fails.
+  const aclSuite = fs.readFileSync(path.join(repoRoot, WINDOWS_ACL_SUITE), 'utf8')
+  const startMarker = '# >>> co-hosted suite: multitable-onprem-package-upgrade-inplace'
+  const endMarker = '# <<< co-hosted suite'
+  const blockStart = aclSuite.indexOf(startMarker)
+  const blockEnd = aclSuite.indexOf(endMarker, blockStart)
+  assert.ok(blockStart > -1 && blockEnd > blockStart, 'the ACL suite must carry the co-hosted block')
+  assert.equal(aclSuite.split(startMarker).length, 2, 'exactly one co-hosted block')
+  assert.deepEqual(psCodeLines(aclSuite.slice(0, blockEnd)), psCodeLines(ACL_PREFIX_CODE), 'the ACL suite up to the end of the co-hosted block is pinned verbatim')
+  const cohost = aclSuite.slice(blockStart, blockEnd)
+
+  // The runner side, verbatim (see WINDOWS_SHELL_RUNNER_CODE): the suite under the
+  // runner's own shell, then exit 1 on ANY problem -- node's exit code, the TAP counts,
+  // a required test that is not `ok` -- and exit 0 only after that.
+  const runner = fs.readFileSync(path.join(repoRoot, WINDOWS_SHELL_RUNNER), 'utf8')
+  assert.deepEqual(psCodeLines(runner), psCodeLines(WINDOWS_SHELL_RUNNER_CODE), 'the co-hosted runner is pinned verbatim')
+  const runnerCode = psCodeLines(runner)
+  assert.deepEqual(runnerCode.filter((line) => /^\s*exit\b/i.test(line)).map((line) => line.trim()), ['exit 0', 'exit 1', 'exit 0'], 'exit 0 off Windows, exit 1 on problems, exit 0 after that')
+  const problemsIdx = runnerCode.indexOf('if ($problems.Count -gt 0) {')
+  assert.ok(problemsIdx > -1 && runnerCode[problemsIdx + 2] === '  exit 1' && runnerCode[problemsIdx + 3] === '}', 'the only exit 1 is the problems block\'s')
+  assert.equal(runnerCode.lastIndexOf('exit 0'), runnerCode.length - 1, 'the success exit is the last line, after the problems block')
+  assert.match(runner, /\$env:UPGRADE_INPLACE_TEST_SHELL = \(Get-Process -Id \$PID\)\.Path/)
+  assert.match(runner, /\$env:UPGRADE_INPLACE_TEST_EXPECT_EDITION = \$PSVersionTable\.PSEdition/)
+  assert.match(runner, /& \$node --test \$testFile/)
+  assert.match(runner, /\$testFile = Join-Path \$repoRoot 'scripts\\ops\\multitable-onprem-package-upgrade-inplace\.test\.mjs'/)
+  // Both PowerShell files run under 5.1 on a 1252 code page: ASCII only, or they
+  // would not parse there.
+  for (const [label, text] of [['runner', runner], ['co-hosted block of the ACL suite', cohost]]) {
+    assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(text), `the ${label} must be pure ASCII`)
+  }
+})
+
+test('shell under test: every harness runs UPGRADE_INPLACE_TEST_SHELL (default pwsh), and on the Windows lanes it is the edition the runner asked for', () => {
+  const result = spawnSync(
+    PWSH,
+    ['-NoProfile', '-NonInteractive', '-Command', "Write-Host ('EDITION=' + $PSVersionTable.PSEdition + ' MAJOR=' + $PSVersionTable.PSVersion.Major + ' WINDOWS=' + ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT))"],
+    { encoding: 'utf8' },
+  )
+  assert.equal(result.status, 0, result.stderr || String(result.error))
+  const match = result.stdout.match(/EDITION=(\w+) MAJOR=(\d+) WINDOWS=(\w+)/)
+  assert.ok(match, result.stdout)
+  const [, edition, major, windows] = match
+  assert.equal(windows === 'True', process.platform === 'win32', 'the shell under test runs on this same OS')
+  if (PWSH_IS_WINDOWS_POWERSHELL) {
+    assert.equal(edition, 'Desktop', `${PWSH} must be Windows PowerShell`)
+    assert.equal(major, '5')
+  }
+  // Under 5.1 the harnesses run a BOM-prefixed, otherwise byte-identical copy of the
+  // script (see writeRunnableScript); everywhere else the repo file itself.
+  const execBytes = fs.readFileSync(scriptExecPath)
+  const repoBytes = fs.readFileSync(scriptPath)
+  if (PWSH_IS_WINDOWS_POWERSHELL) {
+    assert.notEqual(scriptExecPath, scriptPath)
+    assert.ok(execBytes.subarray(0, 3).equals(UTF8_BOM), 'the 5.1 copy must start with a UTF-8 BOM')
+    assert.ok(execBytes.subarray(3).equals(repoBytes[0] === 0xef ? repoBytes.subarray(3) : repoBytes), 'the 5.1 copy must otherwise be byte-identical to the repo script')
+  } else {
+    assert.equal(scriptExecPath, scriptPath)
+  }
+  const expected = process.env.UPGRADE_INPLACE_TEST_EXPECT_EDITION
+  if (expected) {
+    assert.equal(edition, expected, 'the runner asked for its own edition; a harness running another shell would not cover that lane')
+  }
+  console.log(`# shell under test: ${PWSH} -> PSEdition=${edition} PSVersion.Major=${major} Windows=${windows}`)
+})
+
+// ── 2. UNIT (dot-source the real script, call the real functions) ────────────────
+
+function runPwshHarness(harness) {
+  return spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-Command', harness], { encoding: 'utf8' })
+}
+
+function dotSourcePrelude(scratchDir) {
+  // -PackageArchive is mandatory but irrelevant when only defining functions;
+  // pass a harmless placeholder and an explicit -RootDir so the RootDir
+  // parameter default (which resolves PSScriptRoot) is never evaluated.
+  return `. '${scriptExecPath}' -PackageArchive 'unused' -RootDir '${scratchDir}' *> $null\n`
+}
+
+test('Test-IsNodeModulesRelativePath matches only an exact node_modules path segment', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        "Write-Host ('A=' + (Test-IsNodeModulesRelativePath -RelativePath 'lib\\node_modules\\pkg\\x.js'))",
+        "Write-Host ('B=' + (Test-IsNodeModulesRelativePath -RelativePath 'node_modules\\pkg\\x.js'))",
+        "Write-Host ('C=' + (Test-IsNodeModulesRelativePath -RelativePath 'lib\\stock-preparation-preflight.cjs'))",
+        "Write-Host ('D=' + (Test-IsNodeModulesRelativePath -RelativePath 'lib\\legacy-node_modules-shim.cjs'))",
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /A=True/)
+    assert.match(result.stdout, /B=True/)
+    assert.match(result.stdout, /C=False/)
+    // A FILE merely named similarly to node_modules (containing the substring,
+    // not equal to it as a path segment) must NOT be treated as node_modules.
+    assert.match(result.stdout, /D=False/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Copy-TreeExcludingNodeModules copies real files but skips every node_modules path (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const src = path.join(scratch, 'src')
+    fs.mkdirSync(path.join(src, 'lib', 'adapters'), { recursive: true })
+    fs.mkdirSync(path.join(src, 'node_modules', 'pkg'), { recursive: true })
+    fs.mkdirSync(path.join(src, 'scripts'), { recursive: true })
+    fs.writeFileSync(path.join(src, 'lib', 'adapters', 'deep.cjs'), 'module.exports = {}\n')
+    fs.writeFileSync(path.join(src, 'lib', 'legacy-node_modules-shim.cjs'), 'module.exports = {}\n')
+    fs.writeFileSync(path.join(src, 'node_modules', 'pkg', 'index.js'), 'module.exports = {}\n')
+    fs.writeFileSync(path.join(src, 'scripts', 'tool.mjs'), 'export {}\n')
+    fs.writeFileSync(path.join(src, 'app.manifest.json'), '{}\n')
+
+    const dst = path.join(scratch, 'dst')
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `$result = Copy-TreeExcludingNodeModules -Source '${src}' -Destination '${dst}'`,
+        "Write-Host ('Copied=' + $result.Copied)",
+        "Write-Host ('Skipped=' + $result.Skipped)",
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /Copied=4/, 'lib/adapters/deep.cjs, the decoy, scripts/tool.mjs, and app.manifest.json (4 total) must be copied')
+    assert.match(result.stdout, /Skipped=1/, 'exactly the one real node_modules file must be skipped')
+
+    assert.ok(fs.existsSync(path.join(dst, 'lib', 'adapters', 'deep.cjs')), 'F22 regression: deep nested files must survive the copy')
+    assert.ok(fs.existsSync(path.join(dst, 'lib', 'legacy-node_modules-shim.cjs')), 'the substring decoy must be copied, not skipped')
+    assert.ok(fs.existsSync(path.join(dst, 'scripts', 'tool.mjs')), 'sibling directories must not be dropped')
+    assert.ok(fs.existsSync(path.join(dst, 'app.manifest.json')))
+    assert.ok(!fs.existsSync(path.join(dst, 'node_modules', 'pkg', 'index.js')), 'node_modules must never be copied by this helper')
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Test-PackageChecksum refuses a mismatched sidecar and accepts a matching one (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const archivePath = path.join(scratch, 'pkg.zip')
+    fs.writeFileSync(archivePath, 'not-really-a-zip-but-bytes-are-bytes')
+    const actualHash = createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex')
+
+    fs.writeFileSync(`${archivePath}.sha256`, `${actualHash}  pkg.zip\n`)
+    const okHarness =
+      dotSourcePrelude(scratch) +
+      `try { $h = Test-PackageChecksum -ArchivePath '${archivePath}'; Write-Host "OK=$h" } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const okResult = runPwshHarness(okHarness)
+    assert.equal(okResult.status, 0, okResult.stderr || okResult.stdout)
+    assert.match(okResult.stdout, new RegExp(`OK=${actualHash}`))
+
+    fs.writeFileSync(`${archivePath}.sha256`, `${'0'.repeat(64)}  pkg.zip\n`)
+    const badHarness =
+      dotSourcePrelude(scratch) +
+      `try { Test-PackageChecksum -ArchivePath '${archivePath}'; Write-Host "DID_NOT_THROW" } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const badResult = runPwshHarness(badHarness)
+    assert.equal(badResult.status, 0, badResult.stderr || badResult.stdout)
+    assert.doesNotMatch(badResult.stdout, /DID_NOT_THROW/)
+    assert.match(badResult.stdout, /THREW=PACKAGE_CHECKSUM_MISMATCH/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Assert-MustExistFiles passes when complete and names every missing file otherwise (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    fs.mkdirSync(path.join(scratch, 'plugins/plugin-integration-core/lib'), { recursive: true })
+    fs.writeFileSync(path.join(scratch, 'plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs'), '{}')
+    fs.writeFileSync(path.join(scratch, 'plugins/plugin-integration-core/app.manifest.json'), '{}')
+
+    const okHarness =
+      dotSourcePrelude(scratch) +
+      `try { Assert-MustExistFiles -RootDir '${scratch}' -RelativePaths @('${PREFLIGHT_FILE}', '${MANIFEST_FILE}') | Out-Null; Write-Host 'OK' } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const okResult = runPwshHarness(okHarness)
+    assert.equal(okResult.status, 0, okResult.stderr || okResult.stdout)
+    assert.match(okResult.stdout, /^OK/m)
+
+    fs.rmSync(path.join(scratch, 'plugins/plugin-integration-core/lib/stock-preparation-preflight.cjs'))
+    const badHarness =
+      dotSourcePrelude(scratch) +
+      `try { Assert-MustExistFiles -RootDir '${scratch}' -RelativePaths @('${PREFLIGHT_FILE}', '${MANIFEST_FILE}') | Out-Null; Write-Host 'DID_NOT_THROW' } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const badResult = runPwshHarness(badHarness)
+    assert.equal(badResult.status, 0, badResult.stderr || badResult.stdout)
+    assert.doesNotMatch(badResult.stdout, /DID_NOT_THROW/)
+    assert.match(badResult.stdout, /THREW=UPGRADE_ASSERTION_MISSING_FILES/)
+    assert.match(badResult.stdout, new RegExp(PREFLIGHT_FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Assert-PluginTreesMatchPackage passes on a matching tree, and throws on both a missing file and a hash mismatch (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const pkgRoot = path.join(scratch, 'pkg')
+    const liveRoot = path.join(scratch, 'live')
+    fs.mkdirSync(path.join(pkgRoot, 'plugins/plugin-integration-core/lib/adapters'), { recursive: true })
+    fs.writeFileSync(path.join(pkgRoot, 'plugins/plugin-integration-core/lib/adapters/deep.cjs'), 'deep-content-1234')
+    fs.writeFileSync(path.join(pkgRoot, 'plugins/plugin-integration-core/app.manifest.json'), '{}')
+    fs.mkdirSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib/adapters'), { recursive: true })
+    fs.writeFileSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib/adapters/deep.cjs'), 'deep-content-1234')
+    fs.writeFileSync(path.join(liveRoot, 'plugins/plugin-integration-core/app.manifest.json'), '{}')
+
+    const okHarness =
+      dotSourcePrelude(scratch) +
+      `try { $n = Assert-PluginTreesMatchPackage -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}'; Write-Host "OK=$n" } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const okResult = runPwshHarness(okHarness)
+    assert.equal(okResult.status, 0, okResult.stderr || okResult.stdout)
+    assert.match(okResult.stdout, /OK=2/)
+
+    // RED case 1: a missing deployed file (the historical F22 symptom, generalized
+    // to ANY file, not just the one that happened to be missing that day).
+    fs.rmSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib/adapters/deep.cjs'))
+    const missingHarness =
+      dotSourcePrelude(scratch) +
+      `try { Assert-PluginTreesMatchPackage -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}'; Write-Host 'DID_NOT_THROW' } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const missingResult = runPwshHarness(missingHarness)
+    assert.equal(missingResult.status, 0, missingResult.stderr || missingResult.stdout)
+    assert.doesNotMatch(missingResult.stdout, /DID_NOT_THROW/)
+    assert.match(missingResult.stdout, /THREW=UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED/)
+    assert.match(missingResult.stdout, /MISSING: plugin-integration-core.lib.adapters.deep\.cjs/)
+
+    // RED case 2: same count, same path, WRONG content — the exact class a
+    // file-count comparison can never see.
+    fs.writeFileSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib/adapters/deep.cjs'), 'CORRUPTED-DIFFERENT-CONTENT')
+    const corruptHarness =
+      dotSourcePrelude(scratch) +
+      `try { Assert-PluginTreesMatchPackage -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}'; Write-Host 'DID_NOT_THROW' } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const corruptResult = runPwshHarness(corruptHarness)
+    assert.equal(corruptResult.status, 0, corruptResult.stderr || corruptResult.stdout)
+    assert.doesNotMatch(corruptResult.stdout, /DID_NOT_THROW/)
+    assert.match(corruptResult.stdout, /THREW=UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED/)
+    assert.match(corruptResult.stdout, /HASH_MISMATCH: plugin-integration-core.lib.adapters.deep\.cjs/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Assert-NoNodeModulesContentLeaked passes when node_modules content stays put, and throws when it leaks (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const pkgRoot = path.join(scratch, 'pkg')
+    const liveRoot = path.join(scratch, 'live')
+    fs.mkdirSync(path.join(pkgRoot, 'plugins/plugin-integration-core/node_modules/left-pad'), { recursive: true })
+    fs.writeFileSync(path.join(pkgRoot, 'plugins/plugin-integration-core/node_modules/left-pad/index.js'), PACKAGE_LEAK_MARKER)
+    fs.mkdirSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib'), { recursive: true })
+    fs.writeFileSync(path.join(liveRoot, 'plugins/plugin-integration-core/lib/clean.cjs'), 'unrelated content')
+
+    const okHarness =
+      dotSourcePrelude(scratch) +
+      `try { $n = Assert-NoNodeModulesContentLeaked -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}'; Write-Host "OK=$n" } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const okResult = runPwshHarness(okHarness)
+    assert.equal(okResult.status, 0, okResult.stderr || okResult.stdout)
+    assert.match(okResult.stdout, /OK=1/)
+
+    // RED case: simulate the leak a forbidden -Exclude pattern actually produces —
+    // the excluded content lands, uncorrupted, at some OTHER live path.
+    fs.writeFileSync(path.join(liveRoot, 'plugins/plugin-integration-core/index.js'), PACKAGE_LEAK_MARKER)
+    const leakHarness =
+      dotSourcePrelude(scratch) +
+      `try { Assert-NoNodeModulesContentLeaked -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}'; Write-Host 'DID_NOT_THROW' } catch { Write-Host "THREW=$($_.Exception.Message)" }`
+    const leakResult = runPwshHarness(leakHarness)
+    assert.equal(leakResult.status, 0, leakResult.stderr || leakResult.stdout)
+    assert.doesNotMatch(leakResult.stdout, /DID_NOT_THROW/)
+    assert.match(leakResult.stdout, /THREW=UPGRADE_NODE_MODULES_LEAK_DETECTED/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Update-Plugins copies loose root files and, with -Force, a hidden plugin directory (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const pkgRoot = path.join(scratch, 'pkg')
+    const liveRoot = path.join(scratch, 'live')
+    // Loose file directly at plugins/ root — not inside any plugin subdirectory.
+    fs.mkdirSync(path.join(pkgRoot, 'plugins'), { recursive: true })
+    fs.writeFileSync(path.join(pkgRoot, 'plugins/README.txt'), 'loose-root-file')
+
+    // A hidden plugin directory. Windows: a normal name, hidden via the NTFS
+    // attribute (attrib +h). Non-Windows: pwsh's hidden-file convention is a
+    // leading dot, so the directory is NAMED that way instead.
+    const hiddenPluginName = process.platform === 'win32' ? 'hidden-plugin' : '.hidden-plugin'
+    const hiddenPluginDir = path.join(pkgRoot, 'plugins', hiddenPluginName)
+    fs.mkdirSync(hiddenPluginDir, { recursive: true })
+    fs.writeFileSync(path.join(hiddenPluginDir, 'index.cjs'), 'hidden-plugin-content')
+    if (process.platform === 'win32') {
+      const attrib = spawnSync('attrib.exe', ['+h', hiddenPluginDir])
+      assert.equal(attrib.status, 0, `attrib +h failed: ${attrib.stderr}`)
+    }
+
+    fs.mkdirSync(liveRoot, { recursive: true })
+
+    const harness =
+      dotSourcePrelude(scratch) +
+      `Update-Plugins -PackageRoot '${pkgRoot}' -RootDir '${liveRoot}' *> $null`
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+
+    assert.ok(
+      fs.existsSync(path.join(liveRoot, 'plugins', 'README.txt')),
+      'a loose file at the package plugins/ root must be copied, not silently dropped',
+    )
+    assert.equal(fs.readFileSync(path.join(liveRoot, 'plugins', 'README.txt'), 'utf8'), 'loose-root-file')
+    assert.ok(
+      fs.existsSync(path.join(liveRoot, 'plugins', hiddenPluginName, 'index.cjs')),
+      'a hidden plugin directory must still be copied — the directory listing must use -Force',
+    )
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Write-RestoreBlock prints the backup path and an exact copy-back command per replaced path', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    // Real, platform-native paths (not a hardcoded Windows drive letter): a bare
+    // "C:\..." literal makes PowerShell try to resolve PSDrive 'C', which does not
+    // exist on Linux pwsh ("Cannot find drive") even for a pure string Join-Path —
+    // this test does not need the paths to exist, only to be valid on the host OS.
+    const backupPath = path.join(scratch, 'backup', 'x')
+    const rootDir = path.join(scratch, 'live')
+    // The recipe restores only what the backup holds (R60 review, #6079).
+    fs.mkdirSync(path.join(backupPath, 'packages', 'core-backend', 'dist'), { recursive: true })
+    fs.mkdirSync(path.join(backupPath, 'plugins'), { recursive: true })
+    const harness =
+      dotSourcePrelude(scratch) +
+      `Write-RestoreBlock -BackupPath '${backupPath}' -RootDir '${rootDir}' -ReplacedRelativePaths @('packages/core-backend/dist', 'plugins') -BackedUpRelativePaths @('packages/core-backend/dist', 'plugins') -Pm2AppName 'metasheet-backend'`
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.ok(result.stdout.includes(`Backup path: ${backupPath}`))
+    assert.ok(result.stdout.includes(`Remove-Item -LiteralPath '${path.join(rootDir, 'packages', 'core-backend', 'dist')}'`))
+    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'packages', 'core-backend', 'dist')}' -Destination '${path.join(rootDir, 'packages', 'core-backend', 'dist')}'`))
+    // plugins/ is copied back over the live tree, never deleted first (its live node_modules stay).
+    assert.ok(result.stdout.includes(`Get-ChildItem -LiteralPath '${path.join(backupPath, 'plugins')}' -Force | Copy-Item -Destination '${path.join(rootDir, 'plugins')}' -Recurse -Force`))
+    assert.ok(!result.stdout.includes(`Remove-Item -LiteralPath '${path.join(rootDir, 'plugins')}'`), 'plugins/ must never be deleted by the recipe')
+    assert.match(result.stdout, /pm2 restart metasheet-backend --update-env/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Assert-MaintenanceFlagOutsideReplaceDirs refuses a flag inside a replaced dir, accepts one outside it, and is not fooled by a sibling prefix (RED-witnessed)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const rootDir = path.join(scratch, 'live')
+    fs.mkdirSync(rootDir, { recursive: true })
+    const call = (rel) =>
+      `try { Write-Host ('OK ' + (Assert-MaintenanceFlagOutsideReplaceDirs -FlagPath (Join-Path '${rootDir}' '${rel}') -RootDir '${rootDir}' -ReplaceDirs $dirs)) } catch { Write-Host ('THROWN ' + $_.Exception.Message) }`
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        "$dirs = @('packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations')",
+        call('apps/web/dist/maintenance.flag'),
+        call('packages/core-backend/dist/src/maintenance.flag'),
+        call('output/maintenance.flag'),
+        // A directory whose name merely STARTS WITH a replaced directory's name is
+        // not inside it — the check must compare path segments, not raw prefixes.
+        call('apps/web/dist-backup/maintenance.flag'),
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const lines = result.stdout.trim().split('\n').map((l) => l.trim())
+    assert.match(lines[0], /^THROWN MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR/, 'a flag directly inside a replaced dir must be refused')
+    assert.match(lines[1], /^THROWN MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR/, 'a flag nested deeper inside a replaced dir must be refused')
+    assert.match(lines[2], /^OK /, 'output/ is outside every replaced dir and must be accepted')
+    assert.ok(lines[2].includes('maintenance.flag'), 'the accepted call must return the resolved absolute path')
+    assert.match(lines[3], /^OK /, 'a sibling directory sharing a name prefix must not be treated as inside')
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Resolve-BackendHealthUrl derives 127.0.0.1:<PORT>/health from the env file, falls back, and yields to an explicit override', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const envWithPort = path.join(scratch, 'with-port.env')
+    fs.writeFileSync(envWithPort, '# comment\nPORT=18901\nDATABASE_URL=postgres://x\n')
+    const envWithoutPort = path.join(scratch, 'no-port.env')
+    fs.writeFileSync(envWithoutPort, 'DATABASE_URL=postgres://x\n')
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `Write-Host ('DERIVED ' + (Resolve-BackendHealthUrl -EnvFile '${envWithPort}'))`,
+        `Write-Host ('FALLBACK ' + (Resolve-BackendHealthUrl -EnvFile '${envWithoutPort}'))`,
+        `Write-Host ('MISSINGFILE ' + (Resolve-BackendHealthUrl -EnvFile '${path.join(scratch, 'nope.env')}'))`,
+        `Write-Host ('OVERRIDE ' + (Resolve-BackendHealthUrl -Candidate 'http://127.0.0.1:9/health' -EnvFile '${envWithPort}'))`,
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /DERIVED http:\/\/127\.0\.0\.1:18901\/health/)
+    assert.match(result.stdout, /FALLBACK http:\/\/127\.0\.0\.1:8900\/health/)
+    assert.match(result.stdout, /MISSINGFILE http:\/\/127\.0\.0\.1:8900\/health/)
+    assert.match(result.stdout, /OVERRIDE http:\/\/127\.0\.0\.1:9\/health/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// ── R59 (2026-09-24): pm2-runtime hosting ──────────────────────────────────────
+//
+// The demo host's backend runs under a scheduled task (MetaSheet-PM2) that starts
+// pm2-runtime with PM2_HOME=<user profile>\.pm2-runtime. The upgrade's stop took
+// pm2-runtime's only app offline, pm2-runtime auto-exited (pm2's Runtime4Docker
+// autoExitWorker: 0 apps online -> exit, killing its daemon), and the restart
+// answered "Process or Namespace ... not found" -> RESTORE REQUIRED, ~18 min of
+// 503 until the task was started by hand. See
+// docs/development/takeover-beiliao-20260821/handoff-r59-two-machine-20260924.md §2.
+//
+// PowerShell resolves a FUNCTION before a cmdlet of the same name, so defining
+// global Get-ScheduledTask / Start-ScheduledTask functions stubs the task
+// scheduler identically on Windows PowerShell 5.1 (shadowing the real
+// ScheduledTasks module) and on pwsh 7 / Linux (where the module does not exist).
+
+// Every character PowerShell reads as a single quote: ' and the typographic
+// U+2018, U+2019, U+201A, U+201B (its CharExtensions.IsSingleQuote).
+const PS_SINGLE_QUOTE_CHARS = /['\u2018\u2019\u201a\u201b]/g
+
+function psSingleQuote(value) {
+  return `'${String(value).replace(PS_SINGLE_QUOTE_CHARS, (q) => q + q)}'`
+}
+
+// A PowerShell expression that evaluates to exactly `value`, written in ASCII only
+// (one [char] per UTF-16 code unit): a harness stays ASCII whatever the value holds.
+function psCharsExpr(value) {
+  const codes = Array.from({ length: value.length }, (_, i) => value.charCodeAt(i))
+  return `(-join [char[]]@(${codes.join(',')}))`
+}
+
+// Inverse of the harnesses' `Hex` helper below: UTF-16 code units as 4-digit hex,
+// so a value travels through a Windows PowerShell 5.1 stdout (OEM code page) intact.
+function fromPsHex(hex) {
+  return (hex.match(/[0-9a-f]{4}/g) || []).map((h) => String.fromCharCode(parseInt(h, 16))).join('')
+}
+const PS_HEX_FUNCTION = "function Hex([string]$s) { -join ($s.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ }) }"
+
+// A temp dir whose path has no 8.3 short-name segments. The R59 tests compare the
+// home the script resolved with the one the test built, and a Windows TEMP such as
+// C:\Users\RUNNER~1\... (GitHub's Windows runners) would otherwise differ from the
+// script's view only by short- vs long-name spelling (.NET Framework's GetFullPath
+// expands short names). realpathSync.native returns the long form.
+function mkLongTempDir(prefix) {
+  return fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), prefix))
+}
+
+// PowerShell source defining the two task-scheduler stubs, with the real cmdlets'
+// folder semantics (checked read-only on this host's Windows PowerShell 5.1 and pwsh 7
+// against a task in a subfolder): Get-ScheduledTask -TaskName searches EVERY task
+// folder and treats the name as a wildcard pattern; Start-ScheduledTask works by
+// path, and without -TaskPath it looks only in the root folder '\'. Every call is
+// logged to taskLogPath as `get <name>` / `start <name>`, and every start also as
+// `start-path=<TaskPath as the stub received it, '\' when omitted>`.
+//   taskPresent:  whether a task named taskName "exists" (in folder taskPath).
+//   taskPath:     that task's folder, '\' = the root.
+//   extraTasks:   more tasks that exist, [{ name, path }] -- same-name tasks in other
+//                 folders, or wildcard neighbours.
+//   startBehavior: 'start-runtime' (writes runtimeStartedMarker — the fixture's
+//                  "pm2-runtime is up again") or 'throw' (the scheduler refuses).
+//   strayDaemonMarkerPath: when given, every start also logs `start-saw-daemon=yes|no`:
+//                  whether the pm2 stub's session-bound daemon was still there when
+//                  the task started. With real pm2 on Windows, `yes` means the task's
+//                  pm2-runtime attaches to that daemon as a client and the backend
+//                  lives and dies with the upgrade session (verified with pm2 7.0.4).
+function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPath = '\\', taskPresent, extraTasks = [], startBehavior = 'start-runtime', runtimeStartedMarker = null, taskLogPath, strayDaemonMarkerPath = null }) {
+  const sawDaemonLine = strayDaemonMarkerPath
+    ? `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start-saw-daemon=' + $(if (Test-Path -LiteralPath ${psSingleQuote(strayDaemonMarkerPath)}) { 'yes' } else { 'no' }))`
+    : ''
+  const startBody =
+    startBehavior === 'throw'
+      ? "  throw 'STUB_TASK_SCHEDULER_REFUSED: the task could not be started'"
+      : `  Set-Content -LiteralPath ${psSingleQuote(runtimeStartedMarker)} -Value 'runtime-started'`
+  const tasks = [...(taskPresent ? [{ name: taskName, path: taskPath }] : []), ...extraTasks]
+  const taskTable = tasks.map((task) => `[pscustomobject]@{ TaskName = ${psSingleQuote(task.name)}; TaskPath = ${psSingleQuote(task.path)}; State = 'Ready' }`)
+  return [
+    `$global:StubScheduledTasks = @(${taskTable.join(', ')})`,
+    'function global:Get-ScheduledTask {',
+    '  [CmdletBinding()]',
+    '  param([string]$TaskName)',
+    `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('get ' + $TaskName)`,
+    '  $hits = @($global:StubScheduledTasks | Where-Object { $_.TaskName -like $TaskName })',
+    '  if ($hits.Count -gt 0) { return $hits }',
+    `  throw "No MSFT_ScheduledTask objects found with property 'TaskName' equal to '$TaskName'."`,
+    '}',
+    'function global:Start-ScheduledTask {',
+    '  [CmdletBinding()]',
+    "  param([string]$TaskName, [string]$TaskPath = '\\')",
+    `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start ' + $TaskName)`,
+    `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start-path=' + $TaskPath)`,
+    // Like the real cmdlet: a task that is not at exactly that folder + name does not start.
+    '  if (-not @($global:StubScheduledTasks | Where-Object { $_.TaskName -eq $TaskName -and $_.TaskPath -eq $TaskPath }).Count) {',
+    `    throw "The system cannot find the file specified. (stub: no task '$TaskName' in folder '$TaskPath')"`,
+    '  }',
+    ...(sawDaemonLine ? [sawDaemonLine] : []),
+    startBody,
+    '}',
+    '',
+  ].join('\n')
+}
+
+function readLogLines(logPath) {
+  if (!fs.existsSync(logPath)) return []
+  return fs.readFileSync(logPath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+}
+
+// `HOME=[<value>] <args>` lines written by the pm2 stub -> [{ home, command }].
+function readPm2HomeLog(homeLogPath) {
+  return readLogLines(homeLogPath).map((line) => {
+    const match = line.match(/^HOME=\[(.*?)\]\s*(.*)$/)
+    assert.ok(match, `unparseable pm2 home witness line: ${line}`)
+    return { home: match[1], command: match[2].trim().split(/\s+/)[0] }
+  })
+}
+
+test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runtime, which needs BOTH the directory and the scheduled task; every home it returns is absolute (RED-witnessed)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const profileWithRuntime = path.join(scratch, 'profile-with-runtime')
+    const runtimeHome = path.join(profileWithRuntime, '.pm2-runtime')
+    fs.mkdirSync(runtimeHome, { recursive: true })
+    const profileWithoutRuntime = path.join(scratch, 'profile-without-runtime')
+    fs.mkdirSync(profileWithoutRuntime, { recursive: true })
+    const explicitHome = path.join(scratch, 'explicit-home')
+    fs.mkdirSync(explicitHome, { recursive: true })
+    const envHome = path.join(scratch, 'env-home')
+    const missingHome = path.join(scratch, 'no-such-home')
+    // Relative values, resolved against the location the harness sets (scratch).
+    const relativeHomeName = 'rel-home'
+    fs.mkdirSync(path.join(scratch, relativeHomeName), { recursive: true })
+    const relativeEnvHomeName = 'rel-env-home'
+
+    const call = (label, { explicit = '', env = '', profile, task = 'MetaSheet-PM2', present }) =>
+      [
+        `$global:StubTaskPresent = ${present ? '$true' : '$false'}`,
+        '$global:StubTaskQueries = 0',
+        `try { $r = Resolve-Pm2Home -Explicit ${psSingleQuote(explicit)} -EnvValue ${psSingleQuote(env)} -UserProfileDir ${psSingleQuote(profile)} -ScheduledTaskName ${psSingleQuote(task)}; ` +
+          `Write-Host ('${label}=' + $r.Source + '|' + $r.Home + '|' + $global:StubTaskQueries) } catch { Write-Host ('${label}=THREW ' + $_.Exception.Message) }`,
+      ].join('\n')
+
+    const harness =
+      [
+        'function global:Get-ScheduledTask {',
+        '  [CmdletBinding()]',
+        '  param([string]$TaskName)',
+        '  $global:StubTaskQueries += 1',
+        "  if ($global:StubTaskPresent -and $TaskName -eq 'MetaSheet-PM2') { return [pscustomobject]@{ TaskName = $TaskName } }",
+        "  throw \"No MSFT_ScheduledTask objects found with property 'TaskName' equal to '$TaskName'.\"",
+        '}',
+        '',
+      ].join('\n') +
+      dotSourcePrelude(scratch) +
+      [
+        // 1. The explicit parameter wins over everything, without even asking the scheduler.
+        call('A', { explicit: explicitHome, env: envHome, profile: profileWithRuntime, present: true }),
+        // 2. PM2_HOME from the environment wins over auto-detection.
+        call('B', { env: envHome, profile: profileWithRuntime, present: true }),
+        // 3. Auto-detection: .pm2-runtime AND the scheduled task.
+        call('C', { profile: profileWithRuntime, present: true }),
+        // 4. The directory alone is not enough...
+        call('D', { profile: profileWithRuntime, present: false }),
+        // 5. ...nor is the task alone — and without the directory the scheduler is never asked.
+        call('E', { profile: profileWithoutRuntime, present: true }),
+        // 6. An empty task name disables auto-detection.
+        call('F', { profile: profileWithRuntime, task: '', present: true }),
+        // 7. A whitespace-only -Pm2Home is "not given", not a path.
+        call('G', { explicit: '   ', env: envHome, profile: profileWithRuntime, present: true }),
+        // 8. An explicit home that does not exist is refused, not silently created by pm2.
+        call('H', { explicit: missingHome, profile: profileWithRuntime, present: true }),
+        // 9. A relative -Pm2Home comes back ABSOLUTE, resolved against the location its
+        //    existence was checked in: Main later Set-Locations to RootDir, a native child
+        //    inherits that as its cwd, and pm2 resolves a relative PM2_HOME against its cwd.
+        `Push-Location ${psSingleQuote(scratch)}`,
+        call('I', { explicit: relativeHomeName, profile: profileWithRuntime, present: true }),
+        // 10. The same for a relative PM2_HOME from the environment (which need not exist).
+        call('K', { env: relativeEnvHomeName, profile: profileWithRuntime, present: true }),
+        // 12. [IO.Path]::IsPathRooted calls '\x' and 'C:x' rooted, yet both still depend
+        //     on the location (its drive; that drive's location) -- they must come back
+        //     fully qualified too (Windows path forms; see the assertions).
+        ...(process.platform === 'win32'
+          ? [
+              call('L', { env: `\\${relativeEnvHomeName}-rootrel`, profile: profileWithRuntime, present: true }),
+              call('M', { env: `${scratch.slice(0, 2)}${relativeEnvHomeName}-driverel`, profile: profileWithRuntime, present: true }),
+            ]
+          : []),
+        'Pop-Location',
+        // 13. A PM2_HOME that is no file-system path at all is refused, not handed to pm2.
+        call('N', { env: 'Env:\\PM2_HOME_PROBE', profile: profileWithRuntime, present: true }),
+        // (Windows only: a drive-qualified name is how a Windows operator spells a path.)
+        ...(process.platform === 'win32' ? [call('O', { env: 'NoSuchDrive9:\\pm2-home', profile: profileWithRuntime, present: true })] : []),
+        // 11. A container that is not a file-system directory passes Test-Path -PathType
+        //     Container but is no pm2 home (Env:\ exists on every platform; so would HKCU:\).
+        call('J', { explicit: 'Env:\\', profile: profileWithRuntime, present: true }),
+      ].join('\n')
+
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const line = (label) => (result.stdout.split(/\r?\n/).find((l) => l.startsWith(`${label}=`)) || '').slice(label.length + 1)
+
+    assert.equal(line('A'), `parameter -Pm2Home|${explicitHome}|0`)
+    assert.equal(line('B'), `environment PM2_HOME|${envHome}|0`)
+    assert.equal(line('C'), `pm2-runtime (.pm2-runtime + scheduled task 'MetaSheet-PM2')|${runtimeHome}|1`)
+    assert.equal(line('D'), 'default (.pm2-runtime exists but no such scheduled task)||1')
+    assert.equal(line('E'), 'default||0', 'with no .pm2-runtime directory the scheduler must not even be queried')
+    assert.equal(line('F'), 'default||0')
+    assert.equal(line('G'), `environment PM2_HOME|${envHome}|0`)
+    assert.match(line('H'), /^THREW PM2_HOME_NOT_FOUND/)
+    assert.equal(line('I'), `parameter -Pm2Home|${path.join(scratch, relativeHomeName)}|0`, 'a relative -Pm2Home must come back absolute')
+    assert.equal(line('K'), `environment PM2_HOME|${path.join(scratch, relativeEnvHomeName)}|0`, 'a relative PM2_HOME must come back absolute')
+    assert.match(line('J'), /^THREW PM2_HOME_NOT_FOUND/)
+    assert.match(line('N'), /^THREW PM2_HOME_NOT_FOUND: PM2_HOME 'Env:\\PM2_HOME_PROBE' from the environment is not a file-system path \(provider: Environment\)/)
+    if (process.platform === 'win32') assert.match(line('O'), /^THREW PM2_HOME_NOT_FOUND: PM2_HOME 'NoSuchDrive9:\\pm2-home' from the environment cannot be resolved to a file-system path/)
+    if (process.platform === 'win32') {
+      assert.equal(line('L'), `environment PM2_HOME|${scratch.slice(0, 2)}\\${relativeEnvHomeName}-rootrel|0`, "a root-relative '\\x' PM2_HOME must come back on the current location's drive")
+      assert.equal(line('M'), `environment PM2_HOME|${path.join(scratch, `${relativeEnvHomeName}-driverel`)}|0`, "a drive-relative 'C:x' PM2_HOME must come back under that drive's current location")
+    }
+    if (process.platform === 'win32') {
+      // Where Env:\ is known to pass the Container check (Windows PowerShell 5.1 and
+      // pwsh 7 on Windows, both verified), it must be the provider check that refuses it.
+      assert.match(line('J'), /not a file-system directory \(provider: Environment\)/)
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Invoke-Pm2 runs pm2 under the given PM2_HOME for that one call and restores the caller\'s PM2_HOME afterwards; an empty home leaves PM2_HOME alone', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  try {
+    const liveRoot = path.join(scratch, 'live')
+    const pm2LogPath = path.join(scratch, 'pm2-calls.log')
+    const homeLogPath = path.join(scratch, 'pm2-home.log')
+    const stubPath = writePm2Stub(liveRoot, pm2LogPath, null, { homeLogPath, restartNeedsHomeMarker: true })
+    const runtimeHome = path.join(scratch, 'runtime-home')
+    fs.mkdirSync(runtimeHome, { recursive: true })
+
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        "Remove-Item -LiteralPath 'Env:PM2_HOME' -ErrorAction SilentlyContinue",
+        `$r = Invoke-Pm2 -Pm2Command ${psSingleQuote(stubPath)} -Arguments @('stop', 'metasheet-backend') -Pm2Home ${psSingleQuote(runtimeHome)}`,
+        "Write-Host ('A_EXIT=' + $r.ExitCode + ' A_AFTER_SET=' + (Test-Path -LiteralPath 'Env:PM2_HOME'))",
+        "$env:PM2_HOME = 'caller-home'",
+        `$r = Invoke-Pm2 -Pm2Command ${psSingleQuote(stubPath)} -Arguments @('restart', 'metasheet-backend', '--update-env') -Pm2Home ${psSingleQuote(runtimeHome)}`,
+        "Write-Host ('B_EXIT=' + $r.ExitCode + ' B_AFTER=' + $env:PM2_HOME + ' B_NOTFOUND=' + (Test-Pm2ProcessNotFound -Output $r.Output))",
+        `$r = Invoke-Pm2 -Pm2Command ${psSingleQuote(stubPath)} -Arguments @('restart', 'metasheet-backend', '--update-env')`,
+        "Write-Host ('C_EXIT=' + $r.ExitCode + ' C_AFTER=' + $env:PM2_HOME)",
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /A_EXIT=0 A_AFTER_SET=False/, 'a PM2_HOME that was unset before the call must be unset again after it')
+    // No pm2-app-alive.marker in runtimeHome: the stub answers "not found" on stderr,
+    // and Invoke-Pm2 must hand back both the exit code and that stderr text (5.1
+    // would otherwise raise a NativeCommandError under the script's 'Stop').
+    assert.match(result.stdout, /B_EXIT=1 B_AFTER=caller-home B_NOTFOUND=True/)
+    assert.match(result.stdout, /C_EXIT=1 C_AFTER=caller-home/)
+    assert.match(result.stdout, /Process or Namespace metasheet-backend not found/, 'pm2 output must still reach the operator log')
+
+    const homes = readPm2HomeLog(homeLogPath)
+    assert.deepEqual(
+      homes.map((entry) => `${entry.command}@${entry.home}`),
+      [`stop@${runtimeHome}`, `restart@${runtimeHome}`, 'restart@caller-home'],
+      'a given home applies to exactly its own call; with no home the caller\'s PM2_HOME passes through untouched',
+    )
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+function listenOnPipe(server, pipePath) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(pipePath, resolve)
+  })
+}
+
+// The fallback run with the REAL pipe probe (Wait-Pm2DaemonPipeClosed is not stubbed)
+// against a pm2 stub whose restart answers "not found" and whose kill exits
+// killExitCode, one case per entry, each with its own logs. Returns the harness lines;
+// every case prints `<label>=RETURNED <how>` or `<label>=THREW <message>`.
+function realProbeFallbackCases(scratch, home, cases) {
+  const lines = []
+  for (const c of cases) {
+    const dir = path.join(scratch, c.label)
+    c.pm2Log = path.join(dir, 'pm2-calls.log')
+    c.taskLog = path.join(dir, 'task-calls.log')
+    c.daemonMarker = path.join(dir, 'stray-daemon.marker')
+    c.started = path.join(dir, 'runtime-started.marker')
+    const stub = writePm2Stub(dir, c.pm2Log, null, {
+      restartNeedsHomeMarker: true,
+      strayDaemonMarkerPath: c.daemonMarker,
+      killExitCode: c.killExitCode,
+    })
+    lines.push(
+      scheduledTaskStubSource({ taskPresent: true, runtimeStartedMarker: c.started, taskLogPath: c.taskLog, strayDaemonMarkerPath: c.daemonMarker }),
+      `try { $r = Restart-Pm2AppOrScheduledTask -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} -ScheduledTaskName 'MetaSheet-PM2'; ` +
+        `Write-Host ('${c.label}=RETURNED ' + $r) } catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+    )
+  }
+  return lines
+}
+
+test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see a listening pipe by name without connecting to it and report still-open / closed -- also while a pipe name makes the whole namespace unlistable for Windows PowerShell 5.1, and the real fallback then decides by the pipe, whatever pm2 kill answered; elsewhere always closed', async () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  // A pipe of our own, never pm2's real \\.\pipe\rpc.sock: that name is machine-wide
+  // and must not be touched by a test.
+  const pipeName = `ms2-upgrade-inplace-test-${process.pid}-${Date.now()}`
+  let server = null
+  let connections = 0
+  if (process.platform === 'win32') {
+    server = net.createServer((socket) => {
+      connections += 1
+      socket.destroy()
+    })
+    await listenOnPipe(server, `\\\\.\\pipe\\${pipeName}`)
+  }
+  try {
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `Write-Host ('LIVE=' + (Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(pipeName)}))`,
+        `Write-Host ('ABSENT=' + (Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(`${pipeName}-absent`)}))`,
+        `$t0 = Get-Date; $s = Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(pipeName)} -TimeoutSec 1; ` +
+          "Write-Host ('WAIT_LIVE=' + $s + ' ELAPSED_MS=' + [int]((Get-Date) - $t0).TotalMilliseconds)",
+        `Write-Host ('WAIT_ABSENT=' + (Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(`${pipeName}-absent`)} -TimeoutSec 1))`,
+      ].join('\n')
+    const result = await runPwshHarnessAsync(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    if (process.platform === 'win32') {
+      assert.match(result.stdout, /LIVE=True/)
+      assert.match(result.stdout, /ABSENT=False/)
+      const waited = result.stdout.match(/WAIT_LIVE=still-open ELAPSED_MS=(\d+)/)
+      assert.ok(waited, `a pipe that stays open must end the wait as still-open:\n${result.stdout}`)
+      assert.ok(Number(waited[1]) >= 900, `the wait must actually last its timeout, took ${waited[1]} ms`)
+      assert.match(result.stdout, /WAIT_ABSENT=closed/)
+      assert.equal(connections, 0, 'listing the pipe namespace must never connect to the daemon behind it')
+
+      // The state that used to make the probe 'unknown' (so the fallback's evidence
+      // missing): Windows PowerShell 5.1 (.NET Framework) cannot list \\.\pipe\ while
+      // any pipe name in it contains a character that is illegal in a path --
+      // GetFiles('\\.\pipe\') throws "Illegal characters in path." -- whereas pwsh 7
+      // (.NET) lists it. The probe therefore never lists the namespace: it queries pm2's
+      // one pipe name, which answers on both. Only the Windows 5.1 lane can show that
+      // at runtime; the "R59 wiring" test pins the query statically for every lane. The
+      // pipe below is held only for this block, and closed in its finally: while it
+      // exists every 5.1 listing of the whole namespace on this host fails -- so a
+      // whole-namespace probe in a second run of this file on the same Windows host
+      // would fail too; run them one after another.
+      const badServer = net.createServer((socket) => {
+        connections += 1
+        socket.destroy()
+      })
+      await listenOnPipe(badServer, `\\\\.\\pipe\\ms2-upgrade-inplace-bad<${process.pid}>`)
+      try {
+        const home = path.join(scratch, 'runtime-home')
+        fs.mkdirSync(home, { recursive: true })
+        const cases = [
+          { label: 'FALLBACK_KILL_FAILED', killExitCode: 1 },
+          { label: 'FALLBACK_KILL_OK', killExitCode: 0 },
+        ]
+        const badHarness =
+          dotSourcePrelude(scratch) +
+          [
+            "Write-Host ('EDITION=' + $PSVersionTable.PSEdition)",
+            "try { [void][System.IO.Directory]::GetFiles('\\\\.\\pipe\\'); Write-Host 'LISTING=ok' } catch { $e = $_.Exception; while ($null -ne $e.InnerException) { $e = $e.InnerException }; Write-Host ('LISTING=threw ' + $e.GetType().FullName + ': ' + $e.Message) }",
+            `$p = Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(pipeName)}; Write-Host ('BAD_PRESENT=' + $(if ($null -eq $p) { 'null' } else { [string]$p }))`,
+            `$p = Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(`${pipeName}-absent`)}; Write-Host ('BAD_ABSENT=' + $(if ($null -eq $p) { 'null' } else { [string]$p }))`,
+            `Write-Host ('BAD_WAIT=' + (Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(pipeName)} -TimeoutSec 1))`,
+            `Write-Host ('BAD_WAIT_ABSENT=' + (Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(`${pipeName}-absent`)} -TimeoutSec 1))`,
+            ...realProbeFallbackCases(scratch, home, cases),
+          ].join('\n')
+        const bad = await runPwshHarnessAsync(badHarness)
+        assert.equal(bad.status, 0, bad.stderr || bad.stdout)
+        const edition = (bad.stdout.match(/EDITION=(\w+)/) || [])[1]
+        const value = (key) => (bad.stdout.split(/\r?\n/).find((l) => l.startsWith(`${key}=`)) || '').slice(key.length + 1)
+        const byLabel = Object.fromEntries(cases.map((c) => [c.label, c]))
+        const pm2Calls = (label) => readLogLines(byLabel[label].pm2Log).map((l) => l.split(/\s+/)[0])
+        const starts = (label) => readLogLines(byLabel[label].taskLog).filter((l) => l.startsWith('start'))
+        if (edition === 'Desktop') {
+          // ArgumentException ("Illegal characters in path." on an English host): the
+          // type, not the localised message, is what is asserted.
+          assert.match(value('LISTING'), /^threw System\.ArgumentException: /, `under Windows PowerShell 5.1 this pipe name must make the whole namespace unlistable, or this block covers nothing:\n${bad.stdout}`)
+        } else {
+          assert.equal(edition, 'Core', bad.stdout)
+          assert.equal(value('LISTING'), 'ok', bad.stdout)
+        }
+        // Both editions: the probe still sees the live pipe and the absent one, never
+        // unknown, and the wait ends as still-open / closed.
+        assert.equal(value('BAD_PRESENT'), 'True', `the probe must see a live pipe by name while the namespace is unlistable:\n${bad.stdout}`)
+        assert.equal(value('BAD_ABSENT'), 'False', bad.stdout)
+        assert.equal(value('BAD_WAIT'), 'still-open', bad.stdout)
+        assert.equal(value('BAD_WAIT_ABSENT'), 'closed', bad.stdout)
+        // No daemon holds pm2's rpc.sock on a test host (see setUpR59Fixture's note), so
+        // the real probe sees pm2's pipe closed: that is the evidence, whatever pm2 kill
+        // answered, on both editions.
+        for (const c of cases) {
+          assert.equal(value(c.label), 'RETURNED scheduled-task', `${c.label}:\n${bad.stdout}`)
+          assert.deepEqual(pm2Calls(c.label), ['restart', 'kill'], c.label)
+          // (The pm2 stub's failed kill leaves its daemon marker behind, which the task
+          // stub then reports as start-saw-daemon=yes; only the start itself is asserted.)
+          assert.deepEqual(starts(c.label).slice(0, 2), ['start MetaSheet-PM2', 'start-path=\\'], c.label)
+        }
+        assert.doesNotMatch(bad.stdout, /PM2_DAEMON_STATE_UNKNOWN|UNVERIFIED/)
+        assert.equal(connections, 0, 'querying the pipe namespace must never connect to anything behind it')
+      } finally {
+        await new Promise((resolve) => badServer.close(resolve))
+      }
+    } else {
+      // pm2's sockets are files inside PM2_HOME off Windows, and `pm2 kill` there
+      // returns only after the daemon's SIGQUIT: nothing to wait for.
+      assert.match(result.stdout, /LIVE=False/)
+      assert.match(result.stdout, /ABSENT=False/)
+      assert.match(result.stdout, /WAIT_LIVE=closed/)
+      assert.match(result.stdout, /WAIT_ABSENT=closed/)
+    }
+  } finally {
+    if (server) await new Promise((resolve) => server.close(resolve))
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// The daemon-check DECISIONS below run on every OS: only the pipe listing itself is
+// Windows-only (the test above), so the probe is replaced by a scripted one here. A
+// PowerShell function defined after dot-sourcing replaces the script's own in that
+// scope, and the script's callers resolve it by name at call time.
+test('Wait-Pm2DaemonPipeClosed: closed as soon as the probe sees no pipe, still-open only after the timeout, unknown the moment pm2\'s pipe cannot be queried; it polls pm2\'s own pipe by default (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const probeLog = path.join(scratch, 'probe.log')
+    const run = (label, answers, waitArgs) =>
+      [
+        `$global:ProbeAnswers = @(${answers.map((a) => psSingleQuote(a)).join(', ')})`,
+        '$global:ProbeCalls = 0',
+        `Add-Content -LiteralPath ${psSingleQuote(probeLog)} -Value '--- ${label}'`,
+        `$t0 = Get-Date; $s = Wait-Pm2DaemonPipeClosed ${waitArgs}; ` +
+          `Write-Host ('${label}=' + $s + ' CALLS=' + $global:ProbeCalls + ' MS=' + [int]((Get-Date) - $t0).TotalMilliseconds)`,
+      ].join('\n')
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        'function global:Test-Pm2DaemonPipePresent {',
+        "  param([string]$PipeName = 'rpc.sock')",
+        '  $global:ProbeCalls += 1',
+        `  Add-Content -LiteralPath ${psSingleQuote(probeLog)} -Value ('probe ' + $PipeName)`,
+        '  $answer = $global:ProbeAnswers[[Math]::Min($global:ProbeCalls - 1, $global:ProbeAnswers.Count - 1)]',
+        "  if ($answer -eq 'null') { return $null }",
+        "  return ($answer -eq 'true')",
+        '}',
+        run('A', ['true', 'true', 'false'], '-TimeoutSec 5'),
+        run('B', ['true'], '-TimeoutSec 1'),
+        run('C', ['null'], '-TimeoutSec 5'),
+        run('D', ['true', 'null'], '-TimeoutSec 5'),
+        run('E', ['false'], ''),
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const line = (label) => result.stdout.match(new RegExp(`${label}=(\\S+) CALLS=(\\d+) MS=(\\d+)`))
+    const a = line('A')
+    assert.ok(a && a[1] === 'closed' && a[2] === '3', `a pipe that closes after two polls ends the wait as closed on the third:\n${result.stdout}`)
+    const b = line('B')
+    assert.ok(b && b[1] === 'still-open', `a pipe that never closes ends as still-open:\n${result.stdout}`)
+    assert.ok(Number(b[3]) >= 900, `still-open only after the timeout has really passed, took ${b[3]} ms`)
+    const c = line('C')
+    assert.ok(c && c[1] === 'unknown' && c[2] === '1', `a pipe that cannot be queried answers unknown at once, never closed:\n${result.stdout}`)
+    const d = line('D')
+    assert.ok(d && d[1] === 'unknown' && d[2] === '2', `unknown mid-wait is unknown, not closed:\n${result.stdout}`)
+    const e = line('E')
+    assert.ok(e && e[1] === 'closed' && e[2] === '1')
+    const probes = readLogLines(probeLog).filter((l) => l.startsWith('probe '))
+    assert.ok(probes.length > 0 && probes.every((l) => l === 'probe rpc.sock'), `every probe must ask for pm2's own pipe, rpc.sock: ${JSON.stringify(probes)}`)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// pm2 kill's exit code is no evidence either way: on Windows `pm2 kill` exits 0 from
+// killDaemon's callback, which pm2's Client.js calls after a fixed 3000 ms timer even
+// when the daemon is still there (pm2 7.0.4 / 5.4.3; reproduced with real pm2 7.0.4 and
+// a daemon that ignores killMe: exit 0, "[v] PM2 Daemon Stopped", daemon and pipe still
+// there). So every pipe state below is run with a kill that exits 0 and one that fails,
+// and the outcome must not differ.
+test('Restart-Pm2AppOrScheduledTask: after "not found" + pm2 kill, the task starts only when the pipe is seen closed -- never on pm2 kill\'s exit code, an unknown pipe refuses either way -- by the folder it was found in; exactly one task of exactly that name (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const home = path.join(scratch, 'runtime-home')
+    fs.mkdirSync(home, { recursive: true })
+    const cases = [
+      { label: 'CLOSED', pipe: 'closed' },
+      { label: 'CLOSED_KILL_FAILED', pipe: 'closed', killExitCode: 1 },
+      { label: 'UNKNOWN_KILL_OK', pipe: 'unknown' },
+      { label: 'UNKNOWN_KILL_FAILED', pipe: 'unknown', killExitCode: 1 },
+      { label: 'STILL_OPEN', pipe: 'still-open' },
+      { label: 'STILL_OPEN_KILL_FAILED', pipe: 'still-open', killExitCode: 1 },
+      { label: 'OTHER_ANSWER', pipe: 'no-such-state' },
+      { label: 'SUBFOLDER', pipe: 'closed', taskStub: { taskPath: '\\MetaSheet\\' } },
+      { label: 'AMBIGUOUS', pipe: 'closed', taskStub: { extraTasks: [{ name: 'MetaSheet-PM2', path: '\\Other\\' }] } },
+      { label: 'WILDCARD_NAME', pipe: 'closed', taskName: 'MetaSheet-PM*' },
+    ]
+    const prelude =
+      dotSourcePrelude(scratch) +
+      [
+        'function global:Wait-Pm2DaemonPipeClosed {',
+        "  param([int]$TimeoutSec = 15, [string]$PipeName = 'rpc.sock')",
+        "  Add-Content -LiteralPath $global:CasePm2Log -Value ('WAIT ' + $PipeName)",
+        '  return $global:StubPipeState',
+        '}',
+        '',
+      ].join('\n')
+    const caseBlocks = cases.map((c) => {
+      const dir = path.join(scratch, c.label)
+      c.pm2Log = path.join(dir, 'pm2-calls.log')
+      c.taskLog = path.join(dir, 'task-calls.log')
+      c.daemonMarker = path.join(dir, 'stray-daemon.marker')
+      c.started = path.join(dir, 'runtime-started.marker')
+      const stub = writePm2Stub(dir, c.pm2Log, null, {
+        restartNeedsHomeMarker: true,
+        strayDaemonMarkerPath: c.daemonMarker,
+        killExitCode: c.killExitCode || 0,
+      })
+      return [
+        scheduledTaskStubSource({ taskPresent: true, runtimeStartedMarker: c.started, taskLogPath: c.taskLog, strayDaemonMarkerPath: c.daemonMarker, ...(c.taskStub || {}) }),
+        `$global:StubPipeState = ${psSingleQuote(c.pipe)}`,
+        `$global:CasePm2Log = ${psSingleQuote(c.pm2Log)}`,
+        `try { $r = Restart-Pm2AppOrScheduledTask -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} -ScheduledTaskName ${psSingleQuote(c.taskName || 'MetaSheet-PM2')}; ` +
+          `Write-Host ('${c.label}=RETURNED ' + $r) } catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+        '',
+      ].join('\n')
+    })
+    // Windows caps a command line at 32767 characters, and the harness travels as
+    // -Command: the cases run in as many harnesses as it takes to stay under that.
+    const HARNESS_LIMIT = 30000
+    const harnesses = []
+    for (const block of caseBlocks) {
+      const last = harnesses.length - 1
+      if (last >= 0 && harnesses[last].length + block.length <= HARNESS_LIMIT) {
+        harnesses[last] += block
+      } else {
+        harnesses.push(prelude + block)
+      }
+    }
+    let stdout = ''
+    for (const harness of harnesses) {
+      assert.ok(harness.length <= HARNESS_LIMIT, `one case alone must fit a command line (${harness.length} chars)`)
+      const run = runPwshHarness(harness)
+      assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error))
+      stdout += run.stdout
+    }
+    const result = { stdout }
+    const outcome = (label) => (result.stdout.split(/\r?\n/).find((l) => l.startsWith(`${label}=`)) || '').slice(label.length + 1)
+    const byLabel = Object.fromEntries(cases.map((c) => [c.label, c]))
+    const pm2Calls = (label) => readLogLines(byLabel[label].pm2Log).map((l) => l.split(/\s+/)[0])
+    const starts = (label) => readLogLines(byLabel[label].taskLog).filter((l) => l.startsWith('start'))
+
+    // Started: kill, then the pipe check, then the task, by its folder -- the pipe is
+    // closed, whatever pm2 kill answered.
+    for (const label of ['CLOSED', 'CLOSED_KILL_FAILED']) {
+      assert.equal(outcome(label), 'RETURNED scheduled-task', `${label}:\n${result.stdout}`)
+      assert.deepEqual(pm2Calls(label), ['restart', 'kill', 'WAIT'], `${label}: kill, then the pipe check`)
+      assert.deepEqual(starts(label).slice(0, 2), ['start MetaSheet-PM2', 'start-path=\\'], label)
+    }
+    assert.deepEqual(starts('CLOSED'), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+    assert.match(result.stdout, /pm2 kill reported exit=1 \(the pipe check below decides whether a daemon is still there\)/)
+    assert.equal(outcome('SUBFOLDER'), 'RETURNED scheduled-task', `a task in a subfolder must be started by its folder:\n${result.stdout}`)
+    assert.deepEqual(starts('SUBFOLDER'), ['start MetaSheet-PM2', 'start-path=\\MetaSheet\\', 'start-saw-daemon=no'])
+
+    // Refused: the task is never started -- an unknown pipe included, whatever pm2 kill answered.
+    for (const label of ['UNKNOWN_KILL_OK', 'UNKNOWN_KILL_FAILED']) {
+      assert.match(outcome(label), /^THREW PM2_DAEMON_STATE_UNKNOWN: pm2's pipe \\\\\.\\pipe\\rpc\.sock could not be queried after 'pm2 kill'.*'MetaSheet-PM2' was NOT started\.$/, `${label}:\n${result.stdout}`)
+    }
+    assert.doesNotMatch(result.stdout, /UNVERIFIED/)
+    assert.match(outcome('STILL_OPEN'), /^THREW PM2_DAEMON_STILL_RUNNING: .*\(pipe state: still-open\).*The task was NOT started/)
+    assert.match(outcome('STILL_OPEN_KILL_FAILED'), /^THREW PM2_DAEMON_STILL_RUNNING: .*\(pipe state: still-open\)/)
+    assert.match(outcome('OTHER_ANSWER'), /^THREW PM2_DAEMON_STILL_RUNNING: .*\(pipe state: no-such-state\)/, 'an answer the fallback does not know must refuse, not start')
+    for (const label of ['UNKNOWN_KILL_OK', 'UNKNOWN_KILL_FAILED', 'STILL_OPEN', 'STILL_OPEN_KILL_FAILED', 'OTHER_ANSWER']) {
+      assert.deepEqual(pm2Calls(label), ['restart', 'kill', 'WAIT'], label)
+      assert.deepEqual(starts(label), [], `${label}: the task must not be started`)
+    }
+
+    // Not exactly one task of exactly that name: no fallback at all -- nothing killed.
+    assert.match(outcome('AMBIGUOUS'), /^THREW PM2_RESTART_FAILED: exit=1 \(pm2 reports 'metasheet-backend' not found and there is no single scheduled task 'MetaSheet-PM2' to fall back to\)/)
+    assert.match(result.stdout, /scheduled task name 'MetaSheet-PM2' matches 2 tasks \(\\MetaSheet-PM2, \\Other\\MetaSheet-PM2\)/)
+    assert.match(outcome('WILDCARD_NAME'), /^THREW PM2_RESTART_FAILED: exit=1 .*no single scheduled task 'MetaSheet-PM\*'/)
+    for (const label of ['AMBIGUOUS', 'WILDCARD_NAME']) {
+      assert.deepEqual(pm2Calls(label), ['restart'], `${label}: no kill without a task to start`)
+      assert.deepEqual(starts(label), [], label)
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// spawnSync blocks this process's event loop, so a node http server in the same
+// process could never answer a harness started with runPwshHarness. Anything that
+// needs the two to talk must use this async variant.
+function runPwshHarnessAsync(harness) {
+  return new Promise((resolve) => {
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-Command', harness])
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+}
+
+test('Test-MaintenanceGateWired separates a wired gate (503) from an inert flag (200) and from an unreachable nginx, and never throws', async () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  const server = http.createServer((req, res) => {
+    // /wired/* impersonates an nginx that really reads the flag; every other
+    // path impersonates one whose conf was never synced.
+    if (req.url.startsWith('/wired')) {
+      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '90' })
+      res.end('{"error":{"code":"SERVICE_UNAVAILABLE"}}')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('ok')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const flagPath = path.join(scratch, 'maintenance.flag')
+    fs.writeFileSync(flagPath, 'raised')
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `Write-Host ('A=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:${port}/wired/api/health' -FlagPath '${flagPath}'))`,
+        `Write-Host ('B=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:${port}/api/health' -FlagPath '${flagPath}'))`,
+        // Port 1: connection refused — a transport failure, NOT evidence either way.
+        `Write-Host ('C=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:1/api/health' -FlagPath '${flagPath}'))`,
+        "Write-Host 'SURVIVED'",
+      ].join('\n')
+    const result = await runPwshHarnessAsync(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /A=WIRED/, '503 while the flag is up is the only positive proof that this host reads the flag')
+    assert.match(result.stdout, /B=NOT_WIRED/, '200 while the flag is up proves the conf was never synced here')
+    assert.match(result.stdout, /C=UNKNOWN/, 'an unreachable endpoint must not be reported as either wired or unwired')
+    assert.match(result.stdout, /MAINTENANCE_GATE_NOT_WIRED/, 'the 200 case must be loud enough for an operator to notice in the log')
+    assert.match(
+      result.stdout,
+      /SURVIVED/,
+      'the probe is a diagnostic, never a guard: refusing to upgrade a host whose nginx.conf was never synced would be worse than upgrading it unshielded',
+    )
+  } finally {
+    server.close()
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Main structure: the gate is validated before anything runs, raised before pm2 stop, and dropped by an unconditional finally', () => {
+  const mainStart = scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {")
+  const main = scriptSource.slice(mainStart)
+
+  const assertIdx = main.indexOf('Assert-MaintenanceFlagOutsideReplaceDirs -FlagPath $maintenanceFlagPath')
+  const raiseIdx = main.indexOf('New-MaintenanceFlag -FlagPath $maintenanceFlagPath')
+  const stopIdx = main.indexOf('Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName')
+  const backupRootIdx = main.indexOf('New-Item -ItemType Directory -Force -Path $resolvedBackupRoot')
+  assert.ok(assertIdx > -1, 'Main must validate the flag path, not just resolve it')
+  assert.ok(raiseIdx > -1 && stopIdx > -1)
+  assert.ok(assertIdx < backupRootIdx, 'the flag-path refusal must come before ANY directory is created')
+  assert.ok(assertIdx < raiseIdx, 'the path must be validated before the flag is written')
+  assert.ok(raiseIdx < stopIdx, 'the gate must be raised before the backend is stopped')
+
+  // THE INVARIANT THAT HAD NO GUARD: "once the flag is up, the finally owns it".
+  // A raise sitting even two statements ABOVE `try {` still passes every
+  // ordering assertion above, yet any throw between the write and the try --
+  // or an early `exit` from a gate that has not run yet -- leaves the flag on
+  // disk forever, i.e. a permanently 503 site. So: the checksum gate (the one
+  // pre-try step that legitimately refuses) must run BEFORE the raise, the
+  // raise must sit INSIDE the try, and nothing that can throw may separate
+  // `try {` from the raise.
+  const checksumIdx = main.indexOf('$verifiedSha = Test-PackageChecksum')
+  const tryIdx = main.indexOf('try {')
+  assert.ok(checksumIdx > -1 && tryIdx > -1)
+  assert.ok(
+    checksumIdx < raiseIdx,
+    'the checksum refusal must come BEFORE the gate is raised: it exits without running any finally',
+  )
+  assert.ok(
+    tryIdx < raiseIdx,
+    'the gate must be raised INSIDE the try whose finally drops it -- a pre-try raise survives every throw before `try {`',
+  )
+  const betweenTryAndRaise = main.slice(tryIdx + 'try {'.length, raiseIdx)
+  const executableBetween = betweenTryAndRaise
+    .split(String.fromCharCode(10))
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+  assert.deepEqual(
+    executableBetween,
+    [],
+    'nothing that can throw may sit between `try {` and the raise -- the window it opens is exactly the one the finally cannot close',
+  )
+
+  // The positive self-witness: probe the PUBLIC url once while the flag is up
+  // and the backend is still serving. Only that window can distinguish "nginx
+  // reads this flag" (503) from "this host never got the conf" (200) — after
+  // pm2 is stopped a 503 could just as well be a dead upstream. Without it the
+  // run prints "maintenance flag: ... (removed)" on hosts where the flag is
+  // inert, which reads like proof the window was shielded.
+  const gateProbeIdx = main.indexOf('Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath')
+  assert.ok(gateProbeIdx > -1, 'Main must probe the public URL to prove the gate is actually wired on this host')
+  assert.ok(raiseIdx < gateProbeIdx, 'the gate probe is meaningless before the flag exists')
+  assert.ok(
+    gateProbeIdx < stopIdx,
+    'the gate probe must run BEFORE pm2 is stopped: with the backend down, a 503 no longer distinguishes "the gate answered" from "the upstream is dead"',
+  )
+  const finallyIdxForProbe = main.lastIndexOf('} finally {')
+  assert.ok(gateProbeIdx < finallyIdxForProbe && gateProbeIdx > main.indexOf('try {'), 'the probe must sit inside the try whose finally drops the flag')
+
+  const finallyIdx = main.lastIndexOf('} finally {')
+  assert.ok(finallyIdx > stopIdx, 'the pm2 stop and everything after it must sit inside the try whose finally drops the gate')
+  const finallyBlock = main.slice(finallyIdx)
+  assert.match(
+    finallyBlock,
+    /Remove-MaintenanceFlag -FlagPath \$maintenanceFlagPath/,
+    'the outermost finally must delete the flag unconditionally — success, refusal, or exception',
+  )
+
+  // Order inside step 7: backend-direct probe, then the removal, then nginx.
+  const backendProbeIdx = main.indexOf('-HealthUrl $resolvedBackendHealthUrl')
+  const successRemovalIdx = main.indexOf('Remove-MaintenanceFlag -FlagPath $maintenanceFlagPath')
+  const nginxProbeIdx = main.indexOf("-Label 'Nginx healthcheck'")
+  assert.ok(backendProbeIdx > -1 && successRemovalIdx > -1 && nginxProbeIdx > -1)
+  assert.ok(
+    backendProbeIdx < successRemovalIdx && successRemovalIdx < nginxProbeIdx,
+    'the flag must be dropped BETWEEN the backend-direct probe and the nginx probe (r29): probing nginx while the ' +
+      'gate is up makes the script fail its own healthcheck against a healthy backend',
+  )
+})
+
+test('R59 wiring: pm2 is invoked in exactly one place (Invoke-Pm2), and every pm2 call site in Main passes the one resolved home', () => {
+  // PowerShell variable names are case-insensitive: $pm2Command and $Pm2Command
+  // are the same variable, so the scan must be too.
+  const invocations = scriptCodeOnly.match(/&\s*\$pm2Command\b/gi) || []
+  assert.equal(invocations.length, 1, `pm2 must be run from exactly one place, found: ${JSON.stringify(invocations)}`)
+  const invokeStart = scriptCodeOnly.indexOf('function Invoke-Pm2 {')
+  const invokeEnd = scriptCodeOnly.indexOf('\nfunction ', invokeStart + 1)
+  assert.ok(invokeStart > -1 && invokeEnd > invokeStart)
+  const invokeBody = scriptCodeOnly.slice(invokeStart, invokeEnd)
+  assert.match(
+    invokeBody,
+    /&\s*\$Pm2Command @Arguments 2>&1/,
+    'the single pm2 invocation must live inside Invoke-Pm2, which applies PM2_HOME around it',
+  )
+  // The line R59's fix rests on, pinned statically because only Windows PowerShell 5.1
+  // can fail on it at runtime (pwsh 7.2+ never turns native stderr into an error
+  // record): under the script's global 'Stop', 5.1 turns pm2's stderr "not found" into
+  // a terminating NativeCommandError, losing the exit code and the text the fallback
+  // needs -- the exact R59 incident. It must be 'Continue', set before the call, with
+  // nothing re-assigning it in between.
+  const callIdx = invokeBody.search(/&\s*\$Pm2Command @Arguments 2>&1/)
+  const eapIdx = invokeBody.search(/\$ErrorActionPreference\s*=\s*['"]Continue['"]/i)
+  assert.ok(eapIdx > -1, "Invoke-Pm2 must set $ErrorActionPreference = 'Continue' for the pm2 call")
+  assert.ok(eapIdx < callIdx, "Invoke-Pm2 must set $ErrorActionPreference = 'Continue' BEFORE running pm2")
+  assert.doesNotMatch(
+    invokeBody.slice(eapIdx + 1, callIdx),
+    /\$ErrorActionPreference/i,
+    'nothing may re-assign $ErrorActionPreference between the Continue and the pm2 call',
+  )
+
+  // The fallback kills the empty daemon the "not found" restart left in this session,
+  // waits for pm2's machine-wide pipe to close, and only then starts the task -- in
+  // that order, with a still-open pipe refusing to start the task at all.
+  const restartStart = scriptCodeOnly.indexOf('function Restart-Pm2AppOrScheduledTask {')
+  const restartEnd = scriptCodeOnly.indexOf('\nfunction ', restartStart + 1)
+  assert.ok(restartStart > -1 && restartEnd > restartStart)
+  const restartBody = scriptCodeOnly.slice(restartStart, restartEnd)
+  const lookupIdx = restartBody.indexOf('$task = Get-Pm2ScheduledTask -TaskName $ScheduledTaskName')
+  const killIdx = restartBody.search(/Invoke-Pm2 -Pm2Command \$Pm2Command -Arguments @\('kill'\) -Pm2Home \$Pm2Home/)
+  const waitIdx = restartBody.indexOf('$pipeState = Wait-Pm2DaemonPipeClosed')
+  const stillOpenIdx = restartBody.search(/\} elseif \(\$pipeState -ne 'closed'\) \{\s*throw "PM2_DAEMON_STILL_RUNNING/)
+  const startIdx = restartBody.indexOf('Start-ScheduledTask -TaskName $task.TaskName -TaskPath $taskPath -ErrorAction Stop')
+  assert.ok(lookupIdx > -1, 'the task that is started must be the one Get-Pm2ScheduledTask found')
+  assert.ok(killIdx > -1, 'the fallback must `pm2 kill` under the resolved home')
+  assert.ok(waitIdx > -1 && stillOpenIdx > -1 && startIdx > -1)
+  assert.ok(lookupIdx < killIdx && killIdx < waitIdx && waitIdx < stillOpenIdx && stillOpenIdx < startIdx, 'find the task, kill, then wait for the pipe, then refuse or start the task')
+  assert.equal((restartBody.match(/Start-ScheduledTask\b/g) || []).length, 1, 'exactly one Start-ScheduledTask in the fallback')
+  assert.match(
+    restartBody.slice(waitIdx, waitIdx + 60),
+    /Wait-Pm2DaemonPipeClosed\s*\r?\n/,
+    "the fallback must wait on pm2's own pipe (the default -PipeName), not a test pipe",
+  )
+  assert.match(scriptCodeOnly, /function Test-Pm2DaemonPipePresent \{\s*param\(\[string\]\$PipeName = 'rpc\.sock'\)/)
+  assert.match(scriptCodeOnly, /function Wait-Pm2DaemonPipeClosed \{[\s\S]*?\[string\]\$PipeName = 'rpc\.sock'/)
+  // The probe queries pm2's ONE pipe name ($PipeName as GetFiles' search pattern) and
+  // never lists the whole \\.\pipe\ namespace, which Windows PowerShell 5.1 cannot do
+  // while any pipe name holds a character illegal in a path (the pipe test above shows
+  // that at runtime on the Windows 5.1 lane only, so it is pinned here, where every
+  // lane sees a change to it). A query that fails anyway is $null ('unknown', so no
+  // task start), never $false ('closed', so a start).
+  const probeStart = scriptCodeOnly.indexOf('function Test-Pm2DaemonPipePresent {')
+  const probeEnd = scriptCodeOnly.indexOf('\nfunction ', probeStart + 1)
+  assert.ok(probeStart > -1 && probeEnd > probeStart)
+  const probeBody = scriptCodeOnly.slice(probeStart, probeEnd)
+  assert.match(
+    probeBody,
+    /\n\s*try \{\s*\n[\s\S]*foreach \(\$pipe in \[System\.IO\.Directory\]::GetFiles\('\\\\\.\\pipe\\', \$PipeName\)\) \{[\s\S]*\n\s*return \$false\s*\n\s*\} catch \{\s*\n\s*return \$null\s*\n\s*\}\s*\n\}\s*$/,
+    'Test-Pm2DaemonPipePresent must query $PipeName inside its try and answer $null (unknown) from its catch',
+  )
+  assert.equal((probeBody.match(/GetFiles|EnumerateFiles|GetFileSystemEntries|EnumerateFileSystemEntries|Get-ChildItem|\bgci\b|\bdir\b|\bls\b/gi) || []).length, 1, 'exactly one pipe query in Test-Pm2DaemonPipePresent, the by-name GetFiles')
+  assert.doesNotMatch(scriptCodeOnly, /GetFiles\(\s*'\\\\\.\\pipe\\'\s*\)/, 'nothing in the script may list the whole pipe namespace')
+  assert.equal((probeBody.match(/\bcatch\b/g) || []).length, 1, 'exactly one catch in Test-Pm2DaemonPipePresent')
+  assert.equal((probeBody.match(/\btrap\b/gi) || []).length, 0, 'no trap in Test-Pm2DaemonPipePresent')
+  assert.equal((probeBody.match(/return \$null/g) || []).length, 1, 'the catch is the only $null answer')
+  // An unknown pipe refuses to start the task, and the start decision reads nothing
+  // from pm2 kill: its exit code is 0 on Windows whether or not the daemon exited.
+  assert.match(
+    restartBody,
+    /\n\s*if \(\$pipeState -eq 'unknown'\) \{\s*\n\s*throw "PM2_DAEMON_STATE_UNKNOWN: [^"\n]*"\s*\n\s*\} elseif \(\$pipeState -ne 'closed'\) \{\s*\n\s*throw "PM2_DAEMON_STILL_RUNNING: [^"\n]*"\s*\n\s*\}\s*\n/,
+    "'unknown' must throw PM2_DAEMON_STATE_UNKNOWN unconditionally, anything but 'closed' PM2_DAEMON_STILL_RUNNING",
+  )
+  assert.doesNotMatch(restartBody.slice(waitIdx, startIdx), /\$kill\b/i, 'nothing between the pipe wait and the task start may consult the pm2 kill result')
+
+  const main = scriptSource.slice(scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
+  const stopCalls = main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []
+  assert.equal(stopCalls.length, 2, 'Main stops pm2 twice: step 2 and the failure handler')
+  for (const call of stopCalls) {
+    assert.match(call, /-Pm2Home \$resolvedPm2Home\b/, `every stop must run under the resolved pm2 home: ${call}`)
+  }
+  assert.match(
+    main,
+    /Restart-Pm2AppOrScheduledTask -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home -ScheduledTaskName \$Pm2ScheduledTaskName/,
+  )
+  // Resolved before anything is touched: before the backup root is created and
+  // before the gate goes up.
+  const resolveIdx = main.indexOf('Resolve-Pm2Home -Explicit $Pm2Home -EnvValue $env:PM2_HOME')
+  assert.ok(resolveIdx > -1)
+  assert.ok(resolveIdx < main.indexOf('New-Item -ItemType Directory -Force -Path $resolvedBackupRoot'))
+  assert.ok(resolveIdx < main.indexOf('New-MaintenanceFlag -FlagPath $maintenanceFlagPath'))
+})
+
+// ── 3. END-TO-END: the acid fixture ───────────────────────────────────────────────
+//
+// Deep nesting (depth>=3 under lib/), a decoy whose NAME contains "node_modules" as
+// a substring but is not inside one, a package-side node_modules that must be
+// skipped, a live-side node_modules that must survive, and a loose file at plugins/
+// root — every shape the verifiers found the original, shallow fixtures could not
+// reproduce F22 against.
+
+function sha256File(filePath) {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+}
+
+function writeFixtureFile(root, rel, contents) {
+  const abs = path.join(root, rel)
+  fs.mkdirSync(path.dirname(abs), { recursive: true })
+  fs.writeFileSync(abs, contents)
+}
+
+function buildAcidPackageStage(stageDir, { omitPreflightFile = false } = {}) {
+  writeFixtureFile(stageDir, 'PACKAGE-METADATA.json', JSON.stringify({ name: 'acid-fixture-package' }, null, 2))
+  writeFixtureFile(stageDir, 'apps/web/dist/index.html', '<html>NEW WEB DIST</html>\n')
+  writeFixtureFile(
+    stageDir,
+    'packages/core-backend/dist/src/db/migrate.js',
+    [
+      "const fs = require('fs')",
+      "const marker = process.env.UPGRADE_TEST_ENV_MARKER || 'MISSING'",
+      "if (process.env.UPGRADE_TEST_MIGRATE_MARKER_PATH) fs.writeFileSync(process.env.UPGRADE_TEST_MIGRATE_MARKER_PATH, marker)",
+      "console.log('migrate-ok marker=' + marker)",
+    ].join('\n'),
+  )
+  writeFixtureFile(stageDir, 'packages/core-backend/migrations/001_new.sql', 'select 1;\n')
+
+  // Loose file directly at plugins/ root.
+  writeFixtureFile(stageDir, LOOSE_ROOT_FILE, 'PACKAGE_LOOSE_ROOT_FILE')
+
+  writeFixtureFile(stageDir, 'plugins/plugin-integration-core/index.cjs', "module.exports = { name: 'plugin-integration-core' }\n")
+  writeFixtureFile(stageDir, 'plugins/plugin-integration-core/app.manifest.json', JSON.stringify({ id: 'plugin-integration-core' }))
+  if (!omitPreflightFile) {
+    writeFixtureFile(stageDir, PREFLIGHT_FILE, 'module.exports = {}\n')
+  }
+  // Depth>=3 under lib/ (lib -> adapters -> legacy -> file), mirroring the real
+  // package's lib/adapters/ shape one level deeper.
+  writeFixtureFile(stageDir, DEEP_ADAPTER_FILE, 'module.exports = { deep: true }\n')
+  // Decoy: filename CONTAINS "node_modules" as a substring, but is a plain file in
+  // lib/, not inside an actual node_modules directory — must be copied, not skipped.
+  writeFixtureFile(stageDir, DECOY_FILE, 'module.exports = { decoy: true }\n')
+  // Package-side node_modules — must never reach the deployed tree, anywhere.
+  writeFixtureFile(stageDir, PACKAGE_NODE_MODULES_FILE, PACKAGE_LEAK_MARKER)
+}
+
+// The maintenance gate must be UP before the backend goes down. The pm2 stub is
+// the only witness that can see that ordering from the outside: it records, at the
+// instant pm2 is actually invoked, whether the flag file already exists. A run that
+// raises the flag after stopping pm2 (or never) writes FLAG_ABSENT on the stop call.
+function maintenanceWitnessPaths(root, liveRoot) {
+  return {
+    flagPath: path.join(liveRoot, 'output', 'maintenance.flag'),
+    pm2FlagWitnessPath: path.join(root, 'pm2-flag-witness.log'),
+  }
+}
+
+function readPm2FlagWitness(witnessPath) {
+  if (!fs.existsSync(witnessPath)) return []
+  return fs.readFileSync(witnessPath, 'utf8').trim().split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+// The file whose presence INSIDE a pm2 home tells the pm2 stub "a daemon holding
+// the app lives in this home". Absent = the R59 shape: pm2-runtime auto-exited
+// after the stop took its only app offline, so a restart finds nothing.
+const PM2_APP_ALIVE_MARKER = 'pm2-app-alive.marker'
+
+// pm2Behavior (optional, all fields optional):
+//   homeLogPath             — every call appends `HOME=[<PM2_HOME as the stub saw it>] <args>`,
+//                             the witness for "every pm2 call ran under the resolved home".
+//   restartNeedsHomeMarker  — `restart` succeeds only when PM2_HOME is set AND
+//                             <PM2_HOME>/pm2-app-alive.marker exists; otherwise it prints pm2's own
+//                             "[PM2][ERROR] Process or Namespace <name> not found" on STDERR and exits 1.
+//   restartOtherError       — `restart` always fails with an error that is NOT "not found"
+//                             ("[PM2][ERROR] spawn EPERM" on stderr, exit 1).
+//   strayDaemonMarkerPath   — models the machine-wide pm2 daemon a CLI call leaves behind: a
+//                             "not found" restart (a CLI call that found no daemon) prints pm2's
+//                             "Spawning PM2 daemon" line and creates this file; `pm2 kill` deletes it.
+//                             The Start-ScheduledTask stub reads it to record whether the task's
+//                             pm2-runtime would have found (and attached to) that session-bound daemon.
+//   killExitCode            — with strayDaemonMarkerPath: a non-zero value makes `pm2 kill` fail
+//                             ("[PM2][ERROR] kill failed" on stderr) and leave the daemon marker in place.
+// Without pm2Behavior the stub is exactly the historical one: every call exits 0.
+function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
+  const { homeLogPath = null, restartNeedsHomeMarker = false, restartOtherError = false, strayDaemonMarkerPath = null, killExitCode = 0 } = pm2Behavior
+  const binDir = path.join(liveRoot, 'node_modules', '.bin')
+  fs.mkdirSync(binDir, { recursive: true })
+  const stubPath = path.join(binDir, 'pm2.cmd')
+  if (process.platform === 'win32') {
+    const witnessLine = witness
+      ? `if exist "${witness.flagPath}" (echo FLAG_PRESENT %* >> "${witness.pm2FlagWitnessPath}") else (echo FLAG_ABSENT %* >> "${witness.pm2FlagWitnessPath}")`
+      : 'rem no maintenance-flag witness requested'
+    const homeLine = homeLogPath ? `echo HOME=[%PM2_HOME%] %* >> "${homeLogPath}"` : 'rem no pm2-home witness requested'
+    const killLines = strayDaemonMarkerPath
+      ? [
+          'if /i not "%1"=="kill" goto afterkill',
+          ...(killExitCode === 0
+            ? [`if exist "${strayDaemonMarkerPath}" del /f /q "${strayDaemonMarkerPath}"`, 'echo [PM2] [v] PM2 Daemon Stopped']
+            : ['echo [PM2][ERROR] kill failed 1>&2']),
+          `exit /b ${killExitCode}`,
+          ':afterkill',
+        ]
+      : []
+    const spawnLines = strayDaemonMarkerPath
+      ? ['echo [PM2] Spawning PM2 daemon with pm2_home=%PM2_HOME%', `echo spawned> "${strayDaemonMarkerPath}"`]
+      : []
+    const restartLines = restartOtherError
+      ? ['if /i not "%1"=="restart" exit /b 0', 'echo [PM2][ERROR] spawn EPERM 1>&2', 'exit /b 1']
+      : restartNeedsHomeMarker
+      ? [
+          'if /i not "%1"=="restart" exit /b 0',
+          'if not defined PM2_HOME goto notfound',
+          `if not exist "%PM2_HOME%\\${PM2_APP_ALIVE_MARKER}" goto notfound`,
+          'exit /b 0',
+          ':notfound',
+          ...spawnLines,
+          'echo [PM2][ERROR] Process or Namespace %2 not found 1>&2',
+          'exit /b 1',
+        ]
+      : ['exit /b 0']
+    fs.writeFileSync(stubPath, ['@echo off', `echo %* >> "${pm2LogPath}"`, witnessLine, homeLine, ...killLines, ...restartLines, ''].join('\r\n'))
+  } else {
+    // pwsh's `&` call operator execs the file directly on non-Windows — the .cmd
+    // extension is irrelevant there, only the shebang and the executable bit are.
+    // Same relative path on both OSes, so Resolve-Pm2Command in the script needs
+    // no platform branching of its own.
+    const witnessLine = witness
+      ? `if [ -f "${witness.flagPath}" ]; then echo "FLAG_PRESENT $*" >> "${witness.pm2FlagWitnessPath}"; else echo "FLAG_ABSENT $*" >> "${witness.pm2FlagWitnessPath}"; fi\n`
+      : ''
+    const homeLine = homeLogPath ? `echo "HOME=[$PM2_HOME] $*" >> "${homeLogPath}"\n` : ''
+    const killLines = strayDaemonMarkerPath
+      ? killExitCode === 0
+        ? `if [ "$1" = "kill" ]; then\n  rm -f "${strayDaemonMarkerPath}"\n  echo "[PM2] [v] PM2 Daemon Stopped"\n  exit 0\nfi\n`
+        : `if [ "$1" = "kill" ]; then\n  echo "[PM2][ERROR] kill failed" >&2\n  exit ${killExitCode}\nfi\n`
+      : ''
+    const spawnLines = strayDaemonMarkerPath
+      ? ['    echo "[PM2] Spawning PM2 daemon with pm2_home=$PM2_HOME"', `    echo spawned > "${strayDaemonMarkerPath}"`]
+      : []
+    const restartLines = restartOtherError
+      ? 'if [ "$1" = "restart" ]; then\n  echo "[PM2][ERROR] spawn EPERM" >&2\n  exit 1\nfi\n'
+      : restartNeedsHomeMarker
+      ? [
+          'if [ "$1" = "restart" ]; then',
+          `  if [ -z "$PM2_HOME" ] || [ ! -f "$PM2_HOME/${PM2_APP_ALIVE_MARKER}" ]; then`,
+          ...spawnLines,
+          '    echo "[PM2][ERROR] Process or Namespace $2 not found" >&2',
+          '    exit 1',
+          '  fi',
+          'fi',
+          '',
+        ].join('\n')
+      : ''
+    fs.writeFileSync(stubPath, `#!/bin/sh\necho "$*" >> "${pm2LogPath}"\n${witnessLine}${homeLine}${killLines}${restartLines}exit 0\n`)
+    fs.chmodSync(stubPath, 0o755)
+  }
+  return stubPath
+}
+
+function buildAcidLiveRoot(liveRoot, { pm2LogPath, backendPort = null, witness = null, pm2Behavior = {} }) {
+  // PORT is what Resolve-BackendHealthUrl reads to build the backend-direct probe
+  // URL, so a fixture that declares it proves the derivation, not just the override.
+  const portLine = backendPort === null ? '' : `PORT=${backendPort}\n`
+  writeFixtureFile(liveRoot, 'docker/app.env', `UPGRADE_TEST_ENV_MARKER=from-app-env\n# a comment\n${portLine}\nJWT_SECRET="quoted-value"\n`)
+  writeFixtureFile(liveRoot, 'apps/web/dist/index.html', '<html>OLD WEB DIST</html>\n')
+  writeFixtureFile(liveRoot, 'packages/core-backend/dist/src/db/migrate.js', "console.log('stale pre-upgrade migrate.js')\n")
+  writeFixtureFile(liveRoot, 'packages/core-backend/migrations/000_old.sql', 'select 0;\n')
+  writeFixtureFile(liveRoot, 'plugins/plugin-integration-core/index.cjs', "module.exports = { name: 'stale' }\n")
+  writeFixtureFile(liveRoot, 'plugins/plugin-integration-core/app.manifest.json', JSON.stringify({ id: 'stale' }))
+  writeFixtureFile(liveRoot, PREFLIGHT_FILE, 'module.exports = { stale: true }\n')
+  // Live-side node_modules — must survive the upgrade byte-for-byte.
+  writeFixtureFile(liveRoot, LIVE_NODE_MODULES_SURVIVOR, LIVE_SURVIVOR_CONTENT)
+
+  writePm2Stub(liveRoot, pm2LogPath, witness, pm2Behavior)
+}
+
+function buildAcidArchive(root, options = {}) {
+  const stageParent = path.join(root, 'stage')
+  const packageName = 'acid-fixture-multitable-onprem-package'
+  const stageDir = path.join(stageParent, packageName)
+  buildAcidPackageStage(stageDir, options)
+
+  const archivePath = path.join(root, `${packageName}.zip`)
+  const compress = spawnSync(
+    PWSH,
+    ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
+    { encoding: 'utf8' },
+  )
+  assert.equal(compress.status, 0, compress.stderr || compress.stdout)
+
+  const digest = sha256File(archivePath)
+  fs.writeFileSync(`${archivePath}.sha256`, `${digest}  ${path.basename(archivePath)}\n`)
+
+  return { archivePath, stageDir }
+}
+
+function grepTreeForMarker(root, marker) {
+  if (!fs.existsSync(root)) return []
+  const hits = []
+  const stack = [root]
+  while (stack.length) {
+    const current = stack.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(full)
+      } else if (entry.isFile()) {
+        try {
+          if (fs.readFileSync(full, 'utf8').includes(marker)) {
+            hits.push(path.relative(root, full))
+          }
+        } catch {
+          // binary/unreadable — irrelevant to this text-marker check
+        }
+      }
+    }
+  }
+  return hits
+}
+
+// R60 review (#6079): the failure handler's pm2 stop. On Windows it first asks pm2's
+// machine-wide pipe (\\.\pipe\rpc.sock) whether any pm2 daemon is there and, with none,
+// runs no pm2 at all -- a pm2 call then would start a daemon inside the upgrade session.
+// A test host never has one: the fixture's pm2 is a stub, and a real pm2 on the same
+// machine already breaks the R59 tests (see setUpR59Fixture). So on Windows the
+// handler's stop is skipped, and says so; elsewhere the pipe is not pm2's IPC and the
+// handler stops pm2 exactly as before. Every branch of that decision is tested on every
+// OS in the Stop-Pm2App -AfterFailure test below.
+const FAILURE_HANDLER_PM2_CALLS = process.platform === 'win32' ? [] : ['stop']
+function assertFailureHandlerPm2Stop(combined) {
+  if (process.platform === 'win32') {
+    assert.match(combined, /PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock/, 'on Windows the failure handler must skip pm2 when no daemon pipe is there, and say so')
+  } else {
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'off Windows the failure handler stops pm2 as before')
+  }
+}
+
+function runUpgradeScript(args, envOverrides = {}) {
+  return spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', scriptExecPath, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, ...envOverrides },
+  })
+}
+
+// Async variant, required whenever the script under test will call OUT to an HTTP
+// server that lives in THIS SAME Node process: child_process.spawnSync blocks the
+// entire Node event loop until the child exits, so a same-process http.Server
+// cannot accept the script's own healthcheck connections while spawnSync blocks —
+// every request would hang until the client's own timeout. spawn (async) keeps the
+// event loop live so the health server can actually answer.
+function runUpgradeScriptAsync(args, envOverrides = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-File', scriptExecPath, ...args], {
+      env: { ...process.env, ...envOverrides },
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+}
+
+// Answers BOTH probes (backend-direct /health and nginx /api/health) and records,
+// per request, the path and whether the maintenance flag existed at that instant.
+// That pair is the runtime witness for the r29 ordering fix: the backend-direct
+// probe must arrive while the flag is still up, and the nginx probe must arrive
+// after it is gone.
+// gateWired: answer 503 to everything but the backend-direct /health while the flag
+// exists, the way a host whose nginx reads the gate does.
+// preStopProbes: the one silent backend-direct request step 2 makes right before the
+// stop (Test-BackendAnswersNow, tagged X-Upgrade-Prestop-Probe) is recorded there and
+// NOT in `requests`, which stays the health POLLING the tests below count.
+function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false } = {}) {
+  return new Promise((resolve) => {
+    const requests = []
+    const preStopProbes = []
+    const server = http.createServer((req, res) => {
+      // backendUp only governs the backend-direct /health path: it lets the R59
+      // fixtures model "the backend is down until the scheduled task starts it".
+      const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
+      const up = req.url === '/health' ? Boolean(backendUp()) : !gated
+      const log = req.headers['x-upgrade-prestop-probe'] === '1' ? preStopProbes : requests
+      log.push({
+        url: req.url,
+        flagExists: flagPath ? fs.existsSync(flagPath) : null,
+        // The one-shot "is the gate actually wired on this host" probe tags
+        // itself; nginx's `if (-f ...)` is header-blind, so the tag cannot
+        // change what the probe measures on a real box — it only lets these
+        // fixtures tell that request apart from the two health probes.
+        gateProbe: req.headers['x-upgrade-gate-probe'] === '1',
+        backendUp: up,
+      })
+      if (!up) {
+        res.writeHead(503, { 'content-type': 'text/plain' })
+        res.end('backend down')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    })
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({ server, port, requests, preStopProbes, url: `http://127.0.0.1:${port}/api/health` })
+    })
+  })
+}
+
+test('end-to-end (acid fixture): a clean upgrade passes under the real walk — deep files, the decoy, the loose root file, node_modules isolation, all hold', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  const liveRoot = path.join(root, 'live')
+  const witness = maintenanceWitnessPaths(root, liveRoot)
+  const health = await startHealthServer({ flagPath: witness.flagPath })
+  try {
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+    const migrateMarkerPath = path.join(root, 'migrate-marker.txt')
+
+    // The same fake server answers both probes: PORT in app.env makes the script
+    // derive http://127.0.0.1:<port>/health for the backend-direct probe, and
+    // -HealthUrl points the nginx probe at /api/health on that same port.
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, backendPort: health.port, witness })
+    const { archivePath, stageDir } = buildAcidArchive(root)
+
+    const result = await runUpgradeScriptAsync(
+      [
+        '-PackageArchive', archivePath,
+        '-RootDir', liveRoot,
+        '-Pm2AppName', 'metasheet-backend',
+        '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+        '-BackupRoot', backupRoot,
+        '-StagingRoot', stagingRoot,
+        '-HealthUrl', health.url,
+        '-HealthcheckAttempts', '3',
+        '-HealthcheckDelaySec', '1',
+      ],
+      { UPGRADE_TEST_MIGRATE_MARKER_PATH: migrateMarkerPath },
+    )
+
+    if (result.status !== 0) {
+      assert.fail(`expected a clean upgrade to succeed.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    }
+
+    // Depth>=3 deep file survives, hash-identical.
+    const deepDeployedPath = path.join(liveRoot, ...DEEP_ADAPTER_FILE.split('/'))
+    assert.ok(fs.existsSync(deepDeployedPath), 'F22 regression: a deeply nested file must survive the upgrade')
+    assert.equal(sha256File(deepDeployedPath), sha256File(path.join(stageDir, ...DEEP_ADAPTER_FILE.split('/'))))
+
+    // Decoy (substring "node_modules" in the name, not an actual node_modules dir)
+    // is copied like any other file.
+    const decoyDeployedPath = path.join(liveRoot, ...DECOY_FILE.split('/'))
+    assert.ok(fs.existsSync(decoyDeployedPath), 'a file merely named like node_modules must not be treated as node_modules')
+
+    // Loose file at plugins/ root is copied.
+    assert.equal(fs.readFileSync(path.join(liveRoot, ...LOOSE_ROOT_FILE.split('/')), 'utf8'), 'PACKAGE_LOOSE_ROOT_FILE')
+
+    // Package-side node_modules never reaches the deployed tree, anywhere.
+    const leakHits = grepTreeForMarker(path.join(liveRoot, 'plugins'), PACKAGE_LEAK_MARKER)
+    assert.deepEqual(leakHits, [], `package node_modules content must never leak into the deployed tree, found at: ${leakHits.join(', ')}`)
+
+    // Live-side node_modules survives, byte-for-byte.
+    assert.equal(
+      fs.readFileSync(path.join(liveRoot, ...LIVE_NODE_MODULES_SURVIVOR.split('/')), 'utf8'),
+      LIVE_SURVIVOR_CONTENT,
+      'a plugin\'s pre-existing node_modules must be preserved untouched',
+    )
+
+    // Backup snapshot captured the OLD content before replacement.
+    const backupDirs = fs.readdirSync(backupRoot)
+    assert.equal(backupDirs.length, 1)
+    const backupPath = path.join(backupRoot, backupDirs[0])
+    assert.match(fs.readFileSync(path.join(backupPath, 'apps/web/dist/index.html'), 'utf8'), /OLD WEB DIST/)
+
+    // The reported backup path in stdout matches the folder actually written.
+    const printedBackupLine = result.stdout.split('\n').find((line) => line.startsWith('BACKUP_PATH='))
+    assert.ok(printedBackupLine)
+    assert.equal(path.resolve(printedBackupLine.slice('BACKUP_PATH='.length).trim()), path.resolve(backupPath))
+
+    // pm2 was stopped exactly once (no failure -> the catch-handler stop never
+    // fires) and restarted with --update-env.
+    const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
+    assert.match(pm2Log, /stop metasheet-backend/)
+    assert.match(pm2Log, /restart metasheet-backend --update-env/)
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1)
+
+    // Migrations ran with env loaded from docker/app.env into THIS process, not
+    // whatever pm2 happened to be holding: the marker's VALUE came from
+    // UPGRADE_TEST_ENV_MARKER, which only docker/app.env defines.
+    assert.ok(fs.existsSync(migrateMarkerPath))
+    assert.equal(fs.readFileSync(migrateMarkerPath, 'utf8').trim(), 'from-app-env')
+
+    // The real F22 net ran and passed.
+    assert.match(result.stdout, /Plugin hash verification: OK/)
+    assert.match(result.stdout, /Plugin node_modules leak check: OK/)
+
+    // ── The r29 ordering guarantee, witnessed at runtime ──────────────────────
+    // 1) The gate was UP before pm2 was touched at all (stop is the first call).
+    const flagWitness = readPm2FlagWitness(witness.pm2FlagWitnessPath)
+    assert.ok(flagWitness.length >= 1, 'the pm2 stub must have recorded at least the stop call')
+    assert.match(
+      flagWitness[0],
+      /^FLAG_PRESENT stop metasheet-backend/,
+      'the maintenance flag must already exist when pm2 is stopped — raising it afterwards leaves the ' +
+        'connection-reset window this whole gate exists to close',
+    )
+
+    // 2) Backend-direct probe first, while the gate is still up; nginx probe only
+    //    after the gate is gone. Probing nginx first is exactly what made r29 exit
+    //    -1 against a backend that was already healthy.
+    // The gate self-witness is a third request, tagged and deliberately made
+    // BEFORE pm2 is stopped; the r29 ordering below is about the two health
+    // probes, so filter it out here and assert it separately further down.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 2, `expected both probes, got: ${JSON.stringify(health.requests)}`)
+    assert.equal(probes[0].url, '/health', 'the FIRST probe must be the backend-direct one, bypassing nginx')
+    assert.equal(
+      probes[0].flagExists,
+      true,
+      'the backend-direct probe must run while the maintenance flag is still up — that is the whole point of ' +
+        'probing the backend directly instead of through the 503-ing gate',
+    )
+    assert.equal(probes[probes.length - 1].url, '/api/health', 'the LAST probe must be the public one through nginx')
+    assert.equal(
+      probes[probes.length - 1].flagExists,
+      false,
+      'the flag must already be deleted when the nginx probe runs — otherwise the script fails its own healthcheck (r29)',
+    )
+
+    // 2b) The gate self-witness: exactly one tagged request, aimed at the PUBLIC
+    //     url, fired while the flag was still up and — this is what makes it a
+    //     witness rather than decoration — BEFORE the backend was stopped, i.e.
+    //     before any of the other probes. This fixture's fake nginx answers 200
+    //     to everything (it does not implement the gate), which is precisely the
+    //     shape of an un-synced host, so the run must SAY the gate is not wired
+    //     instead of letting "maintenance flag: ... (removed)" imply it was.
+    const gateProbes = health.requests.filter((entry) => entry.gateProbe)
+    assert.equal(gateProbes.length, 1, `expected exactly one tagged gate probe, got: ${JSON.stringify(health.requests)}`)
+    assert.equal(health.requests[0].gateProbe, true, 'the gate probe must be the FIRST request of the whole run, before the backend is stopped')
+    assert.equal(gateProbes[0].url, '/api/health', 'the gate probe must go through the public URL — the whole point is testing what nginx does')
+    assert.equal(gateProbes[0].flagExists, true, 'probing before the flag is raised would prove nothing')
+    assert.match(
+      result.stdout,
+      /MAINTENANCE_GATE_NOT_WIRED/,
+      'a 200 on the public URL while the flag is up means this host\'s nginx never got the gate: the run must say so out loud',
+    )
+    assert.match(result.stdout, /maintenance gate:\s+NOT_WIRED/, 'the final report must carry the gate verdict, not just the flag path')
+
+    // 3) The flag is gone when the script exits, and the final report names it.
+    assert.ok(!fs.existsSync(witness.flagPath), 'the maintenance flag must not outlive a successful upgrade')
+    assert.ok(result.stdout.includes(`MAINTENANCE_FLAG=${witness.flagPath}`), 'the raised flag path must be printed')
+    assert.ok(
+      result.stdout.includes(`maintenance flag: ${witness.flagPath} (removed)`),
+      `the final report must name the flag path and its state.\nstdout:\n${result.stdout}`,
+    )
+
+    assert.match(result.stdout, /package:\s+acid-fixture-multitable-onprem-package\.zip/)
+    assert.match(result.stdout, /migration exit:\s+0/)
+    assert.match(result.stdout, /backend health:\s+OK/)
+    assert.match(result.stdout, /\nhealth:\s+OK/)
+    assert.match(result.stdout, /stock-preparation\/preflight/)
+    assert.match(result.stdout, /stock-prep-acceptance-bootstrap\.mjs/)
+    assert.doesNotMatch(result.stdout, /RESTORE REQUIRED/, 'a clean run must never print the restore block')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): checksum mismatch refuses BEFORE touching pm2 or any live file (RED-witnessed)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    const { archivePath } = buildAcidArchive(root)
+    fs.writeFileSync(`${archivePath}.sha256`, `${'0'.repeat(64)}  ${path.basename(archivePath)}\n`)
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr + result.stdout, /PACKAGE_CHECKSUM_MISMATCH/)
+    assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked when the checksum gate refuses')
+    assert.ok(!fs.existsSync(backupRoot) || fs.readdirSync(backupRoot).length === 0, 'no backup should be written')
+    // The refusal happens before the gate goes up, so nothing may be left
+    // holding it. If a future edit hoists the raise above the checksum gate (or
+    // anywhere outside the try), this run ends with the flag still on disk and
+    // nginx answers 503 for every request until a human deletes the file --
+    // a refused upgrade would take the site down harder than a broken one.
+    assert.ok(
+      !fs.existsSync(path.join(liveRoot, 'output', 'maintenance.flag')),
+      'a pre-try refusal must not leave a maintenance flag behind: no finally runs on that path',
+    )
+    assert.match(
+      fs.readFileSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')), 'utf8'),
+      /stale: true/,
+      'the live plugin file must be untouched',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): a package missing the preflight file fails the F22 tripwire, stops pm2, and prints the restore block (RED-witnessed)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    fs.rmSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')))
+    const { archivePath } = buildAcidArchive(root, { omitPreflightFile: true })
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+
+    assert.notEqual(result.status, 0)
+    const combined = result.stderr + result.stdout
+    assert.match(combined, /UPGRADE_ASSERTION_MISSING_FILES/)
+    assert.match(combined, /stock-preparation-preflight\.cjs/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.match(combined, /BACKUP_PATH=/)
+
+    const backupDirs = fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot) : []
+    assert.equal(backupDirs.length, 1, 'a backup snapshot must exist even though the upgrade ultimately refused')
+
+    // pm2 was stopped at step 2, AND again by the failure handler (off Windows; on
+    // Windows the handler finds no pm2 daemon pipe and runs no pm2 -- R60 review, #6079).
+    const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length)
+    assertFailureHandlerPm2Stop(combined)
+    assert.doesNotMatch(pm2Log, /restart/, 'pm2 restart must never be reached after the tripwire fires')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs) still stops pm2 and prints the restore block (RED-witnessed)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    const { archivePath, stageDir } = buildAcidArchive(root)
+    // Simulate the earliest possible failure in the mutation window: the package
+    // is missing a required full-replace directory entirely (Update-ReplaceDirs
+    // throws PACKAGE_MISSING_REPLACE_DIR before Update-Plugins or any assertion
+    // ever runs). Rebuild the archive after deleting migrations/ from the stage.
+    fs.rmSync(path.join(stageDir, 'packages/core-backend/migrations'), { recursive: true, force: true })
+    const rezip = spawnSync(
+      PWSH,
+      ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
+      { encoding: 'utf8' },
+    )
+    assert.equal(rezip.status, 0, rezip.stderr || rezip.stdout)
+    const digest = sha256File(archivePath)
+    fs.writeFileSync(`${archivePath}.sha256`, `${digest}  ${path.basename(archivePath)}\n`)
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+
+    assert.notEqual(result.status, 0)
+    const combined = result.stderr + result.stdout
+    assert.match(combined, /PACKAGE_MISSING_REPLACE_DIR/)
+    assert.match(
+      combined,
+      /RESTORE REQUIRED/,
+      'a failure with NO specific assertion (a raw mid-swap exception) must still print the restore block — ' +
+        'this is what "wrap the entire mutation window" means, not a per-assertion patchwork',
+    )
+    assert.match(combined, /BACKUP_PATH=/)
+    const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length, 'the failure handler must deal with pm2 even on the earliest possible failure')
+    assertFailureHandlerPm2Stop(combined)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): a failed nginx healthcheck stops the now-broken pm2 app and prints the restore block, not just a throw (RED-witnessed)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  const liveRoot = path.join(root, 'live')
+  const witness = maintenanceWitnessPaths(root, liveRoot)
+  // The BACKEND answers (so the run gets past the first probe and drops the gate);
+  // the nginx URL points at a dead port, which is the failure under test here.
+  const backend = await startHealthServer({ flagPath: witness.flagPath })
+  try {
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, backendPort: backend.port, witness })
+    const { archivePath } = buildAcidArchive(root)
+
+    const result = await runUpgradeScriptAsync([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-HealthUrl', 'http://127.0.0.1:1/api/health',
+      '-HealthcheckAttempts', '2',
+      '-HealthcheckDelaySec', '1',
+    ])
+
+    assert.notEqual(result.status, 0)
+    const combined = result.stderr + result.stdout
+    assert.match(combined, /HEALTHCHECK_FAILED/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.match(combined, /\nhealth:\s+FAILED/, 'the final report must still print before the restore block, showing FAILED')
+    assert.match(combined, /backend health:\s+OK/, 'the backend-direct probe is what decided the gate could come down')
+
+    // The gate came down even though the upgrade ultimately failed, and the restore
+    // block tells the operator where it was in case it somehow survived.
+    assert.ok(!fs.existsSync(witness.flagPath), 'the maintenance flag must not outlive a FAILED upgrade either')
+    assert.ok(combined.includes(`Maintenance flag: ${witness.flagPath}`), 'the restore block must name the flag path')
+    assert.match(combined, /delete it by hand/)
+
+    // pm2 sequence: stop (step 2), restart (step 7, BEFORE the healthcheck that
+    // then fails), stop again (the failure handler — a broken deployment must not
+    // be left running; on Windows only when pm2's daemon pipe is there -- R60 review).
+    const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
+    const calls = pm2Log.trim().split('\n').map((line) => line.trim().split(/\s+/)[0])
+    assert.deepEqual(calls, ['stop', 'restart', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
+  } finally {
+    backend.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): when the BACKEND never answers directly, the nginx probe is never attempted and the gate still comes down', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const witness = maintenanceWitnessPaths(root, liveRoot)
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, witness })
+    const { archivePath } = buildAcidArchive(root)
+
+    // Both URLs point at a dead port: nothing listens, every attempt fails fast
+    // (connection refused), so the plain sync spawn is fine here.
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-BackendHealthUrl', 'http://127.0.0.1:1/health',
+      '-HealthUrl', 'http://127.0.0.1:1/api/health',
+      '-HealthcheckAttempts', '1',
+      '-HealthcheckDelaySec', '1',
+    ])
+
+    assert.notEqual(result.status, 0)
+    const combined = result.stderr + result.stdout
+    assert.match(combined, /BACKEND_HEALTHCHECK_FAILED/)
+    assert.match(combined, /the nginx probe was never attempted/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(witness.flagPath), 'the finally must drop the gate even when the backend never came back')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): the gate is raised BEFORE pm2 is stopped and the finally drops it even when the upgrade throws mid-swap (RED-witnessed)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const witness = maintenanceWitnessPaths(root, liveRoot)
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, witness })
+    const { archivePath, stageDir } = buildAcidArchive(root)
+    // Same shape as the mid-swap test above: the package is missing a required
+    // full-replace directory, so Update-ReplaceDirs throws in the middle of the
+    // mutation window — long after the gate went up, long before any health probe
+    // could take it down. Only the finally can save this run from leaving the whole
+    // site answering 503 forever.
+    fs.rmSync(path.join(stageDir, 'packages/core-backend/migrations'), { recursive: true, force: true })
+    const rezip = spawnSync(
+      PWSH,
+      ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
+      { encoding: 'utf8' },
+    )
+    assert.equal(rezip.status, 0, rezip.stderr || rezip.stdout)
+    fs.writeFileSync(`${archivePath}.sha256`, `${sha256File(archivePath)}  ${path.basename(archivePath)}\n`)
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+
+    assert.notEqual(result.status, 0)
+    const combined = result.stderr + result.stdout
+    assert.match(combined, /PACKAGE_MISSING_REPLACE_DIR/)
+
+    // Raised before the backend went down.
+    const flagWitness = readPm2FlagWitness(witness.pm2FlagWitnessPath)
+    assert.match(
+      flagWitness[0] || '',
+      /^FLAG_PRESENT stop metasheet-backend/,
+      'the gate must be up before pm2 is stopped, on the failure path as much as the success path',
+    )
+
+    // Dropped on the way out, by the finally — nothing else could have.
+    assert.ok(
+      !fs.existsSync(witness.flagPath),
+      'a maintenance flag that survives a failed upgrade is a site-wide 503 nobody is watching for: ' +
+        'the finally block must delete it unconditionally',
+    )
+    assert.ok(combined.includes(`Maintenance flag: ${witness.flagPath}`))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture): a maintenance flag path inside a ReplaceDir refuses at startup, before pm2 or any live file is touched', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    const { archivePath } = buildAcidArchive(root)
+
+    // apps/web/dist is a ReplaceDirs entry: it is deleted and recopied wholesale
+    // mid-upgrade, which would drop the gate at the worst possible moment.
+    const badFlagPath = path.join(liveRoot, 'apps', 'web', 'dist', 'maintenance.flag')
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-MaintenanceFlagPath', badFlagPath,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr + result.stdout, /MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR/)
+    assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked when the flag-path gate refuses')
+    assert.ok(!fs.existsSync(badFlagPath), 'the refused flag must never be written')
+    assert.ok(!fs.existsSync(backupRoot) || fs.readdirSync(backupRoot).length === 0, 'no backup should be written')
+    assert.match(
+      fs.readFileSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')), 'utf8'),
+      /stale: true/,
+      'the live plugin file must be untouched',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ── 3b. END-TO-END: pm2-runtime hosting (R59) ──────────────────────────────────────
+//
+// The REAL script, unmodified, run through a thin wrapper that only defines the
+// task-scheduler stubs first (see scheduledTaskStubSource). USERPROFILE is pointed
+// at a per-test profile directory and PM2_HOME is removed from the child env, so
+// neither the machine running the tests nor the CI runner can leak into what the
+// script auto-detects.
+
+// Pointing USERPROFILE at a bare temp directory has a side effect on Windows
+// PowerShell 5.1: LocalApplicationData no longer resolves, and its module analysis
+// cache is then written RELATIVE TO THE CWD — i.e. a `Microsoft/Windows/PowerShell/
+// ModuleAnalysisCache` directory appears in the repo checkout (observed while
+// writing these tests). Every R59 child therefore also gets an explicit
+// PSModuleAnalysisCachePath inside the same profile directory, which the test's
+// temp root cleanup removes.
+function r59ChildEnv(profileDir, extraOverrides = {}, removals = []) {
+  return childEnv(
+    { USERPROFILE: profileDir, PSModuleAnalysisCachePath: path.join(profileDir, 'ps-module-analysis-cache'), ...extraOverrides },
+    removals,
+  )
+}
+
+function childEnv(overrides = {}, removals = []) {
+  const env = { ...process.env }
+  const drop = new Set([...removals, ...Object.keys(overrides)].map((key) => key.toUpperCase()))
+  for (const key of Object.keys(env)) {
+    if (drop.has(key.toUpperCase())) delete env[key]
+  }
+  return { ...env, ...overrides }
+}
+
+// extraStubSource: more PowerShell the wrapper runs after the task stubs and before the
+// script (the stop-gap tests below define a failing Copy-Item there).
+function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams, extraStubSource = '') {
+  const wrapperPath = path.join(root, 'run-upgrade-with-task-stubs.ps1')
+  const splat = Object.entries(upgradeParams).map(([key, value]) => `  ${key} = ${psSingleQuote(value)}`)
+  fs.writeFileSync(
+    wrapperPath,
+    [scheduledTaskStubSource(taskStub), extraStubSource, '$upgradeParams = @{', ...splat, '}', `& ${psSingleQuote(scriptExecPath)} @upgradeParams`, ''].join('\n'),
+  )
+  return wrapperPath
+}
+
+function runPwshFileAsync(filePath, env, cwd = undefined) {
+  return new Promise((resolve) => {
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-File', filePath], { env, cwd })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+}
+
+// The fallback's pipe check (Wait-Pm2DaemonPipeClosed) is REAL, not stubbed: on
+// Windows it looks at pm2's machine-wide \\.\pipe\rpc.sock. A real pm2 daemon running
+// on the same machine as these tests therefore makes every fallback test wait 15 s and
+// fail with PM2_DAEMON_STILL_RUNNING -- which is the script refusing correctly. CI
+// runners have no pm2; on a dev box, stop pm2 before running this file.
+//
+// runtimeHomeExists: <profile>/.pm2-runtime exists (half of the auto-detect signal).
+// runtimeAlive:      pm2-runtime still holds the app in that home, so a restart there
+//                    succeeds. false = the R59 shape (pm2-runtime exited after the stop).
+function setUpR59Fixture(root, { runtimeHomeExists = true, runtimeAlive = false } = {}) {
+  const liveRoot = path.join(root, 'live')
+  const profileDir = path.join(root, 'profile')
+  const runtimeHome = path.join(profileDir, '.pm2-runtime')
+  fs.mkdirSync(profileDir, { recursive: true })
+  if (runtimeHomeExists) fs.mkdirSync(runtimeHome, { recursive: true })
+  if (runtimeAlive) fs.writeFileSync(path.join(runtimeHome, PM2_APP_ALIVE_MARKER), 'alive')
+  const fx = {
+    root,
+    liveRoot,
+    profileDir,
+    runtimeHome,
+    witness: maintenanceWitnessPaths(root, liveRoot),
+    backupRoot: path.join(root, 'backups'),
+    stagingRoot: path.join(root, 'staging'),
+    pm2LogPath: path.join(root, 'pm2-calls.log'),
+    homeLogPath: path.join(root, 'pm2-home.log'),
+    taskLogPath: path.join(root, 'task-calls.log'),
+    runtimeStartedMarker: path.join(root, 'runtime-started.marker'),
+    // The pm2 stub's model of the machine-wide daemon a "not found" CLI call leaves behind.
+    strayDaemonMarker: path.join(root, 'stray-pm2-daemon.marker'),
+  }
+  // Scheduled-task stub options for this fixture; tests override taskPresent/startBehavior.
+  fx.taskStub = (overrides = {}) => ({
+    taskPresent: true,
+    startBehavior: 'start-runtime',
+    runtimeStartedMarker: fx.runtimeStartedMarker,
+    taskLogPath: fx.taskLogPath,
+    strayDaemonMarkerPath: fx.strayDaemonMarker,
+    ...overrides,
+  })
+  fx.baseParams = {
+    RootDir: liveRoot,
+    EnvFile: path.join(liveRoot, 'docker/app.env'),
+    BackupRoot: fx.backupRoot,
+    StagingRoot: fx.stagingRoot,
+    RunMigrations: '0',
+  }
+  return fx
+}
+
+function buildR59LiveRootAndArchive(fx, backendPort = null, pm2Overrides = {}) {
+  buildAcidLiveRoot(fx.liveRoot, {
+    pm2LogPath: fx.pm2LogPath,
+    backendPort,
+    witness: fx.witness,
+    pm2Behavior: { homeLogPath: fx.homeLogPath, restartNeedsHomeMarker: true, strayDaemonMarkerPath: fx.strayDaemonMarker, ...pm2Overrides },
+  })
+  return buildAcidArchive(fx.root).archivePath
+}
+
+test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtime host kills the empty daemon it just started, THEN starts the MetaSheet-PM2 task, the SAME health polling passes, no restore block (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // The backend stays DOWN until the scheduled task has started pm2-runtime again.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `the R59 shape must now recover by itself.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+
+    // Every pm2 call ran under the auto-detected pm2-runtime home: the stop, the
+    // restart that answered "not found", and the kill of the daemon that restart left.
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], 'a recovered run must not reach the failure handler\'s stop')
+    for (const entry of homes) {
+      assert.equal(entry.home, fx.runtimeHome, `pm2 ${entry.command} must run under ${fx.runtimeHome}, got [${entry.home}]`)
+    }
+    // pm2 said "not found" (the R59 symptom) and the task was started exactly once.
+    assert.match(combined, /Process or Namespace metasheet-backend not found/)
+    assert.match(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start MetaSheet-PM2'])
+    // ...and it started only AFTER the empty daemon was gone. With real pm2 on
+    // Windows (7.0.4, verified), a task started while that daemon lives gets a
+    // pm2-runtime that attaches to it as a client: the backend answers the health
+    // polling below, but runs under the upgrade session's daemon and dies with it.
+    assert.deepEqual(
+      readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start-saw-daemon=')),
+      ['start-saw-daemon=no'],
+      'the task must start with no pm2 daemon left behind by this session',
+    )
+    assert.match(combined, /Spawning PM2 daemon/, 'the fixture must actually model the daemon the "not found" restart leaves behind')
+
+    // The SAME health polling as after a normal restart: backend-direct first while
+    // the gate is up (and only after the task started it), gate down, then nginx.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 2, JSON.stringify(health.requests))
+    assert.equal(probes[0].url, '/health')
+    assert.equal(probes[0].backendUp, true, 'the health polling must start only after the task was started')
+    assert.equal(probes[0].flagExists, true)
+    assert.equal(probes[probes.length - 1].url, '/api/health')
+    assert.equal(probes[probes.length - 1].flagExists, false)
+
+    assert.match(result.stdout, /pm2 home:\s+\S.*\(source: pm2-runtime \(\.pm2-runtime \+ scheduled task 'MetaSheet-PM2'\)\)/)
+    assert.match(result.stdout, /backend started:\s+scheduled-task/)
+    assert.match(result.stdout, /backend health:\s+OK/)
+    assert.match(result.stdout, /\nhealth:\s+OK/)
+    assert.doesNotMatch(combined, /RESTORE REQUIRED/)
+    // The deploy runbook judges a run by "FullyQualifiedErrorId count must be 0".
+    // pm2's "not found" arrives on stderr; a recovered run must not surface it as
+    // a PowerShell error record, or a good upgrade would read as a failed one.
+    assert.doesNotMatch(combined, /FullyQualifiedErrorId|NativeCommandError/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): when pm2-runtime still holds the app, stop AND restart run under the auto-detected .pm2-runtime home and the task is never started (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+
+    // The stub only lets `restart` succeed under a home holding the app, so a
+    // green run here is itself proof the restart ran under .pm2-runtime.
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => `${entry.command}@${entry.home}`), [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`])
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'a successful restart must not also start the task')
+    assert.match(result.stdout, /backend started:\s+pm2-restart/)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const taskFolder of ['\\', '\\MetaSheet\\']) {
+test(`end-to-end (acid fixture, R59): if the scheduled task (in folder ${taskFolder}) cannot be started, the run still stops pm2, prints RESTORE REQUIRED (the pm2 home, then the restart, then a pm2 kill, then the task by its folder) and drops the gate`, async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub({ startBehavior: 'throw', taskPath: taskFolder }),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /PM2_SCHEDULED_TASK_START_FAILED/)
+    assert.match(combined, /STUB_TASK_SCHEDULER_REFUSED/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    // By hand, too, the "not found" answer leaves an empty daemon in the operator's
+    // session: the block must say to kill it BEFORE starting the task -- and it is
+    // pasted top to bottom, so the home must come before the first pm2 call.
+    const restoreBlock = combined.slice(combined.indexOf('RESTORE REQUIRED'))
+    const taskCommand = `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '${taskFolder}'`
+    const homeIdx = restoreBlock.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = restoreBlock.indexOf('pm2 restart metasheet-backend --update-env')
+    const restoreKillIdx = restoreBlock.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = restoreBlock.indexOf(taskCommand)
+    assert.ok(homeIdx > -1, 'the restore block must name the pm2 home the upgrade used')
+    assert.ok(taskIdx > -1, `the restore block must say how to start pm2-runtime again, by the task's folder: ${taskCommand}`)
+    assert.ok(restoreKillIdx > -1, 'the restore block must print `pm2 kill`')
+    assert.ok(homeIdx < restartIdx && restartIdx < restoreKillIdx && restoreKillIdx < taskIdx, 'order: PM2_HOME, pm2 restart, pm2 kill, Start-ScheduledTask')
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', `start-path=${taskFolder}`, 'start-saw-daemon=no'])
+
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill', ...FAILURE_HANDLER_PM2_CALLS], 'the failure handler must still deal with pm2')
+    assertFailureHandlerPm2Stop(combined)
+    for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling after a task that never started')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally must drop the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+}
+
+test('end-to-end (acid fixture, R59): a MetaSheet-PM2 task in a SUBFOLDER is detected, started by its own folder (-TaskPath) and the run recovers -- Start-ScheduledTask by name alone only looks in \\ (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPath: '\\MetaSheet\\' }), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(result.stdout, /source: pm2-runtime \(\.pm2-runtime \+ scheduled task 'MetaSheet-PM2'\)/)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\MetaSheet\\', 'start-saw-daemon=no'])
+    assert.match(result.stdout, /backend started:\s+scheduled-task/)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): on an unmanaged host whose docker/app.env sets PM2_HOME (RunMigrations=1), the report says the step 7 pm2 calls inherited it -- never "not set (pm2 default)"', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeHomeExists: false })
+  const appEnvHome = path.join(root, 'app-env-pm2-home')
+  fs.mkdirSync(appEnvHome, { recursive: true })
+  fs.writeFileSync(path.join(appEnvHome, PM2_APP_ALIVE_MARKER), 'alive')
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    fs.appendFileSync(path.join(fx.liveRoot, 'docker/app.env'), `PM2_HOME=${appEnvHome}\n`)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPresent: false }), {
+      ...fx.baseParams,
+      RunMigrations: '1',
+      PackageArchive: archivePath,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    // The pre-existing behaviour, unchanged: the step 2 stop ran with no PM2_HOME,
+    // the step 7 restart under the one app.env imported at step 6.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), ['stop@', `restart@${appEnvHome}`])
+    const reportLine = (result.stdout.split(/\r?\n/).find((l) => l.startsWith('pm2 home:')) || '')
+    assert.ok(reportLine.includes(`inherited PM2_HOME=${appEnvHome}`), `the final report must name the inherited home:\n${reportLine}`)
+    assert.doesNotMatch(reportLine, /pm2 default/, 'the report must not claim no home was in effect')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): if the task starts but the backend never answers, the health polling fails the run into RESTORE REQUIRED', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => false })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
+    assert.match(combined, /backend started:\s+scheduled-task/)
+    assert.match(combined, /BACKEND_HEALTHCHECK_FAILED/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the normal backend-direct polling must have run, attempts included')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime but no scheduled task, no PM2_HOME) behaves exactly as before — no PM2_HOME injected, no task started, restart "not found" is still fatal', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeHomeExists: true, runtimeAlive: false })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub({ taskPresent: false }),
+      {
+        ...fx.baseParams,
+        PackageArchive: archivePath,
+        HealthUrl: 'http://127.0.0.1:1/api/health',
+        BackendHealthUrl: 'http://127.0.0.1:1/health',
+        HealthcheckAttempts: '1',
+        HealthcheckDelaySec: '1',
+      },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /PM2_RESTART_FAILED: exit=1/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(
+      homes.map((entry) => `${entry.command}@${entry.home}`),
+      ['stop@', 'restart@', ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@`)],
+      'no PM2_HOME may be injected on an unmanaged host, and no daemon may be killed there',
+    )
+    assertFailureHandlerPm2Stop(combined)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'no task may be started on an unmanaged host')
+    assert.doesNotMatch(combined, /\$env:PM2_HOME = /)
+    assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
+    assert.doesNotMatch(combined, /\n\s*pm2 kill\s*\r?\n/)
+    assert.match(combined, /pm2 restart metasheet-backend --update-env/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): on a pm2-runtime host a restart failure that is NOT "not found" stays fatal — the task is not started', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, null, { restartOtherError: true })
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      {
+        ...fx.baseParams,
+        PackageArchive: archivePath,
+        HealthUrl: 'http://127.0.0.1:1/api/health',
+        BackendHealthUrl: 'http://127.0.0.1:1/health',
+        HealthcheckAttempts: '1',
+        HealthcheckDelaySec: '1',
+      },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /spawn EPERM/)
+    assert.match(combined, /PM2_RESTART_FAILED: exit=1/)
+    assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'only "not found" may trigger the task fallback')
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const variant of ['parameter', 'environment']) {
+  test(`end-to-end (acid fixture, R59): a PM2_HOME given by ${variant} wins over the auto-detected .pm2-runtime for every pm2 call`, async () => {
+    const root = mkLongTempDir('ms2-upgrade-r59-')
+    // .pm2-runtime + task present, but that home holds NO app: a run that let
+    // auto-detection win would get "not found" and start the task.
+    const fx = setUpR59Fixture(root, { runtimeHomeExists: true, runtimeAlive: false })
+    const chosenHome = path.join(root, 'chosen-pm2-home')
+    fs.mkdirSync(chosenHome, { recursive: true })
+    fs.writeFileSync(path.join(chosenHome, PM2_APP_ALIVE_MARKER), 'alive')
+    const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+    try {
+      const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+      const params = { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' }
+      const envOverrides = {}
+      if (variant === 'parameter') params.Pm2Home = chosenHome
+      else envOverrides.PM2_HOME = chosenHome
+      const wrapper = writeStubbedUpgradeWrapper(
+        root,
+        fx.taskStub(),
+        params,
+      )
+      const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, envOverrides, variant === 'parameter' ? ['PM2_HOME'] : []))
+      assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+      assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [`stop@${chosenHome}`, `restart@${chosenHome}`])
+      assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [])
+      assert.match(result.stdout, new RegExp(`source: ${variant === 'parameter' ? 'parameter -Pm2Home' : 'environment PM2_HOME'}`))
+    } finally {
+      health.server.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('end-to-end (acid fixture, R59): -Pm2ScheduledTaskName \'\' disables the fallback even though a MetaSheet-PM2 task exists — restart "not found" stays fatal, the scheduler is never asked, the given -Pm2Home still applies', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  // .pm2-runtime holds no app (the R59 shape) and the default-named task EXISTS: only
+  // the empty task name stands between this run and the fallback.
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2Home: fx.runtimeHome,
+      Pm2ScheduledTaskName: '',
+      HealthUrl: 'http://127.0.0.1:1/api/health',
+      BackendHealthUrl: 'http://127.0.0.1:1/health',
+      HealthcheckAttempts: '1',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /PM2_RESTART_FAILED: exit=1 \(pm2 reports 'metasheet-backend' not found; the scheduled-task fallback is disabled\)/)
+    assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.deepEqual(readLogLines(fx.taskLogPath), [], 'with the fallback disabled by name the scheduler must be neither queried nor started')
+    assert.deepEqual(
+      readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
+      [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`, ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@${fx.runtimeHome}`)],
+      'the explicit home must still apply to every pm2 call, and nothing may be killed',
+    )
+    assertFailureHandlerPm2Stop(combined)
+    assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): a non-default -Pm2ScheduledTaskName is the task that is detected, started and reported — never the default MetaSheet-PM2', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    // Only 'Custom-PM2' exists; starting any other name fails like the real cmdlet.
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskName: 'Custom-PM2' }), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2ScheduledTaskName: 'Custom-PM2',
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(result.stdout, /source: pm2-runtime \(\.pm2-runtime \+ scheduled task 'Custom-PM2'\)/)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start Custom-PM2'])
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start-saw-daemon=')), ['start-saw-daemon=no'])
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [
+      `stop@${fx.runtimeHome}`,
+      `restart@${fx.runtimeHome}`,
+      `kill@${fx.runtimeHome}`,
+    ])
+    assert.match(result.stdout, /backend started:\s+scheduled-task/)
+    assert.doesNotMatch(combined, /MetaSheet-PM2/, 'the default task name must not appear anywhere once another one is given')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): a RELATIVE -Pm2Home is resolved once, against the directory the script starts in — the step 6 Set-Location to RootDir must not move the restart to <RootDir>/<relative> (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeHomeExists: false })
+  // The operator starts the script from a directory that is NOT RootDir, naming the
+  // pm2 home relative to it. That directory holds the app; <RootDir>/<relative> does not.
+  const operatorCwd = path.join(root, 'operator-cwd')
+  const relativeName = 'rel-pm2-home'
+  const absoluteHome = path.join(operatorCwd, relativeName)
+  fs.mkdirSync(absoluteHome, { recursive: true })
+  fs.writeFileSync(path.join(absoluteHome, PM2_APP_ALIVE_MARKER), 'alive')
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPresent: false }), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2Home: relativeName,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']), operatorCwd)
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.deepEqual(
+      readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
+      [`stop@${absoluteHome}`, `restart@${absoluteHome}`],
+      'every pm2 call must see the ONE absolute home whose existence was checked',
+    )
+    assert.match(result.stdout, /backend started:\s+pm2-restart/)
+    assert.ok(
+      result.stdout.includes(`${absoluteHome} (source: parameter -Pm2Home)`),
+      `the report must name the absolute home:\n${result.stdout}`,
+    )
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): an explicit -Pm2Home that does not exist refuses at startup, before pm2, the gate or any backup', () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  try {
+    const fx = setUpR59Fixture(root, { runtimeHomeExists: false })
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    const result = runUpgradeScript(
+      [
+        '-PackageArchive', archivePath,
+        '-RootDir', fx.liveRoot,
+        '-EnvFile', path.join(fx.liveRoot, 'docker/app.env'),
+        '-BackupRoot', fx.backupRoot,
+        '-StagingRoot', fx.stagingRoot,
+        '-Pm2Home', path.join(root, 'typo-pm2-home'),
+        '-RunMigrations', '0',
+        '-RestartService', '0',
+      ],
+      { USERPROFILE: fx.profileDir, PSModuleAnalysisCachePath: path.join(fx.profileDir, 'ps-module-analysis-cache') },
+    )
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr + result.stdout, /PM2_HOME_NOT_FOUND/)
+    assert.ok(!fs.existsSync(fx.pm2LogPath), 'pm2 must never be invoked')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the gate must never be raised')
+    assert.ok(!fs.existsSync(fx.backupRoot) || fs.readdirSync(fx.backupRoot).length === 0, 'no backup should be written')
+    assert.ok(!fs.existsSync(path.join(root, 'typo-pm2-home')), 'the typo home must not be created')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// The R59 lines of the restore block are pasted by an operator into a PowerShell
+// prompt. Each value in them is a single-quoted literal, so every single-quote
+// character inside the pm2 home, the task name or the task folder must be doubled --
+// or the pasted $env:PM2_HOME line does not parse and the Start-ScheduledTask line
+// starts a task that is not the one named. PowerShell's single quotes are ' AND the
+// typographic U+2018, U+2019, U+201A, U+201B (a profile directory like Zhang's, typed
+// on a phone or pasted from a document, carries U+2019). The values reach the harness
+// as ASCII [char] expressions and come back as hex, so neither the command line nor a
+// 5.1 stdout (OEM code page) can alter them on the way.
+test('Write-RestoreBlock (R59): the $env:PM2_HOME and Start-ScheduledTask lines are single-quoted literals that parse back to exactly the pm2 home, task name and task folder, even with ASCII and typographic single quotes (U+2018/2019/201A/201B), $ and backticks in them; order PM2_HOME, pm2 restart, pm2 kill, Start-ScheduledTask (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const TYPO = '\u2018\u2019\u201a\u201b'
+    const cases = [
+      { label: 'ASCII', home: "C:\\ops\\it's $pm2 `home", taskName: "O'Brien-PM2", taskPath: "\\Team's ''folder''\\" },
+      {
+        label: 'TYPOGRAPHIC',
+        home: 'C:\\Users\\Zhang\u2019s\\.pm2-runtime',
+        taskName: 'O\u2019Brien-PM2',
+        taskPath: '\\Team\u2019s\\',
+      },
+      {
+        label: 'EVERY_QUOTE',
+        home: `C:\\ops\\${TYPO}'x $env:PM2_HOME \`n ${TYPO}${TYPO}''\u2019`,
+        taskName: `\u2018O\u2019Brien\u201a\u201b'-PM2 $(whoami)\``,
+        taskPath: `\\${TYPO}' ''\u2018\u2018 \`$x\\`,
+      },
+    ]
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        PS_HEX_FUNCTION,
+        ...cases.map((c) =>
+          [
+            `$out = Write-RestoreBlock -BackupPath ${psSingleQuote(path.join(scratch, 'backup'))} -RootDir ${psSingleQuote(path.join(scratch, 'live'))} -ReplacedRelativePaths @() -Pm2AppName 'metasheet-backend' ` +
+              `-Pm2Home ${psCharsExpr(c.home)} -ScheduledTaskName ${psCharsExpr(c.taskName)} -ScheduledTaskPath ${psCharsExpr(c.taskPath)} 6>&1`,
+            'foreach ($item in @($out)) {',
+            '  $line = ([string]$item).Trim()',
+            `  Write-Host ('PRINTED|${c.label}|' + (Hex $line))`,
+            "  if ($line -like '$env:PM2_HOME*' -or $line -like 'Start-ScheduledTask*') {",
+            '    $tokens = $null',
+            '    $errors = $null',
+            '    $ast = [System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$tokens, [ref]$errors)',
+            '    $literals = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq \'SingleQuoted\' }, $true) | ForEach-Object { Hex $_.Value })',
+            '    $expandable = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true)).Count',
+            `    Write-Host ('PARSED|${c.label}|' + ($line -split ' ')[0] + '|' + $errors.Count + '|' + $expandable + '|' + ($literals -join ','))`,
+            '  }',
+            '}',
+          ].join('\n'),
+        ),
+      ].join('\n')
+    assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(harness), 'the harness itself is ASCII')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const lines = result.stdout.split(/\r?\n/)
+    for (const c of cases) {
+      const printed = lines.filter((l) => l.startsWith(`PRINTED|${c.label}|`)).map((l) => fromPsHex(l.slice(`PRINTED|${c.label}|`.length)))
+      // The literal text an operator pastes: every single-quote character doubled, nothing else touched.
+      const quoted = (value) => `'${value.replace(PS_SINGLE_QUOTE_CHARS, (q) => q + q)}'`
+      assert.ok(printed.includes(`$env:PM2_HOME = ${quoted(c.home)}`), `${c.label}: the pm2 home line:\n${printed.join('\n')}`)
+      assert.ok(printed.includes(`Start-ScheduledTask -TaskName ${quoted(c.taskName)} -TaskPath ${quoted(c.taskPath)}`), `${c.label}: the task line:\n${printed.join('\n')}`)
+      // ...and what PowerShell makes of it: no parse error, nothing expanded, exactly the values given.
+      const parsed = Object.fromEntries(
+        lines
+          .filter((l) => l.startsWith(`PARSED|${c.label}|`))
+          .map((l) => {
+            const [, , kind, errors, expandable, hexList] = l.split('|')
+            return [kind, { errors: Number(errors), expandable: Number(expandable), literals: hexList === '' ? [] : hexList.split(',').map(fromPsHex) }]
+          }),
+      )
+      assert.deepEqual(parsed['$env:PM2_HOME'], { errors: 0, expandable: 0, literals: [c.home] }, `${c.label}:\n${result.stdout}`)
+      assert.deepEqual(parsed['Start-ScheduledTask'], { errors: 0, expandable: 0, literals: [c.taskName, c.taskPath] }, `${c.label}:\n${result.stdout}`)
+      const order = printed.filter((l) => /^(\$env:PM2_HOME = |pm2 restart |pm2 kill$|Start-ScheduledTask )/.test(l)).map((l) => l.split(' ').slice(0, 2).join(' '))
+      assert.deepEqual(order, ['$env:PM2_HOME =', 'pm2 restart', 'pm2 kill', 'Start-ScheduledTask -TaskName'], c.label)
+    }
+    // The ASCII case, spelled out once.
+    const asciiPrinted = lines.filter((l) => l.startsWith('PRINTED|ASCII|')).map((l) => fromPsHex(l.slice('PRINTED|ASCII|'.length)))
+    assert.ok(asciiPrinted.includes("$env:PM2_HOME = 'C:\\ops\\it''s $pm2 `home'"), asciiPrinted.join('\n'))
+    assert.ok(asciiPrinted.includes("Start-ScheduledTask -TaskName 'O''Brien-PM2' -TaskPath '\\Team''s ''''folder''''\\'"), asciiPrinted.join('\n'))
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): RestartService=0 on a pm2-runtime host reaches the final report with "backend started: skipped (RestartService=0)" -- pm2 is stopped and never restarted or killed, the task is never started, there is no health polling', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, RestartService: '0', HealthcheckAttempts: '1', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(result.stdout, /===== multitable-onprem-package-upgrade-inplace: final report =====/)
+    assert.match(result.stdout, /\nbackend started:\s+skipped \(RestartService=0\)\s*\r?\n/)
+    assert.match(result.stdout, /backend health:\s+OK \(attempt=0,/)
+    assert.match(result.stdout, /\nhealth:\s+OK \(attempt=0,/)
+    // The stop, under the auto-detected home -- and no other pm2 call at all.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [`stop@${fx.runtimeHome}`])
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK|RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.strayDaemonMarker), 'no pm2 call that could leave a daemon behind')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling when the restart is skipped')
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ── 3c. R60 review (#6079): the restore recipe, the failure handler's pm2 stop, encoding ──
+//
+// The ops machine's adversarial check of the R60 upgrade wrapper (issue #6079,
+// 2026-09-28) found: the restore block deleted packages/core-backend/migrations,
+// which -BackupPaths never backed up, and deleted plugins/, whose backup skips
+// node_modules (the plugins' drivers); the failure handler's `pm2 stop` started a
+// pm2 daemon inside the upgrade session after pm2-runtime had exited (the #6071
+// session-binding shape); and the script's non-ASCII bytes made it depend on the
+// ANSI code page Windows PowerShell 5.1 reads it with.
+
+// The default of a [string[]] parameter of the script under test, read from its source.
+function scriptDefaultList(name) {
+  const match = scriptSource.match(new RegExp(`\\[string\\[\\]\\]\\$${name} = @\\(([^)]*)\\)`))
+  assert.ok(match, `the script must declare a default for -${name}`)
+  return [...match[1].matchAll(/'([^']*)'/g)].map((m) => m[1])
+}
+
+// The commands of a printed restore recipe: every non-comment line after
+// "then restart pm2:" up to the first pm2 line.
+function restoreRecipeCommands(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trim())
+  const start = lines.indexOf('then restart pm2:')
+  assert.ok(start > -1, `no restore recipe in:\n${output}`)
+  const commands = []
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith('$env:PM2_HOME') || line.startsWith('pm2 ') || /^=+$/.test(line)) break
+    if (line === '' || line.startsWith('#')) continue
+    commands.push(line)
+  }
+  return commands
+}
+
+// The paths the recipe's Remove-Item lines delete (single-quoted literals).
+function removeItemTargets(commands) {
+  return commands
+    .filter((command) => command.startsWith('Remove-Item '))
+    .map((command) => {
+      const match = command.match(/^Remove-Item -LiteralPath '((?:[^']|'')*)'/)
+      assert.ok(match, `unparseable Remove-Item line: ${command}`)
+      return match[1].replace(/''/g, "'")
+    })
+}
+
+function slashRelative(root, target) {
+  return path.relative(root, target).split(path.sep).join('/')
+}
+
+// Every file under dir, node_modules included: relative path ('/') -> content.
+function snapshotFiles(dir) {
+  const files = {}
+  if (!fs.existsSync(dir)) return files
+  const stack = [dir]
+  while (stack.length) {
+    const current = stack.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) stack.push(full)
+      else if (entry.isFile()) files[slashRelative(dir, full)] = fs.readFileSync(full, 'utf8')
+    }
+  }
+  return files
+}
+
+test('encoding (R60 review #6079): the upgrade script is pure ASCII with no BOM -- Windows PowerShell 5.1 reads a BOM-less script in the ANSI code page (936 on the demo host, 1252 on windows-latest), and the deploy procedure prepends a BOM itself, which a second BOM would break', () => {
+  const bytes = fs.readFileSync(scriptPath)
+  const offendingLines = new Set()
+  let line = 1
+  for (const byte of bytes) {
+    if (byte === 0x0a) {
+      line += 1
+    } else if (!(byte === 0x09 || byte === 0x0d || (byte >= 0x20 && byte <= 0x7e))) {
+      offendingLines.add(line)
+    }
+  }
+  assert.deepEqual([...offendingLines], [], `the script must be pure ASCII (no BOM, no control characters); offending lines: ${[...offendingLines].join(', ')}`)
+})
+
+test('R60 wiring (#6079): Main refuses a -BackupPaths that misses a replaced or overlaid path before anything is touched; the failure handler looks the task up first, then stops pm2 with -AfterFailure (killing only on a pm2-runtime host); the restore block gets the backed-up and overlaid lists', () => {
+  const backupPaths = scriptDefaultList('BackupPaths')
+  assert.ok(backupPaths.includes('packages/core-backend/migrations'), 'the default -BackupPaths must back up migrations/')
+  for (const rel of [...scriptDefaultList('ReplaceDirs'), 'plugins']) {
+    assert.ok(backupPaths.includes(rel), `the default -BackupPaths must back up ${rel}, which the upgrade replaces or overlays`)
+  }
+
+  const main = scriptSource.slice(scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
+  assert.match(main, /\$overlaidRelativePaths = @\('plugins'\)\s*\$restoredRelativePaths = @\(\$ReplaceDirs\) \+ \$overlaidRelativePaths\s/)
+  const guardIdx = main.indexOf('Assert-ReplacedPathsBackedUp -RestoredRelativePaths $restoredRelativePaths -BackupPaths $BackupPaths')
+  assert.ok(guardIdx > -1, 'Main must refuse a -BackupPaths that misses a replaced path')
+  for (const later of ['New-Item -ItemType Directory -Force -Path $resolvedBackupRoot', 'New-MaintenanceFlag -FlagPath $maintenanceFlagPath', 'Stop-Pm2App -Pm2Command', 'New-TimestampedBackup -RootDir']) {
+    const idx = main.indexOf(later)
+    assert.ok(idx > guardIdx, `the -BackupPaths refusal must come before ${later}`)
+  }
+
+  const stopCalls = (main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []).map((call) => call.trim())
+  assert.equal(stopCalls.length, 2)
+  assert.equal(stopCalls[0], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home', 'the step 2 stop stays unconditional')
+  assert.equal(stopCalls[1], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:($null -ne $restoreTask)')
+  const handler = main.slice(main.indexOf('Write-Err $_.Exception.Message'))
+  const lookupIdx = handler.indexOf('$restoreTask = Get-Pm2ScheduledTask -TaskName $Pm2ScheduledTaskName')
+  const handlerStopIdx = handler.indexOf('Stop-Pm2App -Pm2Command')
+  assert.ok(lookupIdx > -1 && lookupIdx < handlerStopIdx, 'the task lookup must come before the stop that depends on it')
+  assert.match(handler, /Write-RestoreBlock [^\n]* -BackedUpRelativePaths \$BackupPaths -OverlaidRelativePaths \$overlaidRelativePaths\s/)
+})
+
+test('Assert-ReplacedPathsBackedUp (R60 review #6079): the defaults back up every replaced or overlaid path; a -BackupPaths that misses one is refused, naming it; separators, case and extra slashes do not matter (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    // Main's own lists, as dot-sourcing leaves them: the parameter defaults.
+    const restored = "(@($ReplaceDirs) + @('plugins'))"
+    const call = (label, backupPaths) =>
+      `try { Assert-ReplacedPathsBackedUp -RestoredRelativePaths ${restored} -BackupPaths ${backupPaths}; Write-Host '${label}=OK' } catch { Write-Host ('${label}=THREW ' + $_.Exception.Message) }`
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        call('DEFAULTS', '$BackupPaths'),
+        call('PRE_R60', "@('docker', 'config', 'packages/core-backend/dist', 'apps/web/dist', 'plugins')"),
+        call('NO_PLUGINS', "@('packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations')"),
+        call('SPELLINGS', "@('packages\\core-backend\\dist\\', 'APPS/web/dist', 'packages//core-backend/migrations/', ' plugins ')"),
+        call('NOTHING', '@()'),
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const outcome = (label) => (result.stdout.split(/\r?\n/).find((l) => l.startsWith(`${label}=`)) || '').slice(label.length + 1)
+    assert.equal(outcome('DEFAULTS'), 'OK', result.stdout)
+    assert.match(outcome('PRE_R60'), /^THREW RESTORE_PATH_NOT_BACKED_UP: packages\/core-backend\/migrations would be replaced or overlaid by this upgrade but is not in -BackupPaths/, result.stdout)
+    assert.match(outcome('NO_PLUGINS'), /^THREW RESTORE_PATH_NOT_BACKED_UP: plugins would be replaced/, result.stdout)
+    assert.equal(outcome('SPELLINGS'), 'OK', result.stdout)
+    assert.match(outcome('NOTHING'), /^THREW RESTORE_PATH_NOT_BACKED_UP: packages\/core-backend\/dist, apps\/web\/dist, packages\/core-backend\/migrations, plugins would be/, result.stdout)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Write-RestoreBlock (R60 review #6079): a path is deleted only when -BackedUpRelativePaths lists it AND the backup folder holds it -- otherwise no command at all, only a note; plugins/ is copied back over the live tree and never deleted (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const backupPath = path.join(scratch, 'backup')
+    const rootDir = path.join(scratch, 'live')
+    // The backup folder holds both dists, plugins AND migrations -- but migrations is
+    // not listed below, and config is listed but absent from the backup folder (a path
+    // absent on the host at backup time).
+    for (const rel of ['packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations', 'plugins']) {
+      fs.mkdirSync(path.join(backupPath, ...rel.split('/')), { recursive: true })
+    }
+    const harness =
+      dotSourcePrelude(scratch) +
+      `Write-RestoreBlock -BackupPath ${psSingleQuote(backupPath)} -RootDir ${psSingleQuote(rootDir)} ` +
+      "-ReplacedRelativePaths @('packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations', 'config', 'plugins') " +
+      "-BackedUpRelativePaths @('packages/core-backend/dist', 'apps/web/dist', 'config', 'plugins') -Pm2AppName 'metasheet-backend'"
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const commands = restoreRecipeCommands(result.stdout)
+
+    assert.deepEqual(removeItemTargets(commands).map((target) => slashRelative(rootDir, target)).sort(), ['apps/web/dist', 'packages/core-backend/dist'], commands.join('\n'))
+    for (const rel of ['packages/core-backend/migrations', 'config']) {
+      const live = path.join(rootDir, ...rel.split('/'))
+      assert.deepEqual(commands.filter((command) => command.includes(live)), [], `${rel}: no command may touch a path the backup cannot put back:\n${commands.join('\n')}`)
+      assert.ok(result.stdout.includes(`# ${rel}: NOT restored here`), `${rel}: the block must say it is not restored:\n${result.stdout}`)
+    }
+    const livePlugins = path.join(rootDir, 'plugins')
+    assert.deepEqual(commands.filter((command) => command.includes(livePlugins)), [
+      `New-Item -ItemType Directory -Force -Path '${livePlugins}' | Out-Null`,
+      `Get-ChildItem -LiteralPath '${path.join(backupPath, 'plugins')}' -Force | Copy-Item -Destination '${livePlugins}' -Recurse -Force`,
+    ])
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R60 review #6079): the printed restore recipe, run on the tree the failed upgrade left, puts migrations/ and both dists back exactly and every pre-upgrade plugins/ file back, keeps each plugin\'s live node_modules, and deletes only paths -BackupPaths holds -- never plugins/ (RED on the pre-fix script)', () => {
+  const root = mkLongTempDir('ms2-upgrade-restore-')
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    // A plugin the package does not ship, with a driver in its live node_modules.
+    writeFixtureFile(liveRoot, 'plugins/plugin-live-only/index.cjs', 'LIVE_ONLY_PLUGIN')
+    writeFixtureFile(liveRoot, 'plugins/plugin-live-only/node_modules/driver/index.js', 'LIVE_ONLY_DRIVER')
+    // The F22 tripwire fails AFTER the swap: dists and migrations replaced, plugins overlaid.
+    fs.rmSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')))
+    const { archivePath } = buildAcidArchive(root, { omitPreflightFile: true })
+
+    const replacedInFull = ['packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations']
+    const before = Object.fromEntries([...replacedInFull, 'plugins'].map((rel) => [rel, snapshotFiles(path.join(liveRoot, ...rel.split('/')))]))
+    assert.ok(Object.keys(before.plugins).filter((rel) => rel.split('/').includes('node_modules')).length === 2, 'the fixture must carry live plugin node_modules')
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /UPGRADE_ASSERTION_MISSING_FILES/, combined)
+    assert.match(combined, /RESTORE REQUIRED/)
+    // The failed upgrade really changed what the recipe has to put back.
+    assert.ok(fs.existsSync(path.join(liveRoot, 'packages/core-backend/migrations/001_new.sql')), 'the upgrade must have replaced migrations/ before failing')
+    assert.notDeepEqual(snapshotFiles(path.join(liveRoot, 'plugins')), before.plugins)
+
+    // Run the recipe exactly as printed.
+    const commands = restoreRecipeCommands(result.stdout)
+    const recipePath = path.join(root, 'restore-recipe.ps1')
+    writeRunnableScript(recipePath, ["$ProgressPreference = 'SilentlyContinue'", ...commands, ''].join('\n'))
+    const restore = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', recipePath], { encoding: 'utf8' })
+    const restoreReport = `status=${restore.status}\nrecipe:\n${commands.join('\n')}\nstdout:\n${restore.stdout}\nstderr:\n${restore.stderr}`
+
+    // (a) migrations/ and both dists: exactly the pre-upgrade files again.
+    for (const rel of replacedInFull) {
+      assert.deepEqual(snapshotFiles(path.join(liveRoot, ...rel.split('/'))), before[rel], `${rel} must be exactly as before the upgrade.\n${restoreReport}`)
+    }
+    // (b) plugins/: every pre-upgrade file back with its pre-upgrade content -- each
+    // plugin's live node_modules included, which the backup never held.
+    const pluginsAfter = snapshotFiles(path.join(liveRoot, 'plugins'))
+    for (const [rel, content] of Object.entries(before.plugins)) {
+      assert.equal(pluginsAfter[rel], content, `plugins/${rel} must be as before the upgrade.\n${restoreReport}`)
+    }
+    assert.equal(restore.status, 0, restoreReport)
+
+    // (c) The recipe deletes only what -BackupPaths backs up, and never plugins/.
+    const backupPaths = scriptDefaultList('BackupPaths')
+    const deleted = removeItemTargets(commands).map((target) => slashRelative(liveRoot, target))
+    for (const rel of deleted) {
+      assert.ok(backupPaths.includes(rel), `the recipe deletes ${rel}, which -BackupPaths (${backupPaths.join(', ')}) does not back up:\n${commands.join('\n')}`)
+      assert.notEqual(rel, 'plugins', 'the recipe must never delete plugins/: its backup holds no node_modules to put back')
+    }
+    assert.deepEqual([...deleted].sort(), [...replacedInFull].sort(), commands.join('\n'))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R60 review #6079): a -BackupPaths without packages/core-backend/migrations (the pre-R60 default) is refused at startup with RESTORE_PATH_NOT_BACKED_UP -- before pm2, the gate, any backup or any live file', () => {
+  const root = mkLongTempDir('ms2-upgrade-restore-')
+  try {
+    const liveRoot = path.join(root, 'live')
+    const witness = maintenanceWitnessPaths(root, liveRoot)
+    const backupRoot = path.join(root, 'backups')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, witness })
+    const { archivePath } = buildAcidArchive(root)
+    const preR60BackupPaths = scriptDefaultList('BackupPaths').filter((rel) => rel !== 'packages/core-backend/migrations')
+
+    // -File cannot pass an array parameter; a wrapper splats it.
+    const wrapperPath = path.join(root, 'run-upgrade-without-migrations-backup.ps1')
+    writeRunnableScript(
+      wrapperPath,
+      [
+        '$upgradeParams = @{',
+        `  PackageArchive = ${psSingleQuote(archivePath)}`,
+        `  RootDir = ${psSingleQuote(liveRoot)}`,
+        `  EnvFile = ${psSingleQuote(path.join(liveRoot, 'docker', 'app.env'))}`,
+        `  BackupRoot = ${psSingleQuote(backupRoot)}`,
+        `  StagingRoot = ${psSingleQuote(path.join(root, 'staging'))}`,
+        "  RunMigrations = '0'",
+        "  RestartService = '0'",
+        `  BackupPaths = @(${preR60BackupPaths.map((rel) => psSingleQuote(rel)).join(', ')})`,
+        '}',
+        `& ${psSingleQuote(scriptExecPath)} @upgradeParams`,
+        '',
+      ].join('\n'),
+    )
+    const result = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', wrapperPath], { encoding: 'utf8' })
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0, combined)
+    // The refusal is an uncaught error, and both shells wrap its message: pwsh 7
+    // (ConciseView) adds colour codes and wraps at word breaks behind a "     | " gutter;
+    // Windows PowerShell 5.1 hard-wraps at the buffer width, mid-word. So the message is
+    // compared with colour codes, the gutter and ALL whitespace taken out of both sides.
+    const compact = (text) =>
+      text
+        .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+        .replace(/\r?\n[ \t]*\|/g, '')
+        .replace(/\s+/g, '')
+    assert.ok(
+      compact(combined).includes(compact('RESTORE_PATH_NOT_BACKED_UP: packages/core-backend/migrations would be replaced or overlaid by this upgrade but is not in -BackupPaths')),
+      combined,
+    )
+    assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked')
+    assert.ok(!fs.existsSync(backupRoot), 'no backup may be started')
+    assert.deepEqual(readPm2FlagWitness(witness.pm2FlagWitnessPath), [])
+    assert.ok(!fs.existsSync(witness.flagPath), 'the gate must never go up')
+    assert.equal(fs.readFileSync(path.join(liveRoot, 'packages', 'core-backend', 'migrations', '000_old.sql'), 'utf8'), 'select 0;\n', 'no live file may be touched')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pipe means no pm2 command at all; a present or unqueryable pipe means stop -- and on a pm2-runtime host stop, pm2 kill, then the pipe wait, in that order, under the one home; an unmanaged host is never killed; off Windows, and at step 2, the stop runs as before (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const home = path.join(scratch, 'runtime-home')
+    fs.mkdirSync(home, { recursive: true })
+    // machinePipe: Test-Pm2UsesMachinePipe (Windows). pipe: Test-Pm2DaemonPipePresent's
+    // answer. kill: -KillDaemonAfterStop (a pm2-runtime host). wait: the pipe wait's answer.
+    const cases = [
+      { label: 'ABSENT_RUNTIME_HOST', pipe: 'false', kill: true, expect: ['PROBE'] },
+      { label: 'ABSENT_UNMANAGED', pipe: 'false', kill: false, expect: ['PROBE'] },
+      { label: 'PRESENT_RUNTIME_HOST', pipe: 'true', kill: true, expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'PRESENT_UNMANAGED', pipe: 'true', kill: false, expect: ['PROBE', 'stop'] },
+      { label: 'UNKNOWN_RUNTIME_HOST', pipe: 'null', kill: true, expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'UNKNOWN_UNMANAGED', pipe: 'null', kill: false, expect: ['PROBE', 'stop'] },
+      { label: 'STILL_OPEN_RUNTIME_HOST', pipe: 'true', kill: true, wait: 'still-open', expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'NOT_WINDOWS_RUNTIME_HOST', machinePipe: false, pipe: 'false', kill: true, expect: ['stop'] },
+      { label: 'STEP2', afterFailure: false, pipe: 'false', kill: false, expect: ['stop'] },
+    ]
+    const prelude =
+      dotSourcePrelude(scratch) +
+      [
+        'function global:Test-Pm2UsesMachinePipe { return $global:StubMachinePipe }',
+        'function global:Test-Pm2DaemonPipePresent {',
+        "  param([string]$PipeName = 'rpc.sock')",
+        "  Add-Content -LiteralPath $global:CasePm2Log -Value 'PROBE'",
+        "  if ($global:StubPipe -eq 'null') { return $null }",
+        "  return ($global:StubPipe -eq 'true')",
+        '}',
+        'function global:Wait-Pm2DaemonPipeClosed {',
+        "  param([int]$TimeoutSec = 15, [string]$PipeName = 'rpc.sock')",
+        "  Add-Content -LiteralPath $global:CasePm2Log -Value 'WAIT'",
+        '  return $global:StubWait',
+        '}',
+        '',
+      ].join('\n')
+    const blocks = cases.map((c) => {
+      const dir = path.join(scratch, c.label)
+      c.pm2Log = path.join(dir, 'pm2-calls.log')
+      c.homeLog = path.join(dir, 'pm2-home.log')
+      const stub = writePm2Stub(dir, c.pm2Log, null, { homeLogPath: c.homeLog })
+      const flags = [c.afterFailure === false ? '' : '-AfterFailure', c.kill ? '-KillDaemonAfterStop' : ''].filter(Boolean).join(' ')
+      return [
+        `$global:StubMachinePipe = ${c.machinePipe === false ? '$false' : '$true'}`,
+        `$global:StubPipe = ${psSingleQuote(c.pipe)}`,
+        `$global:StubWait = ${psSingleQuote(c.wait || 'closed')}`,
+        `$global:CasePm2Log = ${psSingleQuote(c.pm2Log)}`,
+        `Write-Host '--- ${c.label}'`,
+        `try { Stop-Pm2App -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} ${flags}; Write-Host '${c.label}=RETURNED' } ` +
+          `catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+        '',
+      ].join('\n')
+    })
+    // Windows caps a command line at 32767 characters (see the Restart-Pm2AppOrScheduledTask test).
+    const HARNESS_LIMIT = 30000
+    const harnesses = []
+    for (const block of blocks) {
+      const last = harnesses.length - 1
+      if (last >= 0 && harnesses[last].length + block.length <= HARNESS_LIMIT) harnesses[last] += block
+      else harnesses.push(prelude + block)
+    }
+    let stdout = ''
+    for (const harness of harnesses) {
+      assert.ok(harness.length <= HARNESS_LIMIT, `one case alone must fit a command line (${harness.length} chars)`)
+      const run = runPwshHarness(harness)
+      assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error))
+      stdout += run.stdout
+    }
+    const section = (label) => {
+      const start = stdout.indexOf(`--- ${label}`)
+      assert.ok(start > -1, `no output for ${label}:\n${stdout}`)
+      const next = stdout.indexOf('--- ', start + 4)
+      return stdout.slice(start, next === -1 ? undefined : next)
+    }
+    const byLabel = Object.fromEntries(cases.map((c) => [c.label, c]))
+    for (const c of cases) {
+      assert.match(section(c.label), new RegExp(`${c.label}=RETURNED`), `${c.label}: the failure handler's stop must not throw on this answer:\n${section(c.label)}`)
+      assert.deepEqual(readLogLines(c.pm2Log).map((l) => l.split(/\s+/)[0]), c.expect, `${c.label}: probe / pm2 / wait sequence`)
+      for (const entry of readPm2HomeLog(c.homeLog)) {
+        assert.equal(entry.home, home, `${c.label}: pm2 ${entry.command} must run under the resolved home`)
+      }
+    }
+    // No daemon pipe: zero pm2 invocations, and the log says why.
+    for (const label of ['ABSENT_RUNTIME_HOST', 'ABSENT_UNMANAGED']) {
+      assert.deepEqual(readPm2HomeLog(byLabel[label].homeLog), [], `${label}: pm2 must not be run at all`)
+      assert.match(section(label), /PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock/)
+    }
+    assert.deepEqual(readPm2HomeLog(byLabel.PRESENT_RUNTIME_HOST.homeLog).map((entry) => entry.command), ['stop', 'kill'])
+    assert.doesNotMatch(section('PRESENT_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE/)
+    assert.match(section('STILL_OPEN_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE: after 'pm2 kill' the pipe \\\\\.\\pipe\\rpc\.sock is 'still-open'/)
+    assert.match(section('UNKNOWN_UNMANAGED'), /could not be queried; stopping 'metasheet-backend' anyway/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// ── 3d. The stop gap: a failure after the step 2 stop, before anything was replaced ──
+//
+// Recorded in #6079 (comment of 2026-09-28T08:24:49Z): the script stopped the backend
+// at step 2 and made the backup at step 3 OUTSIDE the failure handler, so a failed
+// backup left the site down with no restart and no guidance. Now the handler covers
+// everything after the stop and decides on one recorded fact -- whether anything of the
+// installed version has been replaced yet (Register-LiveTreeReplacement, set right
+// before the first write to a live path):
+//   nothing replaced -> start the backend again the way step 7 does (pm2 restart, then
+//                       the scheduled-task fallback), check it answers, say so, exit
+//                       non-zero, no restore block;
+//   anything replaced -> as before: stop, restore block, never start the backend.
+
+// PowerShell for a Copy-Item stand-in the wrapper defines before the script runs: the
+// script's Copy-Item calls resolve to it (a function wins over a cmdlet of the same
+// name). A copy whose -Destination lies under failUnder throws, the way a full disk or
+// a locked file would; every other copy is the real cmdlet.
+function copyItemFailureStubSource(failUnder) {
+  return [
+    `$global:StubCopyFailUnder = ${psSingleQuote(failUnder)}`,
+    'function global:Copy-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [string]$Destination, [switch]$Recurse, [switch]$Force)',
+    "  $dest = ([string]$Destination) -replace '[\\\\/]+', '/'",
+    "  $under = (($global:StubCopyFailUnder -replace '[\\\\/]+', '/').TrimEnd('/')) + '/'",
+    '  if ($dest.StartsWith($under, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    throw "STUB_COPY_FAILED: cannot write $Destination"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Copy-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
+// PowerShell for a Remove-Item stand-in, defined like the Copy-Item one above: removing
+// exactly failPath deletes partialFile first (with the real cmdlet) and then throws, the
+// way a recursive delete that meets a locked file stops halfway. Every other call is
+// the real cmdlet.
+function removeItemFailureStubSource(failPath, partialFile) {
+  return [
+    `$global:StubRemoveFailPath = ${psSingleQuote(failPath)}`,
+    `$global:StubRemovePartialFile = ${psSingleQuote(partialFile)}`,
+    'function global:Remove-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [switch]$Recurse, [switch]$Force)',
+    "  $target = (([string]($LiteralPath | Select-Object -First 1)) -replace '[\\\\/]+', '/').TrimEnd('/')",
+    "  $fail = ($global:StubRemoveFailPath -replace '[\\\\/]+', '/').TrimEnd('/')",
+    '  if ($target.Equals($fail, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $global:StubRemovePartialFile -Force',
+    '    throw "STUB_REMOVE_FAILED: stopped halfway through deleting $LiteralPath"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
+// The run must end on the ORIGINAL error, uncaught, on stderr. Both shells wrap it
+// (pwsh 7: colour codes and a "     | " gutter; Windows PowerShell 5.1: hard wraps at
+// the buffer width), so it is compared with those and all whitespace taken out.
+function assertEndsOnError(result, message) {
+  const compact = (text) =>
+    text
+      .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+      .replace(/\r?\n[ \t]*\|/g, '')
+      .replace(/\s+/g, '')
+  assert.ok(compact(result.stderr).includes(compact(message)), `the run must end on the original error "${message}".\nstderr:\n${result.stderr}`)
+}
+
+// The installed version's own files (the pm2 stub excluded: the harness wrote it).
+function liveInstallSnapshot(liveRoot) {
+  const files = snapshotFiles(liveRoot)
+  for (const rel of Object.keys(files)) {
+    if (rel.startsWith('node_modules/.bin/')) delete files[rel]
+  }
+  return files
+}
+
+// The backend-direct /health of a pm2-runtime host as an upgrade meets it: answering
+// until the first `pm2 stop` (the pm2 stub's home log shows it), then down -- and, with
+// comesBackWithTask, up again once the scheduled task has started pm2-runtime (the task
+// stub's marker). Step 2's silent pre-stop probe therefore sees it up; every poll after
+// the stop sees it down until the task started. Across two runs of one fixture the
+// first run's stop keeps it down for the second.
+function backendUpUntilStopped(fx, { comesBackWithTask = true } = {}) {
+  return () => !readPm2HomeLog(fx.homeLogPath).some((entry) => entry.command === 'stop') || (comesBackWithTask && fs.existsSync(fx.runtimeStartedMarker))
+}
+
+test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing replaced -- brings the backend back the way step 7 does (pm2 restart, "not found", pm2 kill, the MetaSheet-PM2 task), checks it answers, says so and exits non-zero; no restore block (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // The backend answers until the step 2 stop, then stays DOWN until the scheduled task
+  // has started pm2-runtime again.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, `a failed upgrade must exit non-zero.\n${report}`)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.doesNotMatch(result.stdout, /BACKUP_PATH=/, 'the run must have failed inside the backup step')
+
+    // The step 2 stop, then exactly the step 7 start path: the restart answers "not
+    // found" (pm2-runtime exited after the stop), the empty daemon it started is killed,
+    // and the task is started with no daemon left -- all under the one resolved home.
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], `the backend must be started again after the stop.\n${report}`)
+    for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+    // The evidence for the start: step 2 asked the backend once, silently, right before
+    // it stopped it, and it answered (review F1: no answer there, no start).
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true'], `step 2 must ask the backend once, before the stop.\n${report}`)
+    // It checked the backend answers, directly (the gate is still up), after the start.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 1, `the backend-direct probe must run after the start.\n${report}`)
+    assert.equal(probes[0].url, '/health')
+    assert.equal(probes[0].backendUp, true, 'the probe must come after the task started the backend')
+
+    // What the operator reads: nothing was replaced, the backend is back, no restore.
+    assert.match(result.stdout, /NOTHING_REPLACED: /)
+    assert.match(result.stdout, /=+ UPGRADE NOT APPLIED =+/)
+    assert.match(result.stdout, /Backend: started again \(scheduled-task\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./)
+    assert.match(result.stdout, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
+    assert.doesNotMatch(combined, /RESTORE REQUIRED/, 'nothing was replaced: there is nothing to restore, and the backup may be incomplete')
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'the failure handler\'s stop is for a replaced install only')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap wiring (#6079): everything after the step 2 stop sits in the one handler, whose FIRST decision is the replace journal -- nothing replaced starts the backend and rethrows before the task lookup, the stop or the restore block; the journal is marked before the first live write in Update-ReplaceDirs and Update-Plugins', () => {
+  // LF throughout: a Windows checkout (core.autocrlf) has CRLF on disk.
+  const source = scriptSource.split('\r\n').join('\n')
+  const main = source.slice(source.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
+  const stopIdx = main.indexOf('Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home\n')
+  const innerTryIdx = main.indexOf('try {', stopIdx)
+  const backupIdx = main.indexOf('$backupPath = New-TimestampedBackup -RootDir')
+  const catchIdx = main.indexOf('} catch {')
+  assert.ok(stopIdx > -1 && innerTryIdx > stopIdx && catchIdx > innerTryIdx, 'the handler\'s try must open after the step 2 stop')
+  assert.deepEqual(
+    main.slice(stopIdx, innerTryIdx).split('\n').slice(1).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')),
+    [],
+    'nothing may run between the step 2 stop and the handler\'s try',
+  )
+  assert.ok(innerTryIdx < backupIdx && backupIdx < catchIdx, 'the step 3 backup must run inside the handler\'s try')
+  const journalInitIdx = main.indexOf('$replaceJournal = @{ Replaced = $false }')
+  assert.ok(journalInitIdx > -1 && journalInitIdx < main.indexOf('try {'), 'the journal must exist before the outer try, unmarked')
+  // Review F1: the evidence that the backend was running. $false until step 2's silent
+  // probe, taken after the gate probe and right before the stop, says otherwise; no
+  // probe at all with RestartService=0 (nothing is started then anyway).
+  const evidenceInitIdx = main.indexOf('$backendAnsweredBeforeStop = $false\n')
+  assert.ok(evidenceInitIdx > -1 && evidenceInitIdx < main.indexOf('try {'), 'the pre-stop evidence must start $false, before the outer try')
+  const probeMatch = main.match(/\n(\s*)if \(\$RestartService -ne '0'\) \{\n\s*\$backendAnsweredBeforeStop = Test-BackendAnswersNow -HealthUrl \$resolvedBackendHealthUrl\n\s*\}\n(?:\s*\n)?\s*Stop-Pm2App -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home\n/)
+  assert.ok(probeMatch, 'step 2 must probe the backend (RestartService other than 0) immediately before its stop, with nothing in between')
+  assert.ok(main.indexOf('Test-MaintenanceGateWired -ProbeUrl $HealthUrl') < main.indexOf('Test-BackendAnswersNow -HealthUrl'), 'the pre-stop probe comes after the gate probe')
+  assert.equal((main.match(/\$backendAnsweredBeforeStop\s*=/g) || []).length, 2, 'the evidence is set twice only: $false, then the probe')
+  assert.match(main, /Update-ReplaceDirs -PackageRoot \$packageRoot -RootDir \$resolvedRoot -RelativeDirs \$ReplaceDirs -Journal \$replaceJournal\n/)
+  assert.match(main, /Update-Plugins -PackageRoot \$packageRoot -RootDir \$resolvedRoot -Journal \$replaceJournal\n/)
+
+  const handler = main.slice(catchIdx)
+  assert.match(
+    handler,
+    /^\} catch \{\s*\n\s*Write-Err \$_\.Exception\.Message\s*\n\s*if \(-not \$replaceJournal\.Replaced\) \{\s*\n(?:\s*#[^\n]*\n)*\s*\$null = Start-BackendAfterUnappliedUpgrade -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home -ScheduledTaskName \$Pm2ScheduledTaskName -RestartService \$RestartService -BackendAnsweredBeforeStop \$backendAnsweredBeforeStop -BackendHealthUrl \$resolvedBackendHealthUrl [^\n]*\n\s*throw\s*\n\s*\}\s*\n/,
+    'the handler must first report the error, then -- nothing replaced -- start the backend again and rethrow, before anything else',
+  )
+  const branchEnd = handler.search(/\n\s*throw\s*\n/)
+  for (const later of ['$restoreTask = Get-Pm2ScheduledTask', 'Stop-Pm2App -Pm2Command', 'Write-RestoreBlock -BackupPath']) {
+    assert.ok(handler.indexOf(later) > branchEnd, `${later} belongs to the replaced branch only`)
+  }
+
+  const code = stripPowerShellBlockComments(source)
+  const fnBody = (name) => {
+    const start = code.indexOf(`function ${name} {`)
+    const nextFunction = code.indexOf('\nfunction ', start + 1)
+    const end = nextFunction > -1 ? nextFunction : code.indexOf("\nif ($MyInvocation.InvocationName -ne '.') {", start + 1)
+    assert.ok(start > -1 && end > start, `function ${name} not found`)
+    return code.slice(start, end)
+  }
+  const replaceDirs = fnBody('Update-ReplaceDirs')
+  const markIdx = replaceDirs.indexOf('Register-LiveTreeReplacement -Journal $Journal')
+  assert.ok(markIdx > replaceDirs.indexOf('throw "PACKAGE_MISSING_REPLACE_DIR'), 'a package check that refuses before any write is still "nothing replaced"')
+  assert.ok(markIdx > -1 && markIdx < replaceDirs.indexOf('Remove-Item -LiteralPath $dst') && markIdx < replaceDirs.indexOf('Copy-TreeExcludingNodeModules'), 'the journal must be marked BEFORE the delete and the copy')
+  const plugins = fnBody('Update-Plugins')
+  const pluginMarkIdx = plugins.indexOf('Register-LiveTreeReplacement -Journal $Journal')
+  assert.ok(pluginMarkIdx > -1 && pluginMarkIdx < plugins.indexOf('New-Item -ItemType Directory -Force -Path $livePluginsDir') && pluginMarkIdx < plugins.indexOf('Copy-Item') && pluginMarkIdx < plugins.indexOf('Copy-TreeExcludingNodeModules'), 'Update-Plugins must mark the journal before its first write')
+
+  const unapplied = fnBody('Start-BackendAfterUnappliedUpgrade')
+  assert.match(unapplied, /Restart-Pm2AppOrScheduledTask -Pm2Command \$Pm2Command -Name \$Name -Pm2Home \$Pm2Home -ScheduledTaskName \$ScheduledTaskName\n/, 'the backend must be started the way step 7 starts it')
+  assert.doesNotMatch(unapplied, /Write-RestoreBlock|Stop-Pm2App|Remove-Item|Copy-Item/, 'nothing replaced: no restore, no stop, no file operation')
+  assert.match(unapplied, /\[Parameter\(Mandatory = \$true\)\]\[bool\]\$BackendAnsweredBeforeStop/, 'the pre-stop evidence has no default: every caller must say what it saw')
+  assert.equal((unapplied.match(/Restart-Pm2AppOrScheduledTask/g) || []).length, 1)
+  assert.ok(unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') > -1 && unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') < unapplied.indexOf('Restart-Pm2AppOrScheduledTask'), 'no pre-stop answer, no start: the start sits in the branch after that refusal')
+
+  // The pre-stop probe: one tagged request, silent, never throws.
+  const probe = fnBody('Test-BackendAnswersNow')
+  assert.equal((probe.match(/Invoke-WebRequest/g) || []).length, 1, 'exactly one request')
+  assert.match(probe, /-Headers @\{ 'X-Upgrade-Prestop-Probe' = '1' \}/)
+  assert.doesNotMatch(probe, /Write-(Host|Info|Err|Output|Warning)/, 'the probe prints nothing: the success path output must not change')
+  assert.match(probe, /\} catch \{\s*\n\s*return \$false\s*\n\s*\}/, 'any failure is "did not answer"')
+})
+
+// Rebuilds the fixture archive (and its sidecar) from a stage the test has edited.
+function rezipStage(stageDir, archivePath) {
+  const rezip = spawnSync(
+    PWSH,
+    ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
+    { encoding: 'utf8' },
+  )
+  assert.equal(rezip.status, 0, rezip.stderr || rezip.stdout)
+  fs.writeFileSync(`${archivePath}.sha256`, `${sha256File(archivePath)}  ${path.basename(archivePath)}\n`)
+}
+
+test('stop gap (#6079): the decision rests on the first write, not on the step -- a package missing packages/core-backend/dist fails INSIDE step 4 but before any live write, so the backend is started again (pm2 restart) and the install is untouched', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  // pm2-runtime still holds the app: the plain `pm2 restart` brings it back.
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    buildAcidLiveRoot(fx.liveRoot, {
+      pm2LogPath: fx.pm2LogPath,
+      backendPort: health.port,
+      witness: fx.witness,
+      pm2Behavior: { homeLogPath: fx.homeLogPath, restartNeedsHomeMarker: true, strayDaemonMarkerPath: fx.strayDaemonMarker },
+    })
+    const { archivePath, stageDir } = buildAcidArchive(root)
+    // ReplaceDirs' FIRST entry: Update-ReplaceDirs refuses it before writing anything.
+    fs.rmSync(path.join(stageDir, 'packages/core-backend/dist'), { recursive: true, force: true })
+    rezipStage(stageDir, archivePath)
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.match(result.stdout, /=== Step 4\/8: extract \+ replace runtime paths ===/, 'the failure must come from inside step 4')
+    assertEndsOnError(result, 'PACKAGE_MISSING_REPLACE_DIR: packages/core-backend/dist not found under extracted package')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'a restart that worked must not also start the task')
+    assert.match(result.stdout, /Backend: started again \(pm2-restart\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./, report)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): once the first live path is being replaced, the backend is NEVER started by the script -- a copy that fails right after packages/core-backend/dist was deleted gets the failure handler\'s stop and RESTORE REQUIRED, no restart, no task start, no health polling', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      // The first copy INTO the live tree: Update-ReplaceDirs has just deleted the live
+      // dist (ReplaceDirs' first entry) and fails on the first file it copies back.
+      copyItemFailureStubSource(liveDist),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.match(result.stdout, /BACKUP_PATH=/, 'the backup must have completed')
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.ok(!fs.existsSync(path.join(liveDist, 'src', 'db', 'migrate.js')), 'the fixture must really have replaced (deleted) the live dist before the failure')
+
+    // The replaced branch, exactly as before this fix: the failure handler's stop
+    // (on Windows skipped, no daemon pipe), the restore block, and nothing that starts
+    // the backend -- no restart, no pm2 kill, no task start, no health polling.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...FAILURE_HANDLER_PM2_CALLS], `the backend must not be started once anything was replaced.\n${report}`)
+    assertFailureHandlerPm2Stop(combined)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling')
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.ok(restoreRecipeCommands(result.stdout).some((command) => command.startsWith('Remove-Item -LiteralPath ') && command.includes(liveDist)), 'the restore block must put the replaced dist back')
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a delete that stops halfway through the first live directory has already replaced something -- the fact is recorded BEFORE the delete, so the backend is never started and RESTORE REQUIRED is printed', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    // A second file, so "halfway" leaves one deleted and one still there.
+    writeFixtureFile(fx.liveRoot, 'packages/core-backend/dist/keep-me.js', 'KEEP_ME')
+    const deletedFirst = path.join(liveDist, 'src', 'db', 'migrate.js')
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      removeItemFailureStubSource(liveDist, deletedFirst),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_REMOVE_FAILED: stopped halfway through deleting')
+    assert.ok(!fs.existsSync(deletedFirst) && fs.existsSync(path.join(liveDist, 'keep-me.js')), 'the fixture must leave the live dist half-deleted')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...FAILURE_HANDLER_PM2_CALLS], `a half-deleted install must never be started.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling')
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): when starting the backend again itself fails (the task cannot be started), the operator is told the site is DOWN, with the commands to start it by hand -- the pm2 home, pm2 restart, pm2 kill, the task by its folder -- and the run fails on the original error; no restore block', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub({ startBehavior: 'throw', taskPath: '\\MetaSheet\\' }),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill'], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\MetaSheet\\', 'start-saw-daemon=no'])
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling after a start that failed')
+
+    const block = result.stdout.slice(result.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(result.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(block, /Backend: NOT started -- starting it again failed: PM2_SCHEDULED_TASK_START_FAILED: could not start scheduled task '\\MetaSheet\\MetaSheet-PM2'/)
+    assert.match(block, /THE SITE IS DOWN until the backend is started\. Start it by hand:/)
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const killIdx = block.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\MetaSheet\\'")
+    assert.ok(homeIdx > -1 && restartIdx > -1 && killIdx > -1 && taskIdx > -1, `the block must print every start command.\n${block}`)
+    assert.ok(homeIdx < restartIdx && restartIdx < killIdx && killIdx < taskIdx, 'order: PM2_HOME, pm2 restart, pm2 kill, Start-ScheduledTask')
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a backend that is started again but never answers is reported as started and NOT answering, after the normal number of backend-direct attempts -- the site is DOWN, and the commands to start it by hand come with the pm2 home first (review F2: never a bare pm2 command)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // Answering until the step 2 stop; the task starts pm2-runtime, but the backend never
+  // answers again (a crash loop, or a start slower than the attempts).
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx, { comesBackWithTask: false }) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill'], report)
+    assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the backend-direct polling must run its attempts')
+    assert.match(result.stdout, /Backend: started again \(scheduled-task\), but it did NOT answer http:\/\/127\.0\.0\.1:\d+\/health in 2 attempts\./, report)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+
+    // Review F2. The finally drops the gate, so nginx answers 502 while the backend does
+    // not answer: the operator must read that the site is down, and get the start
+    // commands with the pm2 home FIRST -- on a pm2-runtime host whose runtime exited, a
+    // pm2 command without it starts an empty daemon in the operator's session (the
+    // caveat printed with `pm2 kill`). No bare pm2 advice at all.
+    const block = result.stdout.slice(result.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(result.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(block, /THE SITE IS DOWN until the backend answers\./, report)
+    assert.doesNotMatch(block, /pm2 status/, 'no bare `pm2 status` advice')
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const caveatIdx = block.indexOf('started an empty pm2 daemon in THIS session')
+    const killIdx = block.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && restartIdx > -1 && caveatIdx > -1 && killIdx > -1 && taskIdx > -1, `the block must print every start command and the kill caveat.\n${block}`)
+    assert.ok(homeIdx < restartIdx && restartIdx < caveatIdx && caveatIdx < killIdx && killIdx < taskIdx, 'order: PM2_HOME, pm2 restart, the caveat, pm2 kill, Start-ScheduledTask')
+    const firstPm2Idx = block.search(/\n\s*pm2 /)
+    assert.ok(firstPm2Idx > homeIdx, 'no pm2 command may be printed before the PM2_HOME line')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079, review F1): a re-run that meets a backend which does NOT answer (an earlier run replaced files, failed, and was never restored) and then fails before replacing anything does NOT start the backend -- the half-replaced tree stays stopped, and the operator is told why and to restore that run first', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    const env = r59ChildEnv(fx.profileDir, {}, ['PM2_HOME'])
+    const params = { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' }
+
+    // Run 1: the first copy into the live dist fails right after it was deleted (a full
+    // disk): RESTORE REQUIRED, the backend left stopped.
+    const run1 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(liveDist)), env)
+    const report1 = `run 1 stdout:\n${run1.stdout}\nrun 1 stderr:\n${run1.stderr}`
+    assert.notEqual(run1.status, 0, report1)
+    assert.match(run1.stdout, /RESTORE REQUIRED/, report1)
+    assert.ok(!fs.existsSync(path.join(liveDist, 'src', 'db', 'migrate.js')), 'run 1 must leave the live dist half-replaced')
+    const halfReplaced = liveInstallSnapshot(fx.liveRoot)
+    const pm2CallsBefore = readPm2HomeLog(fx.homeLogPath).length
+    const taskCallsBefore = readLogLines(fx.taskLogPath).length
+
+    // The operator does not restore. Run 2: the backup fails (the same full disk).
+    const run2 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(fx.backupRoot)), env)
+    const combined = run2.stderr + run2.stdout
+    const report = `run 2 stdout:\n${run2.stdout}\nrun 2 stderr:\n${run2.stderr}`
+    assert.notEqual(run2.status, 0, report)
+    assertEndsOnError(run2, 'STUB_COPY_FAILED: cannot write')
+    assert.doesNotMatch(run2.stdout, /BACKUP_PATH=/, 'run 2 must have failed inside the backup step')
+
+    // Nothing starts run 1's half-replaced tree: run 2's step 2 stop, and no pm2 call,
+    // no task start and no health polling after it.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).slice(pm2CallsBefore).map((entry) => entry.command), ['stop'], `the backend must not be started on a tree an earlier run half-replaced.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).slice(taskCallsBefore).filter((line) => line.startsWith('start')), [], 'the task must not be started')
+    assert.ok(!fs.existsSync(fx.runtimeStartedMarker), 'pm2-runtime must not have been started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling in either run')
+    // Why: run 1 met the backend answering before its stop, run 2 did not.
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true', '/health up=false'], report)
+
+    // What the operator reads.
+    const block = run2.stdout.slice(run2.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(run2.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(run2.stdout, /NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version\. The backend did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so it is NOT started/, report)
+    assert.match(block, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
+    assert.match(block, /Backend: NOT started -- it did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so nothing shows the installed files are a version that runs\./)
+    assert.match(block, /THE SITE IS DOWN until the backend is started\./)
+    assert.match(block, /If an earlier upgrade run printed RESTORE REQUIRED and that restore was not done, restore from THAT run's backup first/)
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && homeIdx < restartIdx && restartIdx < taskIdx, `the block must print the start commands, pm2 home first.\n${block}`)
+    assert.doesNotMatch(combined, /started again|so that version is intact|Nothing needs to be restored|=+ RESTORE REQUIRED =+/, 'run 2 must neither start the backend nor vouch for the installed files, and prints no restore block of its own (its backup holds run 1\'s half-replaced tree)')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), halfReplaced, 'run 2 changed no file')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): with -RestartService 0 a failure before anything was replaced starts nothing -- the operator is told the site is DOWN and how to start it', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // Only a witness here: with RestartService=0 step 2 must not probe the backend at all.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, RestartService: '0', HealthUrl: 'http://127.0.0.1:1/api/health', HealthcheckAttempts: '1', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop'], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [])
+    assert.match(result.stdout, /Backend: NOT started \(-RestartService 0\)\. THE SITE IS DOWN until the backend is started\. Start it by hand:/, report)
+    assert.match(result.stdout, /Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'/)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+    assert.deepEqual(health.preStopProbes, [], 'RestartService=0: no pre-stop probe')
+    assert.deepEqual(health.requests, [], 'RestartService=0: no request to the backend at all')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a failure BEFORE the step 2 stop (the gate cannot be raised) leaves the backend alone -- no pm2 call, no start, no restore, the install untouched', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    // The flag's folder is a FILE: New-MaintenanceFlag, the first statement of the try,
+    // cannot create it.
+    const blocker = path.join(root, 'flag-parent-is-a-file')
+    fs.writeFileSync(blocker, 'not a directory')
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      MaintenanceFlagPath: path.join(blocker, 'maintenance.flag'),
+      HealthUrl: 'http://127.0.0.1:1/api/health',
+      HealthcheckAttempts: '1',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.doesNotMatch(result.stdout, /MAINTENANCE_FLAG=/, 'the gate must not have gone up')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath), [], `no pm2 call at all: the backend was never stopped.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [])
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|RESTORE REQUIRED|Step 3\/8/)
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before)
+    assert.equal(fs.readFileSync(blocker, 'utf8'), 'not a directory')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ── 3e. The success path is unchanged, byte for byte ─────────────────────────────
+//
+// The stop-gap fix moved the step 3 backup inside the failure handler and added the
+// replace journal; an operator must see exactly what R60 printed. The golden files
+// under scripts/ops/fixtures/multitable-onprem-upgrade-inplace/ are the output of the
+// script at origin/main cd89c74dd (before the fix), run through this same fixture and
+// normalized by normalizeRunOutput -- which replaces ONLY what differs between runs
+// (the temp root, the ports, the backup timestamp, the staging suffix, the package
+// hash), separators, line ends and trailing blanks. Everything else must match.
+
+const SUCCESS_GOLDEN_DIR = path.join(repoRoot, 'scripts/ops/fixtures/multitable-onprem-upgrade-inplace')
+
+function normalizeRunOutput(text, root) {
+  let out = text.replace(/\r\n?/g, '\n').replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+  for (const spelling of [root, root.split(path.sep).join('/')]) {
+    out = out.replace(new RegExp(spelling.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '<ROOT>')
+  }
+  return out
+    .replace(/\\/g, '/')
+    .replace(/upgrade-backup-\d{8}-\d{6}/g, 'upgrade-backup-<TIMESTAMP>')
+    .replace(/mspui-[0-9a-f]{12}/g, 'mspui-<ID>')
+    .replace(/sha256=[0-9a-f]{64}/g, 'sha256=<SHA256>')
+    .replace(/127\.0\.0\.1:\d+/g, '127.0.0.1:<PORT>')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/, ''))
+    .join('\n')
+}
+
+const SUCCESS_SHAPES = [
+  // The demo host's shape since R59: pm2-runtime exited after the stop, the restart
+  // answers "not found", the fallback kills the empty daemon and starts the task.
+  // Migrations run (step 6), so their output is part of the comparison.
+  { name: 'pm2-runtime-task-fallback', runtimeAlive: false, params: { RunMigrations: '1' } },
+  // pm2 still holds the app: the plain restart.
+  { name: 'pm2-restart', runtimeAlive: true, params: {} },
+]
+
+for (const shape of SUCCESS_SHAPES) {
+  test(`success path unchanged (${shape.name}): the full output of a successful upgrade is byte-for-byte the output of the script before the stop-gap fix (origin/main cd89c74dd), after normalizing only run-specific values`, async () => {
+    const root = mkLongTempDir('ms2-upgrade-golden-')
+    const fx = setUpR59Fixture(root, { runtimeAlive: shape.runtimeAlive })
+    // A host whose nginx reads the gate: the gate probe gets 503, so the output
+    // carries no text that depends on the console code page.
+    const health = await startHealthServer({
+      flagPath: fx.witness.flagPath,
+      gateWired: true,
+      backendUp: () => shape.runtimeAlive || fs.existsSync(fx.runtimeStartedMarker),
+    })
+    try {
+      // No stray-daemon model: that makes the pm2 stub print on stdout AND stderr in
+      // one call, and the order in which a shell merges the two is not guaranteed.
+      const archivePath = buildR59LiveRootAndArchive(fx, health.port, { strayDaemonMarkerPath: null })
+      const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+        ...fx.baseParams,
+        ...shape.params,
+        PackageArchive: archivePath,
+        HealthUrl: health.url,
+        HealthcheckAttempts: '3',
+        HealthcheckDelaySec: '1',
+      })
+      const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+      assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+      const actual = `=== stdout ===\n${normalizeRunOutput(result.stdout, root)}=== stderr ===\n${normalizeRunOutput(result.stderr, root)}`
+      const expected = fs.readFileSync(path.join(SUCCESS_GOLDEN_DIR, `success-output-${shape.name}.txt`), 'utf8').replace(/\r\n/g, '\n')
+      assert.equal(actual, expected, 'the success-path output must not change')
+    } finally {
+      health.server.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+// ── 4. END-TO-END: replay both canonical -Exclude patterns against the acid fixture
+
+// Splices a REDEFINITION of Copy-TreeExcludingNodeModules into a COPY of the real
+// script, inserted immediately before the `if ($MyInvocation...)` main-execution
+// gate. PowerShell functions are ordinary statements: a later `function Name {...}`
+// executed before Name is first CALLED simply replaces the earlier definition in
+// that scope, so this does not require parsing or removing the original body — the
+// mutated file's Main block ends up calling the LAST definition reached, which is
+// this one. The real script on disk is never touched.
+function buildMutatedScript(patternBody) {
+  const anchor = "if ($MyInvocation.InvocationName -ne '.') {"
+  const idx = scriptSource.indexOf(anchor)
+  assert.ok(idx > -1, 'main-execution anchor not found in the real script')
+  const override = [
+    'function Copy-TreeExcludingNodeModules {',
+    '  param(',
+    '    [Parameter(Mandatory = $true)][string]$Source,',
+    '    [Parameter(Mandatory = $true)][string]$Destination',
+    '  )',
+    '  New-Item -ItemType Directory -Force -Path $Destination | Out-Null',
+    `  ${patternBody}`,
+    '  return [pscustomobject]@{ Copied = -1; Skipped = -1 }',
+    '}',
+    '',
+  ].join('\n')
+  return scriptSource.slice(0, idx) + override + scriptSource.slice(idx)
+}
+
+const FORBIDDEN_PATTERNS = {
+  // Canonical pattern 1 (the actual F22 defect): piped Get-ChildItem -Exclude into
+  // a recursive Copy-Item. Empirically (verified against this exact shape): the
+  // correctly-nested files CAN still end up present, but node_modules content
+  // leaks through to other, wrong paths — -Exclude filters only items literally
+  // NAMED 'node_modules' from the flat -Recurse listing; every descendant of an
+  // excluded node_modules directory is still individually emitted and copied.
+  'piped-gci-exclude':
+    "Get-ChildItem -LiteralPath $Source -Recurse -Exclude 'node_modules' | Copy-Item -Destination $Destination -Recurse -Force",
+  // Canonical pattern 2: a single, direct Copy-Item -Recurse -Exclude with a
+  // bare (non-wildcarded) -Path. Per Microsoft's own documentation, -Exclude on
+  // Copy-Item takes effect ONLY when -Path contains a wildcard — with a bare
+  // directory path -Exclude has ZERO effect (node_modules is NOT excluded at
+  // all), AND -Recurse into an EXISTING destination nests everything one level
+  // too deep under a copy of the source's own leaf name, so every expected file
+  // is "missing" at its correct path.
+  'direct-copyitem-exclude':
+    'Copy-Item -Path $Source -Destination $Destination -Recurse -Exclude \'node_modules\' -Force',
+}
+
+for (const [patternName, patternBody] of Object.entries(FORBIDDEN_PATTERNS)) {
+  test(`end-to-end (acid fixture): the ${patternName} forbidden pattern FAILS the upgrade`, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-replay-'))
+    try {
+      const liveRoot = path.join(root, 'live')
+      const backupRoot = path.join(root, 'backups')
+      const stagingRoot = path.join(root, 'staging')
+      const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+      buildAcidLiveRoot(liveRoot, { pm2LogPath })
+      const { archivePath } = buildAcidArchive(root)
+
+      const mutatedScriptPath = path.join(root, `mutated-${patternName}.ps1`)
+      writeRunnableScript(mutatedScriptPath, buildMutatedScript(patternBody))
+
+      const result = spawnSync(
+        PWSH,
+        [
+          '-NoProfile', '-NonInteractive', '-File', mutatedScriptPath,
+          '-PackageArchive', archivePath,
+          '-RootDir', liveRoot,
+          '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+          '-BackupRoot', backupRoot,
+          '-StagingRoot', stagingRoot,
+          '-RunMigrations', '0',
+          '-RestartService', '0',
+        ],
+        { encoding: 'utf8' },
+      )
+
+      assert.notEqual(
+        result.status,
+        0,
+        `the ${patternName} forbidden pattern must fail the upgrade, not pass silently.\n` +
+          `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      )
+      const combined = result.stderr + result.stdout
+      assert.match(
+        combined,
+        /UPGRADE_ASSERTION_MISSING_FILES|UPGRADE_PLUGIN_HASH_VERIFICATION_FAILED|UPGRADE_NODE_MODULES_LEAK_DETECTED/,
+        `the ${patternName} failure must be caught by one of this script's own gates, not some unrelated crash`,
+      )
+      assert.match(combined, /RESTORE REQUIRED/)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+

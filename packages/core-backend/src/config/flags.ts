@@ -1,3 +1,20 @@
+import {
+  ELEARNING_ANALYTICS_ENABLED,
+  ELEARNING_ASSESSMENT_ENABLED,
+  ELEARNING_ASSIGNMENT_ENABLED,
+  ELEARNING_CONTENT_ENABLED,
+  ELEARNING_ENABLED,
+  ELEARNING_ENROLLMENT_ENABLED,
+  ELEARNING_INCENTIVE_ENABLED,
+  ELEARNING_MEDIA_ENABLED,
+  ELEARNING_WATCH_CHALLENGE_ENABLED,
+  isElearningFlagEnabled,
+} from '../elearning/feature-flags'
+import {
+  DINGTALK_TODO_MIRROR_ENABLED,
+  isDingTalkTodoMirrorEnabled,
+} from '../integrations/dingtalk/todo-mirror-flag'
+
 /**
  * Feature Flags Configuration
  *
@@ -29,6 +46,22 @@ export const FEATURE_FLAGS = {
   useKyselyDB: process.env.USE_KYSELY === 'true' || process.env.NODE_ENV === 'test',
   kanbanDB: process.env.KANBAN_DB === 'true' || process.env.NODE_ENV === 'test',
   workflowEnabled: process.env.WORKFLOW_ENABLED === 'true',
+
+  // E-learning V0.1 named pilot (exact literal 'true' only; default OFF)
+  [ELEARNING_ENABLED]: isElearningFlagEnabled(ELEARNING_ENABLED),
+  [ELEARNING_CONTENT_ENABLED]: isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED),
+  [ELEARNING_ASSIGNMENT_ENABLED]: isElearningFlagEnabled(ELEARNING_ASSIGNMENT_ENABLED),
+  [ELEARNING_ASSESSMENT_ENABLED]: isElearningFlagEnabled(ELEARNING_ASSESSMENT_ENABLED),
+  [ELEARNING_INCENTIVE_ENABLED]: isElearningFlagEnabled(ELEARNING_INCENTIVE_ENABLED),
+  [ELEARNING_ANALYTICS_ENABLED]: isElearningFlagEnabled(ELEARNING_ANALYTICS_ENABLED),
+  [ELEARNING_MEDIA_ENABLED]: isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED),
+  [ELEARNING_WATCH_CHALLENGE_ENABLED]: isElearningFlagEnabled(ELEARNING_WATCH_CHALLENGE_ENABLED),
+  [ELEARNING_ENROLLMENT_ENABLED]: isElearningFlagEnabled(ELEARNING_ENROLLMENT_ENABLED),
+
+  // DingTalk approval-todo one-way mirror (plan B). Exact literal 'true' only; default OFF.
+  // The RUNTIME gate is isDingTalkTodoMirrorEnabled(env) at each site — this entry only makes the
+  // flag visible to getEnabledFeatures()/getFeatureFlags() and shares the ONE implementation.
+  [DINGTALK_TODO_MIRROR_ENABLED]: isDingTalkTodoMirrorEnabled(),
 } as const;
 
 /**

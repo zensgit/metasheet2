@@ -1,20 +1,5 @@
-function escapeCsvCell(value: unknown): string {
-  const text = value === undefined || value === null ? '' : String(value)
-  if (/[",\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`
-  }
-  return text
-}
-
-export function downloadCsvFile(filename: string, headers: string[], rows: Array<Array<unknown>>): void {
-  const lines = [
-    headers.map((header) => escapeCsvCell(header)).join(','),
-    ...rows.map((row) => row.map((cell) => escapeCsvCell(cell)).join(',')),
-  ]
-  const blob = new Blob([`\ufeff${lines.join('\n')}`], { type: 'text/csv;charset=utf-8;' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = filename
-  link.click()
-  URL.revokeObjectURL(link.href)
-}
+// Moved to `services/integration/stockPreparation/stockPrepCsv.ts` (2026-09) so the stock-prep
+// missing-components panel can reuse these CSV helpers — plus a new CSV/formula-injection guard —
+// without importing from `views/plm`. Kept here as a re-export: every existing import of this module
+// (e.g. `PlmProductView.vue`) keeps working unchanged.
+export { escapeCsvCell, downloadCsvFile } from '../../services/integration/stockPreparation/stockPrepCsv'

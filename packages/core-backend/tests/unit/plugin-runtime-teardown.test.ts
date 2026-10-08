@@ -6,6 +6,7 @@ import {
   stopAttendanceScheduler,
 } from '../../src/services/AttendanceScheduler'
 import type { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
+import { usePinnedServer } from '../utils/pinned-server'
 
 function fakeExpiryService(): AttendanceExpiryService {
   return {
@@ -29,6 +30,8 @@ function installLoadedPlugin(server: MetaSheetServer, name: string, plugin: Reco
     loadedAt: new Date(),
   })
 }
+
+const pinned = usePinnedServer()
 
 describe('MetaSheetServer plugin runtime teardown', () => {
   afterEach(() => {
@@ -56,7 +59,8 @@ describe('MetaSheetServer plugin runtime teardown', () => {
 
     await (server as any).activatePluginByName(pluginName)
 
-    await expect(request((server as any).app).get(routePath)).resolves.toMatchObject({
+    pinned.setApp((server as any).app)
+    await expect(request(pinned.url()).get(routePath)).resolves.toMatchObject({
       status: 200,
       body: { version: 1 },
     })
@@ -66,7 +70,8 @@ describe('MetaSheetServer plugin runtime teardown', () => {
 
     expect(deactivateV1).toHaveBeenCalledTimes(1)
     expect((server as any).pluginApis.has(pluginName)).toBe(false)
-    await expect(request((server as any).app).get(routePath)).resolves.toMatchObject({
+    pinned.setApp((server as any).app)
+    await expect(request(pinned.url()).get(routePath)).resolves.toMatchObject({
       status: 404,
     })
 
@@ -84,7 +89,8 @@ describe('MetaSheetServer plugin runtime teardown', () => {
 
     await (server as any).activatePluginByName(pluginName)
 
-    await expect(request((server as any).app).get(routePath)).resolves.toMatchObject({
+    pinned.setApp((server as any).app)
+    await expect(request(pinned.url()).get(routePath)).resolves.toMatchObject({
       status: 200,
       body: { version: 2 },
     })
@@ -113,7 +119,8 @@ describe('MetaSheetServer plugin runtime teardown', () => {
 
     expect(state).toMatchObject({ status: 'failed', error: 'boom' })
     expect((server as any).pluginApis.has(pluginName)).toBe(false)
-    await expect(request((server as any).app).get(routePath)).resolves.toMatchObject({
+    pinned.setApp((server as any).app)
+    await expect(request(pinned.url()).get(routePath)).resolves.toMatchObject({
       status: 404,
     })
   })

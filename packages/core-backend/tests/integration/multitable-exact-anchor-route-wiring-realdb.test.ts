@@ -1,0 +1,2302 @@
+/**
+ * W0 L8 route wiring — the four legacy surfaces (revert/reset × preview/execute) onto exact-anchor
+ * authority + applyExactAnchorRecovery. Behavior-level goldens (mutation-oriented where practical):
+ *   - default-off refusal/parity
+ *   - history-batch and direct operation anchor preview
+ *   - wall-clock uniform refusal (EXACT_ANCHOR_REQUIRED)
+ *   - token-bound mode (revert token cannot drive reset)
+ *   - preview + in-fence full-read auth
+ *   - size ceiling
+ *   - revert vs reset semantics
+ *   - resurrection remains values-free and fail-closed without at-anchor inbound authority
+ *   - route tests prove the real L8 apply is invoked (token burn + sealed operation)
+ *
+ * Requires DATABASE_URL. Flags toggled only inside this process (default OFF everywhere real).
+ */
+import { createHash, randomUUID } from 'node:crypto'
+import express, { type Express } from 'express'
+import request from 'supertest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
+
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { createRecoveryArchiveWorkerAuthorization, createRecoveryArchiveWorkerCallbacks, createRecoveryArchiveDerivedProcessor, createRecoveryComputedHelpers, setYjsInvalidatorForRoutes, univerMetaRouter } from '../../src/routes/univer-meta'
+import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
+import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
+import * as realtimeMod from '../../src/multitable/realtime-publish'
+import { eventBus } from '../../src/integration/events/event-bus'
+import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { SHEET_ROW_LOCK_LIVENESS_SQL } from '../../src/multitable/sheet-liveness'
+import { applyFencedDerivedDataMerge, withFencedDerivedTransaction } from '../../src/multitable/derived-write-fence'
+import { runRecoveryArchiveDerivedTransaction } from '../../src/multitable/recovery-archive-derived-processor'
+import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
+import { acquireRecoveryAuthorityLease, resolveDatabaseRecoverySheetAuthority } from '../../src/multitable/recovery-authorization-stability'
+import { enqueueRecoveryMutationEvent, type RecoveryMutationEvent } from '../../src/multitable/recovery-mutation-events'
+
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const TS = Date.now()
+const BASE = `base_earw_${TS}`
+const SHEET = `sheet_earw_${TS}`
+const REL_SHEET = `sheet_earw_rel_${TS}`
+const F_STR = `fld_earw_note_${TS}`
+const F_NUM = `fld_earw_num_${TS}`
+const F_FORMULA = `fld_earw_formula_${TS}`
+const F_NOISE = `fld_earw_noise_${TS}`
+/** Source-sheet FOL golden: link → target sheet, lookup of target num, formula-over-lookup. */
+const F_SRC_LINK = `fld_earw_src_link_${TS}`
+const F_SRC_LOOKUP = `fld_earw_src_lu_${TS}`
+const F_FOL = `fld_earw_fol_${TS}`
+const F_TGT_NUM = `fld_earw_tgt_num_${TS}`
+const F_TGT_MIRROR = `fld_earw_tgt_mirror_${TS}`
+const F_REL_LINK = `fld_earw_rel_link_${TS}`
+const F_REL_LOOKUP = `fld_earw_rel_lu_${TS}`
+const TGT_SHEET = `sheet_earw_tgt_${TS}`
+const ACTOR = `user_earw_${TS}`
+const ROLE_RACE = `role_earw_race_${TS}`
+const GROUP_RACE = randomUUID()
+const PERMISSION_RACE = `permission:earw:${TS}`
+const REC_A = `rec_earw_a_${TS}`
+const REC_B = `rec_earw_b_${TS}`
+const REC_C = `rec_earw_c_${TS}`
+const REC_REL = `rec_earw_rel_${TS}`
+const REC_REL_UNRELATED = `rec_earw_rel_unrel_${TS}`
+const REC_TGT_ANCHOR = `rec_earw_tgt_a_${TS}` // target num = 10 (anchor link target)
+const REC_TGT_LIVE = `rec_earw_tgt_l_${TS}` // target num = 99 (live link target)
+
+const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
+const txn = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> =>
+  poolManager.get().transaction(async ({ query }) => fn(query as unknown as QueryFn)) as Promise<T>
+
+const burnCountForToken = async (token: string): Promise<number> => Number(
+  ((await q(
+    'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE token_sha256 = $1',
+    [createHash('sha256').update(token).digest('hex')],
+  )).rows[0] as { c: number }).c,
+)
+
+let app: Express
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+let curPerms = ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']
+let curRoles = ['member']
+
+const revertPreview = (body: Record<string, unknown>) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send(body)
+const revertExecute = (body: Record<string, unknown>) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send(body)
+const resetPreview = (body: Record<string, unknown>) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/reset-preview`).send(body)
+const resetExecute = (body: Record<string, unknown>) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/reset-execute`).send(body)
+
+async function sealOp(
+  recordId: string,
+  events: Array<{ seq: string; version: number; action?: 'create' | 'update' | 'delete'; snap?: Record<string, unknown>; batchId?: string }>,
+): Promise<{ opId: string; batchId: string }> {
+  const opId = randomUUID()
+  const batchId = events[0]?.batchId ?? `batch_${TS}_${recordId}`
+  const maxSeq = events.map((e) => e.seq).reduce((a, b) => (BigInt(a) >= BigInt(b) ? a : b))
+  await txn(async (query) => {
+    for (const e of events) {
+      await query(
+        `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq, operation_id, batch_id)
+         VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6::bigint,$7::uuid,$8)`,
+        [SHEET, recordId, e.version, e.action ?? 'update', JSON.stringify(e.snap ?? { [F_STR]: `v${e.version}` }), e.seq, opId, e.batchId ?? batchId],
+      )
+    }
+    await query(
+      `INSERT INTO meta_record_history_operations (sheet_id, operation_id, endpoint_seq, event_count)
+       VALUES ($1,$2::uuid,$3::bigint,$4::int)`,
+      [SHEET, opId, maxSeq, events.length],
+    )
+  })
+  return { opId, batchId }
+}
+
+async function wipe(): Promise<void> {
+  // Deterministic cleanup: wipe by sheet AND by known field/record ids so orphaned
+  // meta_links / notifications from a prior failed case cannot leak into the next golden.
+  await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[F_REL_LINK, F_SRC_LINK]]).catch(() => {})
+  await q(
+    `DELETE FROM meta_links WHERE record_id = ANY($1::text[]) OR foreign_record_id = ANY($1::text[])`,
+    [[REC_A, REC_B, REC_REL, REC_REL_UNRELATED, REC_TGT_ANCHOR, REC_TGT_LIVE]],
+  ).catch(() => {})
+  for (const sheetId of [SHEET, REL_SHEET, TGT_SHEET]) {
+    for (const t of [
+      'meta_history_baselines',
+      'meta_history_trust_checkpoints',
+      'meta_recovery_token_burns',
+      'meta_record_version_markers',
+      'meta_records_trash',
+      'meta_record_revisions',
+      'meta_records',
+    ])
+      await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_record_history_operations WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM record_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM formula_dependencies WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_record_subscriptions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [sheetId]).catch(() => {})
+  }
+  await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+  await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+}
+
+/**
+ * Seed: A live at anchor (v1), edited after (v2); B created after anchor; C existed at anchor then deleted.
+ * Pattern matches L8 apply suite: activate first (trusted_since = small nextval), then seal the anchor
+ * at a HIGH synthetic seq so trusted_since ≤ anchorSeq always holds.
+ *
+ * Optional side-effect world when `withSideEffects` is true:
+ *   - simple formula F_FORMULA = {F_NUM}+1 (DB materialization golden)
+ *   - source FOL: F_SRC_LINK + F_SRC_LOOKUP + F_FOL (hydration-before-formula golden)
+ *   - REL_SHEET linked lookup of F_NUM for FOL-1 fan-out + production-read golden
+ */
+async function seedWorld(opts?: { withSideEffects?: boolean }): Promise<{ anchorOp: string; batchId: string; postOp: string; seqBase: bigint }> {
+  await wipe()
+  const ck = await txn((query) => activateCheckpoint(query, { sheetId: SHEET }))
+  const base = BigInt(ck.trustedSinceSeq) + 1000n
+  const s1 = String(base)
+  const s2 = String(base + 1000n)
+  const s3 = String(base + 1200n)
+
+  const anchorSnap: Record<string, unknown> = { [F_STR]: 'A-at-anchor', [F_NOISE]: 'noise-stable' }
+  const liveSnap: Record<string, unknown> = { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }
+  if (opts?.withSideEffects) {
+    anchorSnap[F_NUM] = 10
+    anchorSnap[F_FORMULA] = 999 // deliberately STALE at-anchor formula value (recompute must fix to 11)
+    // FOL: at-anchor links to REC_TGT_ANCHOR (num=10); formula-over-lookup must materialize 11 after hydrate.
+    // Stale F_FOL=999 at anchor so recompute (not the snapshot) is the source of truth.
+    anchorSnap[F_SRC_LINK] = [REC_TGT_ANCHOR]
+    anchorSnap[F_FOL] = 999
+    liveSnap[F_NUM] = 99
+    liveSnap[F_FORMULA] = 100 // live formula matched live num; after revert must become 11
+    // Live: link points at REC_TGT_LIVE (num=99); FOL stale-matched to 100. After restore → 11 via hydration.
+    liveSnap[F_SRC_LINK] = [REC_TGT_LIVE]
+    liveSnap[F_FOL] = 100
+  }
+
+  const { opId: anchorOp, batchId } = await sealOp(REC_A, [
+    { seq: s1, version: 1, action: 'create', snap: anchorSnap },
+  ])
+  const { opId: postOp } = await sealOp(REC_A, [
+    { seq: s2, version: 2, action: 'update', snap: liveSnap, batchId: `batch_post_${TS}` },
+  ])
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [
+    REC_A, SHEET, JSON.stringify(liveSnap),
+  ])
+  await sealOp(REC_B, [
+    { seq: s3, version: 1, action: 'create', snap: { [F_STR]: 'B-after' }, batchId: `batch_b_${TS}` },
+  ])
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+    REC_B, SHEET, JSON.stringify({ [F_STR]: 'B-after' }),
+  ])
+
+  if (opts?.withSideEffects) {
+    // Target sheet rows for source FOL (stable numbers; never recovered themselves).
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = EXCLUDED.version`,
+      [REC_TGT_ANCHOR, TGT_SHEET, JSON.stringify({ [F_TGT_NUM]: 10 })],
+    )
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = EXCLUDED.version`,
+      [REC_TGT_LIVE, TGT_SHEET, JSON.stringify({ [F_TGT_NUM]: 99 })],
+    )
+    // Outbound source link is LIVE-state (to REC_TGT_LIVE); recovery rebuilds to anchor target.
+    await q('DELETE FROM meta_links WHERE field_id = $1', [F_SRC_LINK]).catch(() => {})
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK, REC_A, REC_TGT_LIVE,
+    ])
+
+    // Related sheet: REC_REL links → REC_A (lookup of F_NUM is affected on revert); REC_REL_UNRELATED has no link.
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = EXCLUDED.version`,
+      [REC_REL, REL_SHEET, JSON.stringify({ note: 'related-row' })],
+    )
+    await q(
+      `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = EXCLUDED.version`,
+      [REC_REL_UNRELATED, REL_SHEET, JSON.stringify({ note: 'unrelated-golden' })],
+    )
+    await q('DELETE FROM meta_links WHERE field_id = $1', [F_REL_LINK]).catch(() => {})
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_REL_LINK, REC_REL, REC_A,
+    ])
+  }
+
+  await q(
+    `SELECT setval('meta_record_chain_seq', GREATEST((SELECT last_value FROM meta_record_chain_seq), $1::bigint), true)`,
+    [String(base + 2000n)],
+  ).catch(() => {})
+  return { anchorOp, batchId, postOp, seqBase: base }
+}
+
+describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
+  beforeAll(async () => {
+    app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = { id: ACTOR, roles: curRoles, perms: curPerms }
+      next()
+    })
+    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50'
+    app.use('/api/multitable', univerMetaRouter())
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2) ON CONFLICT DO NOTHING', [BASE, 'EARW Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [SHEET, BASE, 'EARW Sheet'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [REL_SHEET, BASE, 'EARW Related'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [TGT_SHEET, BASE, 'EARW Target'])
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_STR, SHEET, 'Note', 'string', '{}', 1],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_NUM, SHEET, 'Num', 'number', '{}', 2],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_FORMULA, SHEET, 'Derived', 'formula', JSON.stringify({ expression: `={${F_NUM}}+1` }), 3],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_NOISE, SHEET, 'Noise', 'string', '{}', 4],
+    )
+    // Source FOL chain: link → target sheet, lookup of F_TGT_NUM, formula = {lookup}+1
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [
+        F_SRC_LINK,
+        SHEET,
+        'SrcLink',
+        'link',
+        JSON.stringify({ foreignSheetId: TGT_SHEET, twoWay: true, mirrorFieldId: F_TGT_MIRROR }),
+        5,
+      ],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_SRC_LOOKUP, SHEET, 'SrcLookup', 'lookup', JSON.stringify({ linkFieldId: F_SRC_LINK, targetFieldId: F_TGT_NUM, foreignSheetId: TGT_SHEET }), 6],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_FOL, SHEET, 'Fol', 'formula', JSON.stringify({ expression: `={${F_SRC_LOOKUP}}+1` }), 7],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_TGT_NUM, TGT_SHEET, 'TgtNum', 'number', '{}', 1],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [
+        F_TGT_MIRROR,
+        TGT_SHEET,
+        'SrcLink mirror',
+        'link',
+        JSON.stringify({ foreignSheetId: SHEET, twoWay: true, mirrorOf: F_SRC_LINK }),
+        2,
+      ],
+    )
+    await q('DELETE FROM formula_dependencies WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await q(
+      `INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id)
+       VALUES ($1,$2,$3,$4)`,
+      [SHEET, F_FORMULA, F_NUM, SHEET],
+    )
+    // FOL depends on the lookup intermediary (link expansion also feeds this via recalculateFormulaFields).
+    await q(
+      `INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id)
+       VALUES ($1,$2,$3,$4)`,
+      [SHEET, F_FOL, F_SRC_LOOKUP, SHEET],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_REL_LINK, REL_SHEET, 'Link', 'link', JSON.stringify({ foreignSheetId: SHEET }), 1],
+    )
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+       ON CONFLICT DO NOTHING`,
+      [F_REL_LOOKUP, REL_SHEET, 'Lookup', 'lookup', JSON.stringify({ linkFieldId: F_REL_LINK, targetFieldId: F_NUM, foreignSheetId: SHEET }), 2],
+    )
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1, 'x', $2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'])],
+    )
+    await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [ROLE_RACE, 'EARW race role'])
+    await q(
+      'INSERT INTO permissions (code, name, description) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING',
+      [PERMISSION_RACE, 'EARW race permission', 'exact-anchor authority-lock golden'],
+    )
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+    }
+  })
+
+  afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
+    setYjsInvalidatorForRoutes(null)
+    for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+      await q(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`).catch(() => {})
+    }
+    await wipe()
+    await q('DELETE FROM formula_dependencies WHERE sheet_id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SHEET, REL_SHEET, TGT_SHEET]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = $1', [ROLE_RACE]).catch(() => {})
+    await q('DELETE FROM permissions WHERE code = $1', [PERMISSION_RACE]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
+    await q(`SELECT setval('meta_record_chain_seq', 1000, true)`).catch(() => {})
+  })
+
+  beforeEach(async () => {
+    curPerms = ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']
+    curRoles = ['member']
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
+    setYjsInvalidatorForRoutes(null)
+    await wipe()
+    await q('UPDATE users SET permissions = $2::jsonb, is_active = TRUE WHERE id = $1', [
+      ACTOR,
+      JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']),
+    ])
+  })
+
+  /** Success-path requires trust pair: fence + CONTIGUITY_STRICT (RECOVERY_TRUST_REQUIRED otherwise). */
+  const enableRecoveryExecute = () => {
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+  }
+
+  test('default-off: revert-execute and reset-preview/execute refuse; wall-clock always EXACT_ANCHOR_REQUIRED', async () => {
+    const wall = await revertPreview({ asOf: '2026-01-02T00:00:00.000Z' })
+    expect(wall.status).toBe(400)
+    expect(wall.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+
+    const malformed = await revertPreview({ anchorOperationId: '00000000-0000-4000-8000-000000000001', asOf: 123 })
+    expect(malformed.status).toBe(400)
+    expect(malformed.body?.error?.code).toBe('VALIDATION_ERROR')
+
+    const execOff = await revertExecute({ previewIdentity: 'x', confirm: 'undelete' })
+    expect(execOff.status).toBe(403)
+    expect(execOff.body?.error?.code).toBe('REVERT_DISABLED')
+
+    const resetOff = await resetPreview({ historyBatchId: 'batch_x' })
+    expect(resetOff.status).toBe(403)
+    expect(resetOff.body?.error?.code).toBe('RESET_DISABLED')
+  })
+
+  test('history-batch and direct operation anchor preview; wall-clock refused even when flag on', async () => {
+    enableRecoveryExecute()
+    process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
+    const { anchorOp, batchId } = await seedWorld()
+
+    const wall = await revertPreview({ asOf: '2026-01-02T00:00:00.000Z' })
+    expect(wall.status).toBe(400)
+    expect(wall.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+
+    const byOp = await revertPreview({ anchorOperationId: anchorOp })
+    expect(byOp.status).toBe(200)
+    expect(byOp.body?.data?.anchorOperationId).toBe(anchorOp)
+    expect(byOp.body?.data?.previewIdentity).toBeTruthy()
+    expect(byOp.body?.data?.summary?.visibleRevertCount).toBeGreaterThanOrEqual(1)
+    expect(byOp.body?.data?.summary?.resurrectCount).toBe(0)
+    expect(byOp.body?.data?.summary?.driftCount).toBe(0)
+    expect(byOp.body?.data?.summary?.effectiveWriteCount).toBeGreaterThanOrEqual(1)
+
+    const byBatch = await revertPreview({ historyBatchId: batchId })
+    expect(byBatch.status).toBe(200)
+    expect(byBatch.body?.data?.anchorOperationId).toBe(anchorOp)
+    expect(byBatch.body?.data?.historyBatchId).toBe(batchId)
+  })
+
+  test('token-bound mode: revert preview identity cannot drive reset-execute', async () => {
+    enableRecoveryExecute()
+    process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+    const ex = await resetExecute({ previewIdentity: token, confirm: 'reset' })
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+  })
+
+  test('reset execute validation is typed and token rejection never echoes verifier-internal reasons', async () => {
+    enableRecoveryExecute()
+
+    const missingConfirm = await resetExecute({ previewIdentity: 'opaque-token' })
+    expect(missingConfirm.status).toBe(400)
+    expect(missingConfirm.body?.error).toEqual({
+      code: 'RESET_CONFIRM_REQUIRED',
+      message: 'Type "reset" to confirm this operation.',
+    })
+
+    const forged = await resetExecute({ previewIdentity: 'not-a-valid-token', confirm: 'reset' })
+    expect(forged.status).toBe(409)
+    expect(forged.body?.error).toEqual({
+      code: 'PREVIEW_IDENTITY_INVALID',
+      message: 'Reset preview identity rejected; the sheet changed since preview — re-preview',
+    })
+    expect(String(forged.body?.error?.message)).not.toMatch(/\((?:invalid|expired|signature|malformed)[^)]*\)/i)
+  })
+
+  test('execute is token-only: caller anchor/mode authority is rejected with zero writes and does not burn the token', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+
+    const rejected = await revertExecute({
+      previewIdentity: token,
+      historyBatchId: `stale_batch_${TS}`,
+      mode: 'reset',
+    })
+    expect(rejected.status).toBe(400)
+    expect(rejected.body?.error?.code).toBe('VALIDATION_ERROR')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
+    expect(await burnCountForToken(token)).toBe(0)
+
+    const malformed = await revertExecute({ previewIdentity: token, asOf: 123 })
+    expect(malformed.status).toBe(400)
+    expect(malformed.body?.error?.code).toBe('VALIDATION_ERROR')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
+    expect(await burnCountForToken(token)).toBe(0)
+
+    const accepted = await revertExecute({ previewIdentity: token })
+    expect(accepted.status).toBe(200)
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-at-anchor')
+  })
+
+  test('size ceiling: live sheet over max → 413 before expensive work', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    // force tiny ceiling via env (route resolves at router construction — use effective write path by
+    // temporarily setting env; the route uses SHEET_REVERT_MAX_RECORDS captured at construction = 50).
+    // Insert enough live rows to exceed 50.
+    for (let i = 0; i < 55; i++) {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1) ON CONFLICT DO NOTHING', [
+        `rec_earw_pad_${TS}_${i}`, SHEET, JSON.stringify({ [F_STR]: 'pad' }),
+      ])
+    }
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(413)
+    expect(pv.body?.error?.code).toBe('SHEET_TOO_LARGE')
+  })
+
+  test('revert vs reset semantics + soft-delete trash + L8 apply invoked (burn) + field-level records payload', async () => {
+    enableRecoveryExecute()
+    const spy = vi.spyOn(exactApply, 'applyExactAnchorRecovery')
+    const { anchorOp } = await seedWorld()
+
+    // REVERT: keeps B (created after), reverts A; undeleteSupported false (inbound fail-closed)
+    const rpv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(rpv.status).toBe(200)
+    expect(rpv.body?.data?.undeleteSupported).toBe(false)
+    const rToken = rpv.body?.data?.previewIdentity as string
+    expect(rToken).toBeTruthy()
+    const rex = await revertExecute({ previewIdentity: rToken })
+    expect(rex.status).toBe(200)
+    expect(spy).toHaveBeenCalled()
+    expect(rex.body?.data?.revertedCount).toBeGreaterThanOrEqual(1)
+    // Field-level payload for automation/Yjs (not empty changes)
+    const recs = rex.body?.data?.records as Array<{ recordId: string; fieldIds: string[] }> | undefined
+    expect(Array.isArray(recs) && recs.length >= 1).toBe(true)
+    expect(recs![0].fieldIds).toContain(F_STR)
+    const aLive = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0] as { data: Record<string, unknown> }
+    expect(aLive.data[F_STR]).toBe('A-at-anchor')
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_B])).rows.length).toBe(1) // kept
+    expect(await burnCountForToken(rToken)).toBe(1)
+
+    // re-seed for reset — soft-delete B into trash
+    const { anchorOp: op2 } = await seedWorld()
+    const spv = await resetPreview({ anchorOperationId: op2 })
+    expect(spv.status).toBe(200)
+    const sToken = spv.body?.data?.previewIdentity as string
+    expect(sToken).toBeTruthy()
+    const sex = await resetExecute({ previewIdentity: sToken, confirm: 'reset' })
+    expect(sex.status).toBe(200)
+    expect(sex.body?.data?.deletedCount).toBeGreaterThanOrEqual(1)
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_B])).rows.length).toBe(0)
+    expect((await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [REC_B])).rows.length).toBe(1)
+    spy.mockRestore()
+  })
+
+  test('POST-COMMIT BEHAVIOR: subscriber + eventBus true-delta + Yjs source/related + formula DB recompute + related lookup fan-out (negative goldens)', async () => {
+    enableRecoveryExecute()
+    const rtSpy = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime')
+    const busSpy = vi.spyOn(eventBus, 'emit')
+    const yjsSpy = vi.fn(async (_ids: string[]) => {})
+    setYjsInvalidatorForRoutes(yjsSpy)
+    try {
+      const { anchorOp } = await seedWorld({ withSideEffects: true })
+
+      // Arrange: subscribe a watcher (behavior-level post-commit subscriber notification)
+      await q(
+        `INSERT INTO meta_record_subscriptions (id, sheet_id, record_id, user_id, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, now(), now())`,
+        [SHEET, REC_A, 'watcher-user-1'],
+      )
+      // Unrelated golden baseline (must stay green)
+      const unrelBefore = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_REL_UNRELATED])).rows[0] as {
+        data: Record<string, unknown>
+      }
+
+      const pv = await revertPreview({ anchorOperationId: anchorOp })
+      expect(pv.status).toBe(200)
+      const token = pv.body?.data?.previewIdentity as string
+      expect(token).toBeTruthy()
+
+      const ex = await revertExecute({ previewIdentity: token })
+      expect(ex.status).toBe(200)
+      const recs = (ex.body?.data?.records ?? []) as Array<{ recordId: string; fieldIds: string[]; revisionId?: string }>
+      expect(recs.length).toBeGreaterThanOrEqual(1)
+      const revId = recs[0].revisionId
+      expect(revId).toBeTruthy()
+      expect(recs[0].fieldIds).toContain(F_STR)
+      expect(recs[0].fieldIds).toContain(F_NUM)
+      expect(recs[0].fieldIds).toContain(F_SRC_LINK) // outbound link restored (FOL hydration trigger)
+      // Noise is unchanged across anchor/live → not in true-delta fieldIds
+      expect(recs[0].fieldIds).not.toContain(F_NOISE)
+
+      // DB-derived simple formula recompute: F_NUM restored to 10 ⇒ formula = 11 (was stale 100/999)
+      const aLive = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0] as {
+        data: Record<string, unknown>
+      }
+      expect(aLive.data[F_STR]).toBe('A-at-anchor')
+      expect(aLive.data[F_NUM]).toBe(10)
+      expect(aLive.data[F_FORMULA]).toBe(11)
+      expect(aLive.data[F_NOISE]).toBe('noise-stable')
+      // Source FOL: restored link → REC_TGT_ANCHOR (num=10); hydration-before-formula must materialize 11.
+      // Goes red (typically 1 = absent-lookup→0 + 1) if hydration is removed or reordered after formula.
+      expect(aLive.data[F_SRC_LINK]).toEqual([REC_TGT_ANCHOR])
+      expect(aLive.data[F_FOL]).toBe(11)
+      // Outbound meta_links rebuilt to the anchor target (not the live target).
+      const srcLinks = (await q(
+        'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+        [F_SRC_LINK, REC_A],
+      )).rows as Array<{ foreign_record_id: string }>
+      expect(srcLinks.map((r) => r.foreign_record_id)).toEqual([REC_TGT_ANCHOR])
+
+      // Related lookup VALUE via production read route (GET /view hydrates lookup/rollup) — not a private helper.
+      // F_NUM restored to 10 on REC_A ⇒ REC_REL's F_REL_LOOKUP resolves to [10]; REC_REL_UNRELATED unaffected.
+      const relView = await request(app).get('/api/multitable/view').query({ sheetId: REL_SHEET })
+      expect(relView.status).toBe(200)
+      const relRows = (relView.body?.data?.rows ?? relView.body?.data?.records ?? []) as Array<{
+        id: string
+        data: Record<string, unknown>
+      }>
+      const relRow = relRows.find((r) => r.id === REC_REL)
+      const unrelRow = relRows.find((r) => r.id === REC_REL_UNRELATED)
+      expect(relRow).toBeTruthy()
+      expect(unrelRow).toBeTruthy()
+      expect(relRow!.data[F_REL_LOOKUP]).toEqual([10])
+      // Unrelated row has no link → lookup is empty array (or absent), never the restored source value.
+      const unrelLookup = unrelRow!.data[F_REL_LOOKUP]
+      expect(unrelLookup === undefined || unrelLookup === null || (Array.isArray(unrelLookup) && unrelLookup.length === 0)).toBe(true)
+
+      // Source-sheet realtime: true-delta patch (not full snapshot) + formula fieldId merge
+      const rtCalls = rtSpy.mock.calls.map((c) => c[0] as Record<string, unknown>)
+      const sourceUpdated = rtCalls.find(
+        (c) => c && c.kind === 'record-updated' && c.spreadsheetId === SHEET && Array.isArray(c.recordPatches),
+      ) as {
+        recordIds: string[]
+        fieldIds: string[]
+        recordPatches: Array<{ patch: Record<string, unknown> }>
+      } | undefined
+      expect(sourceUpdated).toBeTruthy()
+      expect(sourceUpdated!.recordIds).toContain(REC_A)
+      expect(sourceUpdated!.fieldIds).toContain(F_STR)
+      expect(sourceUpdated!.fieldIds).toContain(F_NUM)
+      expect(sourceUpdated!.fieldIds).toContain(F_FORMULA) // simple formula keys merged into fieldIds
+      expect(sourceUpdated!.fieldIds).toContain(F_FOL) // FOL formula keys merged after hydrated recompute
+      expect(sourceUpdated!.fieldIds).not.toContain(F_NOISE)
+      const patchKeys = Object.keys(sourceUpdated!.recordPatches[0].patch)
+      expect(patchKeys).toContain(F_STR)
+      expect(patchKeys).toContain(F_NUM)
+      expect(patchKeys).toContain(F_FORMULA)
+      expect(patchKeys).toContain(F_FOL)
+      // Not a full snapshot of every field only-as-authority: noise may be absent from true-delta patch
+      expect(sourceUpdated!.recordPatches[0].patch[F_STR]).toBe('A-at-anchor')
+      expect(sourceUpdated!.recordPatches[0].patch[F_FOL]).toBe(11)
+
+      // Related-sheet pure invalidation fan-out (no recordPatches)
+      const relatedUpdated = rtCalls.find(
+        (c) => c && c.kind === 'record-updated' && c.spreadsheetId === REL_SHEET,
+      ) as { recordIds: string[]; fieldIds: string[]; recordPatches?: unknown } | undefined
+      expect(relatedUpdated).toBeTruthy()
+      expect(relatedUpdated!.recordIds).toContain(REC_REL)
+      expect(relatedUpdated!.recordIds).not.toContain(REC_REL_UNRELATED)
+      expect(relatedUpdated!.fieldIds).toContain(F_REL_LOOKUP)
+      expect(relatedUpdated!.recordPatches).toBeUndefined()
+
+      // Two-way mirror targets whose authoritative edge changed get a pure invalidation on the target
+      // sheet for BOTH the removed live target and added anchor target. Removing the recovery-specific
+      // link invalidation fan-out leaves every prior formula/related assertion green but this one red.
+      const targetUpdated = rtCalls.find(
+        (c) => c && c.kind === 'record-updated' && c.spreadsheetId === TGT_SHEET,
+      ) as { recordIds: string[]; fieldIds: string[]; recordPatches?: unknown } | undefined
+      expect(targetUpdated).toBeTruthy()
+      expect(new Set(targetUpdated!.recordIds)).toEqual(new Set([REC_TGT_ANCHOR, REC_TGT_LIVE]))
+      expect(targetUpdated!.fieldIds).toContain(F_TGT_MIRROR)
+      expect(targetUpdated!.recordPatches).toBeUndefined()
+
+      // eventBus true-delta only (user-facing recovery patch — not a second formula-only revision event)
+      const updatedEvents = busSpy.mock.calls.filter((c) => c[0] === 'multitable.record.updated')
+      expect(updatedEvents.length).toBe(1)
+      const payload = updatedEvents[0][1] as { changes: Record<string, unknown>; recordId: string }
+      expect(payload.recordId).toBe(REC_A)
+      expect(payload.changes[F_STR]).toBe('A-at-anchor')
+      expect(payload.changes[F_NUM]).toBe(10)
+      // Formula is materialization, not a user-facing revision change payload
+      expect(payload.changes[F_FORMULA]).toBeUndefined()
+      expect(payload.changes[F_FOL]).toBeUndefined()
+
+      // Subscriber notification behavior-level (revision-carrying)
+      const notifRows = await q(
+        `SELECT revision_id, event_type FROM meta_record_subscription_notifications
+         WHERE sheet_id = $1 AND record_id = $2 AND user_id = $3`,
+        [SHEET, REC_A, 'watcher-user-1'],
+      )
+      expect(notifRows.rows.length).toBeGreaterThanOrEqual(1)
+      expect(String((notifRows.rows[0] as { revision_id: unknown }).revision_id)).toBe(String(revId))
+      expect((notifRows.rows[0] as { event_type: string }).event_type).toBe('record.updated')
+
+      // Yjs invalidation: exact affected source + related record ids (not unrelated)
+      expect(yjsSpy).toHaveBeenCalled()
+      const yjsIds = new Set((yjsSpy.mock.calls as Array<[string[]]>).flatMap((c) => c[0] ?? []))
+      expect(yjsIds.has(REC_A)).toBe(true)
+      expect(yjsIds.has(REC_REL)).toBe(true)
+      expect(yjsIds.has(REC_TGT_ANCHOR)).toBe(true)
+      expect(yjsIds.has(REC_TGT_LIVE)).toBe(true)
+      expect(yjsIds.has(REC_REL_UNRELATED)).toBe(false)
+      expect(yjsIds.has(REC_B)).toBe(false)
+
+      // Negative golden: unrelated related-sheet row untouched
+      const unrelAfter = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_REL_UNRELATED])).rows[0] as {
+        data: Record<string, unknown>
+      }
+      expect(unrelAfter.data).toEqual(unrelBefore.data)
+      // B (created after, kept by revert) untouched
+      const bLive = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_B])).rows[0] as {
+        data: Record<string, unknown>
+      }
+      expect(bLive.data[F_STR]).toBe('B-after')
+    } finally {
+      setYjsInvalidatorForRoutes(null)
+      rtSpy.mockRestore()
+      busSpy.mockRestore()
+    }
+  })
+
+  test('LIVE-LINK-AUTHORITY: stale JSON is hydrated from meta_links; post-preview relation drift refuses with no burn', async () => {
+    enableRecoveryExecute()
+
+    const first = await seedWorld({ withSideEffects: true })
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_A])
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_ANCHOR,
+    ])
+    const hydratedPreview = await revertPreview({ anchorOperationId: first.anchorOp })
+    expect(hydratedPreview.status).toBe(200)
+    const hydratedToken = hydratedPreview.body?.data?.previewIdentity as string
+    expect(hydratedToken).toBeTruthy()
+    const hydratedExecute = await revertExecute({ previewIdentity: hydratedToken })
+    expect(hydratedExecute.status).toBe(200)
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
+      .toEqual([REC_TGT_ANCHOR])
+
+    const second = await seedWorld({ withSideEffects: true })
+    const preview = await revertPreview({ anchorOperationId: second.anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_SRC_LINK, REC_A])
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_ANCHOR,
+    ])
+
+    const refusedExecute = await revertExecute({ previewIdentity: token })
+    expect(refusedExecute.status).toBe(409)
+    expect(refusedExecute.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
+      .toEqual([REC_TGT_LIVE])
+    expect(await burnCountForToken(token)).toBe(0)
+  })
+
+  test('LIVE-LINK-DUPLICATE: duplicate authoritative edges fail closed before a token is exposed', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+      F_SRC_LINK,
+      REC_A,
+      REC_TGT_LIVE,
+    ])
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(409)
+    expect(preview.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(preview.body?.data?.previewIdentity).toBeUndefined()
+  })
+
+  test('RESET LINK INVALIDATION: deleting a target invalidates the surviving inbound source record', async () => {
+    enableRecoveryExecute()
+    const rtSpy = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime')
+    const yjsSpy = vi.fn(async (_ids: string[]) => {})
+    setYjsInvalidatorForRoutes(yjsSpy)
+    try {
+      const { anchorOp } = await seedWorld({ withSideEffects: true })
+      await q('DELETE FROM meta_links WHERE field_id = $1', [F_REL_LINK])
+      await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [
+        F_REL_LINK,
+        REC_REL,
+        REC_B,
+      ])
+      await q(
+        'UPDATE meta_records SET data = data || jsonb_build_object($1::text, $2::jsonb) WHERE id = $3',
+        [F_REL_LINK, JSON.stringify([REC_B]), REC_REL],
+      )
+
+      const preview = await resetPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body?.data?.previewIdentity as string
+      const executed = await resetExecute({ previewIdentity: token, confirm: 'reset' })
+      expect(executed.status).toBe(200)
+      expect(executed.body?.data?.deletedRecordIds).toContain(REC_B)
+
+      const related = rtSpy.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .find((payload) => payload.kind === 'record-updated' && payload.spreadsheetId === REL_SHEET) as
+        | { recordIds: string[]; fieldIds: string[]; recordPatches?: unknown }
+        | undefined
+      expect(related).toBeTruthy()
+      expect(related!.recordIds).toContain(REC_REL)
+      expect(related!.fieldIds).toContain(F_REL_LINK)
+      expect(related!.recordPatches).toBeUndefined()
+      const yjsIds = new Set((yjsSpy.mock.calls as Array<[string[]]>).flatMap((call) => call[0] ?? []))
+      expect(yjsIds.has(REC_REL)).toBe(true)
+      expect((await q(
+        'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+        [F_REL_LINK, REC_REL, REC_B],
+      )).rowCount).toBe(0)
+    } finally {
+      setYjsInvalidatorForRoutes(null)
+      rtSpy.mockRestore()
+    }
+  })
+
+  test('AUTH-RACE (Express + production makePlanAuthorization): fence-parked field_perm revoke ⇒ exact 403 FORBIDDEN, zero writes; regrant allows same token', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(typeof token).toBe('string')
+    expect(token.length).toBeGreaterThan(10)
+
+    const liveBefore = (await q('SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_A, SHEET]))
+      .rows[0] as { data: Record<string, unknown>; version: number }
+    expect(liveBefore.data[F_STR]).toBe('A-live-now')
+    const burnsBefore = Number(
+      ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+    )
+    const revsBefore = Number(
+      ((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+        [SHEET],
+      )).rows[0] as { c: number }).c,
+    )
+
+    // Use the live internal pool (not a module-load snapshot) so the fence holder and the route
+    // share the same pg Pool as poolManager.transaction.
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      // Capture holder backend pid + acquire the EXACT canonical fence key production uses.
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      expect(Number.isFinite(holderPid) && holderPid > 0).toBe(true)
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+      // Snapshot the granted advisory lock identity held by THIS holder (database/classid/objid/objsubid).
+      const holderLockRes = await holder.query(
+        `SELECT database, classid, objid, objsubid
+           FROM pg_locks
+          WHERE locktype = 'advisory' AND granted = true AND pid = $1`,
+        [holderPid],
+      )
+      expect(holderLockRes.rows.length).toBeGreaterThanOrEqual(1)
+
+      // Start execute via the real Express route (production makePlanAuthorization — no boolean stub).
+      // Force-start the SuperAgent thenable immediately (assignment alone does not fire the request).
+      const applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+
+      // Prove the apply is PARKED on the EXACT advisory lock identity held by this holder.
+      // Join waiter → holder on (database, classid, objid, objsubid); require waiter.pid != holder
+      // and waiter.granted = false. An unrelated advisory waiter must NOT satisfy this test.
+      let sawExactWaiter = false
+      for (let i = 0; i < 100; i++) {
+        const waiters = await holder.query(
+          `SELECT count(*)::int AS c
+             FROM pg_locks waiter
+             JOIN pg_locks holder
+               ON holder.locktype = 'advisory'
+              AND holder.granted = true
+              AND holder.pid = $1
+              AND waiter.locktype = 'advisory'
+              AND waiter.granted = false
+              AND waiter.pid <> holder.pid
+              AND waiter.database IS NOT DISTINCT FROM holder.database
+              AND waiter.classid = holder.classid
+              AND waiter.objid = holder.objid
+              AND waiter.objsubid = holder.objsubid`,
+          [holderPid],
+        )
+        if (Number((waiters.rows[0] as { c: number }).c) > 0) {
+          sawExactWaiter = true
+          break
+        }
+        // Bail early if the request already settled without parking (would make the race vacuous).
+        const settled = await Promise.race([
+          applying.then(() => true),
+          new Promise<boolean>((r) => setTimeout(() => r(false), 0)),
+        ])
+        if (settled) break
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(sawExactWaiter).toBe(true)
+
+      // While parked: mutate a real DB-backed field permission to read_only on a SEPARATE connection.
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3', [
+        SHEET, F_STR, ACTOR,
+      ]).catch(() => {})
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,true,true)`,
+        [SHEET, F_STR, ACTOR],
+      )
+
+      // Release fence → in-fence plan auth re-adjudicates against the revoked write permission.
+      await holder.query('COMMIT')
+      const ex = await applying
+      expect(ex.status).toBe(403)
+      expect(ex.body?.error?.code).toBe('FORBIDDEN')
+
+      // Zero record / revision / burn writes (burn rolled back with the refusal).
+      const liveAfter = (await q('SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_A, SHEET]))
+        .rows[0] as { data: Record<string, unknown>; version: number }
+      expect(liveAfter).toEqual(liveBefore)
+      expect(Number(
+        ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+      )).toBe(burnsBefore)
+      expect(Number(
+        ((await q(
+          `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+          [SHEET],
+        )).rows[0] as { c: number }).c,
+      )).toBe(revsBefore)
+
+      // Regrant permission: burn rolled back ⇒ the SAME token can execute successfully (retry contract).
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3', [
+        SHEET, F_STR, ACTOR,
+      ])
+      const retry = await revertExecute({ previewIdentity: token })
+      expect(retry.status).toBe(200)
+      expect(retry.body?.data?.revertedCount).toBeGreaterThanOrEqual(1)
+      const liveOk = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0] as {
+        data: Record<string, unknown>
+      }
+      expect(liveOk.data[F_STR]).toBe('A-at-anchor')
+      expect(Number(
+        ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+      )).toBe(burnsBefore + 1)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* already committed/released */ }
+      holder.release()
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    }
+  })
+
+  test('AUTH-COMMIT-RACE: source and foreign permission writers park after final auth until recovery commits', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    // This deny is dormant until ROLE_RACE membership is added. A membership INSERT after final auth but
+    // before recovery COMMIT would therefore be a real authorization revocation, not a cosmetic table write.
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'role',$3,false,true)`,
+      [SHEET, F_STR, ROLE_RACE],
+    )
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const barrier = await livePool!.connect()
+    const membershipWriter = await livePool!.connect()
+    const barrierClass = 731_928
+    const barrierObject = Math.max(1, TS % 2_000_000_000)
+    const functionName = `earw_auth_commit_pause_${TS}`
+    const triggerName = `earw_auth_commit_pause_trg_${TS}`
+    let applying: Promise<Awaited<ReturnType<typeof revertExecute>>> | null = null
+    let sourcePermission: Promise<request.Response> | null = null
+    let foreignPermission: Promise<request.Response> | null = null
+    let membershipChange: Promise<void> | null = null
+    let membershipError: unknown = null
+    let sourceSettled = false
+    let foreignSettled = false
+    let membershipSettled = false
+    try {
+      await barrier.query('SELECT pg_advisory_lock($1::int, $2::int)', [barrierClass, barrierObject])
+      const barrierPid = Number((await barrier.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      await q(`
+        CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(${barrierClass}, ${barrierObject});
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await q(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE UPDATE ON meta_records
+        FOR EACH ROW WHEN (OLD.id = '${REC_A}')
+        EXECUTE FUNCTION ${functionName}()
+      `)
+
+      // The trigger is AFTER both final authorization callbacks. Once parked here, any permission write
+      // that commits would be a genuine revoke-after-check/before-recovery-COMMIT race.
+      applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let recoveryParked = false
+      for (let i = 0; i < 100; i++) {
+        const parked = await q(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_locks held
+               JOIN pg_locks waiter
+                 ON waiter.locktype = held.locktype
+                AND waiter.database IS NOT DISTINCT FROM held.database
+                AND waiter.classid IS NOT DISTINCT FROM held.classid
+                AND waiter.objid IS NOT DISTINCT FROM held.objid
+                AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid
+              WHERE held.pid = $1
+                AND held.locktype = 'advisory'
+                AND held.granted = true
+                AND waiter.granted = false
+           ) AS parked`,
+          [barrierPid],
+        )
+        recoveryParked = parked.rows[0]?.parked === true
+        if (recoveryParked) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(recoveryParked).toBe(true)
+
+      sourcePermission = Promise.resolve(
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/field-permissions/${F_STR}/user/${ACTOR}`)
+          .send({ visible: true, readOnly: true }),
+      ).finally(() => { sourceSettled = true })
+      foreignPermission = Promise.resolve(
+        request(app)
+          .put(`/api/multitable/sheets/${TGT_SHEET}/records/${REC_TGT_ANCHOR}/permissions`)
+          .send({ subjectType: 'user', subjectId: ACTOR, accessLevel: 'read' }),
+      ).finally(() => { foreignSettled = true })
+      membershipChange = (async () => {
+        await membershipWriter.query('BEGIN')
+        try {
+          await membershipWriter.query(
+            'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+            [ACTOR, ROLE_RACE],
+          )
+          await membershipWriter.query('COMMIT')
+        } catch (error) {
+          await membershipWriter.query('ROLLBACK').catch(() => {})
+          membershipError = error
+        }
+      })().finally(() => { membershipSettled = true })
+
+      // Both production writers must be blocked on their owning meta_sheets row. Removing the source
+      // authority lock makes the first settle; omitting foreign sheets makes the second settle.
+      //
+      // The FOR UPDATE pattern is DERIVED from the production statement (SHEET_ROW_LOCK_LIVENESS_SQL,
+      // multitable/sheet-liveness.ts) rather than copied: a hard-coded copy goes blind the day that
+      // statement is reworded — the probe then matches nothing, this loop runs to exhaustion and the
+      // `>= 2` floor below turns a REWORDING into a red that reads like a lost lock, while the property
+      // "the source permission writer parks on its sheet row" quietly stops being checked at all
+      // (#5938: the rename from `SELECT 1 …` to `SELECT deleted_at …` did exactly this).
+      let authorityWaiters = 0
+      for (let i = 0; i < 100; i++) {
+        const waiting = await q(
+          `SELECT count(*)::int AS c
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND state = 'active'
+              AND wait_event_type = 'Lock'
+              AND (
+                query LIKE $1
+                OR query LIKE 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE%'
+              )`,
+          [`${SHEET_ROW_LOCK_LIVENESS_SQL}%`],
+        )
+        authorityWaiters = Number(waiting.rows[0]?.c ?? 0)
+        if (authorityWaiters >= 2 || sourceSettled || foreignSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(sourceSettled).toBe(false)
+      expect(foreignSettled).toBe(false)
+      expect(authorityWaiters).toBeGreaterThanOrEqual(2)
+      // Membership writers have no sheet-row prerequisite; their shared authority lease must fail
+      // immediately while recovery holds the actor's exclusive lease.
+      for (let i = 0; i < 100; i++) {
+        if (membershipSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(membershipSettled).toBe(true)
+      expect(membershipError).toMatchObject({
+        code: '40001',
+        message: 'METASHEET_RECOVERY_AUTHORITY_BUSY',
+      })
+
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject])
+      expect((await applying).status).toBe(200)
+      expect((await sourcePermission).status).toBe(200)
+      expect((await foreignPermission).status).toBe(200)
+      await membershipChange
+      await q(
+        'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [ACTOR, ROLE_RACE],
+      )
+      expect((await q(
+        'SELECT read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3',
+        [SHEET, F_STR, ACTOR],
+      )).rows[0]?.read_only).toBe(true)
+      expect((await q(
+        'SELECT access_level FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 AND subject_id = $3',
+        [TGT_SHEET, REC_TGT_ANCHOR, ACTOR],
+      )).rows[0]?.access_level).toBe('read')
+    } finally {
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject]).catch(() => {})
+      if (applying) await applying.catch(() => {})
+      if (sourcePermission) await sourcePermission.catch(() => {})
+      if (foreignPermission) await foreignPermission.catch(() => {})
+      if (membershipChange) await membershipChange.catch(() => {})
+      await membershipWriter.query('ROLLBACK').catch(() => {})
+      membershipWriter.release()
+      barrier.release()
+      await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_records`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1', [TGT_SHEET]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+    }
+  })
+
+  test('AUTH-DB-FRESH: a committed database revoke defeats stale request claims and rolls back the token burn', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const preview = await revertPreview({ anchorOperationId: anchorOp })
+    expect(preview.status).toBe(200)
+    const token = preview.body?.data?.previewIdentity as string
+
+    // curPerms intentionally retains the old grants. Execute must use request ∩ DB-fresh authority.
+    await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
+    const execute = await revertExecute({ previewIdentity: token })
+    expect(execute.status).toBe(403)
+    expect(execute.body?.error?.code).toBe('FORBIDDEN')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
+    expect(await burnCountForToken(token)).toBe(0)
+  })
+
+  test.each(['inactive', 'disabled'] as const)('AUTH-ACTOR: %s actor cannot recover through a surviving sheet-admin grant', async (state) => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const initial = (await q('SELECT role FROM users WHERE id=$1', [ACTOR])).rows[0] as { role: string | null }
+    try {
+      await q(
+        `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, user_id, perm_code)
+         VALUES ($1, 'user', $2, $2, 'multitable:admin')`,
+        [SHEET, ACTOR],
+      )
+      curPerms = []
+      await q("UPDATE users SET permissions='[]'::jsonb WHERE id=$1", [ACTOR])
+      const preview = await revertPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body.data.previewIdentity as string
+      if (state === 'inactive') await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      else await q("UPDATE users SET role='disabled' WHERE id=$1", [ACTOR])
+
+      const execute = await revertExecute({ previewIdentity: token })
+      expect(execute.status).toBe(403)
+      expect(execute.body.error.code).toBe('FORBIDDEN')
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+      expect(await burnCountForToken(token)).toBe(0)
+
+      await q('UPDATE users SET is_active=TRUE, role=$2 WHERE id=$1', [ACTOR, initial.role])
+      const retry = await revertExecute({ previewIdentity: token })
+      expect(retry.status).toBe(200)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-at-anchor')
+      expect(await burnCountForToken(token)).toBe(1)
+    } finally {
+      await q('UPDATE users SET is_active=TRUE, role=$2 WHERE id=$1', [ACTOR, initial.role])
+      await q("DELETE FROM spreadsheet_permissions WHERE sheet_id=$1 AND subject_type='user' AND subject_id=$2", [SHEET, ACTOR])
+    }
+  })
+
+  test('AUTH-EXPLICIT: foreign-base revoke masks formula inputs despite stale request grants', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const foreignBase = `base_earw_foreign_${TS}`
+    const originalPermissions = [...curPerms]
+    try {
+      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$1)', [SHEET, F_FOL, F_SRC_LOOKUP])
+      await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [foreignBase, 'EARW foreign'])
+      await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [TGT_SHEET, foreignBase])
+      curPerms = [...originalPermissions, 'multitable:base:read']
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
+      const preview = await revertPreview({ anchorOperationId: anchorOp })
+      expect(preview.status).toBe(200)
+      const token = preview.body.data.previewIdentity as string
+
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
+      const denied = await revertExecute({ previewIdentity: token })
+      expect(denied.status).toBe(403)
+      expect(denied.body.error.code).toBe('FORBIDDEN')
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+      expect(await burnCountForToken(token)).toBe(0)
+
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
+      expect((await revertPreview({ anchorOperationId: anchorOp })).status).toBe(200)
+    } finally {
+      await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [TGT_SHEET, BASE])
+      await q('DELETE FROM meta_bases WHERE id=$1', [foreignBase])
+      await q('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(originalPermissions)])
+      curPerms = originalPermissions
+    }
+  })
+
+  test.each([true, false])('RECOVERY-EVENT: source write and durable event share commit=%s', async (commit) => {
+    await seedWorld()
+    const previousFlag = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
+    const before = (await q('SELECT version FROM meta_records WHERE id=$1', [REC_A])).rows[0].version
+    let event: RecoveryMutationEvent | undefined
+    try {
+      const write = txn(async (query) => {
+        await query('UPDATE meta_records SET version=version+1 WHERE id=$1', [REC_A])
+        event = await enqueueRecoveryMutationEvent(query, SHEET, ACTOR, {
+          kind: 'revert', recordId: REC_A, version: Number(before) + 1,
+          revisionId: randomUUID(), changedFieldIds: [F_STR], patch: { [F_STR]: 'restored' }, linkInvalidations: [],
+        })
+        const inside = await query('SELECT event_type, payload FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])
+        expect(inside.rows).toEqual([{ event_type: event.type, payload: event.payload }])
+        expect((await q('SELECT id FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])).rows).toEqual([])
+        if (!commit) throw new Error('SYNTHETIC_RECOVERY_ROLLBACK')
+      })
+      if (commit) await write
+      else await expect(write).rejects.toThrow('SYNTHETIC_RECOVERY_ROLLBACK')
+      expect(event).toBeDefined()
+      const durable = await q('SELECT event_type, payload FROM meta_automation_outbox WHERE event_id=$1', [event!.payload._eventId])
+      expect(durable.rows).toEqual(commit ? [{ event_type: event!.type, payload: event!.payload }] : [])
+      expect(Number((await q('SELECT version FROM meta_records WHERE id=$1', [REC_A])).rows[0].version)).toBe(Number(before) + (commit ? 1 : 0))
+      const consumers = await q(`SELECT c.consumer_key FROM meta_automation_outbox_consumer c
+        JOIN meta_automation_outbox o ON o.id=c.outbox_id WHERE o.event_id=$1 ORDER BY c.consumer_key`, [event!.payload._eventId])
+      expect(consumers.rows).toEqual(commit ? [{ consumer_key: 'automation-record-trigger' }, { consumer_key: 'webhook-event-bridge' }] : [])
+    } finally {
+      if (event) await q('DELETE FROM meta_automation_outbox WHERE event_id=$1', [event.payload._eventId])
+      if (previousFlag === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previousFlag
+    }
+  })
+
+  test('RECOVERY-EVENT: autocommit query cannot forge a transaction for durable enqueue', async () => {
+    const previousFlag = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
+    const recordId = `rec_event_probe_${randomUUID()}`
+    try {
+      await expect(enqueueRecoveryMutationEvent(q, SHEET, ACTOR, {
+        kind: 'delete', recordId, revisionId: randomUUID(), linkInvalidations: [],
+      })).rejects.toThrow('must run inside a real database TRANSACTION')
+      expect((await q("SELECT id FROM meta_automation_outbox WHERE payload->>'recordId'=$1", [recordId])).rows).toEqual([])
+    } finally {
+      await q("DELETE FROM meta_automation_outbox WHERE payload->>'recordId'=$1", [recordId])
+      if (previousFlag === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previousFlag
+    }
+  })
+
+  test.each([true, false])('WORKER-COMPUTED: requestless hydration retains taint with dependency rows=%s', async (withDependencies) => {
+    await seedWorld({ withSideEffects: true })
+    if (withDependencies) await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,$1)', [SHEET, F_FOL, F_SRC_LOOKUP])
+    const authority = await resolveDatabaseRecoverySheetAuthority(q, SHEET, ACTOR)
+    const helpers = createRecoveryComputedHelpers(authority.access)
+    const fields = (await q('SELECT id, name, type, property FROM meta_fields WHERE sheet_id=$1', [SHEET])).rows as Parameters<typeof helpers.applyLookupRollup>[2]
+    const links = [{ fieldId: F_SRC_LINK, cfg: { foreignSheetId: TGT_SHEET, limitSingleRecord: false } }]
+    const values = new Map([[REC_A, new Map([[F_SRC_LINK, [REC_TGT_LIVE]]])]])
+    const compute = async () => {
+      const rows = (await q('SELECT id, version, data FROM meta_records WHERE id=$1', [REC_A])).rows as Parameters<typeof helpers.applyLookupRollup>[3]
+      await helpers.applyLookupRollup(q, SHEET, fields, rows, links, values)
+      const formulas = await helpers.recalculateFormulaFields(q, SHEET, fields, [REC_A], [F_SRC_LINK], new Map(rows.map(row => [row.id, row.data])))
+      return { rows, formulas }
+    }
+    try {
+      const allowed = await compute()
+      expect(allowed.rows[0].data[F_SRC_LOOKUP]).toEqual([99])
+      expect(allowed.formulas).toEqual([{ recordId: REC_A, data: { [F_FOL]: 100 } }])
+      const related = await helpers.computeDependentLookupRollupRecords(q, SHEET, [REC_A], [F_NUM])
+      expect(related.some(row => row.recordId === REC_REL && row.affectedFieldIds.includes(F_REL_LOOKUP))).toBe(true)
+      await q(`INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+        VALUES ($1,$2,'user',$3,FALSE,FALSE)`, [TGT_SHEET, F_TGT_NUM, ACTOR])
+      const denied = await compute()
+      expect(denied.rows[0].data[F_SRC_LOOKUP]).toEqual([])
+      expect(denied.formulas).toEqual([])
+      await expect(createRecoveryComputedHelpers(authority.access, true).recalculateFormulaFields(
+        q, SHEET, fields, [REC_A], [F_SRC_LINK], new Map(denied.rows.map(row => [row.id, row.data])),
+      )).rejects.toThrow('RECOVERY_DERIVED_AUTHORITY_UNAVAILABLE')
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FOL]).toBe(100)
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
+      expect((await compute()).formulas).toEqual(allowed.formulas)
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [TGT_SHEET, F_TGT_NUM, ACTOR])
+    }
+  })
+
+  test.each(['source', 'related', 'source_relation', 'related_relation'] as const)('WORKER-STRICT: blocked %s formula remains retryable, legacy stays best-effort', async (target) => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const relatedFormula = `fld_earw_rel_formula_${TS}`
+    const source = target.startsWith('source')
+    const relation = target.endsWith('_relation')
+    const sheetId = source ? SHEET : REL_SHEET
+    const recordId = source ? REC_A : REC_REL
+    const formulaId = source ? F_FORMULA : relatedFormula
+    const originalProperty = (await q('SELECT property FROM meta_fields WHERE id=$1', [F_FORMULA])).rows[0].property
+    if (!source) await q(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order")
+      VALUES ($1,$2,'Derived','formula',$3::jsonb,3)`,
+    [relatedFormula, REL_SHEET, JSON.stringify({ expression: relation
+      ? `=RELSUMIF("${F_REL_LINK}","${F_NUM}","${F_NUM}","greater",0)` : `={${F_REL_LOOKUP}}+1` })])
+    try {
+      if (source && relation) {
+        await q('UPDATE meta_fields SET property=$2::jsonb WHERE id=$1', [F_FORMULA,
+          JSON.stringify({ expression: `=RELSUMIF("${F_SRC_LINK}","${F_TGT_NUM}","${F_TGT_NUM}","greater",0)` })])
+        await q('INSERT INTO formula_dependencies (sheet_id,field_id,depends_on_field_id,depends_on_sheet_id) VALUES ($1,$2,$3,$1)',
+          [SHEET, F_FORMULA, F_SRC_LINK])
+      }
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [recordId, JSON.stringify({ [formulaId]: 100 })])
+      const authority = await resolveDatabaseRecoverySheetAuthority(q, SHEET, ACTOR)
+      const fields = (await q('SELECT id,name,type,property FROM meta_fields WHERE sheet_id=$1', [SHEET])).rows
+        .filter(field => field.type !== 'formula' || field.id === formulaId)
+      const compute = async (strict: boolean) => {
+        const helpers = createRecoveryComputedHelpers(authority.access, strict)
+        return source
+          ? helpers.recalculateFormulaFields(q, SHEET, fields, [REC_A], [F_NUM, F_SRC_LINK])
+          : helpers.computeDependentLookupRollupRecords(q, SHEET, [REC_A], [F_NUM])
+      }
+      await q("UPDATE meta_sheets SET recovery_writer_state='fencing' WHERE id=$1", [sheetId])
+      await expect(compute(true)).rejects.toThrow('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+      await expect(compute(false)).resolves.toBeInstanceOf(Array)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[formulaId]).toBe(100)
+      await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [sheetId])
+      await compute(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[formulaId])
+        .toBe(relation ? source ? 99 : 10 : 11)
+    } finally {
+      await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [sheetId])
+      await q('DELETE FROM formula_dependencies WHERE field_id=$1', [relatedFormula])
+      await q('DELETE FROM meta_fields WHERE id=$1', [relatedFormula])
+      await q('UPDATE meta_fields SET property=$2::jsonb WHERE id=$1', [F_FORMULA, JSON.stringify(originalProperty)])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test('WORKER-TRANSACTION: refuses autocommit and out-of-scope writes, rolls back materialization before notification', async () => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = { jobId: randomUUID(), workspaceId: `workspace_rollback_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
+    const work = { identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] }
+    const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
+    try {
+      await expect(withFencedDerivedTransaction(q, [SHEET], async () => true))
+        .rejects.toThrow('RECOVERY_DERIVED_TRANSACTION_REQUIRED')
+      await expect(txn(query => withFencedDerivedTransaction(query, [SHEET], scoped =>
+        applyFencedDerivedDataMerge(scoped, REL_SHEET, REC_REL, { [F_REL_LOOKUP]: 123 }))))
+        .rejects.toThrow('RECOVERY_DERIVED_SCOPE_CHANGED')
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      const processWork = createRecoveryArchiveDerivedProcessor({ query: q, transaction: fn => txn(async query => {
+        expect(await fn(query)).toBe(true)
+        expect((await query('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+        throw new Error('synthetic_derived_commit_failure')
+      }) })
+      await expect(processWork(work)).rejects.toThrow('synthetic_derived_commit_failure')
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(100)
+      expect(publish).not.toHaveBeenCalled()
+      expect(await createRecoveryArchiveDerivedProcessor({ query: q, transaction: txn })(work)).toBe(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+      expect(publish).toHaveBeenCalled()
+    } finally {
+      publish.mockRestore()
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test('WORKER-SCOPE: rejects a link target added between discovery and fence acquisition', async () => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const extraSheet = `${SHEET}_scope_expansion`
+    const extraField = `${F_SRC_LINK}_scope_expansion`
+    let release!: () => void
+    let reached!: () => void
+    const hold = new Promise<void>(resolve => { release = resolve })
+    const ready = new Promise<void>(resolve => { reached = resolve })
+    let paused = false
+    const materialize = vi.fn(async () => true)
+    let running: Promise<boolean> | undefined
+    try {
+      await q('INSERT INTO meta_sheets (id,base_id,name) VALUES ($1,$2,$3)', [extraSheet, BASE, 'Scope fixture'])
+      const transaction = (run: (query: QueryFn) => Promise<boolean>) => txn(query => run(async (statement, params) => {
+        if (!paused && statement === 'SELECT pg_advisory_xact_lock(hashtext($1))') {
+          paused = true
+          reached()
+          await hold
+        }
+        return query(statement, params)
+      }))
+      running = runRecoveryArchiveDerivedTransaction(transaction, {
+        identity: { jobId: randomUUID(), workspaceId: `workspace_scope_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR },
+        revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM], linkInvalidations: [],
+      }, materialize)
+      const rejected = expect(running).rejects.toThrow('RECOVERY_DERIVED_SCOPE_CHANGED')
+      await Promise.race([ready, running.then(() => { throw new Error('scope_barrier_not_reached') })])
+      await txn(async query => {
+        await query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+        await query(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order")
+          VALUES ($1,$2,'Scope link','link',$3::jsonb,99)`,
+        [extraField, SHEET, JSON.stringify({ foreignSheetId: extraSheet })])
+      })
+      release()
+      await rejected
+      expect(materialize).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await running?.catch(() => {})
+      await q('DELETE FROM meta_fields WHERE id=$1', [extraField])
+      await q('DELETE FROM meta_sheets WHERE id=$1', [extraSheet])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test.each(['source', 'foreign', 'actor'] as const)('WORKER-RACE: holds %s stable across calculation and commit', async (kind) => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = { jobId: randomUUID(), workspaceId: `workspace_race_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
+    let release!: () => void
+    let reached!: () => void
+    const hold = new Promise<void>(resolve => { release = resolve })
+    const ready = new Promise<void>(resolve => { reached = resolve })
+    let paused = false
+    const gate = (query: QueryFn): QueryFn => async (sql, params) => {
+      const result = await query(sql, params)
+      if (!paused && sql === 'SELECT id,version,data FROM meta_records WHERE sheet_id=$1 AND id=ANY($2::text[])') {
+        paused = true
+        reached()
+        await hold
+      }
+      return result
+    }
+    const writer = await poolManager.get().getInternalPool()!.connect()
+    let running: Promise<boolean> | undefined
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+      const processWork = createRecoveryArchiveDerivedProcessor({ query: gate(q), transaction: fn => txn(query => fn(gate(query))) })
+      running = processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] })
+      await Promise.race([ready, running.then(() => { throw new Error('processor_returned_before_read_barrier') })])
+      await writer.query('BEGIN')
+      await writer.query("SET LOCAL lock_timeout='250ms'")
+      if (kind === 'actor') {
+        await expect(writer.query('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR]))
+          .rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      } else {
+        const sheetId = kind === 'source' ? SHEET : TGT_SHEET
+        await expect(writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(sheetId)]))
+          .rejects.toMatchObject({ code: '55P03' })
+      }
+      await writer.query('ROLLBACK')
+      release()
+      expect(await running).toBe(true)
+      expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(11)
+      if (kind === 'actor') {
+        await writer.query('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+        expect(await processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM], linkInvalidations: [] })).toBe(false)
+      } else {
+        await writer.query('BEGIN')
+        await writer.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(kind === 'source' ? SHEET : TGT_SHEET)])
+        await writer.query('UPDATE meta_records SET data=data || $2::jsonb, version=version+1 WHERE id=$1',
+          [kind === 'source' ? REC_A : REC_TGT_LIVE, JSON.stringify({ [kind === 'source' ? F_NUM : F_TGT_NUM]: 20 })])
+        await writer.query('COMMIT')
+        expect(await processWork({ identity, revisionId: randomUUID(), recordId: REC_A, fieldIds: [F_NUM, F_SRC_LINK], linkInvalidations: [] })).toBe(true)
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[kind === 'source' ? F_FORMULA : F_FOL]).toBe(21)
+      }
+    } finally {
+      await writer.query('ROLLBACK').catch(() => {})
+      release()
+      await running?.catch(() => {})
+      writer.release()
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test.each(['revert', 'delete', 'revoked', 'blocked', 'foreign_denied', 'crossbase_denied'] as const)('WORKER-PROCESSOR: canonical derived work handles %s without replaying events', async (scenario) => {
+    await seedWorld({ withSideEffects: true })
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = { jobId: randomUUID(), workspaceId: `workspace_processor_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR }
+    const relatedFormula = `fld_earw_processor_formula_${TS}`
+    const otherBase = `${BASE}_processor_other`
+    const processWork = createRecoveryArchiveDerivedProcessor({ query: q, transaction: txn })
+    const emit = vi.spyOn(eventBus, 'emit').mockReturnValue(true)
+    const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
+    const invalidate = vi.fn(async (_ids: string[]) => {})
+    setYjsInvalidatorForRoutes(invalidate)
+    const work = {
+      identity, revisionId: randomUUID(), recordId: REC_A,
+      fieldIds: scenario === 'delete' ? [] : [F_NUM, F_SRC_LINK],
+      linkInvalidations: ['delete', 'foreign_denied', 'crossbase_denied'].includes(scenario)
+        ? [{ sheetId: REL_SHEET, recordIds: [REC_REL], fieldIds: [F_REL_LINK] }] : [],
+    }
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      if (scenario === 'delete') {
+        await q(`INSERT INTO meta_fields (id,sheet_id,name,type,property,"order") VALUES ($1,$2,'Derived','formula',$3::jsonb,3)`,
+          [relatedFormula, REL_SHEET, JSON.stringify({ expression: `={${F_REL_LOOKUP}}+1` })])
+        await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_REL, JSON.stringify({ [relatedFormula]: 100 })])
+        await q('DELETE FROM meta_links WHERE record_id=$1 OR foreign_record_id=$1', [REC_A])
+        await q('DELETE FROM meta_records WHERE id=$1', [REC_A])
+      } else {
+        await q('UPDATE meta_records SET data=data || $2::jsonb WHERE id=$1', [REC_A, JSON.stringify({ [F_NUM]: 10 })])
+        await q('UPDATE meta_links SET foreign_record_id=$3 WHERE field_id=$1 AND record_id=$2', [F_SRC_LINK, REC_A, REC_TGT_ANCHOR])
+      }
+      expect(await processWork({ ...work, identity: { ...identity, workspaceId: `${identity.workspaceId}_wrong` } })).toBe(false)
+      if (scenario === 'foreign_denied' || scenario === 'crossbase_denied') {
+        if (scenario === 'foreign_denied') await q(`INSERT INTO field_permissions
+          (sheet_id,field_id,subject_type,subject_id,visible,read_only) VALUES ($1,$2,'user',$3,FALSE,FALSE)`,
+        [REL_SHEET, F_REL_LOOKUP, ACTOR])
+        else {
+          await q('INSERT INTO meta_bases (id,name) VALUES ($1,$2)', [otherBase, 'Processor private base'])
+          await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [REL_SHEET, otherBase])
+        }
+        expect(await processWork(work)).toBe(false)
+        expect(invalidate).not.toHaveBeenCalled()
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(100)
+        await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [REL_SHEET, F_REL_LOOKUP, ACTOR])
+        await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [REL_SHEET, BASE])
+      }
+      if (scenario === 'revoked') {
+        await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+        expect(await processWork(work)).toBe(false)
+        expect(invalidate).not.toHaveBeenCalled()
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data[F_FORMULA]).toBe(100)
+        await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      }
+      if (scenario === 'blocked') {
+        await q("UPDATE meta_sheets SET recovery_writer_state='fencing' WHERE id=$1", [SHEET])
+        await expect(processWork(work)).rejects.toThrow('RECOVERY_DERIVED_WRITE_INCOMPLETE')
+        expect(invalidate).not.toHaveBeenCalled()
+        await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [SHEET])
+      }
+      expect(await processWork(work)).toBe(true)
+      if (scenario === 'delete') {
+        expect((await q('SELECT id FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([])
+        expect((await q('SELECT data FROM meta_records WHERE id=$1', [REC_REL])).rows[0].data[relatedFormula]).toBe(1)
+        expect(invalidate.mock.calls[0][0]).toContain(REC_REL)
+      } else {
+        const data = (await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data
+        expect(data[F_FORMULA]).toBe(11)
+        expect(data[F_FOL]).toBe(11)
+      }
+      expect(emit).not.toHaveBeenCalled()
+      expect(publish).toHaveBeenCalled()
+      expect(publish.mock.calls.every(([payload]) => payload.recordPatches === undefined)).toBe(true)
+      expect(invalidate.mock.calls[0][0]).toContain(REC_A)
+    } finally {
+      emit.mockRestore()
+      publish.mockRestore()
+      setYjsInvalidatorForRoutes(null)
+      await q('UPDATE meta_sheets SET recovery_writer_state=NULL WHERE id=$1', [SHEET])
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [REL_SHEET, F_REL_LOOKUP, ACTOR])
+      await q('UPDATE meta_sheets SET base_id=$2 WHERE id=$1', [REL_SHEET, BASE])
+      await q('DELETE FROM meta_bases WHERE id=$1', [otherBase])
+      await q('DELETE FROM formula_dependencies WHERE field_id=$1', [relatedFormula])
+      await q('DELETE FROM meta_fields WHERE id=$1', [relatedFormula])
+      delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    }
+  })
+
+  test.each([false, true])('WORKER-CALLBACKS: commit-bound effects with post-commit revocation=%s', async (revoked) => {
+    await seedWorld({ withSideEffects: true })
+    const oldWorkspace = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0].workspace_id
+    const identity = Object.freeze({ jobId: randomUUID(), workspaceId: `workspace_effects_${TS}`, baseId: BASE, sheetId: SHEET, actorId: ACTOR })
+    const callbacks = createRecoveryArchiveWorkerCallbacks({ query: q, transaction: txn })
+    const emit = vi.spyOn(eventBus, 'emit').mockReturnValue(true)
+    const publish = vi.spyOn(realtimeMod, 'publishMultitableSheetRealtime').mockImplementation(() => {})
+    const invalidate = vi.fn(async (_recordIds: string[]) => {})
+    setYjsInvalidatorForRoutes(invalidate)
+    const fact: exactApply.ExactAnchorAppliedMutation = {
+      kind: 'revert', recordId: REC_A, version: 3, revisionId: randomUUID(),
+      changedFieldIds: [F_NUM, F_SRC_LINK], patch: { [F_NUM]: 10, [F_SRC_LINK]: [REC_TGT_ANCHOR] }, linkInvalidations: [],
+    }
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, identity.workspaceId])
+      await txn(async query => {
+        await query('UPDATE meta_records SET data=data || $2::jsonb, version=3 WHERE id=$1', [REC_A, JSON.stringify(fact.patch)])
+        await query('UPDATE meta_links SET foreign_record_id=$3 WHERE field_id=$1 AND record_id=$2', [F_SRC_LINK, REC_A, REC_TGT_ANCHOR])
+        await callbacks.apply.onMutationApplied!(query, fact, identity)
+        expect(emit).not.toHaveBeenCalled()
+        expect(invalidate).not.toHaveBeenCalled()
+      })
+      if (revoked) await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      await callbacks.apply.afterCommit!(identity, [fact])
+      expect(emit).toHaveBeenCalledTimes(1)
+      expect(emit).toHaveBeenCalledWith('multitable.record.updated', {
+        sheetId: SHEET, actorId: ACTOR, recordId: REC_A, changes: fact.patch, _eventId: expect.any(String),
+      })
+      const data = (await q('SELECT data FROM meta_records WHERE id=$1', [REC_A])).rows[0].data
+      expect(data[F_FORMULA]).toBe(revoked ? 100 : 11)
+      expect(data[F_FOL]).toBe(revoked ? 100 : 11)
+      expect(invalidate).toHaveBeenCalledTimes(1)
+      expect(invalidate.mock.calls[0][0]).toContain(REC_A)
+      expect(publish).toHaveBeenCalled()
+      if (revoked) expect(publish.mock.calls.every(([payload]) => payload.recordPatches === undefined)).toBe(true)
+    } finally {
+      emit.mockRestore()
+      publish.mockRestore()
+      setYjsInvalidatorForRoutes(null)
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, oldWorkspace])
+    }
+  })
+
+  test('WORKER-AUTHORITY: real database revocation and scope drift fail closed without request claims', async () => {
+    await seedWorld()
+    const original = (await q('SELECT workspace_id FROM meta_bases WHERE id=$1', [BASE])).rows[0]
+    const workspaceId = `workspace_worker_${TS}`
+    const identity = Object.freeze({ jobId: `job_worker_${TS}`, actorId: ACTOR, sheetId: SHEET, baseId: BASE, workspaceId })
+    const worker = createRecoveryArchiveWorkerAuthorization()
+    try {
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, workspaceId])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      expect(await worker.apply.preliminaryFullRead(q, identity)).toBe(true)
+      await q('UPDATE users SET is_active=FALSE WHERE id=$1', [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE users SET is_active=TRUE WHERE id=$1', [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,FALSE,FALSE)`, [SHEET, F_STR, ACTOR],
+      )
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE field_permissions SET visible=TRUE, read_only=TRUE WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(true)
+      const planContext = {
+        mode: 'revert' as const, actorId: ACTOR, sheetId: SHEET,
+        plan: { reverts: [], resurrects: [], deletedAtAnchorLiveNow: [], createdAfterAnchor: [], driftCount: 0, unchangedCount: 0 },
+        revertWrites: [{ recordId: REC_A, liveVersion: 2, changedFieldIds: [F_STR], patch: { [F_STR]: 'restored' }, projectedData: { [F_STR]: 'restored' }, linkUpdates: [] }],
+        deleteRecordIds: [],
+      }
+      expect(await worker.apply.evaluatePlanAuthorization(q, planContext, identity)).toBe(false)
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      expect(await worker.apply.evaluatePlanAuthorization(q, planContext, identity)).toBe(true)
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, `${workspaceId}_other`])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, workspaceId])
+      await q("UPDATE users SET permissions='[]'::jsonb WHERE id=$1", [ACTOR])
+      expect(await worker.recheckAuthority(q, identity)).toBe(false)
+      expect((await q('SELECT data, version FROM meta_records WHERE id=$1', [REC_A])).rows).toEqual([
+        { data: { [F_STR]: 'A-live-now', [F_NOISE]: 'noise-stable' }, version: 2 },
+      ])
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, F_STR, ACTOR])
+      await q('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1', [BASE, original.workspace_id])
+      await q('UPDATE users SET is_active=TRUE, permissions=$2::jsonb WHERE id=$1', [ACTOR, JSON.stringify(curPerms)])
+    }
+  })
+
+  test('AUTHORITY-LOCKS: related user/role revokes fail fast, while unrelated last-login writes remain unblocked', async () => {
+    await q(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ACTOR, ROLE_RACE],
+    )
+    await q(
+      'INSERT INTO role_permissions (role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ROLE_RACE, PERMISSION_RACE],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    const userWriter = await livePool!.connect()
+    const roleWriter = await livePool!.connect()
+    const unrelatedWriter = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      expect(await acquireRecoveryAuthorityLease(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )).toBe('ready')
+
+      // The users trigger is intentionally column-scoped: session metadata must not wait behind a
+      // potentially long recovery transaction.
+      await unrelatedWriter.query('BEGIN')
+      await unrelatedWriter.query("SET LOCAL lock_timeout = '250ms'")
+      await unrelatedWriter.query('UPDATE users SET last_login_at = now() WHERE id = $1', [ACTOR])
+      await unrelatedWriter.query('COMMIT')
+
+      await userWriter.query('BEGIN')
+      await roleWriter.query('BEGIN')
+      await expect(
+        userWriter.query('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]']),
+      ).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(
+        roleWriter.query(
+          'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+          [ROLE_RACE, PERMISSION_RACE],
+        ),
+      ).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await userWriter.query('ROLLBACK')
+      await roleWriter.query('ROLLBACK')
+
+      await holder.query('COMMIT')
+      await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [ACTOR, '[]'])
+      await q(
+        'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+        [ROLE_RACE, PERMISSION_RACE],
+      )
+      expect((await q('SELECT permissions FROM users WHERE id = $1', [ACTOR])).rows[0]?.permissions).toEqual([])
+      expect((await q(
+        'SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+        [ROLE_RACE, PERMISSION_RACE],
+      )).rowCount).toBe(0)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      await userWriter.query('ROLLBACK').catch(() => {})
+      await roleWriter.query('ROLLBACK').catch(() => {})
+      await unrelatedWriter.query('ROLLBACK').catch(() => {})
+      holder.release()
+      userWriter.release()
+      roleWriter.release()
+      unrelatedWriter.release()
+      await q('DELETE FROM role_permissions WHERE role_id = $1', [ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+      await q('UPDATE users SET permissions = $2::jsonb WHERE id = $1', [
+        ACTOR,
+        JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema']),
+      ]).catch(() => {})
+    }
+  })
+
+  test('AUTHORITY-SUBJECT-LOCKS: user, role, and group grant revokes fail fast under a recovery lease', async () => {
+    await seedWorld()
+    await q(
+      'INSERT INTO platform_member_groups (id, name) VALUES ($1::uuid,$2) ON CONFLICT (id) DO NOTHING',
+      [GROUP_RACE, `EARW group ${TS}`],
+    )
+    await q(
+      'INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING',
+      [GROUP_RACE, ACTOR],
+    )
+    await q(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [ACTOR, ROLE_RACE],
+    )
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code)
+       VALUES ($1,'user',$2,'spreadsheet:admin') ON CONFLICT DO NOTHING`,
+      [SHEET, ACTOR],
+    )
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1,$2,'role',$3,true,false) ON CONFLICT DO NOTHING`,
+      [SHEET, F_STR, ROLE_RACE],
+    )
+    await q(
+      `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+       VALUES ($1,$2,'member-group',$3,'admin') ON CONFLICT DO NOTHING`,
+      [SHEET, REC_A, GROUP_RACE],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    const userWriter = await livePool!.connect()
+    const roleWriter = await livePool!.connect()
+    const groupWriter = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      expect(await acquireRecoveryAuthorityLease(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )).toBe('ready')
+
+      await userWriter.query('BEGIN')
+      await roleWriter.query('BEGIN')
+      await groupWriter.query('BEGIN')
+      await expect(userWriter.query(
+        `DELETE FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(roleWriter.query(
+        `DELETE FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+        [SHEET, F_STR, ROLE_RACE],
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await expect(groupWriter.query(
+        `DELETE FROM record_permissions
+          WHERE sheet_id = $1 AND record_id = $2
+            AND subject_type = 'member-group' AND subject_id = $3`,
+        [SHEET, REC_A, GROUP_RACE],
+      )).rejects.toMatchObject({ code: '40001', message: 'METASHEET_RECOVERY_AUTHORITY_BUSY' })
+      await userWriter.query('ROLLBACK')
+      await roleWriter.query('ROLLBACK')
+      await groupWriter.query('ROLLBACK')
+
+      await holder.query('COMMIT')
+      await q(
+        `DELETE FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )
+      await q(
+        `DELETE FROM field_permissions
+          WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND subject_id = $3`,
+        [SHEET, F_STR, ROLE_RACE],
+      )
+      await q(
+        `DELETE FROM record_permissions
+          WHERE sheet_id = $1 AND record_id = $2
+            AND subject_type = 'member-group' AND subject_id = $3`,
+        [SHEET, REC_A, GROUP_RACE],
+      )
+      expect((await q(
+        `SELECT count(*)::int AS c
+           FROM spreadsheet_permissions
+          WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+        [SHEET, ACTOR],
+      )).rows[0]?.c).toBe(0)
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      await userWriter.query('ROLLBACK').catch(() => {})
+      await roleWriter.query('ROLLBACK').catch(() => {})
+      await groupWriter.query('ROLLBACK').catch(() => {})
+      holder.release()
+      userWriter.release()
+      roleWriter.release()
+      groupWriter.release()
+      await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, GROUP_RACE]).catch(() => {})
+      await q('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ACTOR, ROLE_RACE]).catch(() => {})
+      await q('DELETE FROM platform_member_group_members WHERE group_id = $1::uuid', [GROUP_RACE]).catch(() => {})
+      await q('DELETE FROM platform_member_groups WHERE id = $1::uuid', [GROUP_RACE]).catch(() => {})
+    }
+  })
+
+  test('AUTHORITY-HTTP-RETRY: permission authoring maps the fixed authority conflict to values-free 409s', async () => {
+    await seedWorld()
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      expect(await acquireRecoveryAuthorityLease(
+        (sql, params) => holder.query(sql, params) as unknown as ReturnType<QueryFn>,
+        [ACTOR],
+      )).toBe('ready')
+
+      const responses = await Promise.all([
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/permissions/user/${ACTOR}`)
+          .send({ accessLevel: 'admin' }),
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/field-permissions/${F_STR}/user/${ACTOR}`)
+          .send({ visible: true, readOnly: true }),
+        request(app)
+          .put(`/api/multitable/sheets/${SHEET}/records/${REC_A}/permissions`)
+          .send({ subjectType: 'user', subjectId: ACTOR, accessLevel: 'admin' }),
+      ])
+
+      for (const response of responses) {
+        expect(response.status).toBe(409)
+        expect(response.body).toEqual({
+          ok: false,
+          error: {
+            code: 'RECOVERY_AUTHORITY_BUSY',
+            message: 'Recovery is stabilizing permissions; retry this change.',
+          },
+        })
+      }
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1 AND subject_id = $2', [SHEET, ACTOR]).catch(() => {})
+    }
+  })
+
+  test('NO-ORACLE AUTH-RACE: fence-parked full-read revoke outranks concurrent HISTORY_INCOMPLETE, zero writes', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(typeof token).toBe('string')
+
+    const liveBefore = (await q(
+      'SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [REC_A, SHEET],
+    )).rows[0] as { data: Record<string, unknown>; version: number }
+    const burnsBefore = Number(
+      ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+    )
+    const restoreRevsBefore = Number(
+      ((await q(
+        `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+        [SHEET],
+      )).rows[0] as { c: number }).c,
+    )
+
+    // Corrupt the sealed anchor after preview without changing the live row. The operation endpoint now
+    // advertises one event while its revision set is empty, so strict history would return
+    // HISTORY_INCOMPLETE if it ran before the fresh in-fence full-read adjudication.
+    await q(
+      'DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND operation_id = $2::uuid',
+      [SHEET, anchorOp],
+    )
+
+    const livePool = poolManager.get().getInternalPool()
+    expect(livePool).toBeTruthy()
+    const holder = await livePool!.connect()
+    try {
+      await holder.query('BEGIN')
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      expect(Number.isFinite(holderPid) && holderPid > 0).toBe(true)
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)])
+
+      const applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let sawExactWaiter = false
+      for (let i = 0; i < 100; i++) {
+        const waiters = await holder.query(
+          `SELECT count(*)::int AS c
+             FROM pg_locks waiter
+             JOIN pg_locks held
+               ON held.locktype = 'advisory'
+              AND held.granted = true
+              AND held.pid = $1
+              AND waiter.locktype = 'advisory'
+              AND waiter.granted = false
+              AND waiter.pid <> held.pid
+              AND waiter.database IS NOT DISTINCT FROM held.database
+              AND waiter.classid = held.classid
+              AND waiter.objid = held.objid
+              AND waiter.objsubid = held.objsubid`,
+          [holderPid],
+        )
+        if (Number((waiters.rows[0] as { c: number }).c) > 0) {
+          sawExactWaiter = true
+          break
+        }
+        const settled = await Promise.race([
+          applying.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0)),
+        ])
+        if (settled) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(sawExactWaiter).toBe(true)
+
+      // Revoke full-table read on a separate connection while execute is parked. The actor still has
+      // canManageSheetAccess, so only the conservative field-read adjudication changes.
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,false,false)`,
+        [SHEET, F_STR, ACTOR],
+      )
+
+      await holder.query('COMMIT')
+      const ex = await applying
+      expect(ex.status).toBe(403)
+      expect(ex.body?.error?.code).toBe('FORBIDDEN')
+      expect(ex.body?.error?.code).not.toBe('HISTORY_INCOMPLETE')
+      expect((await q(
+        'SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [REC_A, SHEET],
+      )).rows[0]).toEqual(liveBefore)
+      expect(Number(
+        ((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c,
+      )).toBe(burnsBefore)
+      expect(Number(
+        ((await q(
+          `SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`,
+          [SHEET],
+        )).rows[0] as { c: number }).c,
+      )).toBe(restoreRevsBefore)
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* already committed/released */ }
+      holder.release()
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    }
+  })
+
+  test('trust OFF (strict missing): preview/execute refuse RECOVERY_TRUST_REQUIRED — no token / zero writes', async () => {
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    // CONTIGUITY_STRICT intentionally unset
+    const { anchorOp } = await seedWorld()
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(409)
+    expect(pv.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect(pv.body?.data?.previewIdentity).toBeUndefined()
+    const before = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]
+    // Mint a token under full trust then drop strict to prove execute refuses
+    enableRecoveryExecute()
+    const pv2 = await revertPreview({ anchorOperationId: anchorOp })
+    const token = pv2.body?.data?.previewIdentity as string
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const ex = await revertExecute({ previewIdentity: token })
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
+    expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]).toEqual(before)
+    expect(await burnCountForToken(token)).toBe(0)
+  })
+
+  test('RECORD_LOCKED: locked target → 409 RECORD_LOCKED values-free, zero writes', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    await q('UPDATE meta_records SET locked = true, locked_by = $1 WHERE id = $2 AND sheet_id = $3', ['someone-else', REC_A, SHEET])
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    const ex = await revertExecute({ previewIdentity: token })
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('RECORD_LOCKED')
+    expect(JSON.stringify(ex.body)).not.toMatch(/rev-now|A-live-now|A-at-anchor/) // values-free
+    expect(await burnCountForToken(token)).toBe(0)
+  })
+
+  test('LINK-TARGET-RACE: recovery locks a foreign target through commit so concurrent delete cannot invalidate authorization', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld({ withSideEffects: true })
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    const token = pv.body?.data?.previewIdentity as string
+    expect(token).toBeTruthy()
+
+    const livePool = poolManager.get().getInternalPool()
+    const barrier = await livePool.connect()
+    const targetDeleter = await livePool.connect()
+    const barrierClass = 731_927
+    const barrierObject = Math.max(1, TS % 2_000_000_000)
+    const fnName = `earw_pause_${TS}`
+    const triggerName = `earw_pause_trg_${TS}`
+    let applying: Promise<Awaited<ReturnType<typeof revertExecute>>> | null = null
+    let deleting: Promise<void> | null = null
+    let deleteSettled = false
+    try {
+      await barrier.query('SELECT pg_advisory_lock($1::int, $2::int)', [barrierClass, barrierObject])
+      const barrierPid = Number((await barrier.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const deleterPid = Number((await targetDeleter.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+
+      // Pause the source UPDATE after plan authorization + foreign-target validation. At this point the
+      // recovery transaction must already hold FOR UPDATE on REC_TGT_ANCHOR.
+      await q(`
+        CREATE OR REPLACE FUNCTION ${fnName}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(${barrierClass}, ${barrierObject});
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await q(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE UPDATE ON meta_records
+        FOR EACH ROW WHEN (OLD.id = '${REC_A}')
+        EXECUTE FUNCTION ${fnName}()
+      `)
+
+      // SuperTest requests are lazy thenables; Promise.resolve starts the route immediately.
+      applying = Promise.resolve(revertExecute({ previewIdentity: token }))
+      let recoveryParked = false
+      for (let i = 0; i < 100; i++) {
+        const parked = await q(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_locks held
+               JOIN pg_locks waiter
+                 ON waiter.locktype = held.locktype
+                AND waiter.database IS NOT DISTINCT FROM held.database
+                AND waiter.classid IS NOT DISTINCT FROM held.classid
+                AND waiter.objid IS NOT DISTINCT FROM held.objid
+                AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid
+              WHERE held.pid = $1
+                AND held.locktype = 'advisory'
+                AND held.granted = true
+                AND waiter.granted = false
+           ) AS parked`,
+          [barrierPid],
+        )
+        recoveryParked = parked.rows[0]?.parked === true
+        if (recoveryParked) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(recoveryParked).toBe(true)
+
+      deleting = (async () => {
+        await targetDeleter.query('BEGIN')
+        try {
+          await targetDeleter.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TGT_SHEET)])
+          await targetDeleter.query(
+            'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+            [REC_TGT_ANCHOR, TGT_SHEET],
+          )
+          await targetDeleter.query(
+            'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+            [REC_TGT_ANCHOR],
+          )
+          await targetDeleter.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])
+          await targetDeleter.query('COMMIT')
+        } catch (error) {
+          await targetDeleter.query('ROLLBACK').catch(() => {})
+          throw error
+        }
+      })().finally(() => { deleteSettled = true })
+
+      // The target delete must park on recovery's authorization-stability row lock. Removing FOR UPDATE
+      // lets the delete finish before apply and makes this golden red (the FK remains the structural backstop).
+      let deleteParked = false
+      for (let i = 0; i < 100; i++) {
+        const state = await q('SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [deleterPid])
+        deleteParked = state.rows[0]?.wait_event_type === 'Lock'
+        if (deleteParked || deleteSettled) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      expect(deleteSettled).toBe(false)
+      expect(deleteParked).toBe(true)
+
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject])
+      const ex = await applying
+      expect(ex.status).toBe(200)
+      await deleting
+
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1 AND sheet_id = $2', [REC_TGT_ANCHOR, TGT_SHEET])).rowCount).toBe(0)
+      expect((await q('SELECT 1 FROM meta_links WHERE foreign_record_id = $1', [REC_TGT_ANCHOR])).rowCount).toBe(0)
+    } finally {
+      await barrier.query('SELECT pg_advisory_unlock($1::int, $2::int)', [barrierClass, barrierObject]).catch(() => {})
+      if (applying) await applying.catch(() => {})
+      if (deleting) await deleting.catch(() => {})
+      await targetDeleter.query('ROLLBACK').catch(() => {})
+      targetDeleter.release()
+      barrier.release()
+      await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_records`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${fnName}()`).catch(() => {})
+    }
+  })
+
+  test('doomed resurrect preview: discloses undelete set but mints NO executable token', async () => {
+    enableRecoveryExecute()
+    process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
+    const { anchorOp, seqBase } = await seedWorld()
+    // Record present at anchor, deleted after → resurrect candidate (inbound-unprovable)
+    const REC_DEL = `rec_earw_del_${TS}`
+    await sealOp(REC_DEL, [
+      { seq: String(seqBase - 50n), version: 1, action: 'create', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_pre_${TS}` },
+    ])
+    const { opId: deleteOp } = await sealOp(REC_DEL, [
+      { seq: String(seqBase + 1400n), version: 1, action: 'delete', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_post_${TS}` },
+    ])
+    const deleteRevisionId = String((await q(
+      `SELECT id::text AS id FROM meta_record_revisions
+       WHERE sheet_id = $1 AND record_id = $2 AND operation_id = $3::uuid`,
+      [SHEET, REC_DEL, deleteOp],
+    )).rows[0]?.id)
+    await q(
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,1,$4)`,
+      [REC_DEL, SHEET, JSON.stringify({ [F_STR]: 'was-at-anchor' }), deleteRevisionId],
+    )
+    await q(
+      `SELECT setval('meta_record_chain_seq', GREATEST((SELECT last_value FROM meta_record_chain_seq), $1::bigint), true)`,
+      [String(seqBase + 2000n)],
+    ).catch(() => {})
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteSupported).toBe(false)
+    expect(pv.body?.data?.undeleteBlockedReason).toBe('INBOUND_UNPROVABLE')
+    expect((pv.body?.data?.undeleteRecordIds as string[] | undefined)?.length ?? 0).toBeGreaterThanOrEqual(1)
+    // Doomed: no executable token (even if reverts are also present)
+    expect(pv.body?.data?.previewIdentity).toBeNull()
+  })
+
+  test('a post-anchor healed gap does not contaminate the trusted target generation', async () => {
+    enableRecoveryExecute()
+    const { anchorOp, seqBase } = await seedWorld()
+    // Current live is version 3 with only v1+v3 revisions (delete v2) on REC_A. The selected anchor is v1,
+    // so target-generation A validates only the checkpoint-to-anchor window; current projection separately
+    // proves that live equals the latest captured v3 snapshot.
+    await sealOp(REC_A, [
+      { seq: String(seqBase + 1500n), version: 3, action: 'update', snap: { [F_STR]: 'healed-v3' }, batchId: `batch_healed_${TS}` },
+    ])
+    await q('UPDATE meta_records SET version = 3, data = $1::jsonb WHERE id = $2 AND sheet_id = $3', [
+      JSON.stringify({ [F_STR]: 'healed-v3' }), REC_A, SHEET,
+    ])
+    await q('DELETE FROM meta_record_revisions WHERE record_id = $1 AND version = 2 AND sheet_id = $2', [REC_A, SHEET])
+    const pv = await revertPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.previewIdentity).toBeTruthy()
+    expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now/) // values-free
+  })
+
+  test('retention stop: reset refuses while meta revision retention is enabled', async () => {
+    process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
+    const { anchorOp } = await seedWorld()
+    const pv = await resetPreview({ anchorOperationId: anchorOp })
+    expect(pv.status).toBe(409)
+    expect(pv.body?.error?.code).toBe('RESET_RETENTION_CONFLICT')
+  })
+
+  test('non-admin cannot preview; wall-clock and exact-anchor both fail closed without data oracle for denied actors', async () => {
+    enableRecoveryExecute()
+    curPerms = ['multitable:read', 'multitable:write'] // no share → no canManageSheetAccess
+    const { anchorOp } = await seedWorld()
+    // Wall-clock is uniformly EXACT_ANCHOR_REQUIRED (400) before auth — no integrity/anchor oracle.
+    const wall = await revertPreview({ asOf: '2026-01-01T00:00:00.000Z' })
+    expect(wall.status).toBe(400)
+    expect(wall.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+    // Exact-anchor reaches the D2 admin gate and refuses 403 without disclosing plan/state.
+    const exact = await revertPreview({ anchorOperationId: anchorOp })
+    expect(exact.status).toBe(403)
+    expect(JSON.stringify(exact.body)).not.toMatch(/A-live-now|A-at-anchor|previewIdentity/)
+  })
+
+  test('share-capable read-only admin cannot mint a token for a plan execute would already forbid', async () => {
+    enableRecoveryExecute()
+    const { anchorOp } = await seedWorld()
+    curPerms = ['multitable:read', 'multitable:share']
+
+    const revert = await revertPreview({ anchorOperationId: anchorOp })
+    expect(revert.status).toBe(403)
+    expect(revert.body?.error?.code).toBe('FORBIDDEN')
+    expect(revert.body?.data?.previewIdentity).toBeUndefined()
+
+    const reset = await resetPreview({ anchorOperationId: anchorOp })
+    expect(reset.status).toBe(403)
+    expect(reset.body?.error?.code).toBe('FORBIDDEN')
+    expect(reset.body?.data?.previewIdentity).toBeUndefined()
+  })
+
+  test('NO-ORACLE: canManage + field visible=false full-read fail ⇒ 403 FORBIDDEN, never HISTORY_INCOMPLETE/token', async () => {
+    enableRecoveryExecute()
+    try {
+      const { anchorOp, seqBase } = await seedWorld()
+      // Healed gap would be HISTORY_INCOMPLETE if integrity ran before full-read
+      await sealOp(REC_A, [
+        { seq: String(seqBase + 1500n), version: 3, action: 'update', snap: { [F_STR]: 'healed-v3' }, batchId: `batch_oracle_${TS}` },
+      ])
+      await q('UPDATE meta_records SET version = 3, data = $1::jsonb WHERE id = $2 AND sheet_id = $3', [
+        JSON.stringify({ [F_STR]: 'healed-v3' }), REC_A, SHEET,
+      ])
+      await q('DELETE FROM meta_record_revisions WHERE record_id = $1 AND version = 2 AND sheet_id = $2', [REC_A, SHEET])
+      // Field permission that fails full-table-read (visible=false for actor).
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3', [SHEET, F_STR, ACTOR]).catch(() => {})
+      await q(
+        `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1,$2,'user',$3,false,false)`,
+        [SHEET, F_STR, ACTOR],
+      )
+      const pv = await revertPreview({ anchorOperationId: anchorOp })
+      expect(pv.status).toBe(403)
+      expect(pv.body?.error?.code).toBe('FORBIDDEN')
+      expect(pv.body?.error?.code).not.toBe('HISTORY_INCOMPLETE')
+      expect(pv.body?.error?.code).not.toBe('SHEET_TOO_LARGE')
+      expect(pv.body?.data?.previewIdentity).toBeUndefined()
+      expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now|A-at-anchor/)
+
+      // A non-system-admin with the broad manage capability must see the exact same refusal for an unknown
+      // sheet. Otherwise 404 vs 403 becomes a sheet-existence oracle before the conservative full-read gate.
+      const unknown = await request(app)
+        .post(`/api/multitable/sheets/sheet_earw_unknown_${TS}/revert-preview`)
+        .send({ anchorOperationId: anchorOp })
+      expect(unknown.status).toBe(403)
+      expect(unknown.body).toEqual(pv.body)
+
+      const knownExecute = await revertExecute({ previewIdentity: 'invalid-but-shape-valid' })
+      expect(knownExecute.status).toBe(403)
+      const unknownExecute = await request(app)
+        .post(`/api/multitable/sheets/sheet_earw_unknown_${TS}/revert-execute`)
+        .send({ previewIdentity: 'invalid-but-shape-valid' })
+      expect(unknownExecute.status).toBe(403)
+      expect(unknownExecute.body).toEqual(knownExecute.body)
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    }
+  })
+})
+
+// Fail-not-skip when this file is selected under the real-DB allowlist without DATABASE_URL.
+test('sentinel: the real-DB allowlist step must have DATABASE_URL (fail-not-skip, scoped to that step)', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('real-DB allowlist step is missing DATABASE_URL — the harness is broken, not legitimately skippable')
+  }
+  expect(true).toBe(true)
+})

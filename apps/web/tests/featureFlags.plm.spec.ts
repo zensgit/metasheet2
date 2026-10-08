@@ -53,7 +53,9 @@ describe('featureFlags plm gating', () => {
 
     expect(features.plm).toBe(false)
     expect(features.mode).toBe('platform')
-    expect(flags.resolveHomePath()).toBe('/attendance')
+    // #5392: the platform-mode default landing is now the 我的应用 apps page, not attendance —
+    // the assertion this replaces (`.toBe('/attendance')`) reds against the pre-fix store.
+    expect(flags.resolveHomePath()).toBe('/home')
     expect(flags.isPlmWorkbenchFocused()).toBe(false)
   })
 })

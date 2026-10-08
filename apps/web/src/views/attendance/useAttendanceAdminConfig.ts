@@ -6,6 +6,11 @@ import {
   type CalendarPolicyOverrideFormState,
   type CalendarPolicyOverrideWire,
 } from './attendanceCalendarPolicyOverrides'
+import {
+  DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+  type EmployeeQuickActionIcons,
+  resolveEmployeeQuickActionIcons,
+} from './attendanceEmployeeWorkspaceCommonIcons'
 
 type Translate = (en: string, zh: string) => string
 type SetStatusFn = (message: string, kind?: 'info' | 'error') => void
@@ -75,6 +80,7 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  employeeQuickActionIcons?: EmployeeQuickActionIcons
 }
 
 interface AttendanceRule {
@@ -206,6 +212,7 @@ export function useAttendanceAdminConfig({
     geoFenceLng: '',
     geoFenceRadius: '',
     minPunchIntervalMinutes: 1,
+    employeeQuickActionIcons: { ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS },
   })
 
   const ruleForm = reactive({
@@ -276,6 +283,11 @@ export function useAttendanceAdminConfig({
     settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
     settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
     settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
+    const icons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
+    settingsForm.employeeQuickActionIcons.makeup = icons.makeup
+    settingsForm.employeeQuickActionIcons.leave = icons.leave
+    settingsForm.employeeQuickActionIcons.overtime = icons.overtime
+    settingsForm.employeeQuickActionIcons.swap = icons.swap
   }
 
   function addHolidayOverride() {
@@ -430,6 +442,7 @@ export function useAttendanceAdminConfig({
         ipAllowlist,
         geoFence,
         minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
+        employeeQuickActionIcons: resolveEmployeeQuickActionIcons(settingsForm.employeeQuickActionIcons),
       }
 
       const response = await apiFetchWithTimeout('/api/attendance/settings', {

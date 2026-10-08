@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+/**
+ * Integration Guard scope classifier (governance slice, 2026-07-25).
+ *
+ * Extracted out of .github/workflows/integration-guard.yml's `id: changes` step (owner ruling) so the
+ * classification LOGIC is unit-testable directly (scripts/ops/integration-guard-required-wiring-
+ * contract.test.mjs drives `classify()` with synthetic file lists — plugin-only, web-only, both,
+ * neither, and a deeply-nested plugin path — instead of only asserting the workflow's YAML shape).
+ *
+ * INPUT: a NUL-delimited list of changed file paths on stdin (produced by the workflow step via
+ * `git diff --name-only -z <base> <head>`, or `git diff-tree --root --no-commit-id --name-only -z -r
+ * <head>` for a rootless/initial-commit base). NUL-delimited, not newline-delimited, because a path
+ * can legally contain a newline (or a space, which newline-splitting handles fine but NUL-delimiting
+ * is the only fully safe separator for arbitrary filenames on a POSIX filesystem).
+ *
+ * OUTPUT: exactly one line `relevant=true` or `relevant=false` on stdout, and — if $GITHUB_OUTPUT is
+ * set in the environment — the same line appended there. NEVER anything else: no `unknown`, no empty
+ * string, no default-falls-through-uninitialized state. This closes the owner-mandated mutation class
+ * "set the initial value to `relevant=unknown`" at the SOURCE — `relevant` here is a `Boolean`
+ * (classify() returns a JS boolean), not a free-form shell string that a future edit could set to any
+ * literal.
+ */
+
+import { readFileSync, appendFileSync, readdirSync } from 'node:fs'
+import { GUARDED_PATH_ENTRIES, isPrefixEntry, prefixOf } from './integration-guard-guarded-paths.mjs'
+
+/**
+ * @param {string} changedPath
+ * @param {readonly string[]} roster
+ * @returns {boolean}
+ */
+export function matchesGuardedPath(changedPath, roster) {
+  for (const entry of roster) {
+    if (isPrefixEntry(entry)) {
+      const prefix = prefixOf(entry)
+      if (changedPath === prefix || changedPath.startsWith(`${prefix}/`)) return true
+    } else if (changedPath === entry) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * @param {readonly string[]} changedFiles
+ * @param {readonly string[]} [roster]
+ * @returns {boolean}
+ */
+export function classify(changedFiles, roster = GUARDED_PATH_ENTRIES) {
+  for (const path of changedFiles) {
+    if (matchesGuardedPath(path, roster)) return true
+  }
+  return false
+}
+
+/**
+ * Splits a NUL-delimited buffer/string into a clean array of non-empty path strings.
+ * @param {Buffer | string} raw
+ * @returns {string[]}
+ */
+export function parseNulDelimited(raw) {
+  const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : raw
+  return text.split('\0').filter((p) => p.length > 0)
+}
+
+/**
+ * CASE-EXACT existence check. `fs.existsSync` is case-INSENSITIVE on the default macOS (APFS) and
+ * Windows filesystems this repo is often developed on, but the ubuntu-latest CI runner's filesystem is
+ * case-SENSITIVE, same as `git`'s own path matching. A roster entry mutated only in case (e.g.
+ * `apps/web/tests/jsonassist.spec.ts` instead of `JsonAssist.spec.ts`) would `existsSync()`-pass on a
+ * developer's Mac while silently never matching a real changed path in CI (git diff paths are exact-
+ * case). This walks each path segment via `readdirSync` and checks case-exact membership at every
+ * level, so it fails identically on every OS.
+ * @param {string} repoRoot
+ * @param {string} relativePath
+ * @returns {boolean}
+ */
+export function existsCaseExact(repoRoot, relativePath) {
+  const segments = relativePath.split('/').filter((s) => s.length > 0)
+  let currentDir = repoRoot
+  for (const segment of segments) {
+    let entries
+    try {
+      entries = readdirSync(currentDir)
+    } catch {
+      return false
+    }
+    if (!entries.includes(segment)) return false
+    currentDir = `${currentDir}/${segment}`
+  }
+  return true
+}
+
+/**
+ * Every non-prefix roster entry must resolve to a real file, and every prefix entry's directory must
+ * exist — closes the "rename a roster entry to a path that no longer exists" mutation class at the
+ * roster level (any entry, not just the one path an owner mutation happens to pick), CASE-EXACTLY (see
+ * existsCaseExact() above for why plain existsSync is not safe here).
+ * @param {readonly string[]} roster
+ * @param {string} repoRoot
+ * @returns {{ entry: string, resolvedPath: string }[]} entries that do NOT exist on disk
+ */
+export function findMissingRosterEntries(roster, repoRoot) {
+  const missing = []
+  for (const entry of roster) {
+    const resolvedPath = isPrefixEntry(entry) ? prefixOf(entry) : entry
+    if (!existsCaseExact(repoRoot, resolvedPath)) {
+      missing.push({ entry, resolvedPath })
+    }
+  }
+  return missing
+}
+
+// ---------------------------------------------------------------------------
+// CLI entrypoint — only runs when this file is executed directly (`node
+// scripts/ops/integration-guard-classify.mjs`), never when imported for tests.
+// ---------------------------------------------------------------------------
+
+function isMainModule() {
+  return import.meta.url === `file://${process.argv[1]}`
+}
+
+if (isMainModule()) {
+  const stdinBuf = readFileSync(0) // fd 0 = stdin
+  const changedFiles = parseNulDelimited(stdinBuf)
+  const relevant = classify(changedFiles)
+  const line = `relevant=${relevant}`
+
+  for (const path of changedFiles) {
+    process.stderr.write(`Integration Guard: changed path: ${path}\n`)
+  }
+  process.stderr.write(
+    relevant
+      ? 'Integration Guard: relevant changes detected.\n'
+      : 'Integration Guard: no relevant changes detected.\n',
+  )
+
+  process.stdout.write(`${line}\n`)
+
+  const outputFile = process.env.GITHUB_OUTPUT
+  if (outputFile) {
+    appendFileSync(outputFile, `${line}\n`)
+  }
+
+  process.exit(0)
+}

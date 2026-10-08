@@ -9,12 +9,37 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  MISSING_COMPONENT_DETAIL_LIMIT,
+  ROW_ERROR_LIMIT,
+  ROW_ERROR_LIMIT_CEILING,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
+  normalizeRootSelection,
   expandPlmProjectBom,
   summarizeBomExpansionForEvidence,
+  summarizeMissingComponents,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
+
+// F1c: the PURE 老系统 rules, exposed on __internals so a test can pin them without an adapter.
+// X5: `createRowErrorCollector` rides the same seam, so the cap's MEMORY bound can be asserted on
+// the structure itself rather than only through the length of an expansion's output.
+const {
+  __internals: { dashHierarchyRelationship, createRowErrorCollector, hasSheetMetalShape, hasMainDrawingShape, selectOrderRootCandidates },
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
+
+// The C3 planner, required HERE so one test can carry a declared source column the whole way:
+// source row -> expansion row -> the record actually written to plm_stock_preparation_main. Each
+// leg has its own suite; only an end-to-end assertion catches a value that is read and then dropped
+// at the hand-off, which is exactly what happened to 规格 before 备料主表 had a column for it.
+const { planStockPreparationConflicts } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
+
+// W3a: the revision builder, required HERE because the whole point of putting the missing-component
+// detail BESIDE `rowErrors` instead of inside them is that the revision cannot see it. Asserting
+// that against the REAL hasher is the only version of the claim worth making.
+const {
+  __internals: { buildRevision },
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -293,6 +318,132 @@ async function testFailClosedGuards() {
   }
 }
 
+// Hold-not-zero: a SQL NULL or blank Bom_ExAttr1 / order-detail quantity must
+// never silently coerce to 0 (Number(null) === 0 and Number('') === 0 are both
+// finite). Before this fix that zero multiplied down through every descendant
+// (totalQuantity = parent x 0), silently zeroing an entire subtree's demand —
+// the customer's legacy system's exact hazard. A row whose SOURCE quantity is
+// genuinely blank/null must be held as invalid_quantity, never planned as a
+// writable 0. A row whose source quantity is a STATED numeric 0 is a real
+// measured zero and must keep expanding exactly as before.
+async function testBlankOrNullQuantityHeldNotZeroed() {
+  function threeLevelData(bomExAttr1AtMidTree, orderDetailQuantity = '2') {
+    return baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: orderDetailQuantity }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Sub-assembly', Material: 'Iron', SysVer: 'V1' },
+        { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Fastener', Material: 'Copper', SysVer: 'V1' },
+      ],
+      DN_PDM_BomHeadInfo: [
+        { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+        { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', bom_able: true },
+      ],
+      DN_PDM_BomDetailsInfo: [
+        { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: bomExAttr1AtMidTree, sort_id: 1 },
+        { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4', sort_id: 1 },
+      ],
+    })
+  }
+
+  // (1) NULL quantity on a mid-tree node (PART-B, depth 1, with its own child
+  // PART-C beneath it): the row errors as invalid_quantity and the subtree
+  // (PART-C) must never be read or expanded with a silently zeroed total.
+  {
+    const { adapter, calls } = createAdapter(threeLevelData(null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a null mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'), 'the zero-quantity mid-tree row itself is never pushed')
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'), 'PART-C subtree is never read once its parent quantity is held')
+    assert.ok(!calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B'), 'expansion never descends into the held node to read its subtree')
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0), 'no row anywhere in this run carries a silently-zeroed totalQuantity')
+  }
+
+  // (2) Blank-string quantity on the same mid-tree node: identical hold.
+  {
+    const { adapter } = createAdapter(threeLevelData(''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(
+      result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child' && error.depth === 1),
+      'a blank-string mid-tree Bom_ExAttr1 is held as invalid_quantity, not coerced to 0',
+    )
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-B'))
+    assert.ok(!result.rows.some((row) => row.componentSourceId === 'PART-C'))
+    assert.ok(!result.rows.some((row) => row.totalQuantity === 0))
+  }
+
+  // Whitespace-only counts as blank too (isBlank trims before checking).
+  {
+    const { adapter } = createAdapter(threeLevelData('   '))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'child'))
+  }
+
+  // (3) A STATED numeric 0 mid-tree quantity is a real measured zero: it must
+  // keep expanding exactly as before, multiplying down as 0 (not held).
+  {
+    const { adapter } = createAdapter(threeLevelData(0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+    assert.equal(result.valid, true, 'a stated numeric 0 is a valid measured quantity, not an error')
+    assert.equal(result.status, 'expanded')
+    assert.ok(!result.rowErrors.some((error) => error.type === 'invalid_quantity'))
+    const partB = result.rows.find((row) => row.componentSourceId === 'PART-B')
+    const partC = result.rows.find((row) => row.componentSourceId === 'PART-C')
+    assert.ok(partB, 'PART-B still expands on a stated zero')
+    assert.equal(partB.rawQuantity, 0)
+    assert.equal(partB.totalQuantity, 0, 'stated zero multiplies down exactly as before')
+    assert.ok(partC, 'PART-C subtree still expands beneath a stated zero')
+    assert.equal(partC.totalQuantity, 0)
+  }
+
+  // Root order-detail quantity is the same parseQuantity() call site (relation
+  // 'root'): null/blank must hold there too, and a stated 0 must still expand.
+  {
+    const { adapter } = createAdapter(threeLevelData('4', null))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0, 'a null root order-detail quantity holds before any row is pushed')
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', ''))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 0))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, true, 'a stated numeric 0 root quantity is valid, not an error')
+    assert.equal(result.rows[0].rawQuantity, 0)
+    assert.equal(result.rows[0].totalQuantity, 0)
+  }
+
+  // (4) The existing not-a-number case is a different failure (garbled value,
+  // not absent) and must keep failing exactly as before — untouched by this
+  // fix. (Locked already in testFailClosedGuards; reasserted here for locality.)
+  {
+    const { adapter } = createAdapter(threeLevelData('4', 'not-a-number'))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    assert.equal(result.valid, false)
+    assert.ok(result.rowErrors.some((error) => error.type === 'invalid_quantity' && error.relation === 'root'))
+    assert.equal(result.rows.length, 0)
+  }
+}
+
 async function testScaleLimitsRemainDiagnosableAndValuesFree() {
   {
     const { adapter } = createAdapter(baseData({
@@ -408,14 +559,1617 @@ function testReadPlanValidation() {
   )
 }
 
+// 规格 and the material creation time: DECLARED on the read plan, DEFAULTED TO ABSENT.
+//
+// Neither is a core role of this vendor family (source-vendor-presets/dn-pdm-family.preset.json
+// declares exactly rowId/id/code/name/material/version on the part table). Where they live is a
+// per-deployment reading — a native view column on the measured customer catalog, a dictionary-
+// assigned generic slot on a stock one — so the shipped plan pins NEITHER. A deployment that has
+// them says so; one that does not gets absence, never a guessed column.
+async function testSpecAndCreateTimeAreDeclaredNotGuessed() {
+  // (1) UNDECLARED — the shipped default. The row must be byte-identical to the pre-change one:
+  //     no `spec` key, no `createTime` key, not even an empty one.
+  const undeclared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  assert.equal(undeclared.valid, true)
+  for (const row of undeclared.rows) {
+    assert.ok(!('spec' in row), 'an undeclared spec slot must not be guessed off a same-named column')
+    assert.ok(!('createTime' in row), 'an undeclared createTime slot must not be guessed either')
+  }
+
+  // (2) DECLARED — the same source rows, now with the deployment naming its own columns.
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  plan.part.createTimeField = 'Createtime'
+  const declared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200', Createtime: '2026-08-30T09:15:00' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20', Createtime: '2026-08-30T09:40:00' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declared.valid, true)
+  assert.equal(declared.rows[0].spec, 'DN1200', '规格 rides the expansion row once declared')
+  assert.equal(declared.rows[0].createTime, '2026-08-30T09:15:00', 'the material creation time rides it too')
+  assert.equal(declared.rows[1].spec, 'M20')
+
+  // (3) DECLARED but EMPTY on the source row — absence, never an empty string on the row.
+  const declaredButBlank = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: '   ', Createtime: null },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declaredButBlank.valid, true, 'a declared column the source leaves empty is not an error')
+  for (const row of declaredButBlank.rows) {
+    assert.ok(!('spec' in row), 'a blank declared spec is absent, not an empty string')
+    assert.ok(!('createTime' in row), 'a null declared createTime is absent')
+  }
+
+  // (4) The evidence must not start leaking the new values.
+  const evidenceJson = JSON.stringify(summarizeBomExpansionForEvidence(declared))
+  assert.ok(!evidenceJson.includes('DN1200'), 'evidence hides 规格')
+  assert.ok(!evidenceJson.includes('2026-08-30'), 'evidence hides the creation time')
+
+  // (5) The DECLARED batch rule survives plan normalization — it is the deployment's one
+  //     configuration surface, so dropping it here would make the rule unreachable.
+  assert.equal(normalizeStockPreparationBomReadPlan(plan).batchIdentity, undefined, 'absent stays absent')
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan({ ...plan, batchIdentity: { mode: 'material_create_hour' } }).batchIdentity,
+    { mode: 'material_create_hour' },
+  )
+  assert.deepEqual(
+    normalizeStockPreparationBomReadPlan(plan).part,
+    { object: 'DN_PDM_PartLibraryInfo', idField: 'OBJ_ID', codeField: 'IdentityNo', nameField: 'IdentityName', materialField: 'Material', versionField: 'SysVer', specField: 'Specification', createTimeField: 'Createtime' },
+    'both declared slots survive normalization as safe identifiers',
+  )
+  assert.throws(
+    () => normalizeStockPreparationBomReadPlan({ ...plan, part: { ...plan.part, specField: 'Specification;DROP' } }),
+    StockPreparationBomExpansionError,
+    'a declared spec slot is still held to the safe-identifier rule',
+  )
+}
+
+// THE LAST MILE: a declared NATIVE source column reaches the 备料 WORKING SHEET.
+//
+// testSpecAndCreateTimeAreDeclaredNotGuessed above proves the declared slot reaches the EXPANSION
+// ROW. This one carries it the rest of the way — expansion -> conflict plan -> the row that is
+// written to plm_stock_preparation_main — because until 备料主表 gained `componentSpec` the value
+// was read from the source and then dropped on the floor at exactly this step.
+//
+// The declared column is spelled `Specification`, a PLAIN NATIVE COLUMN NAME on the part object.
+// That is the measured shape on the customer catalog (docs/development/takeover-beiliao-20260821/
+// onsite-connection-test-runbook-20260901.md §0/§4), and the point of the assertion is that the
+// DECLARED-SLOT design expresses it directly: `readPlan.part.specField` is a column name, exactly
+// like the `codeField: 'IdentityNo'` / `materialField: 'Material'` next to it. No dictionary
+// indirection is required for a deployment whose 规格 is a native column, and none is assumed for
+// one whose 规格 is a dictionary slot — the plan names whichever the deployment actually has.
+async function testDeclaredNativeSpecColumnReachesTheMainTableRow() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  const expansion = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(expansion.valid, true)
+
+  const conflictPlan = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-native-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const records = conflictPlan.decisions.filter((decision) => decision.decision === 'add').map((decision) => decision.record)
+  assert.ok(records.length >= 2, 'the expanded rows become main-table writes')
+
+  const root = records.find((record) => record.componentCode === 'A-001')
+  const child = records.find((record) => record.componentCode === 'B-001')
+  assert.ok(root && child, 'both the root and its child are written')
+
+  // 规格 — read from the declared NATIVE column, all the way onto the working sheet.
+  assert.equal(root.componentSpec, 'DN1200', '规格 reaches 备料主表 from a declared native column')
+  assert.equal(child.componentSpec, 'M20')
+
+  // 父组件图号 / 父组件名称 — resolved from the in-batch parent, which is the only place they
+  // exist (the expansion carries the parent as an OBJ_ID).
+  assert.equal(child.parentComponentCode, 'A-001', '父组件图号 reaches 备料主表')
+  assert.equal(child.parentComponentName, 'Assembly', '父组件名称 reaches 备料主表')
+  assert.equal(Object.prototype.hasOwnProperty.call(root, 'parentComponentCode'), false, 'the root has no parent — absence, not a blank')
+
+  // All seven, on one written row, from one pull.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentCode', 'componentName', 'componentSpec', 'material', 'totalQuantity']) {
+    assert.ok(child[fieldId] !== undefined && child[fieldId] !== null && child[fieldId] !== '', `the seven fields all land: ${fieldId}`)
+  }
+
+  // UNDECLARED is still absence, end to end — a deployment whose 规格 lives somewhere else gets an
+  // empty column, not a guess off a same-named source column and not a failure.
+  const undeclared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1', Specification: 'M20' },
+      ],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  const undeclaredPlan = planStockPreparationConflicts({
+    expandedRows: undeclared.rows,
+    existingRows: [],
+    rowErrors: undeclared.rowErrors,
+    runId: 'run-no-native-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(undeclaredPlan.valid, true, 'no declared spec slot is not an error')
+  for (const decision of undeclaredPlan.decisions.filter((d) => d.decision === 'add')) {
+    assert.equal(Object.prototype.hasOwnProperty.call(decision.record, 'componentSpec'), false, 'no 规格 cell is invented')
+    // ...while the parent columns, which need no declaration, still land.
+    if (decision.record.componentCode === 'B-001') {
+      assert.equal(decision.record.parentComponentCode, 'A-001', '父组件图号 needs no per-deployment declaration')
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W3a — THE MISSING-COMPONENT SIDE CHANNEL
+// ---------------------------------------------------------------------------
+//
+// A `missing_component` rowError blocks the ENTIRE project — one of them makes the plan invalid and
+// apply refuses without an explicit hold — so an operator has to be told WHICH part numbers to
+// create. Part numbers are real customer values, and `expansion.rowErrors` is the one place they
+// must never go: it is hashed whole into the dry-run revision, it derives the anonymous-hold
+// identity, and its projection is what the confirmation ledger stores. Putting a part number there
+// would move every revision, supersede every pending hold on an affected project (wiping the
+// human-entered values with it) and write a customer value into the ledger.
+//
+// Hence the split: `expansion.missingComponents`, a top-level array beside `rowErrors`, and a
+// rowError payload that did not change by one byte. M-01..M-05 are the five guards that make that a
+// property of the code rather than a paragraph.
+
+// PART-Z is wanted by TWO different parents (so `parentCount` has something to count), PART-Y by one,
+// and neither exists in the part library. PART-A and PART-C do.
+function missingComponentData() {
+  return {
+    DN_PDM_PathExAttrInfo: [{ FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' }],
+    DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+    DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 2 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Frame', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-C', bom_id: 'BOM-C', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-Z', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-Y', Bom_ExAttr1: '1', sort_id: 2 },
+      { bom_pid: 'BOM-C', part_id: 'PART-Z', Bom_ExAttr1: '1', sort_id: 1 },
+    ],
+  }
+}
+
+const REVISION_ACTION = Object.freeze({
+  actionId: 'plm.stock-preparation.pull-bom.v1',
+  source: { externalSystemId: 'ext_plm', workspaceId: null, readPlan: null },
+  target: { sheetId: 'sheet_main', objectId: 'plm_stock_preparation_main', fieldIdMap: {} },
+})
+
+// M-01 / M-02 / M-05: the rowError shape, the revision, and the evidence.
+async function testMissingComponentDetailNeverReachesTheHashedSurfaces() {
+  const { adapter } = createAdapter(missingComponentData())
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.equal(result.valid, false, 'a missing component fails the expansion')
+  const missingRowErrors = result.rowErrors.filter((entry) => entry.type === 'missing_component')
+  assert.equal(missingRowErrors.length, 3, 'three probes found nothing (PART-Z twice, PART-Y once)')
+
+  // M-01 THE ROWERROR PAYLOAD IS FROZEN. Not "contains no part number" — the exact key set, so an
+  // added key of ANY name is red. This is the assertion that keeps the revision, the identity and
+  // the ledger safe all at once, which is why it is stated as an equality and not as an absence.
+  for (const rowError of missingRowErrors) {
+    assert.deepEqual(
+      Object.keys(rowError),
+      ['type', 'field', 'depth'],
+      'missing_component rowErrors carry {type, field, depth} and nothing else',
+    )
+  }
+  assert.equal(
+    JSON.stringify(result.rowErrors).includes('PART-Z'),
+    false,
+    'no part number reaches the rowError array by any route',
+  )
+
+  // The side channel itself, in the shape the response contract froze. ONE ENTRY PER PART NUMBER:
+  // the collector is keyed, so the counts are already aggregated when the detail leaves the expander.
+  assert.ok(Array.isArray(result.missingComponents), 'the side channel is a top-level array')
+  assert.equal(result.missingComponents.length, 2, 'one entry per distinct PART NUMBER, not per probe')
+  assert.equal(result.missingComponentDistinctCount, 2, 'and the uncapped id count agrees with it here')
+  const zed = result.missingComponents.find((entry) => entry.componentSourceId === 'PART-Z')
+  assert.equal(zed.occurrenceCount, 2, 'PART-Z was wanted by two BOM positions')
+  assert.equal(zed.parentCount, 2, '…under two different parents')
+  assert.equal(zed.parentSourceId, 'PART-A', 'the FIRST place it was wanted is what the entry names')
+  assert.equal(zed.bomId, 'BOM-A')
+  for (const entry of result.missingComponents) {
+    assert.deepEqual(
+      Object.keys(entry),
+      ['componentSourceId', 'parentSourceId', 'bomId', 'path', 'depth', 'occurrenceCount', 'parentCount'],
+      'the frozen detail shape',
+    )
+    assert.equal(entry.depth, 1, 'these are all first-level children')
+    assert.deepEqual(JSON.parse(entry.path)[1], entry.componentSourceId, 'path ends at the part that was wanted')
+  }
+
+  // M-02 THE REVISION DOES NOT MOVE. Compared against the SAME expansion with the keys deleted —
+  // which is exactly the object shape this module produced before W3a — through the real hasher.
+  const stripped = clone(result)
+  delete stripped.missingComponents
+  delete stripped.missingComponentDistinctCount
+  assert.equal(Object.prototype.hasOwnProperty.call(stripped, 'missingComponents'), false)
+  const revisionArgs = (expansion) => ({
+    action: REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+  assert.equal(
+    buildRevision(revisionArgs(result)),
+    buildRevision(revisionArgs(stripped)),
+    'M-02: the dry-run revision is blind to the missing-component detail — no stored revision moves, no pending hold is superseded',
+  )
+
+  // M-05 THE EVIDENCE DOES NOT MOVE. Same clause as the values-free assertions above it in this file.
+  const evidence = summarizeBomExpansionForEvidence(result)
+  const evidenceJson = JSON.stringify(evidence)
+  for (const partNumber of ['PART-Z', 'PART-Y', 'BOM-A', 'BOM-C']) {
+    assert.equal(evidenceJson.includes(partNumber), false, `evidence hides ${partNumber}`)
+  }
+  assert.equal('missingComponents' in evidence, false, 'evidence gains no key at all')
+  // …and neither does the values-free summary the evidence is projected from.
+  assert.equal('missingComponents' in result.summary, false, 'summary gains no key at all')
+  assert.ok(result.summary.errorTypes.includes('missing_component'), 'the values-free half still SAYS there are missing components')
+}
+
+// The key is present on every return path, so no consumer has to ask.
+async function testMissingComponentsKeyIsPresentOnEveryReturnPath() {
+  const { adapter: emptyAdapter } = createAdapter({ DN_PDM_PathExAttrInfo: [] })
+  const notFound = await expandPlmProjectBom({ sourceAdapter: emptyAdapter, projectNo: 'P-404' })
+  assert.equal(notFound.status, 'not_found')
+  assert.deepEqual(notFound.missingComponents, [], 'not_found carries an empty array')
+
+  const failing = await expandPlmProjectBom({
+    sourceAdapter: { async read() { const error = new Error('driver down'); error.code = 'X'; throw error } },
+    projectNo: 'P-001',
+  })
+  assert.equal(failing.status, 'failed')
+  assert.deepEqual(failing.missingComponents, [], 'a failed root read carries an empty array')
+
+  const { adapter } = createAdapter(baseData())
+  const ok = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(ok.status, 'expanded')
+  assert.deepEqual(ok.missingComponents, [], 'a clean expansion carries an empty array')
+
+  // The bounded (large-BOM) path reaches the same return.
+  const { adapter: boundedAdapter } = createAdapter(missingComponentData())
+  const bounded = await expandPlmProjectBom({ sourceAdapter: boundedAdapter, projectNo: 'P-001', maxRows: 1 })
+  assert.ok(Array.isArray(bounded.missingComponents), 'the bounded path carries the key too')
+
+  // …and so does the companion count, on every one of them.
+  for (const [label, expansion] of [['not_found', notFound], ['failed root read', failing], ['clean', ok], ['bounded', bounded]]) {
+    assert.equal(typeof expansion.missingComponentDistinctCount, 'number', `${label} carries the distinct count`)
+  }
+}
+
+// A missing part named DIRECTLY by the order detail: depth 0, no parent, no BOM head.
+async function testMissingRootComponentCarriesNullParentAndBom() {
+  const data = missingComponentData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-ROOTLESS', quantity: '1', sort_id: 1 }]
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.deepEqual(result.missingComponents, [{
+    componentSourceId: 'PART-ROOTLESS',
+    parentSourceId: null,
+    bomId: null,
+    path: JSON.stringify(['PART-ROOTLESS']),
+    depth: 0,
+    occurrenceCount: 1,
+    parentCount: 1,
+  }])
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.items[0].parentCount, 1, '"wanted directly by the order" is one place it is wanted')
+}
+
+// `ambiguous_component` gets no side channel — see readPart's header for why.
+async function testAmbiguousComponentOpensNoValueChannel() {
+  const data = missingComponentData()
+  data.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-A', IdentityNo: 'A-002', IdentityName: 'Assembly (dup)', SysVer: 'V1' })
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.ok(result.rowErrors.some((entry) => entry.type === 'ambiguous_component'), 'the duplicate is reported')
+  assert.equal(
+    JSON.stringify(result.missingComponents).includes('PART-A'),
+    false,
+    'an ambiguous component contributes nothing to the value channel',
+  )
+}
+
+// M-03/M-04 live in stock-preparation-conflict-planner.test.cjs (identity + ledger projection).
+// Here: what the summary itself promises the frontend.
+async function testMissingComponentSummaryContract() {
+  const { adapter } = createAdapter(missingComponentData())
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  const summary = summarizeMissingComponents(result)
+
+  assert.deepEqual(Object.keys(summary), ['distinctCount', 'probeCount', 'truncated', 'items'], 'the frozen response shape')
+  assert.equal(summary.distinctCount, 2, 'ONE ROW PER PART NUMBER — creating a part is a per-part job')
+  assert.equal(summary.probeCount, 3, 'three BOM positions wanted a part that does not exist')
+  assert.equal(summary.truncated, false)
+  assert.deepEqual(
+    summary.items.map((item) => item.componentSourceId),
+    ['PART-Z', 'PART-Y'],
+    'occurrenceCount descending: the part blocking the most positions is first',
+  )
+  assert.deepEqual(summary.items[0], {
+    componentSourceId: 'PART-Z',
+    parentSourceId: 'PART-A',
+    bomId: 'BOM-A',
+    path: JSON.stringify(['PART-A', 'PART-Z']),
+    depth: 1,
+    occurrenceCount: 2,
+    parentCount: 2,
+  }, 'parent/bom/path/depth are the FIRST place it was wanted; parentCount says how many wanted it')
+  assert.equal(summary.items[1].parentCount, 1)
+
+  // The tie-break is total, so the same expansion always summarizes identically.
+  const tied = summarizeMissingComponents({
+    missingComponents: [
+      { componentSourceId: 'PART-B', parentSourceId: 'P1', bomId: 'B1', path: 'x', depth: 1 },
+      { componentSourceId: 'PART-A', parentSourceId: 'P1', bomId: 'B1', path: 'x', depth: 1 },
+    ],
+  })
+  assert.deepEqual(tied.items.map((item) => item.componentSourceId), ['PART-A', 'PART-B'], 'equal counts break by part number ascending')
+
+  // A caller-supplied limit truncates the ITEMS and says so, while the totals stay true.
+  const clipped = summarizeMissingComponents(result, { limit: 1 })
+  assert.equal(clipped.items.length, 1)
+  assert.equal(clipped.truncated, true)
+  assert.equal(clipped.distinctCount, 2, 'distinctCount is the real total, not the page size')
+  assert.equal(clipped.probeCount, 3)
+
+  // An expansion that never had the key (a stored artifact from before W3a) summarizes to empty
+  // rather than throwing.
+  assert.deepEqual(summarizeMissingComponents({}), { distinctCount: 0, probeCount: 0, truncated: false, items: [] })
+}
+
+/** A BOM under PART-A whose child positions are `[partId, howManyPositions]`, none of them in stock. */
+function bomOfMissingParts(spec) {
+  const data = missingComponentData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
+  const details = []
+  for (const [partId, count] of spec) {
+    for (let i = 0; i < count; i += 1) {
+      details.push({ bom_pid: 'BOM-A', part_id: partId, Bom_ExAttr1: '1', sort_id: details.length })
+    }
+  }
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+// THE COLLECTOR IS CAPPED BY DISTINCT PART NUMBER, not by probe — and the difference is correctness,
+// not list length. An empty part library against a wide BOM must not accumulate an unbounded pile of
+// part numbers on a read whose whole contract is that it is bounded; but the cap must cost the list
+// a WHOLE PART, never a wrong count for a part that IS on it.
+async function testMissingComponentCollectionIsCappedByDistinctPart() {
+  const overflow = MISSING_COMPONENT_DETAIL_LIMIT + 37
+  const data = bomOfMissingParts(
+    Array.from({ length: overflow }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, 1]),
+  )
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.equal(result.missingComponents.length, MISSING_COMPONENT_DETAIL_LIMIT, 'the collector stops carrying DETAIL at the cap')
+  assert.equal(result.missingComponentDistinctCount, overflow, 'but it keeps counting distinct part numbers past it')
+  assert.equal(
+    result.rowErrors.filter((entry) => entry.type === 'missing_component').length,
+    overflow,
+    'every probe past the cap is still REPORTED — it just stops carrying a value',
+  )
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, overflow, 'distinctCount is the TRUE total, not the page size')
+  assert.equal(summary.items.length, MISSING_COMPONENT_DETAIL_LIMIT, 'while the items stay bounded')
+  assert.equal(summary.probeCount, overflow, 'the probe total is the truth, taken from the uncapped rowErrors')
+  assert.equal(summary.truncated, true, 'and the caller is told the list is not the whole story')
+}
+
+/**
+ * THE COUNTING BUG THE PER-PROBE CAP HAD, as two witnesses. Both were RED before the collector was
+ * keyed by part number, and the second is the one that would have cost an operator a whole day:
+ *
+ *   199 positions want A, then 300 want B  ->  the list said [A:199, B:1]
+ *   200 positions want A, then 300 want B  ->  B WAS NOT IN THE LIST AT ALL
+ *
+ * The operator creates every part the list names, re-runs, and the project is still held — by the
+ * part the list dropped. And the ordering ("create the most-blocking part first") inverted in
+ * exactly the wide-BOM case the ordering exists for.
+ */
+async function testTheCapCostsAWholePartNeverAWrongCount() {
+  for (const [label, aPositions] of [['under the cap', 199], ['exactly at the cap', MISSING_COMPONENT_DETAIL_LIMIT]]) {
+    const { adapter } = createAdapter(bomOfMissingParts([['PART-A-MISSING', aPositions], ['PART-B-MISSING', 300]]))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    const summary = summarizeMissingComponents(result)
+
+    assert.equal(summary.distinctCount, 2, `${label}: two parts are missing, however many positions want them`)
+    assert.equal(summary.probeCount, aPositions + 300, `${label}: every position is counted`)
+    assert.equal(summary.truncated, false, `${label}: nothing was dropped — two parts fit in any cap`)
+    assert.deepEqual(
+      summary.items.map((item) => [item.componentSourceId, item.occurrenceCount]),
+      [['PART-B-MISSING', 300], ['PART-A-MISSING', aPositions]],
+      `${label}: B is present with its REAL count, and sorts first because it blocks the most`,
+    )
+    assert.equal(summary.items[0].parentCount, 1, `${label}: all 300 positions are under the one parent`)
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// D-C: the `rowErrors` cap.
+//
+// The cheapest possible rowError generator, on purpose: a BOM detail row whose component id is
+// blank fails at `toKey` and never reaches `readPart`, so N rowErrors cost N array entries and zero
+// extra source reads. That keeps a 6001-position fixture a sub-second test.
+// ---------------------------------------------------------------------------------------------
+function bomOfBlankComponentIds(count, { badQuantityPositions = 0, quantitiesFirst = false } = {}) {
+  const data = baseData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
+  const blanks = []
+  for (let i = 0; i < count; i += 1) {
+    blanks.push({ bom_pid: 'BOM-A', part_id: '', Bom_ExAttr1: '1' })
+  }
+  // A SECOND type, so the per-type totals have something to be wrong about and the retained sample
+  // demonstrably drops a whole type when the other block fills the cap.
+  const badQuantities = []
+  for (let i = 0; i < badQuantityPositions; i += 1) {
+    badQuantities.push({ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 'not-a-number' })
+  }
+  // X5 — THE PRODUCTION ORDER, made a knob. The expander walks `DN_PDM_BomDetailsInfo` in the order
+  // the source hands it back, so which type it meets FIRST is a property of the source, not of the
+  // batch. Flipping the two blocks is the whole of the two-order probe below.
+  const details = (quantitiesFirst ? badQuantities.concat(blanks) : blanks.concat(badQuantities))
+    .map((detail, index) => ({ ...detail, sort_id: index }))
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+async function expandBlankComponentBom(count, options = {}) {
+  const { adapter } = createAdapter(bomOfBlankComponentIds(count, options))
+  return expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', ...(options.expand || {}) })
+}
+
+const ROW_ERROR_TRUNCATION_KEYS = ['rowErrorsTotal', 'rowErrorsRetained', 'rowErrorsTruncated', 'rowErrorTypeCounts']
+
+function revisionOf(expansion) {
+  return buildRevision({
+    action: REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+}
+
+// (a) THE BOUNDARY. 4999 / 5000 / 5001 — the last two are the ones that matter, because "at the cap"
+// must still be an untruncated expansion or the stanza would appear on a project that lost nothing.
+async function testRowErrorCapBoundary() {
+  for (const [count, expected] of [
+    [ROW_ERROR_LIMIT - 1, { length: ROW_ERROR_LIMIT - 1, truncated: false }],
+    [ROW_ERROR_LIMIT, { length: ROW_ERROR_LIMIT, truncated: false }],
+    [ROW_ERROR_LIMIT + 1, { length: ROW_ERROR_LIMIT, truncated: true }],
+  ]) {
+    const result = await expandBlankComponentBom(count)
+    const label = `${count} rowErrors`
+    assert.equal(result.status, 'failed', `${label}: rowErrors still fail the expansion`)
+    assert.equal(result.rowErrors.length, expected.length, `${label}: the ARRAY is bounded by the cap`)
+
+    if (!expected.truncated) {
+      for (const key of ROW_ERROR_TRUNCATION_KEYS) {
+        assert.equal(key in result.summary, false, `${label}: an expansion that lost nothing mounts no ${key}`)
+      }
+      continue
+    }
+    assert.equal(result.summary.rowErrorsTruncated, true, `${label}: and the summary says so`)
+    assert.equal(result.summary.rowErrorsTotal, count, `${label}: the TOTAL is the truth, not the array length`)
+    assert.equal(result.summary.rowErrorsRetained, ROW_ERROR_LIMIT, `${label}: alongside what was kept`)
+    assert.deepEqual(
+      result.summary.rowErrorTypeCounts,
+      { missing_component_source_id: count },
+      `${label}: per-type counts accumulate past the cap too`,
+    )
+  }
+
+  // THE COUNTS ARE PER TYPE, and a type whose every occurrence was dropped still has to be named.
+  //
+  // X5 CHANGED WHICH TYPE THAT IS, and nothing else here. The cap keeps the N entries that sort
+  // FIRST by row identity, so the type that loses every slot is the one that sorts LAST —
+  // `missing_component_source_id`, not `invalid_quantity`. The fixture is flipped to match (5000
+  // unparseable quantities fill the sample, 7 blanks are refused); the claim under test is
+  // unchanged, and it is now a claim about the SET rather than about who arrived first.
+  const mixed = await expandBlankComponentBom(7, { badQuantityPositions: ROW_ERROR_LIMIT })
+  assert.equal(mixed.rowErrors.length, ROW_ERROR_LIMIT)
+  assert.equal(
+    mixed.rowErrors.some((entry) => entry.type === 'missing_component_source_id'),
+    false,
+    'the retained sample contains no missing_component_source_id at all',
+  )
+  assert.deepEqual(mixed.summary.rowErrorTypeCounts, {
+    invalid_quantity: ROW_ERROR_LIMIT,
+    missing_component_source_id: 7,
+  }, 'but the per-type totals count the seven the sample never kept')
+  assert.ok(
+    mixed.summary.errorTypes.includes('missing_component_source_id'),
+    'and errorTypes names the type whose every occurrence the cap dropped — otherwise the summary would say the project has no such defect',
+  )
+  // …and the SAME seven are dropped when the source hands the two blocks back the other way round.
+  // Before X5 this was the opposite sample entirely: the blanks came first, so they took every slot
+  // and `invalid_quantity` was the type that vanished.
+  const mixedReversed = await expandBlankComponentBom(7, {
+    badQuantityPositions: ROW_ERROR_LIMIT,
+    quantitiesFirst: true,
+  })
+  assert.deepEqual(mixedReversed.rowErrors, mixed.rowErrors, 'the retained sample is the same sample in either production order')
+  assert.deepEqual(mixedReversed.summary, mixed.summary, 'and so is the whole summary')
+
+  // Evidence stays values-free: integers, a boolean, and the type tokens `errorTypes` already
+  // publishes. Nothing customer-shaped can ride the stanza.
+  const evidence = summarizeBomExpansionForEvidence(mixed)
+  assert.equal(evidence.rowErrorsTruncated, true)
+  assert.equal(evidence.rowErrorsTotal, ROW_ERROR_LIMIT + 7)
+  assert.equal(evidence.rowErrorsRetained, ROW_ERROR_LIMIT)
+  assert.deepEqual(evidence.rowErrorTypeCounts, mixed.summary.rowErrorTypeCounts)
+  const evidenceJson = JSON.stringify(evidence)
+  for (const value of ['P-001', 'PART-A', 'PART-B', 'not-a-number']) {
+    assert.equal(evidenceJson.includes(value), false, `truncation evidence hides ${value}`)
+  }
+}
+
+// (b) THE BASELINE. Under the cap, the capped expander and an effectively-uncapped one must produce
+// the SAME OBJECT — not "the same modulo the new keys". Stated as a deepEqual against a run with the
+// limit raised to the ceiling, plus an equality through the REAL revision hasher, because "no
+// revision moves" is the only version of the promise a deployment can act on.
+async function testUnderTheCapIsByteIdenticalToAnUncappedExpansion() {
+  const count = ROW_ERROR_LIMIT - 1
+  const capped = await expandBlankComponentBom(count)
+  const uncapped = await expandBlankComponentBom(count, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING } })
+
+  assert.deepEqual(capped.rowErrors, uncapped.rowErrors, 'the array is untouched below the cap')
+  assert.deepEqual(capped.summary, uncapped.summary, 'so is the whole values-free summary')
+  assert.deepEqual(
+    summarizeBomExpansionForEvidence(capped),
+    summarizeBomExpansionForEvidence(uncapped),
+    'so is the evidence projection',
+  )
+  assert.equal(revisionOf(capped), revisionOf(uncapped), 'and the dry-run revision does not move')
+
+  // The stanza is CONDITIONAL, so an under-cap summary's key set is the pre-cap one exactly. Stated
+  // as a key-set equality rather than four absences: a fifth key of any name is red too.
+  assert.deepEqual(
+    Object.keys(capped.summary).filter((key) => key.startsWith('rowError')),
+    [],
+    'an under-cap summary mounts no rowError* key whatsoever',
+  )
+
+  // The clean path — the overwhelmingly common one — is the same claim with zero rowErrors.
+  const { adapter } = createAdapter(baseData())
+  const clean = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(clean.status, 'expanded')
+  assert.deepEqual(Object.keys(clean.summary).filter((key) => key.startsWith('rowError')), [])
+  assert.deepEqual(
+    Object.keys(summarizeBomExpansionForEvidence(clean)).filter((key) => key.startsWith('rowError')),
+    [],
+    'and the evidence stanza a clean expansion produces is the pre-cap one, key for key',
+  )
+}
+
+// (c) OVER THE CAP: deterministic, and NOT confusable with a different overflowing project.
+//
+// The second half is the reason the revision had to learn about the truncation at all. 5001 blanks
+// and 6001 blanks produce byte-identical `rows`, `errors` AND retained `rowErrors` — the sample
+// cannot tell them apart. Without the overflow facts in the hash they would share a revision, and
+// one project's dry-run token would validate against the other's plan.
+async function testOverTheCapIsDeterministicAndDistinguishable() {
+  const first = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  const again = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  assert.deepEqual(first.rowErrors, again.rowErrors, 'the retained prefix is the same prefix every time')
+  assert.deepEqual(first.summary, again.summary, 'and so is the summary')
+  assert.equal(revisionOf(first), revisionOf(again), 'so the same input yields the same revision')
+
+  const bigger = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1001)
+  assert.deepEqual(bigger.rowErrors, first.rowErrors, 'the two projects share their retained sample exactly…')
+  assert.deepEqual(bigger.rows, first.rows, '…and their rows…')
+  assert.deepEqual(bigger.errors, first.errors, '…and their global errors')
+  assert.notEqual(bigger.summary.rowErrorsTotal, first.summary.rowErrorsTotal, 'only the totals differ')
+  assert.notEqual(
+    revisionOf(bigger),
+    revisionOf(first),
+    'and that alone must move the revision — otherwise two different overflowing projects share a dry-run token',
+  )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X5: WHICH entries the cap keeps. D-C bounded the sample and X4 took the truncated sample out of
+// the revision hash; what survived both was that the SELECTION followed the source's reading order,
+// so two reads of one batch kept entries of different TYPES, planned different conflictTypes and
+// 409'd. The five tests below are the whole claim: (①) under the cap nothing moves, (②) past it the
+// surviving set is order-blind ACROSS types and (②b) WITHIN one type — the half the sort key's
+// content tiebreaker owns, and the only half that is load-bearing on real payloads — (③) the totals
+// stay true, (④) the structure stays bounded by N.
+// ---------------------------------------------------------------------------------------------
+
+// ① THE ASYMMETRY, PINNED. Under the cap the sample is the WHOLE set, so no selection is happening
+// and the entries stay in TRAVERSAL order — the order the expander MET the defects, which is what
+// an operator reads out of the dry-run response. Not, to correct the reason this comment used to
+// give, because sorting would move an under-cap revision: it would not, and the assertion at the
+// bottom of this test is the proof — two different under-cap orders already hash to ONE revision,
+// so canonicalising the array would buy nothing there. This test is what fails if a later cut
+// decides to canonicalise the under-cap array anyway.
+async function testUnderTheCapTheSampleStaysInTraversalOrder() {
+  const blanksFirst = await expandBlankComponentBom(3, {
+    badQuantityPositions: 2,
+    expand: { rowErrorLimit: 10 },
+  })
+  assert.deepEqual(
+    blanksFirst.rowErrors.map((entry) => entry.type),
+    ['missing_component_source_id', 'missing_component_source_id', 'missing_component_source_id', 'invalid_quantity', 'invalid_quantity'],
+    'under the cap the sample is in the order the expander met the defects, NOT in sort-key order',
+  )
+  assert.deepEqual(
+    Object.keys(blanksFirst.summary).filter((key) => key.startsWith('rowError')),
+    [],
+    'and an under-cap expansion still mounts no overflow stanza',
+  )
+
+  // The other production order is a DIFFERENT array here, and that is correct: nothing was dropped,
+  // so both arrays carry the same five entries and the revision hasher is what makes the ORDER
+  // immaterial (X4's canonicalHashOrder). X5 is about the SELECTION, and there is none to make.
+  const quantitiesFirst = await expandBlankComponentBom(3, {
+    badQuantityPositions: 2,
+    quantitiesFirst: true,
+    expand: { rowErrorLimit: 10 },
+  })
+  assert.deepEqual(
+    quantitiesFirst.rowErrors.map((entry) => entry.type),
+    ['invalid_quantity', 'invalid_quantity', 'missing_component_source_id', 'missing_component_source_id', 'missing_component_source_id'],
+    'the under-cap array follows the source order on this side too',
+  )
+  assert.equal(
+    revisionOf(quantitiesFirst),
+    revisionOf(blanksFirst),
+    'and the two under-cap orders still hash to ONE revision — that half was already X4',
+  )
+}
+
+// ② + ③ THE JUDGE'S PROBE, generalised. One batch, two source orders, a cap small enough that the
+// selection is forced: the retained entries must be the SAME entries, and the totals must stay the
+// true totals of the whole batch rather than of the sample.
+async function testTheTruncatedSampleIsTheSameSetInEitherProductionOrder() {
+  const blanks = 6
+  const badQuantities = 5
+  const total = blanks + badQuantities
+  const trueTypeCounts = { invalid_quantity: badQuantities, missing_component_source_id: blanks }
+
+  // rowErrorLimit=1 is the裁判 probe verbatim: before X5 one order kept the blank and the other kept
+  // the bad quantity, so the plans disagreed on conflictTypes and apply 409'd.
+  for (const rowErrorLimit of [1, 2, 5, 6, 10]) {
+    const label = `rowErrorLimit=${rowErrorLimit}`
+    const forward = await expandBlankComponentBom(blanks, {
+      badQuantityPositions: badQuantities,
+      expand: { rowErrorLimit },
+    })
+    const reversed = await expandBlankComponentBom(blanks, {
+      badQuantityPositions: badQuantities,
+      quantitiesFirst: true,
+      expand: { rowErrorLimit },
+    })
+
+    assert.equal(forward.rowErrors.length, rowErrorLimit, `${label}: the sample is the cap`)
+    assert.deepEqual(reversed.rowErrors, forward.rowErrors, `${label}: and it is the SAME sample in either source order`)
+    assert.equal(revisionOf(reversed), revisionOf(forward), `${label}: so both dry-runs carry one revision`)
+
+    // ③ The counts are of the BATCH, not of the sample, on both sides.
+    assert.equal(forward.summary.rowErrorsTotal, total, `${label}: the total is the truth`)
+    assert.equal(forward.summary.rowErrorsRetained, rowErrorLimit, `${label}: alongside what was kept`)
+    assert.equal(forward.summary.rowErrorsTruncated, true, `${label}: and the overflow is stated`)
+    assert.deepEqual(forward.summary.rowErrorTypeCounts, trueTypeCounts, `${label}: per-type totals count every occurrence`)
+    assert.deepEqual(reversed.summary, forward.summary, `${label}: the summary is order-blind too`)
+    assert.deepEqual(
+      forward.summary.errorTypes,
+      ['invalid_quantity', 'missing_component_source_id'],
+      `${label}: errorTypes still names BOTH types, including one the sample may hold none of`,
+    )
+  }
+
+  // The composition itself, stated rather than implied: with one slot the surviving entry is the
+  // one the ROW IDENTITY orders first — invalid_quantity — whichever block the source read first.
+  const oneSlot = await expandBlankComponentBom(blanks, {
+    badQuantityPositions: badQuantities,
+    expand: { rowErrorLimit: 1 },
+  })
+  assert.deepEqual(oneSlot.rowErrors.map((entry) => entry.type), ['invalid_quantity'])
+}
+
+/**
+ * ②b — THE SAME CLAIM WHERE THE TYPE CANNOT DECIDE IT, which is where this guard actually lives.
+ *
+ * The probe above flips two BLOCKS of different types, so `type` alone settles the order and the
+ * content tiebreaker is never consulted. On real payloads that is the common case in reverse: NO
+ * rowError this module emits carries `path` / `idempotencyKey` / `componentCode` (see
+ * ROW_ERROR_IDENTITY_FIELDS' header), so the identity half collapses to the type token and the
+ * content half is the ONLY thing that can tell two same-type defects apart. Why ② was not enough,
+ * measured: delete the content comparison (or stub `stableRowErrorContent` to ''), and ② — plus the
+ * whole table-actions suite — stays green while the entry this fixture retains flips with the source
+ * order. So this test — its one-slot assertion is what goes red under either of those mutations.
+ *
+ * THE FIXTURE IS A NESTED BOM, because depth is the cheapest content difference the expander will
+ * actually produce:
+ *
+ *   PART-A ─ BOM-A ─┬─ PART-C   bad quantity  -> invalid_quantity depth 1
+ *                   └─ PART-D   good quantity
+ *                        └ BOM-D ─ PART-E  bad quantity -> invalid_quantity depth 2
+ *
+ * Expansion is depth-first (`expandChildren` recurses inside the detail loop), so swapping the two
+ * SIBLINGS under BOM-A swaps which of the two `invalid_quantity` entries is produced first — and
+ * nothing else: both source orders carry the identical set of detail rows, `sort_id` included, so
+ * this really is one batch read twice rather than two batches.
+ */
+function nestedQuantityDefectBom({ subtreeFirst = false } = {}) {
+  const badChild = { bom_pid: 'BOM-A', part_id: 'PART-C', Bom_ExAttr1: 'not-a-number', sort_id: 1 }
+  const goodBranch = { bom_pid: 'BOM-A', part_id: 'PART-D', Bom_ExAttr1: '1', sort_id: 2 }
+  return baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Clip', Material: 'Iron', SysVer: 'V1' },
+      { OBJ_ID: 'PART-D', IdentityNo: 'D-001', IdentityName: 'Subassembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-E', IdentityNo: 'E-001', IdentityName: 'Screw', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-D', bom_id: 'BOM-D', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: (subtreeFirst ? [goodBranch, badChild] : [badChild, goodBranch])
+      .concat([{ bom_pid: 'BOM-D', part_id: 'PART-E', Bom_ExAttr1: 'not-a-number', sort_id: 1 }]),
+  })
+}
+
+async function expandNestedQuantityDefectBom(options = {}) {
+  const { adapter } = createAdapter(nestedQuantityDefectBom(options))
+  return expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', ...(options.expand || {}) })
+}
+
+async function testTheSampleIsOrderBlindWhenTwoDefectsShareAType() {
+  const DEPTH_1 = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1, relation: 'child' }
+  const DEPTH_2 = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 2, relation: 'child' }
+
+  const childFirst = await expandNestedQuantityDefectBom()
+  const subtreeFirst = await expandNestedQuantityDefectBom({ subtreeFirst: true })
+
+  // THE SCOPE CLAIM IN ROW_ERROR_IDENTITY_FIELDS' HEADER, enforced rather than asserted in prose:
+  // these entries carry none of the three unpopulated identity fields, so `type` is the whole
+  // identity and everything below is decided by CONTENT alone. A payload that starts carrying one of
+  // them makes this red — and that comment is then the thing to re-read before it is made green.
+  for (const entry of childFirst.rowErrors) {
+    assert.deepEqual(Object.keys(entry).sort(), ['depth', 'field', 'relation', 'type'], 'the real payload is {type, field, depth, relation} — see ROW_ERROR_IDENTITY_FIELDS')
+    for (const identityField of ['path', 'idempotencyKey', 'componentCode']) {
+      assert.equal(identityField in entry, false, `a real rowError carries no ${identityField}, so identity is the type token alone`)
+    }
+  }
+
+  // The two source orders really do produce the two entries in opposite sequence — asserted before
+  // the cap is applied, because a fixture that quietly stopped flipping would make the rest vacuous.
+  assert.deepEqual(childFirst.rowErrors, [DEPTH_1, DEPTH_2], 'one order meets the depth-1 defect first')
+  assert.deepEqual(subtreeFirst.rowErrors, [DEPTH_2, DEPTH_1], 'the other meets the depth-2 defect first')
+
+  // ONE SLOT, TWO SAME-TYPE DEFECTS. The survivor must be the content-smaller one (depth 1 sorts
+  // before depth 2) in BOTH source orders. This is the assertion the content tiebreaker owns: with
+  // it deleted the collector ties on identity, keeps the incumbent, and returns whichever entry the
+  // source happened to hand over first.
+  const forward = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 1 } })
+  const reversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 1 } })
+  assert.deepEqual(reversed.rowErrors, forward.rowErrors, 'same-type defects are selected identically in either source order')
+  assert.deepEqual(forward.rowErrors, [DEPTH_1], 'and the survivor is the content-smaller entry, not the first one produced')
+  assert.equal(revisionOf(reversed), revisionOf(forward), 'so both dry-runs carry one revision')
+
+  // AND THE ASYMMETRY ON THE SAME FIXTURE: a cap of 2 truncates nothing here, so both orders keep
+  // BOTH entries in traversal order and stay two different arrays — exactly what ① pins, restated
+  // where the two entries share a type. The revision is one revision anyway, because the untruncated
+  // array is hashed through `canonicalHashOrder`, which re-sorts it.
+  const underCap = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 2 } })
+  const underCapReversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 2 } })
+  assert.deepEqual(underCap.rowErrors, [DEPTH_1, DEPTH_2], 'under the cap the array is still traversal order…')
+  assert.deepEqual(underCapReversed.rowErrors, [DEPTH_2, DEPTH_1], '…on both sides, because nothing was selected')
+  assert.equal(revisionOf(underCapReversed), revisionOf(underCap), 'and the hasher makes that order immaterial')
+
+  // The counts stay the truth of the batch on this shape too, and both orders agree on them.
+  const capped = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 1 } })
+  const cappedReversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 1 } })
+  assert.equal(capped.summary.rowErrorsTotal, 2, 'both same-type defects are counted')
+  assert.deepEqual(capped.summary.rowErrorTypeCounts, { invalid_quantity: 2 }, 'per-type totals count the dropped one')
+  assert.deepEqual(cappedReversed.summary, capped.summary, 'and the summary is order-blind')
+}
+
+// ④ THE MEMORY BOUND, which is the reason "collect everything, then sort and slice" is not the
+// implementation. Asserted twice: through an expansion (50 defects, cap 3) and directly on the
+// collector, where an occupancy that ever exceeds the cap is visible even though the OUTPUT is the
+// same three entries either way.
+//
+// WHAT THIS DOES NOT PROVE, stated rather than implied: a degenerate collector that buffered every
+// entry AND reported a capped `size()` would be indistinguishable from outside — its output, its
+// summary and its revision would all match. Measured: mutating the collector into "push everything,
+// slice in finalize" turns this suite red at the first cap test (`rowErrorsRetained` stops being
+// the retained count); doing the same AND capping the reported size leaves the whole suite green.
+// The O(N) ceiling is therefore structural — `entries` is pushed to only while it is SHORTER than
+// `limit`, one line in `createRowErrorCollector` — and this test guards the reachable form of the
+// regression, not the adversarial one.
+async function testTheTruncatedSampleNeverOutgrowsTheCap() {
+  const result = await expandBlankComponentBom(45, {
+    badQuantityPositions: 5,
+    expand: { rowErrorLimit: 3 },
+  })
+  assert.equal(result.summary.rowErrorsTotal, 50, '50 defects were produced')
+  assert.equal(result.rowErrors.length, 3, 'and exactly 3 survived')
+  assert.deepEqual(
+    result.rowErrors.map((entry) => entry.type),
+    ['invalid_quantity', 'invalid_quantity', 'invalid_quantity'],
+    'the survivors are the sort-key-first 3 — the 45 blanks arrived first and still lost',
+  )
+  assert.deepEqual(result.summary.rowErrorTypeCounts, { invalid_quantity: 5, missing_component_source_id: 45 })
+
+  // Directly on the seam. The 47 entries that lose are offered FIRST, so a collector that grew to
+  // hold them all before trimming would be caught by the size assertion rather than by the output.
+  const collector = createRowErrorCollector(3)
+  const winner = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1, relation: 'child' }
+  const loser = { type: 'missing_component_source_id', field: 'part_id', depth: 1 }
+  let peak = 0
+  for (let index = 0; index < 47; index += 1) {
+    collector.add({ ...loser })
+    peak = Math.max(peak, collector.size())
+  }
+  for (let index = 0; index < 3; index += 1) {
+    collector.add({ ...winner })
+    peak = Math.max(peak, collector.size())
+  }
+  assert.equal(peak, 3, 'the collector never holds more than the cap, not even for one add')
+  assert.deepEqual(collector.finalize(), [winner, winner, winner], 'and the three it kept are the three that sort first')
+
+  // The identity half of the key, pinned on the COLLECTOR's contract rather than on an expansion —
+  // deliberately, and this is the one synthetic shape in the X5 block: no rowError the expander
+  // emits carries `path` (its `missing_component` payload is `{type, field, depth}`), so `path`
+  // ordering is reachable only by calling the collector directly. What the expander really produces
+  // is covered by testTheSampleIsOrderBlindWhenTwoDefectsShareAType, where identity collapses to the
+  // type token and the CONTENT tiebreaker decides. Keep both: this one fails if a future payload
+  // starts carrying `path` and the identity comparison was dropped meanwhile.
+  for (const order of [['["Z"]', '["A"]'], ['["A"]', '["Z"]']]) {
+    const paths = createRowErrorCollector(1)
+    for (const pathToken of order) paths.add({ type: 'missing_component', path: pathToken, depth: 1 })
+    assert.deepEqual(
+      paths.finalize().map((entry) => entry.path),
+      ['["A"]'],
+      `offered as ${order.join(' then ')}, the identity-first entry is the one kept`,
+    )
+  }
+}
+
+// ②c — THE STRUCTURAL PREMISE OF ②, PINNED ON THE COLLECTOR. The selection is order-blind only
+// because the slot `add` offers up for eviction holds the LARGEST entry retained so far. That is
+// the job of ONE line: the one-shot heapify `add` runs on the first entry it refuses, which turns
+// the traversal-ordered fill into a MAX-heap before any comparison is made against `entries[0]`.
+// Delete it and `entries[0]` is merely whatever the fill happened to leave at index 0, every later
+// newcomer is compared against the wrong incumbent, and the retained set goes back to depending on
+// arrival order — the exact 409 X5 exists to close.
+//
+// MEASURED, AND THE REASON THIS TEST EXISTS: with that single line removed the whole declared chain
+// (bom-expansion / table-actions / large-bom-jobs / conflict-planner / expansion-snapshot-mapper)
+// stayed green. No fixture above ever fills the buffer with three or more DISTINCT sort keys in an
+// order that is not already heap order — the expansions feed at most two distinct keys, and the
+// cap-bound test above feeds 47 byte-identical losers followed by 3 byte-identical winners, so the
+// heap property is never load-bearing there. A cap of 3 cannot see it either: with three slots the
+// heapify loop degenerates to a single `siftDown(0)`, so the buggy variants and the correct one
+// agree. Hence a cap of FOUR below, and a fill that parks the largest retained entry at index 3 —
+// a leaf under the second internal node, which only a full bottom-up heapify ever visits.
+//
+// This is a collector-seam test for the same reason the `path` case above is: the expander cannot
+// produce four distinct sort keys in one batch of this shape on demand, and the invariant belongs
+// to the structure rather than to any one expansion.
+function testTheEvictedSlotIsTheLargestRetainedEntry() {
+  // Five of the module's own type tokens, listed ASCENDING by the sort key. Identity is the type
+  // token alone on these payloads (see ROW_ERROR_IDENTITY_FIELDS' header), so the ladder is the
+  // sort order and nothing else is consulted.
+  const ASCENDING = [
+    { type: 'ambiguous_component', field: 'part_id', depth: 1 },
+    { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1 },
+    { type: 'missing_bom_id', field: 'bom_id', depth: 1 },
+    { type: 'missing_child_bom', field: 'bom_id', depth: 1 },
+    { type: 'missing_component', field: 'part_id', depth: 1 },
+  ]
+  const [SMALLEST, SECOND, THIRD, FOURTH, LARGEST] = ASCENDING
+  const EXPECTED = [SMALLEST, SECOND, THIRD, FOURTH]
+
+  const offer = (order) => {
+    const collector = createRowErrorCollector(4)
+    let peak = 0
+    for (const entry of order) {
+      collector.add(entry)
+      peak = Math.max(peak, collector.size())
+    }
+    return { retained: collector.finalize(), peak }
+  }
+
+  // THE FILL THAT IS NOT HEAP ORDER. The four that fit arrive smallest-first with the LARGEST of
+  // them last, so it lands at index 3; the fifth entry offered sorts below it and must take its
+  // place. A collector that compares the newcomer against index 0 instead refuses it and keeps the
+  // largest — a different retained set, which is a different plan.
+  const notHeapOrder = offer([SMALLEST, SECOND, THIRD, LARGEST, FOURTH])
+  assert.deepEqual(
+    notHeapOrder.retained,
+    EXPECTED,
+    'the entry evicted is the LARGEST retained one, not whatever the fill left at index 0',
+  )
+  assert.equal(notHeapOrder.peak, 4, 'and the cap still holds while that swap happens')
+
+  // The mirror image fills largest-first, which already satisfies the heap property at the root. It
+  // agrees today AND it agreed with every broken heapify measured above — which is precisely why
+  // the assertion before it, not this one, is the binding half.
+  const alreadyHeapOrder = offer([LARGEST, THIRD, SECOND, SMALLEST, FOURTH])
+  assert.deepEqual(alreadyHeapOrder.retained, EXPECTED, 'and the heap-ordered fill agrees, entry for entry')
+
+  // EVERY order, not two. 120 permutations of the same five entries through a cap of 4: the retained
+  // set is a function of the SET alone, so all 120 must answer identically. This is ② restated
+  // where an arrival order is free rather than a fixture away, and it is what catches a partial
+  // heapify (root only, or top-down) that the two named fills above may happen to survive.
+  const permutationsOf = (items) => (items.length <= 1 ? [items] : items.flatMap((item, index) => (
+    permutationsOf(items.slice(0, index).concat(items.slice(index + 1))).map((rest) => [item].concat(rest))
+  )))
+  const orders = permutationsOf(ASCENDING)
+  assert.equal(orders.length, 120, 'every arrival order of the five entries is covered')
+  for (const order of orders) {
+    const { retained, peak } = offer(order)
+    assert.deepEqual(
+      retained,
+      EXPECTED,
+      `arrival order ${order.map((entry) => entry.type).join(' -> ')} kept a different set`,
+    )
+    assert.equal(peak, 4, 'and no arrival order grows the structure past the cap')
+  }
+}
+
+// Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
+// expander (the only thing that reads the cap), and it REFUSES rather than clamps: a silent
+// `Math.min` would let a deploy config say 2000000 while 20000 ran, with nothing anywhere to tell
+// the operator which number was in force.
+async function testRowErrorLimitIsConfigurableUnderACeiling() {
+  const lowered = await expandBlankComponentBom(120, { expand: { rowErrorLimit: 50 } })
+  assert.equal(lowered.rowErrors.length, 50, 'a lower configured cap is honoured')
+  assert.equal(lowered.summary.rowErrorsTotal, 120, 'and the total is still the truth')
+
+  const atCeiling = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1, {
+    expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING },
+  })
+  assert.equal(
+    atCeiling.rowErrors.length,
+    ROW_ERROR_LIMIT + 1,
+    'the ceiling itself is a legal cap, and this fixture is under it',
+  )
+  assert.ok(ROW_ERROR_LIMIT_CEILING >= ROW_ERROR_LIMIT, 'the ceiling is not below the default')
+
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 } }),
+    /rowErrorLimit must not exceed/,
+    'one past the ceiling is a refusal, not a silent clamp',
+  )
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: 0 } }),
+    /rowErrorLimit/,
+    'a nonsense cap is refused rather than silently defaulted',
+  )
+
+  // TYPE STRICTNESS, and it is not pedantry. `Number()` turns `true` into 1, so a coercing parser
+  // would answer a config typo by cutting the retained defect list — the operator's whole worklist —
+  // down to a single entry, while every total stayed truthful and nothing looked wrong.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    await assert.rejects(
+      () => expandBlankComponentBom(1, { expand: { rowErrorLimit: nonsense } }),
+      /rowErrorLimit must be a positive integer/,
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
+}
+
+/**
+ * THE MISSING-PARTS LIST MUST NOT SHRINK WHEN THE ROWERROR CAP FIRES — and the failure was not
+ * merely a low number, it was an ARITHMETICALLY IMPOSSIBLE pair on the W3a operator panel:
+ *
+ *   `distinctCount` comes off the expander's uncapped id set.
+ *   `probeCount` was counted off the `rowErrors` ARRAY, which D-C made a bounded sample.
+ *
+ * So a truncated expansion rendered "缺件 240 种(共 50 处引用)" — more distinct missing parts than
+ * references to them, which cannot happen for real data (a part is missing because it was probed).
+ * The truth was sitting in the same summary object the whole time as
+ * `rowErrorTypeCounts.missing_component`; it just was not read. Same fail-open shape as
+ * `hasHardApplyBlockingRowErrors`, in the values-BEARING projection.
+ *
+ * The fixture lowers the cap rather than building 5000 absent parts, because the cap is the cap
+ * whatever its value and 240 part reads keeps this test sub-second.
+ */
+async function testMissingComponentProbeCountSurvivesTheRowErrorCap() {
+  const distinct = MISSING_COMPONENT_DETAIL_LIMIT + 40
+  const positionsPerPart = 2
+  const retained = 50
+  const probes = distinct * positionsPerPart
+  const { adapter } = createAdapter(bomOfMissingParts(
+    Array.from({ length: distinct }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, positionsPerPart]),
+  ))
+  const result = await expandPlmProjectBom({
+    sourceAdapter: adapter,
+    projectNo: 'P-001',
+    rowErrorLimit: retained,
+  })
+
+  assert.equal(result.rowErrors.length, retained, 'the rowError array really is a sample here')
+  assert.equal(result.summary.rowErrorsTruncated, true)
+  assert.equal(result.summary.rowErrorTypeCounts.missing_component, probes, 'and the true total is on the summary')
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, distinct, 'distinctCount still comes off the uncapped id set')
+  assert.equal(summary.probeCount, probes, 'and probeCount is the TRUE probe total, not the retained sample')
+  // Two positions per part on purpose: the detail collector retains 200 parts carrying 2 occurrences
+  // each, so a fix that only clamped probeCount up to the DETAIL total would answer 400 here and
+  // 480 is the only right answer. The bound below would accept 400; this equality does not.
+  assert.ok(
+    summary.probeCount >= summary.distinctCount,
+    'a part cannot be missing without having been probed — this pair may never invert',
+  )
+  assert.equal(summary.truncated, true)
+
+  // The structural floor holds even for an expansion that carries no summary at all (a stored W3a
+  // artifact from before D-C, or a hand-built object): distinctCount is never allowed to exceed
+  // probeCount, whatever any upstream cap did to the array.
+  const floor = summarizeMissingComponents({ missingComponentDistinctCount: 9, missingComponents: [], rowErrors: [] })
+  assert.equal(floor.distinctCount, 9)
+  assert.equal(floor.probeCount, 9, 'the floor answers with the distinct count rather than an impossible 0')
+}
+
+// ---------------------------------------------------------------------------
+// F1c — 老系统 StockInfoController.java 的三条语义
+//
+// owner 裁决:「阅读 StockInfoController.java,采用该逻辑」。下面每个用例都钉一条老系统语义,
+// 注释里给出老系统的出处行号,以及这条守卫被拿掉时会红在哪。
+// ---------------------------------------------------------------------------
+
+// ① 两条 active bomHead 指着同一个子件(同用量)=> 子件只出一次,被合并的条数进 values-free 证据。
+//    差异A(展开器 banner :72-78 自承的重复来源)就是这个形状。
+async function testTwoActiveBomHeadsCollapseOneChild() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.equal(result.rows.length, 2, '根 + 一个子件 —— 第二条 bomHead 的同键子件被同父去重吃掉')
+  assert.equal(result.rows.filter((row) => row.componentSourceId === 'PART-B').length, 1)
+  assert.equal(result.summary.duplicateSiblingsCollapsed, 1, '被合并的条数是 values-free 证据里的一个整数')
+  const summaryJson = JSON.stringify(result.summary)
+  assert.ok(!summaryJson.includes('B-001') && !summaryJson.includes('Bolt'), '证据里只有计数,没有图号/名称')
+  // 幂等键没动:留下的那行的键仍是 {projectNo, componentSourceId, parentSourceId, path}。
+  assert.deepEqual(
+    JSON.parse(result.rows[1].idempotencyKey),
+    { projectNo: 'P-001', componentSourceId: 'PART-B', parentSourceId: 'PART-A', path: ['PART-A', 'PART-B'] },
+  )
+
+  // 反向:只有一条 bomHead 时 summary 不长这个键(没合并过就是 byte-identical)。
+  const single = await expandPlmProjectBom({ sourceAdapter: createAdapter(baseData()).adapter, projectNo: 'P-001' })
+  assert.equal('duplicateSiblingsCollapsed' in single.summary, false, '没合并过的 summary 不长这个键')
+}
+
+// ② 同图号、不同名称/材质的标准件不被去重 —— 老系统 iterHandle 686-691 那句注释说的就是这件事
+//    (把名称和材质加进键,是因为标准件的图号一样,只按图号去重会把它们合并掉)。
+async function testSameDrawingDifferentStandardPartsSurvive() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'GB-70', IdentityName: '内六角螺钉', Material: '8.8级', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'GB-70', IdentityName: '内六角螺钉 M8', Material: '12.9级', SysVer: 'V1' },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '2', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-C', Bom_ExAttr1: '2', sort_id: 2 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.equal(result.rows.length, 3, '同图号但名称及规格/材质不同的两个标准件都留下')
+  assert.equal('duplicateSiblingsCollapsed' in result.summary, false)
+}
+
+// ③ 同父同键但用量不同的两条明细:不合并,仍然两行 —— 这是对老系统的有意偏离,理由写在
+//    siblingDedupeKey 的注释里:合并会把 duplicate_expanded_key 的 fail-closed 挂起消掉。
+async function testSiblingsThatDisagreeOnQuantityAreNotCollapsed() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '1', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '2', sort_id: 2 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.rows.length, 3, '用量不一致的重复明细两行都在,留给 duplicate_expanded_key 挂起')
+  assert.equal('duplicateSiblingsCollapsed' in result.summary, false)
+  assert.equal(result.rows[1].idempotencyKey, result.rows[2].idempotencyKey, '两行同键 —— 正是规划器要挂起的形状')
+}
+
+// ④ 根选择:有总图 => 版本最高的那张总图 + 全部钣金;其它订单行不当根。
+//    老系统 doGetAllBomInfo 1051-1089。
+async function testRootSelectionKeepsHighestMainDrawingAndSheetMetal() {
+  const data = () => baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN-V1', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN-V3', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-SHEET', quantity: '1', sort_id: 3 },
+      { order_id: 'ORDER-1', part_id: 'PART-OTHER', quantity: '1', sort_id: 4 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-MAIN-V1', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-MAIN-V3', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V3' },
+      { OBJ_ID: 'PART-SHEET', IdentityNo: 'J2601-A', IdentityName: '钣金件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-OTHER', IdentityNo: 'X-900', IdentityName: '别的件', Material: 'Q235', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  })
+  const result = await expandPlmProjectBom({ sourceAdapter: createAdapter(data()).adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.deepEqual(
+    result.rows.map((row) => row.componentSourceId).sort(),
+    ['PART-MAIN-V3', 'PART-SHEET'],
+    '最高版本总图 + 钣金件当根;低版本总图和非总图/非钣金的订单行不当根',
+  )
+  assert.equal(result.summary.rootsFilteredOut, 2)
+
+  // 规则可覆盖:关掉就退回 F1c 之前的行为(订单行全部当根)。
+  const disabled = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(data()).adapter,
+    projectNo: 'P-001',
+    rootSelection: { enabled: false },
+  })
+  assert.equal(disabled.rows.length, 4)
+  assert.equal('rootsFilteredOut' in disabled.summary, false)
+
+  // 规则可覆盖:另一家工厂的编码约定照样能表达,图号前后缀不是写死的。
+  const retuned = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(data()).adapter,
+    projectNo: 'P-001',
+    rootSelection: { mainDrawingPrefix: 'X', mainDrawingSuffix: '-900', sheetMetalSuffixes: ['-ZZ'] },
+  })
+  assert.deepEqual(retuned.rows.map((row) => row.componentSourceId), ['PART-OTHER'], '换了规则,根也跟着换')
+
+  // 配置本身 fail-closed:空后缀会让每个图号都成为总图。
+  await assert.rejects(
+    () => expandPlmProjectBom({
+      sourceAdapter: createAdapter(data()).adapter,
+      projectNo: 'P-001',
+      rootSelection: { mainDrawingSuffix: '' },
+    }),
+    /rootSelection.mainDrawingSuffix must not be empty/,
+  )
+}
+
+// ⑤ 根选择:无总图 => 订单行全部当根,但按图号 dash 分段判定为别人子级的行剔除。
+//    老系统 doGetAllBomInfo 1056-1072 + checkHierarchyRelationship 413-450。
+async function testRootSelectionDropsDashDescendantsWhenNoMainDrawing() {
+  const data = baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-P', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-U', quantity: '1', sort_id: 3 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-P', IdentityNo: 'K300-01', IdentityName: '父件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'K300-01-02', IdentityName: '子件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-U', IdentityNo: 'M900-01', IdentityName: '不相干', Material: 'Q235', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  })
+  const result = await expandPlmProjectBom({ sourceAdapter: createAdapter(data).adapter, projectNo: 'P-001' })
+  assert.deepEqual(
+    result.rows.map((row) => row.componentSourceId),
+    ['PART-P', 'PART-U'],
+    '同前缀、段数更多的 K300-01-02 是 K300-01 的子级,不当根;前缀不同的 M900-01 不受影响',
+  )
+  assert.equal(result.summary.rootsFilteredOut, 1)
+
+  // 纯函数一层:老系统那张真值表(1 / 2 / 0 / -1)。
+  assert.equal(dashHierarchyRelationship('K300-01', 'K300-01-02'), 1)
+  assert.equal(dashHierarchyRelationship('K300-01-02', 'K300-01'), 2)
+  assert.equal(dashHierarchyRelationship('K300-01', 'K300-02'), 0, '段数相同 => 无父子关系')
+  assert.equal(dashHierarchyRelationship('K300-01', 'M900-01-02'), 0, '首段不同 => 无关系')
+  assert.equal(dashHierarchyRelationship('K300-01', '   '), -1, '判不了就是 -1,而 -1 从不导致剔除')
+}
+
+// ⑤b #5862 — 钣金匹配方式与前缀可选:客户口径是「图号含 -A/-B/-C/-D」(contains),老系统口径是
+//     endsWith;两者都是配置。总图判定永远先于钣金判定,所以一个总图图号不可能被算成钣金。
+function testSheetMetalMatchModeAndPrefixRequirement() {
+  const endsWith = normalizeRootSelection({ sheetMetalSuffixes: ['-A', '-B', '-C', '-D'] })
+  const contains = normalizeRootSelection({ sheetMetalSuffixes: ['-A', '-B', '-C', '-D'], sheetMetalMatch: 'contains' })
+  assert.equal(endsWith.sheetMetalMatch, 'endsWith', '默认 = 老系统的 endsWith')
+  assert.equal(endsWith.sheetMetalRequiresMainPrefix, true, '默认 = 老系统的「钣金也要 J 开头」')
+
+  // (a) token 在图号中段:contains 认,endsWith 不认。
+  assert.equal(hasSheetMetalShape('J1-2-C-05', contains), true, 'contains:-C 在中段也算钣金')
+  assert.equal(hasSheetMetalShape('J1-2-C-05', endsWith), false, 'endsWith:-C 不在末尾就不算')
+  assert.equal(hasSheetMetalShape('J1-2-A', contains), true, 'contains 也认末尾')
+  // contains 的命中位置必须在首字符之后:以 token 开头的图号不算(前缀要求关掉时才可能出现这种形状)。
+  const containsNoPrefix = normalizeRootSelection({ sheetMetalMatch: 'contains', sheetMetalRequiresMainPrefix: false })
+  assert.equal(hasSheetMetalShape('-A1-2', containsNoPrefix), false, '仅仅以 token 开头不是命中')
+  assert.equal(hasSheetMetalShape('X-A1-2', containsNoPrefix), true, '首字符之后出现才是命中')
+
+  // (b) 总图永远不是钣金,先判总图。
+  assert.equal(hasMainDrawingShape('J1-2-00', contains), true)
+  assert.equal(hasSheetMetalShape('J1-2-00', contains), false, '总图不含 token,当然不是钣金')
+  assert.equal(hasMainDrawingShape('J1-A-00', contains), true, 'J1-A-00 含 -A 又以 -00 结尾:是总图')
+  assert.equal(hasSheetMetalShape('J1-A-00', contains), false, '总图判定先行,所以不是钣金')
+  // 同样的顺序对 endsWith 也成立(那里两种形状本来就不可能重叠,这里只是钉住顺序不因模式而变)。
+  assert.equal(hasSheetMetalShape('J1-A-00', endsWith), false)
+
+  // 顺序在根选择上的后果:两版总图 + 一张真钣金,contains 模式下低版本总图不能借「含 -A」溜回根集合。
+  const candidates = [
+    { componentSourceId: 'M1', componentCode: 'J1-A-00', sourceVersion: 'V1' },
+    { componentSourceId: 'M2', componentCode: 'J1-A-00', sourceVersion: 'V2' },
+    { componentSourceId: 'S1', componentCode: 'J1-2-B-03', sourceVersion: 'V1' },
+    { componentSourceId: 'O1', componentCode: 'J1-2-05', sourceVersion: 'V1' },
+  ]
+  const picked = selectOrderRootCandidates(candidates, contains)
+  assert.deepEqual(picked.selected.map((c) => c.componentSourceId), ['M2', 'S1'], '最高版总图 + 钣金;低版总图不是钣金根')
+  assert.equal(picked.droppedCount, 2)
+
+  // (c) 前缀可选:B1-2-A 在「不要求 J 前缀」下是钣金,默认下不是。
+  const noPrefix = normalizeRootSelection({ sheetMetalRequiresMainPrefix: false })
+  assert.equal(hasSheetMetalShape('B1-2-A', noPrefix), true)
+  assert.equal(hasSheetMetalShape('B1-2-A', endsWith), false, '默认仍要求 J 前缀(老系统)')
+  assert.equal(hasSheetMetalShape('B1-2-00', noPrefix), false, '总图形状要求前缀,B1-2-00 不是总图;也不含 token,所以也不是钣金')
+
+  // (d)(e) 配置 fail-closed:未知键、非法匹配模式都在配置时拒绝,不是静默忽略。
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalMatchMode: 'contains' }),
+    (error) => error instanceof StockPreparationBomExpansionError
+      && /rootSelection.sheetMetalMatchMode is not a recognized key/.test(error.message)
+      && error.details.field === 'rootSelection.sheetMetalMatchMode',
+    '拼错的键 => 拒,否则存进快照的规则是展开器不跑的规则',
+  )
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalMatch: 'regex' }),
+    (error) => error instanceof StockPreparationBomExpansionError
+      && /rootSelection.sheetMetalMatch must be one of endsWith, contains/.test(error.message)
+      && error.details.field === 'rootSelection.sheetMetalMatch',
+  )
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalRequiresMainPrefix: 'no' }),
+    /rootSelection.sheetMetalRequiresMainPrefix/,
+  )
+  // 既有的键一个不少地仍被接受(闭合键集不能把老配置拒掉)。
+  const full = normalizeRootSelection({
+    enabled: true,
+    mainDrawingPrefix: 'J',
+    mainDrawingSuffix: '-00',
+    sheetMetalSuffixes: ['-A', '-B', '-C', '-D'],
+    sheetMetalMatch: 'contains',
+    sheetMetalRequiresMainPrefix: true,
+    dropDashDescendants: true,
+  })
+  assert.deepEqual(Object.keys(full), ['enabled', 'mainDrawingPrefix', 'mainDrawingSuffix', 'sheetMetalSuffixes', 'sheetMetalMatch', 'sheetMetalRequiresMainPrefix', 'dropDashDescendants'])
+  // 归一化的输出能原样喂回归一化(大 BOM 通道从动作快照读回来就是这么用的)。
+  assert.deepEqual(normalizeRootSelection({ ...full, sheetMetalSuffixes: [...full.sheetMetalSuffixes] }), full)
+}
+
+// ⑤c #5862 — values-free 根选择报告:模式 + 四个计数 + flag,没有图号。
+async function testRootSelectionReportCountsAndFlags() {
+  const partLibrary = [
+    { OBJ_ID: 'PART-MAIN-V1', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-MAIN-V3', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V3' },
+    { OBJ_ID: 'PART-SHEET-A', IdentityNo: 'J2601-A', IdentityName: '钣金件A', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-SHEET-B', IdentityNo: 'J2601-B', IdentityName: '钣金件B', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-OTHER', IdentityNo: 'X-900', IdentityName: '别的件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-P', IdentityNo: 'K300-01', IdentityName: '父件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-C', IdentityNo: 'K300-01-02', IdentityName: '子件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-U', IdentityNo: 'M900-01', IdentityName: '不相干', Material: 'Q235', SysVer: 'V1' },
+  ]
+  const expand = (partIds, rootSelection) => expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: partIds.map((partId, index) => ({ order_id: 'ORDER-1', part_id: partId, quantity: '1', sort_id: index + 1 })),
+      DN_PDM_PartLibraryInfo: partLibrary,
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    })).adapter,
+    projectNo: 'P-001',
+    ...(rootSelection ? { rootSelection } : {}),
+  })
+  const reportOf = (result) => result.summary.rootSelectionReport
+  const evidenceReportOf = (result) => summarizeBomExpansionForEvidence(result).rootSelectionReport
+
+  // 总图(两版)+ 两张钣金 + 一条别的:多钣金根 flag。
+  const twoSheets = await expand(['PART-MAIN-V1', 'PART-MAIN-V3', 'PART-SHEET-A', 'PART-SHEET-B', 'PART-OTHER'])
+  assert.deepEqual(reportOf(twoSheets), {
+    mode: 'main_drawing',
+    mainDrawingCandidates: 2,
+    sheetMetalRoots: 2,
+    otherCandidatesDropped: 1,
+    dashDescendantsDropped: 0,
+    flags: ['multipleSheetMetalRoots'],
+  })
+  assert.equal(twoSheets.summary.rootsFilteredOut, 2, '低版总图 + 别的件:两条剔除;报告里 other=1,另一条是被版本压掉的总图(mainDrawingCandidates-1)')
+  assert.deepEqual(evidenceReportOf(twoSheets), reportOf(twoSheets), '报告原样投影到 dry-run 证据')
+  assert.equal(JSON.stringify(reportOf(twoSheets)).includes('J2601'), false, 'VALUES-FREE:报告里没有图号')
+
+  // 总图 + 0 钣金:sheetMetalRootMissing。
+  const noSheet = await expand(['PART-MAIN-V3', 'PART-OTHER'])
+  assert.deepEqual(reportOf(noSheet), {
+    mode: 'main_drawing',
+    mainDrawingCandidates: 1,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 1,
+    dashDescendantsDropped: 0,
+    flags: ['sheetMetalRootMissing'],
+  })
+
+  // 无总图 + 3 候选(其中一条是 dash 子级):noMainDrawingMultipleRoots + dash 计数。
+  const noMain = await expand(['PART-P', 'PART-C', 'PART-U'])
+  assert.deepEqual(reportOf(noMain), {
+    mode: 'no_main_drawing',
+    mainDrawingCandidates: 0,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 0,
+    dashDescendantsDropped: 1,
+    flags: ['noMainDrawingMultipleRoots'],
+  })
+  assert.equal(noMain.summary.rootsFilteredOut, 1)
+
+  // 无总图 + 单根:没有 flag。
+  const single = await expand(['PART-U'])
+  assert.deepEqual(reportOf(single).flags, [])
+  assert.equal(reportOf(single).mode, 'no_main_drawing')
+
+  // 关掉:mode=disabled,全零,无 flag —— 「规则关着」本身就是答案。
+  const disabled = await expand(['PART-MAIN-V3', 'PART-SHEET-A', 'PART-OTHER'], { enabled: false })
+  assert.deepEqual(reportOf(disabled), {
+    mode: 'disabled',
+    mainDrawingCandidates: 0,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 0,
+    dashDescendantsDropped: 0,
+    flags: [],
+  })
+  assert.equal(disabled.rows.length, 3)
+  assert.deepEqual(evidenceReportOf(disabled), reportOf(disabled))
+  // 报告是 summary 的最后一个键:既有条件键都不被它移动。
+  const keys = Object.keys(twoSheets.summary)
+  assert.equal(keys[keys.length - 1], 'rootSelectionReport')
+  assert.equal(keys[keys.length - 2], 'rootsFilteredOut')
+}
+
+// ⑥ 正控:换根/去重之后,沿路径累乘一如既往(老系统 GetChildrenBom 1122-1136)。
+async function testQuantityRollupSurvivesF1c() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: '子装配', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: '零件', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4', sort_id: 1 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.deepEqual(result.rows.map((row) => row.totalQuantity), [2, 6, 24], '2 -> 2x3 -> 2x3x4')
+}
+
+// ⑦ 名称/规格按第一个空格切(老系统 fillBasicStockInfo 762-770)。三种形状 + 声明列优先。
+async function testNameAndSpecSplitThreeShapes() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 3 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-1', IdentityName: '螺栓 M8 x 30', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-1', IdentityName: '底板', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-1', IdentityName: '垫片  2mm', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', rootSelection: { enabled: false } })
+  const byCode = Object.fromEntries(result.rows.map((row) => [row.componentCode, row]))
+
+  // 有空格:前段是名称,后段是规格,原串留在 nameAndSpec(名称及规格)。
+  assert.equal(byCode['A-1'].componentName, '螺栓')
+  assert.equal(byCode['A-1'].spec, 'M8 x 30', '只切第一个空格,后面的空格留在规格里')
+  assert.equal(byCode['A-1'].nameAndSpec, '螺栓 M8 x 30')
+
+  // 无空格:名称=全串,没有 spec 键(缺席,不是空串)。
+  assert.equal(byCode['B-1'].componentName, '底板')
+  assert.equal(Object.prototype.hasOwnProperty.call(byCode['B-1'], 'spec'), false)
+  assert.equal(byCode['B-1'].nameAndSpec, '底板')
+
+  // 连续空格:只切首个,第二段原样保留(老系统 split(" ", 2) 的行为)。
+  assert.equal(byCode['C-1'].componentName, '垫片')
+  assert.equal(byCode['C-1'].spec, ' 2mm')
+
+  // 声明了原生规格列时,声明列赢(切分只是兜底派生,不覆盖测量值)。
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  const declared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-1', IdentityName: '螺栓 M8 x 30', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+      ],
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declared.rows[0].spec, 'DN1200', '声明的原生列优先于切分出来的后半段')
+}
+
+// ⑧ 端到端:明细排序号 / 父件排序号 / 名称及规格 落进客户包的 ext_ 列,而且只在
+//    「包声明了 + 动作声明了(= target 绑了)」时才落。后者是 fail-closed 的第二道门:
+//    往 target 没绑的 ext_ 列写值会让整行写入被 apply-writer 拒(unmapped_extension_field)。
+async function testSortColumnsLandInThePackColumns() {
+  const expansion = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 7 }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: '总装 甲型', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: '螺栓 M8', Material: 'Iron', SysVer: 'V1' },
+      ],
+      DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 40 }],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  assert.equal(expansion.valid, true)
+
+  const packStanza = (ownership) => ({
+    ownership,
+    preserveOnRefresh: ownership === 'human_preserved',
+    required: false,
+    key: false,
+    extension: true,
+    packId: 'factory-a',
+    packVersion: '1.0.0',
+  })
+  const installedFieldProperties = [
+    { logicalId: 'ext_componentSortNo', name: 'ext_componentSortNo', type: 'number', property: { stockPreparation: packStanza('plm_system') } },
+    { logicalId: 'ext_parentSortNo', name: 'ext_parentSortNo', type: 'number', property: { stockPreparation: packStanza('plm_system') } },
+    { logicalId: 'ext_nameAndSpec', name: 'ext_nameAndSpec', type: 'string', property: { stockPreparation: packStanza('plm_system') } },
+  ]
+  const extensionFieldIds = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec']
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-f1c-sort',
+    plannedAt: '2026-09-11T00:00:00.000Z',
+    installedFieldProperties,
+    extensionFieldIds,
+  })
+  const records = plan.decisions.filter((decision) => decision.decision === 'add').map((decision) => decision.record)
+  const root = records.find((record) => record.componentCode === 'A-001')
+  const child = records.find((record) => record.componentCode === 'B-001')
+
+  assert.equal(root.ext_componentSortNo, 7, '订单明细栏的 sort_id 落进当前组件排序号')
+  assert.equal(child.ext_componentSortNo, 40, 'BOM 明细栏的 sort_id 落进当前组件排序号')
+  assert.equal(child.ext_parentSortNo, 7, '父组件排序号 = 父件自己的排序号(不抄老系统 756 那行的子件 sortId)')
+  assert.equal(child.ext_nameAndSpec, '螺栓 M8', '名称及规格是未切分的原串')
+  assert.equal(child.componentName, '螺栓', '而名称是切分后的前段')
+  assert.equal(Object.prototype.hasOwnProperty.call(root, 'ext_parentSortNo'), false, '根没有父件 => 不写这个键')
+
+  // 第二道门:动作没声明这三列时,一个 ext_ 键都不写(否则 apply-writer 会因未绑定而拒整行)。
+  const undeclared = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-f1c-sort-undeclared',
+    plannedAt: '2026-09-11T00:00:00.000Z',
+    installedFieldProperties,
+  })
+  for (const decision of undeclared.decisions.filter((entry) => entry.decision === 'add')) {
+    assert.deepEqual(
+      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+      [],
+      '动作没声明扩展列 => 一个 ext_ 键都不派生',
+    )
+  }
+}
+
 async function main() {
+  await testRowErrorCapBoundary()
+  await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
+  await testOverTheCapIsDeterministicAndDistinguishable()
+  await testUnderTheCapTheSampleStaysInTraversalOrder()
+  await testTheTruncatedSampleIsTheSameSetInEitherProductionOrder()
+  await testTheSampleIsOrderBlindWhenTwoDefectsShareAType()
+  await testTheTruncatedSampleNeverOutgrowsTheCap()
+  testTheEvictedSlotIsTheLargestRetainedEntry()
+  await testRowErrorLimitIsConfigurableUnderACeiling()
+  await testMissingComponentProbeCountSurvivesTheRowErrorCap()
+  await testMissingComponentDetailNeverReachesTheHashedSurfaces()
+  await testMissingComponentsKeyIsPresentOnEveryReturnPath()
+  await testMissingRootComponentCarriesNullParentAndBom()
+  await testAmbiguousComponentOpensNoValueChannel()
+  await testMissingComponentSummaryContract()
+  await testMissingComponentCollectionIsCappedByDistinctPart()
+  await testTheCapCostsAWholePartNeverAWrongCount()
+  await testSpecAndCreateTimeAreDeclaredNotGuessed()
+  await testDeclaredNativeSpecColumnReachesTheMainTableRow()
   await testSuccessfulExpansion()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()
   await testSourceRowsResolveCaseVariantFieldKeys()
   await testSameComponentUnderDifferentParentsStaysDistinct()
   await testFailClosedGuards()
+  await testBlankOrNullQuantityHeldNotZeroed()
   await testScaleLimitsRemainDiagnosableAndValuesFree()
+  await testTwoActiveBomHeadsCollapseOneChild()
+  await testSameDrawingDifferentStandardPartsSurvive()
+  await testSiblingsThatDisagreeOnQuantityAreNotCollapsed()
+  await testRootSelectionKeepsHighestMainDrawingAndSheetMetal()
+  await testRootSelectionDropsDashDescendantsWhenNoMainDrawing()
+  testSheetMetalMatchModeAndPrefixRequirement()
+  await testRootSelectionReportCountsAndFlags()
+  await testQuantityRollupSurvivesF1c()
+  await testNameAndSpecSplitThreeShapes()
+  await testSortColumnsLandInThePackColumns()
   testReadPlanValidation()
 
   console.log('stock-preparation-bom-expansion.test.cjs OK')

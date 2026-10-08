@@ -24,6 +24,7 @@ describe('useAttendanceAdminRailNavigation', () => {
   let container: HTMLDivElement | null = null
   let scrollIntoViewSpy: ReturnType<typeof vi.fn>
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let originalIntersectionObserver: typeof window.IntersectionObserver | undefined
 
   beforeEach(() => {
     window.localStorage.clear()
@@ -33,6 +34,7 @@ describe('useAttendanceAdminRailNavigation', () => {
     document.body.appendChild(container)
     scrollIntoViewSpy = vi.fn()
     originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    originalIntersectionObserver = window.IntersectionObserver
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrollIntoViewSpy,
@@ -48,11 +50,41 @@ describe('useAttendanceAdminRailNavigation', () => {
         value: originalScrollIntoView,
       })
     }
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: originalIntersectionObserver,
+    })
     app = null
     container = null
   })
 
-  function mountHost(options?: { focused?: boolean }) {
+  function installIntersectionObserver() {
+    let callback: IntersectionObserverCallback | null = null
+    class TestIntersectionObserver {
+      constructor(nextCallback: IntersectionObserverCallback) {
+        callback = nextCallback
+      }
+
+      disconnect = vi.fn()
+      observe = vi.fn()
+      unobserve = vi.fn()
+      takeRecords = vi.fn(() => [])
+      root = null
+      rootMargin = '0px'
+      thresholds = []
+    }
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: TestIntersectionObserver,
+    })
+    return {
+      trigger(entries: IntersectionObserverEntry[]): void {
+        callback?.(entries, {} as IntersectionObserver)
+      },
+    }
+  }
+
+  function mountHost(options?: { focused?: boolean; navigationEnabled?: boolean; routeOwned?: boolean }) {
     const items: AdminSectionNavItem[] = [
       { id: 'attendance-admin-settings', label: 'Settings' },
       { id: 'attendance-admin-approval-flows', label: 'Approval Flows' },
@@ -61,6 +93,8 @@ describe('useAttendanceAdminRailNavigation', () => {
       setup() {
         const showAdmin = ref(true)
         const adminForbidden = ref(false)
+        const adminNavigationEnabled = ref(options?.navigationEnabled ?? true)
+        const adminRouteOwned = ref(options?.routeOwned ?? false)
         const adminFocusCurrentSectionOnly = ref(options?.focused ?? false)
         const adminNavStorageScope = ref('default')
         const adminActiveSectionId = ref(items[0].id)
@@ -79,6 +113,8 @@ describe('useAttendanceAdminRailNavigation', () => {
         const { adminSectionBinding, scrollToAdminSection } = useAttendanceAdminRailNavigation({
           showAdmin,
           adminForbidden,
+          adminNavigationEnabled,
+          adminRouteOwned,
           adminFocusCurrentSectionOnly,
           previousAdminSectionId,
           nextAdminSectionId,
@@ -93,6 +129,9 @@ describe('useAttendanceAdminRailNavigation', () => {
         return {
           adminActiveSectionId,
           adminCompactNavOpen,
+          adminNavStorageScope,
+          adminNavigationEnabled,
+          adminRouteOwned,
           adminSectionBinding,
           isCompactAdminNav,
           scrollToAdminSection,
@@ -146,6 +185,45 @@ describe('useAttendanceAdminRailNavigation', () => {
     expect(scrolledTargets.some(element => element.id === 'attendance-admin-approval-flows')).toBe(false)
   })
 
+  it('keeps the selected section when the observer reports another section in focused mode', async () => {
+    const observer = installIntersectionObserver()
+    const vm = mountHost({ focused: true })
+    await flushUi()
+
+    const approval = document.getElementById('attendance-admin-approval-flows')
+    expect(approval).toBeTruthy()
+    observer.trigger([{
+      target: approval!,
+      isIntersecting: true,
+      intersectionRatio: 0.9,
+      boundingClientRect: approval!.getBoundingClientRect(),
+    } as IntersectionObserverEntry])
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+  })
+
+  // Positive control for the focused-mode suppression guard above: with focused mode OFF the observer
+  // callback MUST assign the reported section — proving the suppressed scroll-spy logic is real logic
+  // (not vacuously dead) and that the guard leg's green comes from the guard, not a broken observer.
+  it('lets the observer drive the active section when focused mode is OFF (positive control)', async () => {
+    const observer = installIntersectionObserver()
+    const vm = mountHost({ focused: false })
+    await flushUi()
+
+    const approval = document.getElementById('attendance-admin-approval-flows')
+    expect(approval).toBeTruthy()
+    observer.trigger([{
+      target: approval!,
+      isIntersecting: true,
+      intersectionRatio: 0.9,
+      boundingClientRect: approval!.getBoundingClientRect(),
+    } as IntersectionObserverEntry])
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+  })
+
   it('closes compact nav after selecting a section', async () => {
     setViewportWidth(640)
     const vm = mountHost()
@@ -191,5 +269,112 @@ describe('useAttendanceAdminRailNavigation', () => {
 
     expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
     expect(window.location.hash).toBe('')
+  })
+
+  // vNext charter §7 Wave 3 (issue #4353): `adminNavigationEnabled` keeps a
+  // hidden section workspace (admin task home open) inert — no restore from
+  // a remembered section, no keyboard nav, no hash-sync side effects.
+  describe('adminNavigationEnabled gate (Wave 3 task-home suppression)', () => {
+    it('falls back to the first element instead of the remembered section when navigation is disabled', async () => {
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    })
+
+    // Positive control: the same stored last-section IS honored (and scrolled to) once
+    // navigation is enabled, proving the disabled-case above comes from the gate and not a
+    // broken fixture. (Hash-writing for this restore-only path is not this composable's own
+    // guarantee in isolation — it stays '' here with or without the gate — so this control
+    // asserts the id restore + scroll, the two effects the gate actually governs.)
+    it('restores the remembered section when navigation is enabled (positive control)', async () => {
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: true })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
+    })
+
+    it('still honors an explicit hash even while navigation is disabled', async () => {
+      window.history.replaceState({}, '', '/attendance#attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('ignores a stale valid hash and keyboard navigation while a group route owns the selection', async () => {
+      window.history.replaceState({}, '', '/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule#attendance-admin-approval-flows')
+      const vm = mountHost({ routeOwned: true })
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    })
+
+    it('changes the route-owned section without writing it into the hash', async () => {
+      window.history.replaceState({}, '', '/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule#attendance-admin-settings')
+      const vm = mountHost({ routeOwned: true })
+      await flushUi()
+
+      vm.scrollToAdminSection('attendance-admin-approval-flows')
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+      expect(window.location.hash).toBe('#attendance-admin-settings')
+    })
+
+    it('ignores Alt+ArrowDown/ArrowUp keyboard navigation while navigation is disabled', async () => {
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      expect(window.location.hash).toBe('')
+    })
+
+    it('does not sync the hash or nav-link scroll when the active section changes programmatically while navigation is disabled', async () => {
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+      scrollIntoViewSpy.mockClear()
+
+      vm.adminActiveSectionId = 'attendance-admin-approval-flows'
+      await flushUi()
+
+      expect(window.location.hash).toBe('')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(false)
+    })
+
+    it('does not re-restore the remembered section on a storage-scope change while navigation is disabled', async () => {
+      // This fixture's readLastAdminSection ignores its scope argument (unlike the real
+      // useAttendanceAdminRail), so the remembered id is stored under the one key it reads;
+      // cross-org key isolation itself is covered by the AttendanceView.vue integration test
+      // ('isolates admin rail persistence by org id' in attendance-admin-anchor-nav.spec.ts).
+      window.localStorage.setItem('metasheet_attendance_admin_nav_last_section:default', 'attendance-admin-approval-flows')
+      const vm = mountHost({ navigationEnabled: false })
+      await flushUi()
+      scrollIntoViewSpy.mockClear()
+
+      vm.adminNavStorageScope = 'org-b'
+      await flushUi()
+
+      expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+      const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+      expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    })
   })
 })

@@ -11,6 +11,14 @@
   keyboard/ARIA surface changed. `defineProps` / `defineEmits` / `onAddSheet` / the
   VIEW_TYPE_ICON map + viewTypeIcon() are unchanged verbatim from the P2-2a version.
 
+  feat/multitable-rename adds an 8th prop (canManageFields) and a 5th emit (rename-sheet): a
+  pencil affordance on each sheet row, gated on canManageFields (mirrors the server's
+  canManageFields gate on PATCH /api/multitable/sheets/:id — hiding is UX only), following the
+  same inline-input + confirm/cancel shape as MetaFieldManager.vue's field rename. It renders as a
+  SIBLING of the treeitem button inside a new `.meta-view-rail__sheet-row` flex wrapper (never
+  nested inside the button — buttons cannot nest), so it never triggers onSheetActivate/
+  onTreeKeydown and does not disturb the tree/roving-tabindex/keyboard surface below.
+
   The byte-identical-DOM baseline this slice retires (MetaViewTabBar.vue — see design MD §7/§8.1):
   its safety net (mount both, diff outerHTML) doesn't survive a real visual relayout, so the frozen
   file + its DOM-equivalence describe block + its own dedicated personal-toggle spec are removed.
@@ -23,25 +31,119 @@
   <nav ref="rootEl" class="meta-view-rail">
     <ul role="tree" :aria-label="railLabel('rail.treeLabel', isZh)" class="meta-view-rail__tree">
       <li v-for="s in sheets" :key="s.id" role="none">
-        <button
-          role="treeitem"
-          type="button"
-          data-testid="rail-sheet-node"
-          :data-node-key="sheetKey(s.id)"
-          :aria-selected="s.id === activeSheetId"
-          :aria-expanded="sheetAriaExpanded(s)"
-          :tabindex="rovingTabindex(sheetKey(s.id))"
-          class="meta-view-rail__sheet"
-          :class="{ '--active': s.id === activeSheetId }"
-          :title="s.name"
-          @click="onSheetActivate(s)"
-          @keydown="onTreeKeydown($event, { key: sheetKey(s.id), type: 'sheet', id: s.id })"
-        >
-          <span class="meta-view-rail__chevron" aria-hidden="true">
-            <el-icon><component :is="s.id === activeSheetId ? IconCaretBottom : IconCaretRight" /></el-icon>
-          </span>
-          <span class="meta-view-rail__sheet-name">{{ s.name }}</span>
-        </button>
+        <div class="meta-view-rail__sheet-row">
+          <button
+            role="treeitem"
+            type="button"
+            data-testid="rail-sheet-node"
+            :data-node-key="sheetKey(s.id)"
+            :aria-selected="s.id === activeSheetId"
+            :aria-expanded="sheetAriaExpanded(s)"
+            :tabindex="rovingTabindex(sheetKey(s.id))"
+            class="meta-view-rail__sheet"
+            :class="{ '--active': s.id === activeSheetId }"
+            :title="s.name"
+            @click="onSheetActivate(s)"
+            @keydown="onTreeKeydown($event, { key: sheetKey(s.id), type: 'sheet', id: s.id })"
+          >
+            <span class="meta-view-rail__chevron" aria-hidden="true">
+              <el-icon><component :is="s.id === activeSheetId ? IconCaretBottom : IconCaretRight" /></el-icon>
+            </span>
+            <span class="meta-view-rail__sheet-name">{{ s.name }}</span>
+            <!--
+              复制数据表 S1 provenance badges (ADR CS-14 / §3): driven ONLY by the server's copiedFrom,
+              read through the api client's single adapter (readSheetCopiedFrom) — absent/null/malformed
+              renders nothing. 「不随 PLM 刷新」 only for the exact 'plugin-managed' kind.
+            -->
+            <template v-if="copiedFromBySheetId.get(s.id)">
+              <span
+                class="meta-view-rail__copy-badge"
+                data-testid="rail-sheet-copy-badge"
+                :title="railLabel('rail.badgeSnapshotCopyTitle', isZh)"
+              >{{ railLabel('rail.badgeSnapshotCopy', isZh) }}</span>
+              <span
+                v-if="copiedFromBySheetId.get(s.id)?.pluginManaged"
+                class="meta-view-rail__copy-badge meta-view-rail__copy-badge--plm"
+                data-testid="rail-sheet-no-plm-refresh-badge"
+                :title="railLabel('rail.badgeNoPlmRefreshTitle', isZh)"
+              >{{ railLabel('rail.badgeNoPlmRefresh', isZh) }}</span>
+            </template>
+          </button>
+          <!--
+            Rename affordance (feat/multitable-rename). Hiding is UX only — the server is the real
+            enforcement (PATCH /api/multitable/sheets/:id gates on canManageFields, see
+            MultitableWorkbench.vue's onRenameSheet). Sibling of the treeitem button (never nested
+            inside it — buttons cannot nest), so it never triggers onSheetActivate/onTreeKeydown.
+          -->
+          <template v-if="renamingSheetId === s.id">
+            <input
+              class="meta-view-rail__sheet-rename-input"
+              data-testid="rail-sheet-rename-input"
+              :value="renamingSheetName"
+              @click.stop
+              @input="renamingSheetName = ($event.target as HTMLInputElement).value"
+              @keydown.enter="confirmRenameSheet(s.id)"
+              @keydown.escape="cancelRenameSheet"
+            />
+            <button
+              type="button"
+              class="meta-view-rail__sheet-rename-ok"
+              data-testid="rail-sheet-rename-confirm"
+              :disabled="!renamingSheetName.trim()"
+              :title="railLabel('rail.confirmRenameSheet', isZh)"
+              @click.stop="confirmRenameSheet(s.id)"
+            >&#x2713;</button>
+            <button
+              type="button"
+              class="meta-view-rail__sheet-rename-cancel"
+              data-testid="rail-sheet-rename-cancel"
+              :title="railLabel('rail.cancelRenameSheet', isZh)"
+              @click.stop="cancelRenameSheet"
+            >&#x2717;</button>
+          </template>
+          <button
+            v-else-if="canManageFields"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-rename"
+            :title="railLabel('rail.renameSheet', isZh)"
+            @click.stop="startRenameSheet(s)"
+          >&#x270E;</button>
+          <!--
+            Copy affordance (复制数据表 S1, ADR CS-2 entry ①). Same single-sheet discipline as delete below:
+            `canCopySheet` is the server-derived /context bit for the CURRENT sheet (full-table read on it ∧
+            its Base writable), so it renders on the SELECTED row only, never on the rail's other rows.
+            Hidden while that row is being renamed. Hiding is UX only — POST /sheets/:id/copy re-runs
+            both gates. Click only emits; the dialog lives in MultitableWorkbench.vue.
+          -->
+          <button
+            v-if="canCopySheet && s.id === activeSheetId && renamingSheetId !== s.id"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-copy"
+            :title="railLabel('rail.copySheet', isZh)"
+            :aria-label="railLabel('rail.copySheet', isZh)"
+            @click.stop="emit('copy-sheet', s.id)"
+          ><el-icon><IconCopyDocument /></el-icon></button>
+          <!--
+            Delete affordance. Rendered for the SELECTED sheet only: `canDeleteSheet` is the
+            server-derived, single-sheet authority bit /context computes for the current sheet
+            (hasSheetLifecycleAuthority — NOT canManageFields), so it says nothing about the rail's
+            other rows and must not be applied to them. Hidden while that row is being renamed.
+            Hiding is UX only — DELETE /api/multitable/sheets/:id re-gates and refuses managed
+            sheets regardless. Click only emits; the confirm lives in MultitableWorkbench.vue.
+            Reuses the pencil button's class (no new <style> rules in this file).
+          -->
+          <button
+            v-if="canDeleteSheet && s.id === activeSheetId && renamingSheetId !== s.id"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-delete"
+            :title="railLabel('rail.deleteSheet', isZh)"
+            :aria-label="railLabel('rail.deleteSheet', isZh)"
+            @click.stop="emit('delete-sheet', s.id)"
+          >&#x1F5D1;</button>
+        </div>
         <ul v-if="s.id === activeSheetId && views.length" role="group" class="meta-view-rail__views">
           <li v-for="v in views" :key="v.id" class="meta-view-rail__view-row">
             <button
@@ -93,6 +195,7 @@ import type { Component } from 'vue'
 import type { MetaSheet, MetaView } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { railLabel } from '../utils/meta-sheet-view-rail-labels'
+import { readSheetCopiedFrom } from '../api/client'
 import { ElIcon } from 'element-plus'
 import {
   Grid as IconGrid,
@@ -105,6 +208,7 @@ import {
   Share as IconHierarchy,
   CaretRight as IconCaretRight,
   CaretBottom as IconCaretBottom,
+  CopyDocument as IconCopyDocument,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -113,6 +217,16 @@ const props = defineProps<{
   activeSheetId: string
   activeViewId: string
   canCreateSheet?: boolean
+  // Rename affordance (feat/multitable-rename): mirrors the server's canManageFields gate (admin
+  // role or multitable:manage-schema). Hiding the pencil button when false is UX only — the
+  // server re-checks on PATCH /api/multitable/sheets/:id and 403s regardless.
+  canManageFields?: boolean
+  // Delete affordance: the server-derived MetaCapabilities.canDeleteSheet bit for the CURRENT sheet
+  // (single-sheet by construction — see /context). Absent/false hides the trash button (fail-closed).
+  canDeleteSheet?: boolean
+  // 复制数据表 S1: the server-derived MetaCapabilities.canCopySheet bit for the CURRENT sheet (/context).
+  // Absent/false hides the copy button (fail-closed, same discipline as canDeleteSheet).
+  canCopySheet?: boolean
   // Slice 3: flag-derived session capability (MetaCapabilities.personalViewsEnabled) — absent/false hides
   // the toggle entirely (G-FE-4). NOT a client-side env const.
   personalViewsEnabled?: boolean
@@ -124,10 +238,16 @@ const emit = defineEmits<{
   (e: 'select-view', id: string): void
   (e: 'create-sheet', name: string): void
   (e: 'toggle-personal', viewId: string): void
+  (e: 'rename-sheet', id: string, name: string): void
+  (e: 'delete-sheet', id: string): void
+  (e: 'copy-sheet', id: string): void
 }>()
 
 const { isZh } = useLocale()
 const personalToggleLabel = computed(() => (isZh.value ? '个人视图' : 'My view'))
+
+// Copy provenance per sheet, mapped ONCE per sheets change through the api client's single adapter.
+const copiedFromBySheetId = computed(() => new Map(props.sheets.map((s) => [s.id, readSheetCopiedFrom(s)])))
 
 function onAddSheet() {
   const name = `Sheet ${props.sheets.length + 1}`
@@ -238,6 +358,32 @@ function onSheetActivate(s: MetaSheet) {
   emit('select-sheet', s.id)
 }
 
+// --- Rename affordance (feat/multitable-rename) --------------------------------------------
+// Same inline-edit shape as MetaFieldManager.vue's field rename: pencil swaps the row into an
+// input + confirm/cancel, Enter confirms, Escape cancels. This component only emits — the parent
+// (MultitableWorkbench.vue) owns the HTTP call and error surfacing.
+const renamingSheetId = ref<string | null>(null)
+const renamingSheetName = ref('')
+
+function startRenameSheet(s: MetaSheet) {
+  renamingSheetId.value = s.id
+  renamingSheetName.value = s.name
+}
+
+function confirmRenameSheet(sheetId: string) {
+  const name = renamingSheetName.value.trim()
+  const current = props.sheets.find((sheet) => sheet.id === sheetId)
+  if (name && name !== current?.name) {
+    emit('rename-sheet', sheetId, name)
+  }
+  cancelRenameSheet()
+}
+
+function cancelRenameSheet() {
+  renamingSheetId.value = null
+  renamingSheetName.value = ''
+}
+
 function onViewActivate(v: MetaView) {
   focusedKey.value = viewKey(v.id)
   emit('select-view', v.id)
@@ -311,11 +457,13 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
   margin: 0;
   padding: var(--ms-space-2) 0;
 }
+.meta-view-rail__sheet-row { display: flex; align-items: center; gap: var(--ms-space-1); padding-right: var(--ms-space-2); }
 .meta-view-rail__sheet {
   display: flex;
   align-items: center;
   gap: var(--ms-space-1);
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   min-height: var(--ms-control-height);
   padding: 0 var(--ms-space-3);
   border: none;
@@ -329,8 +477,64 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
 .meta-view-rail__sheet:hover { background: var(--ms-bg-card); }
 .meta-view-rail__sheet.--active { background: var(--el-color-primary-light-9); color: var(--ms-color-primary); font-weight: 500; }
 .meta-view-rail__sheet.--active:hover { background: var(--el-color-primary-light-8); }
+.meta-view-rail__sheet-rename-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--ms-radius-sm);
+  background: transparent;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.meta-view-rail__sheet-rename-btn:hover { background: var(--ms-bg-card); color: var(--ms-color-primary); }
+.meta-view-rail__sheet-rename-input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--ms-control-height);
+  padding: 0 var(--ms-space-2);
+  border: 1px solid var(--ms-color-primary);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+.meta-view-rail__sheet-rename-ok,
+.meta-view-rail__sheet-rename-cancel {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--ms-radius-sm);
+  background: transparent;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.meta-view-rail__sheet-rename-ok:hover:not(:disabled) { background: var(--ms-bg-card); color: var(--ms-color-success); }
+.meta-view-rail__sheet-rename-ok:disabled { opacity: 0.5; cursor: not-allowed; }
+.meta-view-rail__sheet-rename-cancel:hover { background: var(--ms-bg-card); color: var(--ms-color-danger); }
 .meta-view-rail__chevron { display: inline-flex; align-items: center; width: 14px; flex-shrink: 0; font-size: 12px; color: var(--ms-text-3); }
 .meta-view-rail__sheet-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 复制数据表 S1 provenance badges — token-only like the rest of this file (T6 gate). */
+.meta-view-rail__copy-badge {
+  flex-shrink: 0;
+  padding: 0 var(--ms-space-1);
+  border-radius: var(--ms-radius-sm);
+  background: var(--el-color-info-light-9);
+  color: var(--ms-color-info);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.meta-view-rail__copy-badge--plm {
+  background: var(--el-color-warning-light-9);
+  color: var(--ms-color-warning);
+}
 .meta-view-rail__views { list-style: none; margin: 0; padding: 0; }
 .meta-view-rail__view-row { display: flex; align-items: center; gap: var(--ms-space-1); padding-right: var(--ms-space-2); }
 .meta-view-rail__view {

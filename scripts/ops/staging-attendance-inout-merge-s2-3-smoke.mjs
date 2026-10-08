@@ -46,6 +46,10 @@
 //
 // On PASS, flip the tracker row 内外勤卡合并 🟡 → ✅ with this stamp.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import pg from 'pg'
 
 const BASE_URL = (process.env.BASE_URL || process.env.BASE || '').replace(/\/$/, '')
@@ -268,7 +272,20 @@ async function cleanup() {
   await q(`DELETE FROM approval_instances WHERE business_key IN (SELECT 'attendance-request:' || id FROM attendance_requests WHERE user_id = $1)`, [USER]).catch(() => {})
   await q(`DELETE FROM attendance_requests WHERE user_id = $1`, [USER]).catch(() => {})
   await q(`DELETE FROM attendance_events WHERE user_id = $1`, [USER]).catch(() => {})
-  await q(`DELETE FROM attendance_records WHERE user_id = $1`, [USER]).catch(() => {})
+  const retirementToken = token || process.env.SMOKE_TOKEN || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-000000000023',
+    ticket: 'STAGING-S2-3',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: (typeof ORG_ID !== "undefined" ? ORG_ID : "default"), userIds: [USER] }, { retireRecord: opsRetirementExecutor })
   if (flowId) await q(`DELETE FROM attendance_approval_flows WHERE id = $1 AND org_id = $2`, [flowId, ORG_ID]).catch(() => {})
   const residue = await q(
     `SELECT

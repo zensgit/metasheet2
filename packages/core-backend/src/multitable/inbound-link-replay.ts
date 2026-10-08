@@ -26,6 +26,10 @@
  *   7. NOT EXISTS an identical meta_links row (also kills the self-link double: a self-link is both
  *      outbound-replayed from the trash snapshot and inbound-captured; running AFTER the outbound
  *      replay, the guard sees the freshly inserted row and skips).
+ * A fenced restore adds one more guard without changing legacy callers:
+ *   8. F and N still belong to sheets in the caller's already-fenced participant set. A row that
+ *      disappeared before fence entry and later reappeared on another sheet must not expand the lock set
+ *      after global-order acquisition; it is skipped by the final INSERT predicate instead.
  *
  * ANCHOR QUERY SHAPE (design-lock §2): always `WHERE source_revision_id = $1 AND
  * reason = 'record_delete'` — NEVER filter by sheet_id (on record_delete rows it stores the DELETED
@@ -50,7 +54,7 @@ export interface InboundReplaySkips {
   fieldMirror: number
   /** N's own data no longer lists R in F's cell (Option A: the user's removal wins). */
   neighborDeclined: number
-  /** An identical edge already exists (incl. the self-link outbound-replay overlap). */
+  /** An identical edge exists, or a fenced restore sees an owner outside its pre-fenced participant set. */
   alreadyPresent: number
 }
 
@@ -65,6 +69,11 @@ export interface InboundReplayResult {
   /** TRUE tombstone-row count under the anchor, locked from the diagnostic's single snapshot —
    *  exact in both drift directions (NOT derived from replayed/skipped arithmetic). */
   total: number
+}
+
+export interface InboundReplayOptions {
+  /** When supplied by a fenced restore, both live owners must remain inside the already-fenced set. */
+  allowedParticipantSheetIds?: readonly string[]
 }
 
 export const EMPTY_INBOUND_REPLAY: InboundReplayResult = Object.freeze({
@@ -89,7 +98,21 @@ export const EMPTY_INBOUND_REPLAY: InboundReplayResult = Object.freeze({
 export async function replayInboundLinks(
   query: QueryFn,
   deleteRevisionId: string,
+  opts?: InboundReplayOptions,
 ): Promise<InboundReplayResult> {
+  const participantSheetIds = opts?.allowedParticipantSheetIds === undefined
+    ? null
+    : [...new Set(opts.allowedParticipantSheetIds)].sort()
+  const participantParams = participantSheetIds === null
+    ? [deleteRevisionId]
+    : [deleteRevisionId, participantSheetIds]
+  const participantDiagnosticGuard = participantSheetIds === null
+    ? ''
+    : "WHEN NOT (f.sheet_id = ANY($2::text[])) OR NOT (n.sheet_id = ANY($2::text[])) THEN 'alreadyPresent'"
+  const participantInsertGuard = participantSheetIds === null
+    ? ''
+    : `AND f.sheet_id = ANY($2::text[])
+        AND n.sheet_id = ANY($2::text[])`
   // Diagnostic pass: classify every anchor row by its FIRST failing precondition. Kept in exact
   // predicate lockstep with the INSERT below — RB12 mutations red both if they drift.
   const diag = await query(
@@ -100,6 +123,7 @@ export async function replayInboundLinks(
          WHEN f.type <> 'link' THEN 'fieldNotLink'
          WHEN (f.property->>'mirrorOf') IS NOT NULL THEN 'fieldMirror'
          WHEN NOT ((n.data -> t.field_id) ? t.foreign_record_id) THEN 'neighborDeclined'
+         ${participantDiagnosticGuard}
          WHEN EXISTS (
            SELECT 1 FROM meta_links ml
             WHERE ml.field_id = t.field_id
@@ -114,7 +138,7 @@ export async function replayInboundLinks(
      LEFT JOIN meta_fields f ON f.id = t.field_id
      WHERE t.source_revision_id = $1 AND t.reason = 'record_delete'
      GROUP BY 1`,
-    [deleteRevisionId],
+    participantParams,
   )
 
   const skipped: InboundReplaySkips = {
@@ -138,8 +162,9 @@ export async function replayInboundLinks(
   // live meta_records_trash row (ours does: the caller holds it FOR UPDATE until restore commits).
   const diagnosticTotal = replayable + Object.values(skipped).reduce((a, b) => a + b, 0)
 
-  // The write: same anchor, all seven guards as INSERT predicates. `id` mirrors the outbound
-  // replay's `lnk_<uuid>` shape ('lnk_' + 36 uuid chars = 40 ≤ its 50-char slice).
+  // The write: same anchor, all seven base guards plus the optional fenced-participant guard as INSERT
+  // predicates. `id` mirrors the outbound replay's `lnk_<uuid>` shape ('lnk_' + 36 uuid chars = 40 ≤
+  // its 50-char slice).
   const ins = await query(
     `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
      SELECT 'lnk_' || gen_random_uuid(), t.field_id, t.record_id, t.foreign_record_id
@@ -151,23 +176,24 @@ export async function replayInboundLinks(
         AND f.type = 'link'
         AND (f.property->>'mirrorOf') IS NULL
         AND (n.data -> t.field_id) ? t.foreign_record_id
+        ${participantInsertGuard}
         AND NOT EXISTS (
           SELECT 1 FROM meta_links ml
            WHERE ml.field_id = t.field_id
              AND ml.record_id = t.record_id
              AND ml.foreign_record_id = t.foreign_record_id
         )`,
-    [deleteRevisionId],
+    participantParams,
   )
 
   const replayed = ins.rowCount ?? 0
   // Diagnostic/INSERT drift tripwire — HONEST SEMANTICS, not a correctness net (do not extend this to
   // "fix" the count; it is deliberately a same-day characterization, see NIT-1 in the absorption audit):
   // the diagnostic query above and the write below are two SEPARATE statements, each its own READ
-  // COMMITTED snapshot. The caller's transaction only holds a row lock on the deleted record's OWN
-  // trash row (serializing concurrent restores of THAT record) — it never locks the neighbour or field
-  // rows this function reads. So a genuinely concurrent write to a neighbour's cell (or a field
-  // retype/mirror flip) landing in the gap between the two statements can flip a row's classification:
+  // COMMITTED snapshot. A caller without the optional multi-sheet restore fence only holds a row lock on
+  // the deleted record's OWN trash row (serializing concurrent restores of THAT record), not the neighbour
+  // or field rows this function reads. In that legacy/flag-off posture, a genuinely concurrent write to a
+  // neighbour's cell (or a field retype/mirror flip) landing in the gap can flip a row's classification:
   // the diagnostic counts it one way, the write — evaluating every precondition fresh, at its own later
   // instant — resolves it another way. `replayed` (this statement's actual row count) is always the
   // truth for what got written; when it disagrees with the diagnostic's `replayable` count, the

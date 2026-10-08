@@ -22,6 +22,52 @@ export interface DataSourceListItem {
   name: string
   type: string
   connected: boolean
+  /**
+   * How many 数据工厂 bindings point at this source (canonical `connection_id` plus
+   * owner-attributed legacy `config.dataSourceId`) — the same number the DELETE guard enforces.
+   *
+   * UNDEFINED IS NOT ZERO. The server omits the field when it could not count, and 0 would read as
+   * "unreferenced, safe to delete" about a delete that may still be refused. Render the missing
+   * case as 未知, never as 未被引用.
+   *
+   * A count only: which systems reference the source never crosses the wire.
+   */
+  referenceCount?: number
+}
+
+/**
+ * Why a persisted source could not be loaded by the server (closed vocabulary, mirrored from the
+ * backend's DATA_SOURCE_LOAD_STATES). Only `credentials_unreadable` can be fixed from the UI (by
+ * re-entering credentials); the rest need an administrator.
+ */
+export const DATA_SOURCE_LOAD_STATES = [
+  'credentials_unreadable',
+  'unsupported_type',
+  'load_failed',
+] as const
+export type DataSourceLoadState = (typeof DATA_SOURCE_LOAD_STATES)[number]
+
+/**
+ * One entry of `GET /api/data-sources` → `data.loadFailed`: a source that EXISTS but the server
+ * could not load. Deliberately NOT a {@link DataSourceListItem}: it has no adapter behind it, so it
+ * cannot be tested, browsed, edited or deleted — only re-sealed (see `loadState`). Visible only to
+ * its owner and platform admins; the server omits the field when there is nothing to show.
+ */
+export interface DataSourceLoadFailedItem {
+  id: string
+  name: string
+  type: string
+  loadState: DataSourceLoadState
+  ownerId: string | null
+}
+
+/** What `PUT /api/data-sources/:id/credentials` tells the UI beyond "it worked". */
+export interface RotateDataSourceCredentialsResult {
+  /**
+   * The credentials were saved, but the source only goes live after a service restart (a source
+   * armed for SQL write can only be bound at startup). False for every ordinary rotation.
+   */
+  restartRequired: boolean
 }
 
 /** Sanitized detail from `GET /api/data-sources/:id`; credentials are never returned. */
@@ -58,11 +104,22 @@ export interface DataSourceTableInfo {
   name: string
   schema?: string
   columns?: DataSourceColumnInfo[]
+  /**
+   * Backend marker for "were this entry's columns actually read?" (SchemaInfo/TableInfo.columnsLoaded).
+   * false = list-only entry, `columns` is empty BY CONSTRUCTION — NOT "this table has no fields".
+   * Absent = legacy/loaded shape, read `columns` as before.
+   */
+  columnsLoaded?: boolean
 }
 
 export interface DataSourceSchemaInfo {
   tables?: DataSourceTableInfo[]
   views?: DataSourceTableInfo[]
+  /**
+   * 'list' = names only (the default for GET /:id/schema without includeColumns);
+   * 'full' = per-table columns were read. Absent = adapters that never had an N+1 listing.
+   */
+  detail?: 'list' | 'full'
 }
 
 export interface DataSourceSelectPayload {

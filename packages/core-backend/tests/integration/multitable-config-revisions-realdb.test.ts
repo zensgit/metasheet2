@@ -52,7 +52,8 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write', 'multitable:manage'] }; next() })
+    // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write', 'multitable:manage', 'multitable:manage-schema'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'CR Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'CR Sheet'])
@@ -112,10 +113,14 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     expect(revs[0].after).toMatchObject({ name: 'New' })
   })
 
+  // F8A: the pair must be ON the lossless whitelist the route now enforces
+  // (src/multitable/field-retype-whitelist.ts) — number → text is; the old text → number
+  // direction is exactly what that whitelist refuses with 400 FIELD_RETYPE_NOT_LOSSLESS.
+  // What this test pins (a type change records a revision with changed_keys ∋ type) is unchanged.
   test('field RETYPE → action update, changed_keys includes type', async () => {
-    const fid = (await createField({ name: 'Num', type: 'string' })).body?.data?.field?.id
+    const fid = (await createField({ name: 'Num', type: 'number' })).body?.data?.field?.id
     await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET])
-    await updateField(fid, { type: 'number' })
+    await updateField(fid, { type: 'string' })
     const revs = await configRevs(fid)
     expect(revs.length).toBe(1)
     expect(revs[0].action).toBe('update')

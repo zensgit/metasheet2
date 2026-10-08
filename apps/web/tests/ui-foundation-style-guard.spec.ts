@@ -19,7 +19,20 @@ const TARGET_FILES = [
   'src/views/approval/ApprovalCardDecisionView.vue',
   'src/views/approval/ApprovalCenterTable.vue',
   'src/views/approval/ApprovalCenterView.vue',
+  // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): brand-new desktop
+  // master-detail pane, clean from the start (no legacy hex to migrate) — same precedent as the
+  // IU-3/IU-4 wizard components above.
+  'src/views/approval/ApprovalCenterDetailPane.vue',
   'src/views/approval/ApprovalDetailView.vue',
+  // P1b (审批可发现性, 2026-09-07): the two NEW approval surfaces join the UF-6 target set in their
+  // introducing slice, born token-only (var(--ms-*)/--el-* exclusively) — same precedent as the
+  // F2/F3/UI-7 components above.
+  'src/views/approval/ApprovalBatchTransferView.vue',
+  'src/approvals/components/ApprovalTodoBadge.vue',
+  // Round 2 (same slice): the server-gated nav entry and the app-shell error boundary that keeps
+  // either nav component from taking the shell down. Both are born token-only as well.
+  'src/approvals/components/ApprovalBatchTransferNavEntry.vue',
+  'src/components/ShellChromeBoundary.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
   'src/views/approval/ApprovalNewView.vue',
@@ -28,6 +41,25 @@ const TARGET_FILES = [
   'src/views/approval/TemplateAuthoringView.vue',
   'src/views/approval/TemplateCenterView.vue',
   'src/views/approval/TemplateDetailView.vue',
+  // FWB record-link picker is part of the approval authoring surface and starts token-only.
+  'src/approvals/components/ApprovalRecordLinkPicker.vue',
+  // F0 (docs/development/approval-form-builder-parity-delta-design-20260811.md §5 F0): extracted
+  // from the already-token-only TemplateAuthoringView.vue verbatim, so it starts clean too.
+  'src/approvals/components/ApprovalFormInlineEditor.vue',
+  // F2 (same delta §5 F2 / §6 rules): the NEW Designer 2.0 palette + builder join the UF-6
+  // target set in their introducing slice, born token-only (var(--el-*) exclusively).
+  'src/approvals/components/ApprovalFormPalette.vue',
+  'src/approvals/components/ApprovalFormBuilder.vue',
+  // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D): the canvas
+  // node-card flat-card-grammar migration and the condition-branch priority/default presentation.
+  // Note: ApprovalFlowCanvas.vue was NOT already token-only pre-migration — main carried a
+  // literal `box-shadow: 0 1px 2px rgb(0 0 0 / 4%)` that P1-D's flat-card change deleted, so this
+  // enrollment is a real migration for that file, not a clean pass (corrected from the PR body).
+  'src/approvals/components/ApprovalFlowCanvas.vue',
+  'src/approvals/components/ApprovalGraphNodeConfigEditor.vue',
+  // F3 (same delta §5 F3 / §6 rules): the NEW selected-field inspector joins in its
+  // introducing slice, born token-only too.
+  'src/approvals/components/ApprovalFormFieldInspector.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',
@@ -37,6 +69,9 @@ const TARGET_FILES = [
   'src/components/status/EmptyState.vue',
   'src/multitable/components/MetaAutomationManager.vue',
   'src/multitable/components/MetaAutomationRuleEditor.vue',
+  // 客户反馈 2026-09-24 #4b: the typed condition value control extracted for the rule editor's condition
+  // rows joins in its introducing slice, born token-only (var(--ms-*)/--el-* exclusively).
+  'src/multitable/components/ConditionValueInput.vue',
   // IU-2a (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
   // §3 hard locks "token-only"): Workbench chrome slice tokenized its 142 hardcoded hex/rgb
   // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
@@ -73,6 +108,12 @@ const TARGET_FILES = [
   // IU-4 (docs/development/integration-iu4-composition-wizard-design-lock-20260707.md, #3803):
   // sibling wizard, same "clean from the start" rule.
   'src/components/integration/IntegrationCompositionWizard.vue',
+  // Record inspector v3 PR-B1 (docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §4 item 9, round 2): the NEW details-tab section wrapper joins in its introducing slice, born
+  // token-only (`--ms-*` exclusively, no `var(--x, #hex)` fallbacks). The five pre-existing record
+  // inspector files named in the same §4 item (INS / FP / History / Attachments / Provenance) are
+  // PR-B3's migration and enrol there, not here.
+  'src/multitable/components/MetaRecordFieldSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

@@ -120,6 +120,21 @@ describe('flag ON — two-phase intent/outcome', () => {
     expect(only(h.intent).status).toBe('sent')
   })
 
+  it('real-fire test run writes its outbound intent in kind=test_run', async () => {
+    const h = makeHarness(() => resp(200))
+    await new AutomationExecutor(h.deps).execute(
+      ruleWith(WEBHOOK),
+      TRIGGER,
+      undefined,
+      'trroot_server_derived',
+      'live',
+      'test_run',
+    )
+    expect([...h.intent.keys()]).toEqual([
+      expect.stringMatching(/^test_run\|trroot_server_derived\|/),
+    ])
+  })
+
   it('retry after sent → skip_sent: alreadyApplied, NO second fetch', async () => {
     const h = makeHarness(() => resp(200))
     await new AutomationExecutor(h.deps).execute(ruleWith(WEBHOOK), TRIGGER, undefined, ROOT) // first: sent

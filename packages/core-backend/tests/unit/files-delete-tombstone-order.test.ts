@@ -101,6 +101,9 @@ vi.mock('../../src/rbac/service', () => ({
 
 import { Logger } from '../../src/core/logger'
 import { filesRouter } from '../../src/routes/files'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)', () => {
   beforeEach(() => {
@@ -130,7 +133,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     kyselyMocks.state.updateShouldThrow = true
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(500)
     expect(storageMocks.delete).not.toHaveBeenCalled()
@@ -145,7 +149,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     const warnSpy = vi.spyOn(Logger.prototype, 'warn')
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
@@ -161,7 +166,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
   it('normal path (no injected failure): tombstone UPDATE, then storage.deleteByKey(resolved storage_key), then blob_purged_at stamp, 200', async () => {
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
@@ -186,7 +192,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     }]
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
@@ -213,7 +220,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     })
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     // the tombstone UPDATE (which already wrote the COALESCE-derived storage_key) ran BEFORE the failed
@@ -230,7 +238,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     const warnSpy = vi.spyOn(Logger.prototype, 'warn')
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
@@ -247,7 +256,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1', deleted_at: null, storage_key: null, url: null, meta: {}, created_at: new Date() }]
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
@@ -261,7 +271,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     authMocks.user = { id: 'someone-else' }
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'File not found' })
@@ -273,7 +284,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     kyselyMocks.state.ownerRows = []
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/legacy-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/legacy-1')
 
     expect(res.status).toBe(404)
     expect(storageMocks.exists).not.toHaveBeenCalled()
@@ -286,7 +298,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     kyselyMocks.state.ownerRows = [{ owner_id: 'someone-else', deleted_at: new Date(), storage_key: 'uuid-x/photo.jpg', url: null, meta: {}, created_at: new Date() }]
     const app = buildApp()
 
-    const res = await request(app).delete('/api/files/photo-1')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).delete('/api/files/photo-1')
 
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'File not found' })

@@ -14,8 +14,26 @@ const {
   createDataSourceSqlReadonlySourceAdapter,
   createDataSourceSqlReadonlySourceAdapterFactory,
 } = require('../lib/adapters/data-source-sql-readonly-source-adapter.cjs')
+const { dryRunExternalWrite } = require('../lib/external-write-dry-run.cjs')
 
 const SYSTEM = { kind: ADAPTER_KIND, config: { dataSourceId: 'pg-1' } }
+const LOOKUP_SYSTEM = {
+  kind: ADAPTER_KIND,
+  config: {
+    dataSourceId: 'pg-1',
+    lookupProjection: {
+      baseObject: 'dbo.bom_detail',
+      lookupObject: 'dbo.part_library',
+      localKey: 'part_id',
+      foreignKey: 'OBJ_ID',
+      fields: {
+        FNumber: 'IdentityNo',
+        FName: 'IdentityName',
+      },
+      maxRows: 3,
+    },
+  },
+}
 const WATERMARK_CURSOR_PREFIX = 'dswm1:'
 
 function decodeWatermarkCursor(cursor) {
@@ -44,7 +62,7 @@ function fakeFacade(overrides = {}) {
     },
     async select(id, table, options, principal) {
       calls.select.push({ id, table, options, principal })
-      return overrides.select ? overrides.select(options) : { data: [{ id: 1 }], metadata: {} }
+      return overrides.select ? overrides.select(options, { id, table, principal }) : { data: [{ id: 1 }], metadata: {} }
     },
   }
   return { api, calls }
@@ -133,6 +151,398 @@ async function main() {
       'array filter rejected',
     )
     assert.equal(f.calls.select.length, 0, 'invalid filters fail before any facade read')
+  }
+
+  // 4d. A system-bound lookup projection enriches at most three base rows through exact, read-only
+  //     per-row lookups. The request supplies only the base object/filter/limit; table and field
+  //     identifiers come exclusively from the persisted system config.
+  {
+    const f = fakeFacade({
+      select: (options, call) => {
+        if (call.table === 'dbo.bom_detail') {
+          return {
+            data: [
+              { id: 1, part_id: 'part-1', status: 'ready' },
+              { id: 2, part_id: 'part-2', status: 'ready' },
+            ],
+            metadata: {},
+          }
+        }
+        assert.equal(call.table, 'dbo.part_library')
+        const key = options.where.OBJ_ID
+        return {
+          data: [{
+            IdentityNo: key === 'part-1' ? 'M-001' : 'M-002',
+            IdentityName: key === 'part-1' ? 'Material One' : 'Material Two',
+          }],
+          metadata: {},
+        }
+      },
+    })
+    const res = await adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({
+      object: 'dbo.bom_detail',
+      limit: 3,
+      filters: { status: 'ready' },
+    })
+    assert.deepEqual(res.records, [
+      { id: 1, part_id: 'part-1', status: 'ready', FNumber: 'M-001', FName: 'Material One' },
+      { id: 2, part_id: 'part-2', status: 'ready', FNumber: 'M-002', FName: 'Material Two' },
+    ])
+    assert.equal(res.done, true)
+    assert.equal(res.metadata.lookupProjectionApplied, true)
+    assert.equal(res.metadata.lookupProjectionRows, 2)
+    assert.equal(f.calls.select.length, 3, 'one base read plus one lookup per base row')
+    assert.deepEqual(f.calls.select[0], {
+      id: 'pg-1',
+      table: 'dbo.bom_detail',
+      options: { limit: 3, offset: 0, where: { status: 'ready' } },
+      principal: 'owner-42',
+    })
+    assert.deepEqual(f.calls.select[1].options, {
+      limit: 2,
+      offset: 0,
+      where: { OBJ_ID: 'part-1' },
+    })
+    assert.deepEqual(f.calls.select[2].options, {
+      limit: 2,
+      offset: 0,
+      where: { OBJ_ID: 'part-2' },
+    })
+  }
+
+  // 4e. Projection configuration is strict and fails at construction: no arbitrary SQL-shaped
+  //     object names, unknown fields, or a row bound above three can reach the facade.
+  {
+    for (const lookupProjection of [
+      { ...LOOKUP_SYSTEM.config.lookupProjection, lookupObject: 'dbo.parts;DROP_TABLE' },
+      { ...LOOKUP_SYSTEM.config.lookupProjection, localKey: '__proto__' },
+      { ...LOOKUP_SYSTEM.config.lookupProjection, foreignKey: 'constructor' },
+      { ...LOOKUP_SYSTEM.config.lookupProjection, arbitrarySql: 'SELECT 1' },
+      { ...LOOKUP_SYSTEM.config.lookupProjection, maxRows: 4 },
+      { ...LOOKUP_SYSTEM.config.lookupProjection, maxRows: '3' },
+      {
+        ...LOOKUP_SYSTEM.config.lookupProjection,
+        fields: { FNumber: 'IdentityNo', FName: 'IdentityName', extra: 'secret' },
+      },
+    ]) {
+      const f = fakeFacade()
+      assert.throws(
+        () => adapterWith(f, 'owner-42', {
+          kind: ADAPTER_KIND,
+          config: { dataSourceId: 'pg-1', lookupProjection },
+        }),
+        /lookupProjection/,
+      )
+      assert.equal(f.calls.select.length, 0)
+    }
+  }
+
+  // 4f. The projection is bound to one base object and its saved row cap. Mismatch, over-limit,
+  //     and watermark modes fail before source contact.
+  {
+    const f = fakeFacade()
+    const a = adapterWith(f, 'owner-42', LOOKUP_SYSTEM)
+    await assert.rejects(
+      () => a.read({ object: 'dbo.other_table', limit: 3 }),
+      /bound to a different source object/,
+    )
+    await assert.rejects(
+      () => a.read({ object: 'dbo.bom_detail', limit: 4 }),
+      /server-bound maximum/,
+    )
+    await assert.rejects(
+      () => a.read({
+        object: 'dbo.bom_detail',
+        limit: 3,
+        watermark: { id: 1 },
+        watermarkConfig: { type: 'monotonic_id', field: 'id' },
+      }),
+      /does not support watermark/,
+    )
+    assert.equal(f.calls.select.length, 0)
+  }
+
+  // 4g. A request cannot inject or override lookup identifiers, including through request.options.
+  //     Unknown request fields are normalized away; only the system-bound lookup is contacted.
+  {
+    const f = fakeFacade({
+      select: (options, call) => call.table === 'dbo.bom_detail'
+        ? { data: [{ id: 1, part_id: 'part-1' }], metadata: {} }
+        : { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} },
+    })
+    await adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({
+      object: 'dbo.bom_detail',
+      limit: 3,
+      lookupProjection: { lookupObject: 'dbo.request_injected' },
+      options: { lookupProjection: { lookupObject: 'dbo.options_injected' } },
+    })
+    assert.deepEqual(f.calls.select.map((call) => call.table), ['dbo.bom_detail', 'dbo.part_library'])
+  }
+
+  // 4h. Missing base keys and output alias collisions stop after the base read and before lookup.
+  {
+    for (const baseRow of [
+      { id: 1, part_id: '' },
+      { id: 1, part_id: true },
+      { id: 1, part_id: 'part-1', FNumber: 'collision' },
+    ]) {
+      const f = fakeFacade({ select: () => ({ data: [baseRow], metadata: {} }) })
+      await assert.rejects(
+        () => adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 3 }),
+        /lookup projection/,
+      )
+      assert.equal(f.calls.select.length, 1, 'invalid base row must not trigger lookup')
+    }
+  }
+
+  // 4i. Zero/multiple lookup rows, invalid projected fields, and driver failures all fail closed.
+  //     Driver text and row values are not carried into the surfaced error.
+  {
+    const cases = [
+      { lookupResult: { data: [], metadata: {} }, expected: /exactly one row/ },
+      {
+        lookupResult: {
+          data: [
+            { IdentityNo: 'M-001', IdentityName: 'Material One' },
+            { IdentityNo: 'M-001-DUP', IdentityName: 'Material One Duplicate' },
+          ],
+          metadata: {},
+        },
+        expected: /exactly one row/,
+      },
+      {
+        lookupResult: { data: [{ IdentityNo: 'M-001', IdentityName: ' ' }], metadata: {} },
+        expected: /required field/,
+      },
+      {
+        lookupResult: { data: [{ IdentityNo: 1001, IdentityName: 'Material One' }], metadata: {} },
+        expected: /required field/,
+      },
+      {
+        lookupResult: { data: [{ IdentityNo: 'M-001', IdentityName: false }], metadata: {} },
+        expected: /required field/,
+      },
+      {
+        lookupResult: { data: [], error: new Error('SENSITIVE_DRIVER_TEXT') },
+        expected: /lookup projection read failed/,
+      },
+    ]
+    for (const testCase of cases) {
+      const f = fakeFacade({
+        select: (options, call) => call.table === 'dbo.bom_detail'
+          ? { data: [{ id: 1, part_id: 'SENSITIVE_KEY_VALUE' }], metadata: {} }
+          : testCase.lookupResult,
+      })
+      let observed
+      try {
+        await adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 3 })
+      } catch (error) {
+        observed = error
+      }
+      assert.ok(observed, 'invalid lookup must throw')
+      assert.match(observed.message, testCase.expected)
+      const publicError = JSON.stringify({ message: observed.message, details: observed.details })
+      assert.ok(!publicError.includes('SENSITIVE_KEY_VALUE'))
+      assert.ok(!publicError.includes('SENSITIVE_DRIVER_TEXT'))
+    }
+  }
+
+  // 4j. Base-read driver errors are also coarse whenever projection mode is enabled.
+  {
+    const f = fakeFacade({
+      select: () => ({ data: [], error: new Error('SENSITIVE_FILTER_OR_DRIVER_TEXT') }),
+    })
+    let observed
+    try {
+      await adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 3 })
+    } catch (error) {
+      observed = error
+    }
+    assert.match(observed.message, /lookup projection base read failed/)
+    assert.ok(!observed.message.includes('SENSITIVE_FILTER_OR_DRIVER_TEXT'))
+  }
+
+  // 4j.1. The bounded join must be one-to-one across the whole base page: duplicate local keys or
+  //        duplicate projected material codes are ambiguous even when each individual lookup
+  //        returns exactly one row.
+  {
+    const duplicateLocalFacade = fakeFacade({
+      select: (options, call) => call.table === 'dbo.bom_detail'
+        ? {
+            data: [
+              { id: 1, part_id: 'duplicate-part' },
+              { id: 2, part_id: 'duplicate-part' },
+            ],
+            metadata: {},
+          }
+        : { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} },
+    })
+    await assert.rejects(
+      () => adapterWith(duplicateLocalFacade, 'owner-42', LOOKUP_SYSTEM).read({
+        object: 'dbo.bom_detail',
+        limit: 3,
+      }),
+      /base keys must be unique/,
+    )
+    assert.equal(duplicateLocalFacade.calls.select.length, 2, 'duplicate second key stops before its lookup')
+
+    const duplicateCodeFacade = fakeFacade({
+      select: (options, call) => call.table === 'dbo.bom_detail'
+        ? {
+            data: [
+              { id: 1, part_id: 'part-1' },
+              { id: 2, part_id: 'part-2' },
+            ],
+            metadata: {},
+          }
+        : {
+            data: [{
+              IdentityNo: options.where.OBJ_ID === 'part-1'
+                ? 'Duplicate-Material-Code'
+                : ' duplicate-material-code ',
+              IdentityName: 'Material Name',
+            }],
+            metadata: {},
+          },
+    })
+    await assert.rejects(
+      () => adapterWith(duplicateCodeFacade, 'owner-42', LOOKUP_SYSTEM).read({
+        object: 'dbo.bom_detail',
+        limit: 3,
+      }),
+      /material codes must be unique/,
+    )
+    assert.equal(duplicateCodeFacade.calls.select.length, 3)
+  }
+
+  // 4j.2. The facade is also treated as untrusted for row-count enforcement. Returning more base
+  //        rows than requested fails before any per-row lookup.
+  {
+    const f = fakeFacade({
+      select: () => ({
+        data: [
+          { id: 1, part_id: 'part-1' },
+          { id: 2, part_id: 'part-2' },
+          { id: 3, part_id: 'part-3' },
+        ],
+        metadata: {},
+      }),
+    })
+    await assert.rejects(
+      () => adapterWith(f, 'owner-42', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 2 }),
+      /exceeded the server-bound row limit/,
+    )
+    assert.equal(f.calls.select.length, 1)
+  }
+
+  // 4k. Real C6 dry-run composition: the persisted source system constructs this adapter, the
+  //     persisted equality filter selects two base rows, projection supplies FNumber/FName, and
+  //     planning reaches add=2 without invoking either target write method.
+  {
+    const sourceFacade = fakeFacade({
+      select: (options, call) => {
+        if (call.table === 'dbo.bom_detail') {
+          assert.deepEqual(options.where, { approvedSlice: 'fixture' })
+          return {
+            data: [
+              { id: 1, part_id: 'C6-PRIVATE-PART-1' },
+              { id: 2, part_id: 'C6-PRIVATE-PART-2' },
+            ],
+            metadata: {},
+          }
+        }
+        const suffix = options.where.OBJ_ID.endsWith('1') ? '1' : '2'
+        return {
+          data: [{ IdentityNo: `C6-PRIVATE-CODE-${suffix}`, IdentityName: `C6-PRIVATE-NAME-${suffix}` }],
+          metadata: {},
+        }
+      },
+    })
+    const sourceAdapter = adapterWith(sourceFacade, 'owner-42', LOOKUP_SYSTEM)
+    const targetCalls = { test: 0, lookup: 0, insert: 0, update: 0 }
+    const tokenRecords = new Map()
+    const result = await dryRunExternalWrite({
+      pipeline: {
+        id: 'pipe_lookup_projection_c6',
+        tenantId: 'tenant-test',
+        workspaceId: 'workspace-test',
+        sourceSystemId: 'source-lookup-projection',
+        sourceObject: 'dbo.bom_detail',
+        targetSystemId: 'target-c6',
+        targetObject: 'material',
+        createdBy: 'owner-42',
+        options: { source: { filters: { approvedSlice: 'fixture' } } },
+        fieldMappings: [
+          { sourceField: 'FNumber', targetField: 'externalId', validation: [{ type: 'required' }] },
+          { sourceField: 'FName', targetField: 'name', validation: [{ type: 'required' }] },
+        ],
+      },
+      sourceSystem: { id: 'source-lookup-projection', ...LOOKUP_SYSTEM },
+      targetSystem: {
+        id: 'target-c6',
+        kind: 'data-source:sql-write-gated',
+        config: {
+          dataSourceId: 'target-data-source',
+          object: 'dbo.material',
+          keyFields: ['externalId'],
+          writableFields: ['name'],
+        },
+      },
+      sourceAdapter,
+      dataSourceWrites: {
+        async test() {
+          targetCalls.test += 1
+          return {
+            success: true,
+            capabilityState: { readOnly: false, c6WriteTarget: true, genericQueryDisabled: true },
+          }
+        },
+        async lookupByKey() {
+          targetCalls.lookup += 1
+          return { data: [], metadata: {} }
+        },
+        async insertRows() {
+          targetCalls.insert += 1
+          throw new Error('dry-run must not insert')
+        },
+        async updateRows() {
+          targetCalls.update += 1
+          throw new Error('dry-run must not update')
+        },
+      },
+      tokenStore: {
+        async get(key) { return tokenRecords.get(key) || null },
+        async set(key, value) { tokenRecords.set(key, value) },
+      },
+      dryRunUser: 'reviewer-1',
+      dataSourceOwnerPrincipal: 'owner-42',
+      maxRows: 3,
+    })
+    assert.equal(result.status, 'ready')
+    assert.equal(result.canApply, true)
+    assert.deepEqual(result.counts, {
+      sourceRows: 2,
+      planned: 2,
+      add: 2,
+      update: 0,
+      skip: 0,
+      held: 0,
+      failed: 0,
+    })
+    assert.deepEqual(targetCalls, { test: 1, lookup: 2, insert: 0, update: 0 })
+    assert.equal(sourceFacade.calls.select.length, 3)
+    assert.equal(tokenRecords.size, 1)
+    const publicText = JSON.stringify(result)
+    for (const privateValue of [
+      'C6-PRIVATE-PART-1',
+      'C6-PRIVATE-PART-2',
+      'C6-PRIVATE-CODE-1',
+      'C6-PRIVATE-CODE-2',
+      'C6-PRIVATE-NAME-1',
+      'C6-PRIVATE-NAME-2',
+    ]) {
+      assert.equal(publicText.includes(privateValue), false, 'C6 dry-run result stays values-free')
+    }
   }
 
   // 5. Read-only-source guard now lives in the host facade and fires on EVERY read path: a facade
@@ -449,6 +859,209 @@ async function main() {
     const factory = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f.api } } })
     await factory({ system: SYSTEM, principal: 'owner-9' }).read({ object: 'items', limit: 3 })
     assert.equal(f.calls.select[0].principal, 'owner-9', 'factory must thread the principal to the adapter')
+  }
+
+  // 11. W-5: two fail-closed floors for ARMED B2a reads over SQL Server, both scoped to
+  //     `b2aAuthorization` being present (threaded per-call via the factory's `deps`, never off
+  //     `context`) — see http-routes.cjs's stock-preparation table-action/MVP-persist/large-BOM
+  //     entry points and b2a-trial-registry.cjs for the fixed code + refusal shape.
+  {
+    // A facade fake that records the 5th `select` argument (`armed`) explicitly — the shared
+    // `fakeFacade` above deliberately does NOT record it, so every one of its existing pinned
+    // `calls.select[i]` shape assertions stays byte-identical.
+    function armedAwareFakeFacade(overrides = {}) {
+      const calls = { select: [] }
+      const api = {
+        async test() { return { success: true } },
+        async getSchema() { return { tables: [], views: [] } },
+        async getTableInfo() { return { columns: [] } },
+        async select(id, table, options, principal, armed) {
+          calls.select.push({ id, table, options, principal, armed })
+          if (overrides.select) return overrides.select({ id, table, options, principal, armed })
+          return { data: [{ id: 1 }], metadata: {} }
+        },
+      }
+      return { api, calls }
+    }
+    const AUTHORIZATION = { registryId: 'reg', registryVersion: 1, registrationId: 'trial-1', purpose: 'stock-preparation.table-action' }
+
+    // 11a. Dormant/unauthorized (b2aAuthorization omitted): `armed` reaches the facade as `false` —
+    //      never `undefined`, so a facade that switches on truthiness sees a stable value — and
+    //      NOTHING about the call otherwise differs from before this change.
+    {
+      const f = armedAwareFakeFacade()
+      await adapterWith(f).read({ object: 'items', limit: 5 })
+      assert.equal(f.calls.select[0].armed, false, 'dormant read passes armed=false, never undefined')
+    }
+
+    // 11b. Armed + authorized: `armed=true` reaches the facade.
+    {
+      const f = armedAwareFakeFacade()
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      await a.read({ object: 'items', limit: 5 })
+      assert.equal(f.calls.select[0].armed, true, 'an armed, authorized read passes armed=true')
+    }
+
+    // 11c. Floor 1: the facade's generic pre-connect refusal (DATA_SOURCE_REQUEST_TIMEOUT_DISABLED)
+    //      is caught and re-thrown as the FIXED B2a code, carrying only values-free evidence.
+    {
+      const facadeError = Object.assign(
+        new Error("data source 'pg-1' has connection.requestTimeoutMs=0 (no timeout); this read requires a bounded request timeout and refuses to connect"),
+        { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED', status: 422, name: 'DataSourceRequestTimeoutDisabledError' },
+      )
+      const f = armedAwareFakeFacade({
+        select: () => { throw facadeError },
+      })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'items', limit: 5 })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'floor 1 must refuse')
+      assert.notEqual(caught, facadeError, 'the core-backend generic error is MAPPED, not passed through verbatim')
+      assert.equal(caught.name, 'B2aReadAuthorizationError')
+      assert.equal(caught.status, 403)
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED')
+      assert.equal(caught.details.reason, 'sqlserver_request_timeout_disabled')
+      assert.deepEqual(caught.details, {
+        reason: 'sqlserver_request_timeout_disabled',
+        registryId: 'reg',
+        registryVersion: 1,
+        registrationId: 'trial-1',
+        purpose: 'stock-preparation.table-action',
+      })
+    }
+
+    // 11c-dormant: the SAME facade error, but WITHOUT b2aAuthorization, propagates completely
+    // unmapped — the floor is a strict no-op on a dormant/unauthorized read.
+    {
+      const facadeError = Object.assign(new Error('boom'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({ select: () => { throw facadeError } })
+      let caught
+      try {
+        await adapterWith(f).read({ object: 'items', limit: 5 })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught, facadeError, 'dormant: the facade error propagates verbatim, never mapped')
+    }
+
+    // 11d. Floor 2: #5243's own bare Error (no `.code`, unchanged message) propagates UNMAPPED —
+    //      "reuse the existing error, do not invent a parallel code" means this adapter does nothing
+    //      special with it at all.
+    {
+      const strictError = new Error(
+        'Offset pagination without an explicit orderBy is refused for data source "s" ' +
+        '(connection.strictOffsetOrdering=true): SQL Server OFFSET/FETCH cannot guarantee stable row ' +
+        'order across pages without a real ORDER BY key, so a multi-page read could duplicate or skip ' +
+        'rows. Pass options.orderBy on this select, or unset connection.strictOffsetOrdering to accept ' +
+        'that risk.'
+      )
+      const f = armedAwareFakeFacade({ select: () => { throw strictError } })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'items', limit: 10, cursor: '20' })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught, strictError, 'floor 2 never wraps or re-throws — the underlying #5243 error passes through as-is')
+      assert.equal(f.calls.select[0].armed, true, 'the offset>0, no-orderBy page was requested under armed=true')
+      assert.equal(f.calls.select[0].options.offset, 20)
+      assert.equal('orderBy' in f.calls.select[0].options, false, 'no orderBy on a non-watermark page — this is exactly what forces the floor')
+    }
+
+    // 11e. Floor 1 takes precedence over the lookup-projection catch-all (an operator needs the
+    //      actionable message, not a generic "lookup projection base read failed").
+    {
+      const facadeError = Object.assign(new Error('timeout disabled'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({ select: () => { throw facadeError } })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: LOOKUP_SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      await assert.rejects(
+        () => a.read({ object: 'dbo.bom_detail', limit: 3 }),
+        /B2A_SOURCE_TIMEOUT_DISABLED_REJECTED|requestTimeoutMs/,
+      )
+      let caught
+      try {
+        await a.read({ object: 'dbo.bom_detail', limit: 3 })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED', 'floor 1 wins over the lookup-projection generic message')
+    }
+
+    // 11f. The factory threads b2aAuthorization the SAME way it threads principal (per-call `deps`,
+    //      never read off `context`).
+    {
+      const f = armedAwareFakeFacade()
+      const factory = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f.api } } })
+      await factory({ system: SYSTEM, principal: 'owner-9', b2aAuthorization: AUTHORIZATION }).read({ object: 'items', limit: 3 })
+      assert.equal(f.calls.select[0].armed, true, 'the factory must thread b2aAuthorization to the adapter')
+      const f2 = armedAwareFakeFacade()
+      const factory2 = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f2.api } } })
+      await factory2({ system: SYSTEM, principal: 'owner-9' }).read({ object: 'items', limit: 3 })
+      assert.equal(f2.calls.select[0].armed, false, 'omitting b2aAuthorization is dormant, byte-identical to before this dep existed')
+    }
+
+    // 11g. H-2 (counter-review finding 2): W-5 armed its two floors on the BASE select but NOT on the
+    //      per-page LOOKUP select, so the lookup table's read ran with them silently off. The lookup
+    //      select now receives the SAME armed flag, and floor 1 (requestTimeoutMs=0) is mapped on the
+    //      lookup leg too. Adversarial: the BASE read succeeds, and the LOOKUP table would trip floor 1
+    //      ONLY when the armed flag reaches it — so pre-fix (5th arg missing) the lookup PROCEEDED and
+    //      the whole read succeeded, the evasion; post-fix it is refused with the fixed B2a code.
+    {
+      const facadeError = Object.assign(new Error('lookup timeout disabled'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({
+        select: ({ table, armed }) => {
+          if (table === 'dbo.bom_detail') return { data: [{ id: 1, part_id: 'part-1' }], metadata: {} }
+          // The lookup table (dbo.part_library): floor 1 fires ONLY when armed reaches it. Unarmed —
+          // the pre-fix bug — it proceeds and returns a row, so the whole read would succeed.
+          if (armed) throw facadeError
+          return { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} }
+        },
+      })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: LOOKUP_SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'dbo.bom_detail', limit: 3 })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'H-2: an armed read whose lookup source has requestTimeoutMs=0 must be refused on the lookup leg')
+      assert.equal(caught.name, 'B2aReadAuthorizationError', 'H-2: the lookup floor-1 refusal is the mapped B2a error')
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED',
+        'H-2: floor 1 is mapped on the LOOKUP leg, not swallowed as a generic lookup failure')
+      assert.equal(caught.details.reason, 'sqlserver_request_timeout_disabled')
+      // The threading itself: the base read (call 0) and the lookup read (call 1) both carry armed=true.
+      assert.equal(f.calls.select[0].armed, true, 'H-2: the base select is armed (as before)')
+      assert.equal(f.calls.select[1].table, 'dbo.part_library', 'H-2: the second call is the lookup table')
+      assert.equal(f.calls.select[1].armed, true, 'H-2: the lookup select now receives the armed flag too')
+
+      // DORMANT CONTROL: the SAME facade, no b2aAuthorization -> the lookup select is unarmed, floor 1
+      // is a no-op, and the read completes exactly as it did before this change.
+      const dormant = armedAwareFakeFacade({
+        select: ({ table, armed }) => {
+          if (table === 'dbo.bom_detail') return { data: [{ id: 1, part_id: 'part-1' }], metadata: {} }
+          if (armed) throw facadeError
+          return { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} }
+        },
+      })
+      const dormantRes = await adapterWith(dormant, 'owner-1', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 3 })
+      assert.deepEqual(dormantRes.records, [{ id: 1, part_id: 'part-1', FNumber: 'M-001', FName: 'Material One' }])
+      assert.equal(dormant.calls.select[1].armed, false, 'H-2 dormant: the lookup select is unarmed, byte-identical to before')
+    }
   }
 
   console.log('data-source-sql-readonly-source-adapter.test.cjs: all assertions passed')

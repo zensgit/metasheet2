@@ -2,6 +2,11 @@
  * MultitableApiClient — typed wrapper for all /api/multitable/* endpoints.
  * Uses apiFetch from project utils; accepts optional fetchFn for tests.
  */
+import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
+  type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+import { setBusinessTimezone } from '../utils/business-timezone'
+export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+
 import type {
   MetaBase,
   MetaSheet,
@@ -37,7 +42,6 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
-  MultitableCommentReaction,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
   CommentMentionSummaryItem,
@@ -64,9 +68,18 @@ import type {
   DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
+  CreateTemplateFromBaseInput,
+  CreateTemplateFromBaseResult,
+  ListTemplatesResult,
   InstallTemplateInput,
   InstallTemplateResult,
   TemplateDryRunResult,
+  CopySheetInput,
+  CopySheetDryRunResult,
+  CopySheetFieldDisclosure,
+  CopySheetViewFilterDrop,
+  CopySheetResult,
+  MetaSheetCopiedFrom,
   ApiToken,
   ApiTokenCreateResult,
   MetaTemplate,
@@ -78,10 +91,42 @@ import type {
   DingTalkPersonDelivery,
   DingTalkGroupDestinationInput,
   MetaDeletedRecord,
+  MetaApprovalTemplateSummary,
+  MetaApprovalTemplateDetail,
+  MetaApprovalFormField,
+  MetaApprovalFormOption,
+  MetaRecordApprovalListPage,
+  MetaRecordApprovalSubmission,
+  MetaRecordApprovalDrift,
 } from '../types'
 import { apiFetch } from '../../utils/api'
-import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
+import { apiCodeOwnedErrorMessage, apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
 import type { ConditionalRuleDTO } from '../utils/conditional-rule-ops'
+// S3a (comments shared FE kit extraction): the comment normalizer family moved verbatim to
+// shared/comments/normalize.ts. Imported here (for this file's own internal use in
+// normalizeCommentsList/normalizeCommentInbox below) AND re-exported under the same names, so
+// external consumers that import them from `'../api/client'` (comments-realtime.ts,
+// multitable-client.spec.ts) keep working unchanged. CommentsApiClient is the new interface
+// MultitableApiClient implements (below) as its first implementation.
+import type { RawComment } from '../../shared/comments/normalize'
+import {
+  normalizeMultitableComment,
+  normalizeMultitableCommentIdentity,
+  normalizeMultitableCommentFieldId,
+  normalizeMultitableCommentMentions,
+  normalizeMultitableCommentReactions,
+} from '../../shared/comments/normalize'
+import type { CommentsApiClient } from '../../shared/comments/api-client'
+
+// RawComment was not exported pre-move either — kept module-private, only re-exporting the
+// function family below (which WAS the public surface).
+export {
+  normalizeMultitableComment,
+  normalizeMultitableCommentIdentity,
+  normalizeMultitableCommentFieldId,
+  normalizeMultitableCommentMentions,
+  normalizeMultitableCommentReactions,
+}
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>
 type ApiErrorLocaleResolver = () => boolean
@@ -178,7 +223,9 @@ async function parseJson<T>(res: Response, isZh = false): Promise<T> {
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
     const payload = normalizeApiErrorPayload(body, isZh)
-    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
+    // A code the client owns the copy for (today: FIELD_SCHEMA_CHANGED) is shown in the user's language even when
+    // the server sent its own sentence; every other code keeps the server's message, as before.
+    const error = new Error(firstFieldError(payload.fieldErrors) ?? apiCodeOwnedErrorMessage(payload.code, isZh) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
       status?: number
       code?: string
       fieldErrors?: Record<string, string>
@@ -269,6 +316,434 @@ function unwrapDataBody(body: unknown): unknown {
   return (body as { data?: unknown }).data
 }
 
+/**
+ * 记录级送审 (多维表 x 审批 阶段二, design 4.1/4.4) — the typed 409 the submit route answers when the
+ * (sheet, record, template) triple already has a `creating`/`pending` row (its partial unique index).
+ * Carries the IN-FLIGHT instance's identifiers so the dialog can point at it instead of showing a bare
+ * error: the FE never invents them, it only renders what the server sent (both keys stay OPTIONAL — an
+ * older/leaner backend that omits them degrades to the plain "already in approval" notice).
+ */
+export interface RecordApprovalInFlightError extends Error {
+  status: number
+  code?: string
+  approvalInstanceId?: string
+  requestNo?: string
+}
+
+export const RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME = 'MultitableRecordApprovalInFlightError'
+
+export function isRecordApprovalInFlightError(value: unknown): value is RecordApprovalInFlightError {
+  return value instanceof Error && value.name === RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
+}
+
+// -------------------------------------------------------------------------------------------------
+// 复制数据表（含数据）S1 — wire adapters (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md)
+//
+// The S1 backend is built in parallel against the same ADR, so EVERY wire -> UI mapping for this
+// feature lives in the functions below and nowhere else: `readSheetCopiedFrom` (sheet provenance, ADR
+// §6), `buildCopySheetRequestBody` (§7.1), `normalizeCopySheetDryRun` (§3), `normalizeCopySheetResult`
+// (§3/§8) and `buildCopySheetError` (§8). If the merged backend spells a key differently, the fix is a
+// one-line change in one of these, never a hunt through components.
+//
+// Aligned (2026-09-28) to the backend PR #6112 fix head, branch feat/multitable-copy-sheet-s1 @ 6410ea0c4:
+//   routes/multitable-copy-sheet.ts — dry-run 200 `{ ok, data: { summary: CopySheetPlanSummary } }`, where a
+//   with-data probe over the row cap answers `summary.overLimit: true` (records not read; `rowCount` is the
+//   source's real row count; structural disclosures present); copy 201 `{ ok, data: { sheet: { id, baseId,
+//   name, copiedFrom }, summary, batchId, formulaRecompute? } }` (+ `Idempotent-Replayed: true` on replay);
+//   refusals `{ ok:false, error: { code, message, details? } }` with position/count extras under `details`
+//   (422 structural: `details.fieldId` / `details.viewId`); 409 CONFLICT for a dedupe-lock timeout or a
+//   retryable lock SQLSTATE; 503 COPY_TEMPORARILY_UNAVAILABLE (copy only, no extras) while the server's dedupe
+//   ledger is unmigrated — fail-closed, PR #6136 / decision register R-20; 404 / 403 from sheet-refusals.ts; 400
+//   NAME_INVALID_CHARACTERS from display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
+// -------------------------------------------------------------------------------------------------
+
+export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'
+
+/**
+ * A refused copy / dry-run. Carries only what the dialog renders from: the HTTP status, the stable
+ * `code`, and the values-free structured extras the ADR allows (§8: `{ rowIndex, fieldId }` of the
+ * FIRST failing row; `{ rowCount, limit }` of a size refusal). The server's `message` is deliberately
+ * NOT carried: `RecordValidationError` prose can contain cell values (ADR §1.6 / §7.3), so `.message`
+ * is always this client's own code-based fallback, never server text.
+ */
+export interface CopySheetError extends Error {
+  status: number
+  code?: string
+  rowIndex?: number
+  fieldId?: string
+  /** Source view at fault, for a post-gate 422 structural refusal raised by a view's config/filter. */
+  viewId?: string
+  rowCount?: number
+  fieldCount?: number
+  limit?: number
+}
+
+/**
+ * Post-gate structural refusals (422) whose `fieldId` / `viewId` locate the source column / view at fault
+ * (backend `CopySheetRemapError` / link-target checks: copy-sheet-remap.ts, and copy-sheet-service.ts
+ * forwarding `{ fieldId?, viewId? }` into details). They are only reachable after the full-table-read gate
+ * passed, so the copier can read every column and naming one is not an oracle. Nothing outside this set
+ * carries a fieldId or a viewId.
+ */
+const COPY_SHEET_STRUCTURAL_FIELD_CODES: ReadonlySet<string> = new Set([
+  'COPY_UNMAPPED_FIELD_REF',
+  'COPY_UNSUPPORTED_FIELD_TYPE',
+  'COPY_LINK_TARGET_NOT_LIVE',
+  'COPY_SOURCE_RULE_UNBUILDABLE',
+  'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD',
+])
+
+export function isCopySheetError(value: unknown): value is CopySheetError {
+  return value instanceof Error && value.name === COPY_SHEET_ERROR_NAME
+}
+
+function copySheetCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * THE one place the sheet-provenance wire shape is read (ADR §6: `copiedFrom: { kind, at, sheetId? }`
+ * on /context `sheet` / `sheets[]` and GET /sheets items; DB columns `copied_from_kind` / `copied_at`).
+ * Returns null for anything that is not a copy (absent / null / non-object / empty kind), so the
+ * badge fails closed. `sheetId` is intentionally not surfaced — the badge does not need it and the
+ * server only sends it to readers of the source (§6).
+ */
+export function readSheetCopiedFrom(sheet: unknown): MetaSheetCopiedFrom | null {
+  if (!isPlainObject(sheet)) return null
+  const wire = sheet.copiedFrom
+  if (!isPlainObject(wire)) return null
+  const kind = typeof wire.kind === 'string' ? wire.kind.trim() : ''
+  if (!kind) return null
+  return {
+    kind,
+    pluginManaged: kind === 'plugin-managed',
+    at: typeof wire.at === 'string' && wire.at.trim() ? wire.at : null,
+  }
+}
+
+/**
+ * Request body for BOTH `…/copy` and `…/copy/dry-run` (ADR §7.1: `{ name?, withData, permissionMode }`).
+ * `permissionMode` is pinned to the literal 'inherit' — the only S1 mode — regardless of what a caller
+ * passes, and `withData` is strict-boolean (anything but `true` is `false`). A blank name is omitted so
+ * the server applies its own default-name hygiene (CS-4).
+ */
+export function buildCopySheetRequestBody(input: CopySheetInput): { name?: string; withData: boolean; permissionMode: 'inherit' } {
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  return {
+    ...(name ? { name } : {}),
+    withData: input.withData === true,
+    permissionMode: 'inherit',
+  }
+}
+
+/**
+ * Dry-run answer (ADR §3). The route answers `{ ok, data: { summary } }` where summary is the service's
+ * `CopySheetPlanSummary`: `{ rowCount, fieldCount, disclosures: [{ fieldId, code }], droppedViewFilterLeaves:
+ * [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }` (a bare summary is read too). ADR
+ * spellings are still accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`).
+ * Row cap: the #6112 fix answers a with-data dry-run over the cap with 200 + `summary.overLimit: true`
+ * (records not read, `rowCount` = the source's real row count, structural disclosures still present); an
+ * older backend answers 413 COPY_TOO_LARGE instead, which the dialog handles with a structure-only re-probe.
+ * The copy route itself still answers 413 over the cap. Malformed items are skipped.
+ */
+export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
+  const outer = isPlainObject(body) ? body : {}
+  const data = isPlainObject(outer.summary) ? outer.summary : outer
+  const limits = isPlainObject(data.limits) ? data.limits : {}
+  const fieldDisclosures: CopySheetFieldDisclosure[] = []
+  const viewFilterLeavesDropped: CopySheetViewFilterDrop[] = []
+  const asViewDrops = (list: unknown): unknown[] => (Array.isArray(list)
+    ? list.map((item) => (isPlainObject(item) ? { reason: 'VIEW_FILTER_LEAF_DROPPED', ...item } : item))
+    : [])
+  const items: unknown[] = [
+    ...(Array.isArray(data.disclosures) ? data.disclosures : []),
+    ...(Array.isArray(data.fieldDisclosures) ? data.fieldDisclosures : []),
+    ...asViewDrops(data.droppedViewFilterLeaves),
+    ...asViewDrops(data.viewFilterLeavesDropped),
+  ]
+  for (const item of items) {
+    if (!isPlainObject(item)) continue
+    const reason = (optionalStringValue(item.reason) ?? optionalStringValue(item.code) ?? '').trim()
+    const viewId = optionalStringValue(item.viewId)
+    if (reason === 'VIEW_FILTER_LEAF_DROPPED') {
+      const count = copySheetCount(item.count)
+      if (viewId && count !== null && count > 0) viewFilterLeavesDropped.push({ viewId, count })
+      continue
+    }
+    const fieldId = optionalStringValue(item.fieldId)
+    if (fieldId && reason) fieldDisclosures.push({ fieldId, reason })
+  }
+  return {
+    rowCount: copySheetCount(data.rowCount),
+    fieldCount: copySheetCount(data.fieldCount),
+    builtFieldCount: copySheetCount(data.builtFieldCount),
+    viewCount: copySheetCount(data.viewCount),
+    overLimit: data.overLimit === true || data.exceedsLimit === true,
+    rowLimit: copySheetCount(limits.maxRows) ?? copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
+    fieldDisclosures,
+    viewFilterLeavesDropped,
+    autoNumberRenumberedRows: copySheetCount(data.autoNumberRenumberedRows) ?? 0,
+  }
+}
+
+/**
+ * 201 answer (ADR §3/§8; route `buildSuccessBody`): `{ sheet: { id, baseId, name, copiedFrom }, summary,
+ * batchId, formulaRecompute? }`. The new sheet is required — a body without `sheet.id` is a broken answer
+ * and throws. `Idempotent-Replayed: true` -> `replayed`; `formulaRecompute: { attempted, recomputed,
+ * failed, errorCode? }` (absent when nothing needed recomputing). Values-free toast counts come from
+ * `summary`: columns prefer `builtFieldCount` (mirror columns are not built) over the source `fieldCount`,
+ * and the grant total is ADR §3's 「Z 条授权（含 R 条记录级）」 — the summary's per-table counters
+ * (`permissionRowCount` is table-level only; `fieldPermissionRowCount`, `viewPermissionRowCount`,
+ * `recordPermissionRowCount`) summed, so Z really contains R.
+ */
+export function normalizeCopySheetResult(body: unknown, replayedHeader: string | null): CopySheetResult {
+  const data = isPlainObject(body) ? body : {}
+  const rawSheet = isPlainObject(data.sheet) ? data.sheet : null
+  const id = rawSheet ? optionalStringValue(rawSheet.id) : undefined
+  if (!rawSheet || !id) {
+    const error = new Error('Invalid copy sheet response') as Error & { status?: number }
+    error.name = 'MultitableApiError'
+    throw error
+  }
+  const sheet: MetaSheet = {
+    ...(rawSheet as Partial<MetaSheet>),
+    id,
+    name: stringValue(rawSheet.name),
+    baseId: optionalStringValue(rawSheet.baseId) ?? null,
+  }
+  const recompute = isPlainObject(data.formulaRecompute) ? data.formulaRecompute : null
+  const counts = isPlainObject(data.summary) ? data.summary : data
+  const grantParts = [counts.permissionRowCount, counts.fieldPermissionRowCount, counts.viewPermissionRowCount, counts.recordPermissionRowCount]
+    .map(copySheetCount)
+    .filter((n): n is number => n !== null)
+  return {
+    sheet,
+    replayed: (replayedHeader ?? '').trim().toLowerCase() === 'true',
+    formulaRecompute: recompute
+      ? {
+        attempted: copySheetCount(recompute.attempted),
+        recomputed: copySheetCount(recompute.recomputed),
+        failed: recompute.failed === true || (copySheetCount(recompute.failed) ?? 0) > 0,
+        errorCode: optionalStringValue(recompute.errorCode) ?? null,
+      }
+      : null,
+    summary: {
+      rowCount: copySheetCount(counts.rowCount),
+      fieldCount: copySheetCount(counts.builtFieldCount) ?? copySheetCount(counts.fieldCount),
+      permissionRowCount: grantParts.length > 0 ? grantParts.reduce((sum, n) => sum + n, 0) : null,
+      recordPermissionRowCount: copySheetCount(counts.recordPermissionRowCount),
+    },
+  }
+}
+
+/**
+ * Non-2xx -> CopySheetError. Reads the code from the shared `{ error: { code } }` / `{ error: 'CODE' }`
+ * envelopes, and the structured extras from the error object and its `details` (innermost wins, the
+ * same tolerance `recordApprovalConflictFields` uses). The first-failure row may sit flat or under
+ * `firstFailure` / `failure`. Server `message` is dropped on purpose (see CopySheetError).
+ *
+ * The code is always the OUTER `error.code`: the route's `fail()` nests extras under `details`, so the
+ * row failure's inner record code (`details.code`) never replaces `COPY_ROW_VALIDATION_FAILED`.
+ */
+export function buildCopySheetError(status: number, body: unknown, isZh: boolean): CopySheetError {
+  const envelope = isPlainObject(body) ? body : {}
+  const errorValue = envelope.error
+  const errorObject = isPlainObject(errorValue) ? errorValue : {}
+  const fields: Record<string, unknown> = { ...errorObject, ...(isPlainObject(errorObject.details) ? errorObject.details : {}) }
+  const failure = isPlainObject(fields.firstFailure)
+    ? fields.firstFailure
+    : isPlainObject(fields.failure) ? fields.failure : fields
+  const code = typeof errorValue === 'string'
+    ? optionalStringValue(errorValue)
+    : optionalStringValue(errorObject.code)
+  const error = new Error(apiDefaultErrorMessage(code, status, isZh)) as CopySheetError
+  error.name = COPY_SHEET_ERROR_NAME
+  error.status = status
+  if (code) error.code = code
+  // Extras are carried ONLY for the refusal they belong to: the row position/column of the first failing
+  // row only for COPY_ROW_VALIDATION_FAILED, the column at fault only for a post-gate 422 structural code,
+  // counts only for a size refusal. Anything else — above all the 403 gate refusal — can never transport a
+  // count or a column id to the UI, even if a backend attached one (a hidden column's id on a 403 would be
+  // exactly the oracle ADR §1.9 forbids).
+  if (code === 'COPY_ROW_VALIDATION_FAILED') {
+    const rowIndex = copySheetCount(failure.rowIndex)
+    if (rowIndex !== null) error.rowIndex = rowIndex
+    const fieldId = optionalStringValue(failure.fieldId)
+    if (fieldId) error.fieldId = fieldId
+  }
+  if (status === 422 && code && COPY_SHEET_STRUCTURAL_FIELD_CODES.has(code)) {
+    const fieldId = optionalStringValue(fields.fieldId)
+    if (fieldId) error.fieldId = fieldId
+    const viewId = optionalStringValue(fields.viewId)
+    if (viewId) error.viewId = viewId
+  }
+  if (code === 'COPY_TOO_MANY_FIELDS') {
+    const fieldCount = copySheetCount(fields.fieldCount)
+    if (fieldCount !== null) error.fieldCount = fieldCount
+    const limit = copySheetCount(fields.limit)
+    if (limit !== null) error.limit = limit
+  } else if (code === 'COPY_TOO_LARGE' || status === 413) {
+    const rowCount = copySheetCount(fields.rowCount)
+    if (rowCount !== null) error.rowCount = rowCount
+    const limit = copySheetCount(fields.limit)
+    if (limit !== null) error.limit = limit
+  }
+  return error
+}
+
+// The 409 body may arrive flat (`{ code, approvalInstanceId, ... }`), under the shared
+// `{ error: { ... } }` envelope the rest of this file's errors use, or — what the REAL route sends —
+// one level deeper still, under `error.details`:
+//   { ok:false, error:{ code, message, details:{ submissionId, approvalInstanceId, requestNo, status } } }
+// (core-backend/src/routes/multitable-record-approvals.ts `fail()` + the service's RecordApprovalError
+// details, pinned by its own unit test). Read ALL THREE and let the innermost win: reading `details`
+// too is strictly more tolerant than reading only the flat keys, so a leaner backend still degrades to
+// the plain "already in approval" notice instead of silently losing the identifiers.
+function recordApprovalConflictFields(body: unknown): Record<string, unknown> {
+  if (!isPlainObject(body)) return {}
+  const nested = isPlainObject(body.error) ? body.error : undefined
+  const data = isPlainObject(body.data) ? body.data : undefined
+  const detailsCandidate = nested?.details ?? data?.details ?? body.details
+  const details = isPlainObject(detailsCandidate) ? detailsCandidate : undefined
+  return { ...body, ...(data ?? {}), ...(nested ?? {}), ...(details ?? {}) }
+}
+
+/**
+ * The page size the record-drawer template picker asks for. The route's default is 20 (approvals.ts
+ * `parsePaging(req.query.pageSize, 20)`) and its hard ceiling is MAX_APPROVAL_PAGE_SIZE = 200, so a
+ * tenant with more than 20 published templates would otherwise get a SILENTLY truncated picker with no
+ * paging and (by design) no free-text id fallback. We ask for the ceiling and the dialog says so when
+ * the answer is full.
+ */
+export const RECORD_APPROVAL_TEMPLATE_PAGE_SIZE = 200
+
+function normalizeApprovalTemplateSummary(value: unknown): MetaApprovalTemplateSummary | null {
+  if (!isPlainObject(value) || typeof value.id !== 'string' || !value.id) return null
+  const name = optionalStringValue(value.name)
+  const status = optionalStringValue(value.status)
+  return { id: value.id, ...(name ? { name } : {}), ...(status ? { status } : {}) }
+}
+
+function normalizeApprovalFormOptions(value: unknown): MetaApprovalFormOption[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const options = value
+    .map((entry): MetaApprovalFormOption | null => {
+      // A bare string option (`["A","B"]`) is as common in hand-authored schemas as the {label,value} pair.
+      if (typeof entry === 'string') return entry ? { label: entry, value: entry } : null
+      if (!isPlainObject(entry)) return null
+      const rawValue = typeof entry.value === 'string' ? entry.value : undefined
+      const label = optionalStringValue(entry.label) ?? rawValue
+      if (rawValue === undefined || label === undefined) return null
+      return { label, value: rawValue }
+    })
+    .filter((entry): entry is MetaApprovalFormOption => entry !== null)
+  return options.length > 0 ? options : undefined
+}
+
+// VALUES-FREE on purpose: `defaultValue` is deliberately NOT carried over — the submit dialog starts
+// empty and the actor types what they mean to submit.
+function normalizeApprovalFormField(value: unknown): MetaApprovalFormField | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id) ?? optionalStringValue(value.fieldId)
+  if (!id) return null
+  const type = optionalStringValue(value.type) ?? 'unknown'
+  const label = optionalStringValue(value.label) ?? optionalStringValue(value.name) ?? id
+  const placeholder = optionalStringValue(value.placeholder)
+  const options = normalizeApprovalFormOptions(value.options)
+  return {
+    id,
+    type,
+    label,
+    ...(value.required === true ? { required: true } : {}),
+    ...(placeholder ? { placeholder } : {}),
+    ...(options ? { options } : {}),
+  }
+}
+
+function normalizeApprovalTemplateDetail(body: unknown, fallbackId: string): MetaApprovalTemplateDetail {
+  const root = isPlainObject(body) ? body : {}
+  // `{ template: {...} }` / `{ data: {...} }` envelopes and the bare DTO all reach here.
+  const record = isPlainObject(root.template) ? root.template : isPlainObject(root.data) ? root.data : root
+  const activeVersion = isPlainObject(record.activeVersion) ? record.activeVersion : undefined
+  const schema = isPlainObject(record.formSchema)
+    ? record.formSchema
+    : activeVersion && isPlainObject(activeVersion.formSchema)
+      ? activeVersion.formSchema
+      : {}
+  const rawFields = Array.isArray(schema.fields)
+    ? schema.fields
+    : Array.isArray(record.formFields)
+      ? record.formFields
+      : Array.isArray(record.fields)
+        ? record.fields
+        : []
+  const name = optionalStringValue(record.name)
+  const status = optionalStringValue(record.status)
+  // Both ids are VALUES-FREE identifiers carried for ONE reason: GET /api/approval-templates/:id
+  // serves the LATEST version's form schema (ApprovalProductService.getTemplate -> loadTemplateBundle
+  // preference 'latest'), while the create path validates against the ACTIVE published one
+  // ('active'). When the two differ the template has an unpublished draft edit and the form on screen
+  // is not the form the server will validate — the dialog warns instead of sending the actor into an
+  // unfixable 400. Fixing the read itself is a backend change, out of this surface's reach.
+  const activeVersionId = optionalStringValue(record.activeVersionId) ?? optionalStringValue(record.active_version_id)
+  const latestVersionId = optionalStringValue(record.latestVersionId) ?? optionalStringValue(record.latest_version_id)
+  return {
+    id: optionalStringValue(record.id) ?? fallbackId,
+    ...(name ? { name } : {}),
+    ...(status ? { status } : {}),
+    ...(activeVersionId ? { activeVersionId } : {}),
+    ...(latestVersionId ? { latestVersionId } : {}),
+    formFields: rawFields
+      .map((entry: unknown) => normalizeApprovalFormField(entry))
+      .filter((entry): entry is MetaApprovalFormField => entry !== null),
+  }
+}
+
+function normalizeRecordApprovalDrift(value: unknown): MetaRecordApprovalDrift {
+  const record = objectValue(value)
+  const changedFieldIds = Array.isArray(record.changedFieldIds)
+    ? record.changedFieldIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : []
+  // `changed` is the server's own verdict; an absent flag with a non-empty id list still means changed.
+  return { changed: record.changed === true || changedFieldIds.length > 0, changedFieldIds }
+}
+
+function normalizeRecordApprovalSubmission(value: unknown): MetaRecordApprovalSubmission | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id) ?? optionalStringValue(value.submissionId)
+  const templateId = optionalStringValue(value.templateId) ?? optionalStringValue(value.template_id)
+  if (!id || !templateId) return null
+  const templateName = optionalStringValue(value.templateName) ?? optionalStringValue(value.template_name)
+  const status = optionalStringValue(value.status) ?? 'pending'
+  const outcome = optionalStringValue(value.outcome)
+  const approvalInstanceId = optionalStringValue(value.approvalInstanceId) ?? optionalStringValue(value.approval_instance_id)
+  const requestNo = optionalStringValue(value.requestNo)
+    ?? optionalStringValue(value.approvalRequestNo)
+    ?? optionalStringValue(value.request_no)
+  const submittedBy = optionalStringValue(value.submittedBy) ?? optionalStringValue(value.submitted_by)
+  const submittedByName = optionalStringValue(value.submittedByName) ?? optionalStringValue(value.submitted_by_name)
+  const createdAt = optionalStringValue(value.createdAt) ?? optionalStringValue(value.created_at)
+  const completedAt = optionalStringValue(value.completedAt) ?? optionalStringValue(value.completed_at)
+  const error = optionalStringValue(value.error)
+  const rawVersion = value.recordVersionAtSubmit ?? value.record_version_at_submit
+  return {
+    id,
+    templateId,
+    ...(templateName ? { templateName } : {}),
+    status,
+    ...(outcome ? { outcome } : {}),
+    ...(approvalInstanceId ? { approvalInstanceId } : {}),
+    ...(requestNo ? { requestNo } : {}),
+    ...(submittedBy ? { submittedBy } : {}),
+    ...(submittedByName ? { submittedByName } : {}),
+    ...(typeof rawVersion === 'number' && Number.isFinite(rawVersion) ? { recordVersionAtSubmit: rawVersion } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(error ? { error } : {}),
+    drift: normalizeRecordApprovalDrift(value.drift),
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -340,11 +815,6 @@ function parseContentDispositionFilename(header: string | null): string {
   return 'export'
 }
 
-type RawComment = Partial<MultitableComment> & {
-  spreadsheetId?: string
-  rowId?: string
-}
-
 type RawInboxItem = RawComment & {
   unread?: boolean
   mentioned?: boolean
@@ -359,108 +829,11 @@ type RawInboxItem = RawComment & {
   fieldName?: string | null
 }
 
-type MultitableCommentIdentityPayload = {
-  containerId?: unknown
-  spreadsheetId?: unknown
-  targetId?: unknown
-  rowId?: unknown
-}
-
-type MultitableCommentFieldPayload = {
-  fieldId?: unknown
-  targetFieldId?: unknown
-}
-
-type MultitableCommentMentionsPayload = {
-  mentions?: unknown
-}
-
-function normalizeCommentId(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  const trimmed = value.trim()
-  return trimmed.length > 0 ? trimmed : ''
-}
-
-function normalizeOptionalCommentId(value: unknown): string | undefined {
-  const normalized = normalizeCommentId(value)
-  return normalized.length > 0 ? normalized : undefined
-}
-
-export function normalizeMultitableCommentIdentity(payload: MultitableCommentIdentityPayload | null | undefined) {
-  const containerId = normalizeCommentId(payload?.containerId) || normalizeCommentId(payload?.spreadsheetId)
-  const targetId = normalizeCommentId(payload?.targetId) || normalizeCommentId(payload?.rowId)
-
-  return {
-    containerId,
-    targetId,
-    spreadsheetId: containerId || undefined,
-    rowId: targetId || undefined,
-  }
-}
-
-export function normalizeMultitableCommentFieldId(payload: MultitableCommentFieldPayload | null | undefined): string | null {
-  const fieldId = normalizeCommentId(payload?.fieldId) || normalizeCommentId(payload?.targetFieldId)
-  return fieldId.length > 0 ? fieldId : null
-}
-
-export function normalizeMultitableCommentMentions(payload: MultitableCommentMentionsPayload | null | undefined): string[] {
-  if (!Array.isArray(payload?.mentions)) return []
-  return payload.mentions.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-}
-
-/**
- * Normalize the per-comment `reactions` aggregate (B6). The whitelist normalizer
- * drops unknown raw fields, so reactions MUST be carried explicitly here or the
- * backend's reactions array is silently lost on the wire (wire-vs-fixture drift).
- * Returns undefined when absent (so a comment whose reactions weren't hydrated is
- * distinguishable from one with zero reactions).
- */
-export function normalizeMultitableCommentReactions(
-  payload: { reactions?: unknown } | null | undefined,
-): MultitableCommentReaction[] | undefined {
-  if (!Array.isArray(payload?.reactions)) return undefined
-  const out: MultitableCommentReaction[] = []
-  for (const raw of payload.reactions) {
-    if (!raw || typeof raw !== 'object') continue
-    const r = raw as Record<string, unknown>
-    if (typeof r.emoji !== 'string' || !r.emoji) continue
-    out.push({
-      emoji: r.emoji,
-      count: typeof r.count === 'number' && Number.isFinite(r.count) ? r.count : 0,
-      reactedByMe: r.reactedByMe === true,
-    })
-  }
-  return out
-}
-
 function normalizeCommentPresenceList(payload: { items?: MultitableCommentPresenceSummary[] } | null | undefined): {
   items: MultitableCommentPresenceSummary[]
 } {
   if (!payload?.items) return { items: [] }
   return { items: payload.items.map(normalizeMultitableCommentPresenceSummary) }
-}
-
-export function normalizeMultitableComment(payload: RawComment | null | undefined): MultitableComment {
-  const identity = normalizeMultitableCommentIdentity(payload)
-  const fieldId = normalizeMultitableCommentFieldId(payload)
-  return {
-    id: normalizeCommentId(payload?.id),
-    containerId: identity.containerId,
-    targetId: identity.targetId,
-    spreadsheetId: identity.spreadsheetId,
-    rowId: identity.rowId,
-    fieldId,
-    targetFieldId: fieldId,
-    parentId: normalizeOptionalCommentId(payload?.parentId),
-    mentions: normalizeMultitableCommentMentions(payload),
-    authorId: normalizeCommentId(payload?.authorId),
-    authorName: typeof payload?.authorName === 'string' ? payload.authorName : undefined,
-    content: typeof payload?.content === 'string' ? payload.content : '',
-    resolved: payload?.resolved === true,
-    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
-    updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
-    reactions: normalizeMultitableCommentReactions(payload),
-  }
 }
 
 function normalizeCommentsList(payload: { comments?: RawComment[]; items?: RawComment[] } | null | undefined): {
@@ -568,8 +941,24 @@ function normalizeCommentMentionSummary(
 }
 
 function normalizeCommentMentionSuggestions(
-  payload: { items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number } | null | undefined,
-): { items: MetaCommentMentionSuggestion[]; total: number; limit: number } {
+  payload: {
+    items?: Array<Partial<MetaCommentMentionSuggestion>>
+    total?: number
+    limit?: number
+    query?: unknown
+    hasMore?: unknown
+    requiresQuery?: unknown
+    minQueryLength?: unknown
+  } | null | undefined,
+): {
+  items: MetaCommentMentionSuggestion[]
+  total: number
+  limit: number
+  query: string
+  hasMore: boolean
+  requiresQuery: boolean
+  minQueryLength: number
+} {
   return {
     items: Array.isArray(payload?.items)
       ? payload.items
@@ -582,6 +971,11 @@ function normalizeCommentMentionSuggestions(
       : [],
     total: typeof payload?.total === 'number' ? payload.total : 0,
     limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+    // #5795 markers (see listCommentMentionSuggestions).
+    query: typeof payload?.query === 'string' ? payload.query : '',
+    hasMore: payload?.hasMore === true,
+    requiresQuery: payload?.requiresQuery === true,
+    minQueryLength: typeof payload?.minQueryLength === 'number' ? payload.minQueryLength : 1,
   }
 }
 
@@ -863,7 +1257,13 @@ function normalizeRecordSubscriptionNotification(
       : payload?.eventType === 'notification.sent' ? 'notification.sent'
         : payload?.eventType === 'record.updated' ? 'record.updated'
           : null
-  if (!id || !sheetId || !recordId || !userId || !eventType) return null
+  // recordId is REQUIRED for record-scoped rows (comment.created / record.updated always carry the
+  // record they point at) but OPTIONAL for notification.sent: a send_notification action fired by a
+  // record-less trigger (approval.completed / approval.task_created / schedule / webhook) persists a
+  // row with recordId '' — the server's unread-count already counts it, so dropping it here made the
+  // bell badge say "1" while the panel said "暂无通知" (#5745 §5.4).
+  if (!id || !sheetId || !userId || !eventType) return null
+  if (!recordId && eventType !== 'notification.sent') return null
   return {
     id,
     sheetId,
@@ -995,21 +1395,341 @@ export interface RestorePreviewResult {
   previewIdentity: string | null
 }
 
-// T8-2 Reset-to-T (DESTRUCTIVE sheet-wide PIT restore). `summary.deleteCount` = records created after T that go to the
-// recycle bin; `visibleRevertCount` = survivors reverted to T. `previewIdentity` is null when there is nothing to do.
+// T8-2 / W2 exact-anchor Reset (DESTRUCTIVE sheet-wide recovery). Destructive authority is EXACT only — a
+// Global History `historyBatchId` (server-resolved to its sealed terminal operation) or a direct
+// `anchorOperationId` (sealed operation endpoint id). A free wall-clock time is never accepted; `createdAt`/
+// `asOf` display text is rendered client-side from history-batch metadata and is never part of this request.
+export type ExactAnchorRequest =
+  | { historyBatchId: string; anchorOperationId?: never }
+  | { anchorOperationId: string; historyBatchId?: never }
+
+// `summary.deleteCount` = records created after the anchor (plus deleted-at-anchor-but-live-now) that go to
+// the recycle bin; `visibleRevertCount` = survivors reverted to the anchor state. `summary.resurrectCount` =
+// records that existed at the anchor but have no live row now — the exact-anchor kernel fails these CLOSED
+// (`inbound-unprovable`, at-anchor inbound link history can't be proven), so the server withholds the token.
+// The client independently refuses malformed/incompatible responses that combine this count with a token.
+// No recovered field VALUES are exposed here — only ids and counts.
 export interface ResetPreview {
-  asOf: string
   strategy: string
-  summary: { visibleRevertCount: number; deleteCount: number; visibleUndeleteCount?: number; conflictCount?: number }
+  anchorOperationId?: string
+  anchorSeq?: string
+  checkpointId?: string
+  historyBatchId?: string
+  summary: {
+    visibleRevertCount: number
+    deleteCount: number
+    resurrectCount: number
+    driftCount: number
+    effectiveWriteCount: number
+  }
   deleteRecordIds: string[]
   previewIdentity: string | null
 }
 export interface ResetResult {
-  asOf: string
   strategy: string
-  records?: Array<{ recordId: string; status?: string }>
+  mode?: string
+  anchorOperationId?: string
+  anchorSeq?: string
   revertedCount?: number
+  deletedCount?: number
   deletedRecordIds?: string[]
+}
+
+// D6 archive recovery is sheet-scoped. The client keeps the server's preview
+// identity opaque and only exposes the values-free plan counts to callers.
+export type RecoveryArchiveScope =
+  | { kind: 'whole_sheet' }
+  | { kind: 'selected_records'; recordIds: string[] }
+  | { kind: 'selected_fields'; recordIds: string[]; fieldIds: string[] }
+
+export interface RecoveryArchiveCatalogEntry {
+  generationId: string
+  recoveryPointAt: string
+  archivedAt: string
+  expiresAt: string
+  anchorSeq: string
+  coverageRowCount: string
+  superseded: boolean
+}
+
+export interface RecoveryArchiveCatalogPage {
+  entries: RecoveryArchiveCatalogEntry[]
+  nextCursor: string | null
+}
+
+export interface RecoveryArchivePreview {
+  generationId: string
+  mode: 'revert' | 'reset'
+  scopeKind: RecoveryArchiveScope['kind']
+  executionKind: 'sync' | 'async'
+  executable: boolean
+  blockedReason: 'no_changes' | 'unsupported_attachments' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
+  previewIdentity: string | null
+  summary: {
+    reverts: Array<{ recordId: string; fieldIds: string[] }>
+    resurrectIds: string[]
+    deleteIds: string[]
+    effectiveWriteCount: number
+    keptCreatedAfterAnchorCount: number
+    driftCount: number
+  }
+}
+
+export interface RecoveryArchiveExecuteResult {
+  mode: 'revert' | 'reset'
+  anchorSeq: string
+  checkpointId: string
+  revertedCount: number
+  resurrectedCount: number
+  deletedCount: number
+  keptCreatedAfterAnchor: number
+}
+
+export type RecoveryArchiveJobState =
+  | 'planned'
+  | 'applying'
+  | 'paused_retryable'
+  | 'done'
+  | 'abandoned_partial'
+  | 'cancelled_zero_write'
+
+export interface RecoveryArchiveJobSnapshot {
+  jobId: string
+  state: RecoveryArchiveJobState
+  totalCount: string
+  completedCount: string
+  resumeDeadline: string
+  terminalAt: string | null
+  rowVersion: string
+}
+
+export interface RecoveryArchiveJobPage {
+  entries: RecoveryArchiveJobSnapshot[]
+  nextCursor: string | null
+}
+
+const RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS = [
+  'anchorSeq',
+  'archivedAt',
+  'coverageRowCount',
+  'expiresAt',
+  'generationId',
+  'recoveryPointAt',
+  'superseded',
+] as const
+
+const RECOVERY_ARCHIVE_JOB_STATES: ReadonlySet<unknown> = new Set([
+  'planned',
+  'applying',
+  'paused_retryable',
+  'done',
+  'abandoned_partial',
+  'cancelled_zero_write',
+])
+
+const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
+  'completedCount',
+  'jobId',
+  'resumeDeadline',
+  'rowVersion',
+  'state',
+  'terminalAt',
+  'totalCount',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_KEYS = [
+  'blockedReason',
+  'executable',
+  'executionKind',
+  'generationId',
+  'mode',
+  'previewIdentity',
+  'scopeKind',
+  'summary',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS = [
+  'deleteIds',
+  'driftCount',
+  'effectiveWriteCount',
+  'keptCreatedAfterAnchorCount',
+  'resurrectIds',
+  'reverts',
+] as const
+
+const RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS = [
+  'anchorSeq',
+  'checkpointId',
+  'deletedCount',
+  'keptCreatedAfterAnchor',
+  'mode',
+  'resurrectedCount',
+  'revertedCount',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS: ReadonlySet<unknown> = new Set([
+  'no_changes',
+  'unsupported_attachments',
+  'schema_drift',
+  'inbound_unprovable',
+  'async_plan_required',
+])
+
+function isRecoveryArchiveUuid(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function isRecoveryArchiveDecimal(value: unknown): value is string {
+  return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
+}
+
+function isRecoveryArchiveJobPositiveDecimal(value: unknown): value is string {
+  return isRecoveryArchiveDecimal(value) && value !== '0'
+}
+
+function isRecoveryArchiveTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
+function isRecoveryArchiveCatalogEntry(value: unknown): value is RecoveryArchiveCatalogEntry {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS.length
+    || keys.some((key, index) => key !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS[index])
+  ) {
+    return false
+  }
+  const entry = value as Record<string, unknown>
+  return isRecoveryArchiveUuid(entry.generationId)
+    && isRecoveryArchiveTimestamp(entry.recoveryPointAt)
+    && isRecoveryArchiveTimestamp(entry.archivedAt)
+    && isRecoveryArchiveTimestamp(entry.expiresAt)
+    && isRecoveryArchiveDecimal(entry.anchorSeq)
+    && isRecoveryArchiveDecimal(entry.coverageRowCount)
+    && typeof entry.superseded === 'boolean'
+}
+
+function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJobSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS.length
+    || keys.some((key, index) => key !== RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS[index])
+  ) {
+    return false
+  }
+  const snapshot = value as Record<string, unknown>
+  if (
+    !isRecoveryArchiveUuid(snapshot.jobId)
+    || !RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
+    || !isRecoveryArchiveJobPositiveDecimal(snapshot.totalCount)
+    || !isRecoveryArchiveDecimal(snapshot.completedCount)
+    || !isRecoveryArchiveTimestamp(snapshot.resumeDeadline)
+    || (snapshot.terminalAt !== null && !isRecoveryArchiveTimestamp(snapshot.terminalAt))
+    || !isRecoveryArchiveJobPositiveDecimal(snapshot.rowVersion)
+  ) {
+    return false
+  }
+  const state = snapshot.state as RecoveryArchiveJobState
+  const isTerminal = state === 'done' || state === 'abandoned_partial' || state === 'cancelled_zero_write'
+  return (isTerminal ? snapshot.terminalAt !== null : snapshot.terminalAt === null)
+    && BigInt(snapshot.totalCount) > 5000n
+    && BigInt(snapshot.completedCount) <= BigInt(snapshot.totalCount)
+    && (state !== 'done' || snapshot.completedCount === snapshot.totalCount)
+    && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
+}
+
+function hasRecoveryArchiveExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  return keys.length === expectedKeys.length
+    && keys.every((key, index) => key === expectedKeys[index])
+}
+
+function isRecoveryArchiveOpaque(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value
+}
+
+function isRecoveryArchiveNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+}
+
+function isRecoveryArchiveStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isRecoveryArchiveOpaque)
+}
+
+function isRecoveryArchivePreview(value: unknown): value is RecoveryArchivePreview {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_PREVIEW_KEYS)) return false
+  if (!hasRecoveryArchiveExactKeys(value.summary, RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS)) return false
+  const summary = value.summary
+  if (
+    !Array.isArray(summary.reverts)
+    || summary.reverts.some((revert) => (
+      !hasRecoveryArchiveExactKeys(revert, ['fieldIds', 'recordId'])
+      || !isRecoveryArchiveOpaque(revert.recordId)
+      || !isRecoveryArchiveStringArray(revert.fieldIds)
+    ))
+    || !isRecoveryArchiveStringArray(summary.resurrectIds)
+    || !isRecoveryArchiveStringArray(summary.deleteIds)
+    || !isRecoveryArchiveNonNegativeInteger(summary.effectiveWriteCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.keptCreatedAfterAnchorCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.driftCount)
+  ) {
+    return false
+  }
+  const blockedReasonValid = value.blockedReason === null
+    || RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+  const previewIdentityValid = value.previewIdentity === null
+    || isRecoveryArchiveOpaque(value.previewIdentity)
+  const executionStateValid = value.executable === true
+    ? value.blockedReason === null && isRecoveryArchiveOpaque(value.previewIdentity)
+    : value.executable === false
+      && RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+      && value.previewIdentity === null
+  return isRecoveryArchiveUuid(value.generationId)
+    && (value.mode === 'revert' || value.mode === 'reset')
+    && (value.scopeKind === 'whole_sheet' || value.scopeKind === 'selected_records' || value.scopeKind === 'selected_fields')
+    && (value.executionKind === 'sync' || value.executionKind === 'async')
+    && blockedReasonValid
+    && previewIdentityValid
+    && executionStateValid
+}
+
+function isRecoveryArchiveExecuteResult(value: unknown): value is RecoveryArchiveExecuteResult {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS)) return false
+  return (value.mode === 'revert' || value.mode === 'reset')
+    && isRecoveryArchiveDecimal(value.anchorSeq)
+    && isRecoveryArchiveOpaque(value.checkpointId)
+    && isRecoveryArchiveNonNegativeInteger(value.revertedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.resurrectedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.deletedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.keptCreatedAfterAnchor)
+}
+
+function requireRecoveryArchivePreview(value: unknown): RecoveryArchivePreview {
+  if (!isRecoveryArchivePreview(value)) {
+    throw new Error('Invalid recovery archive preview response')
+  }
+  return value
+}
+
+function requireRecoveryArchiveExecuteResult(value: unknown): RecoveryArchiveExecuteResult {
+  if (!isRecoveryArchiveExecuteResult(value)) {
+    throw new Error('Invalid recovery archive execute response')
+  }
+  return value
+}
+
+function requireRecoveryArchiveJobSnapshot(value: unknown): RecoveryArchiveJobSnapshot {
+  if (!isRecoveryArchiveJobSnapshot(value)) {
+    throw new Error('Invalid recovery archive job response')
+  }
+  return value
 }
 
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
@@ -1047,6 +1767,19 @@ export interface RestoreBatchExecuteResult {
   targetVersion: number
 }
 
+export interface DeletedSheet {
+  id: string
+  baseId: string
+  name: string
+  description: string | null
+  deletedAt: string
+}
+
+export interface DeletedSheetPage {
+  sheets: DeletedSheet[]
+  nextCursor: string | null
+}
+
 // T9-R4: a config/schema-change history entry (server-gated per entity type; the FE renders it as-is).
 export interface MetaConfigRevision {
   id: string
@@ -1058,6 +1791,7 @@ export interface MetaConfigRevision {
   changedKeys: string[]
   batchId: string | null
   actorId: string | null
+  actorName?: string | null
   createdAt: string
 }
 
@@ -1197,7 +1931,11 @@ export interface AiBulkPreviewRow {
  * is heterogeneous: `skipped_no_perm` (not writable — needs a perm change),
  * `rate_limited_before_call` / `blocked_before_call` (transient — a re-run may
  * reach it), `generation_failed_before_usage` (provider failed, no usage),
- * `unsafe_input` (secret-shaped content, not sent).
+ * `unsafe_input` (secret-shaped content, not sent), `sheet_not_live` (#5838: the
+ * table could not be confirmed available WHILE the batch ran — deleted, its row
+ * gone, or the liveness lookup itself failed; the server fails closed on all
+ * three and does not distinguish them here, so copy for this reason must not
+ * ASSERT a deletion).
  */
 export interface AiBulkPreviewSkipped {
   recordId: string
@@ -1223,11 +1961,22 @@ export interface AiBulkPreviewData {
   /** Total settled provider cost (USD) for THIS preview — already charged; shown for cost honesty. */
   settledCost: number
   /**
-   * true → the batch BROKE EARLY (provider/cache error or quota/blocked/
-   * rate-limit hit mid-loop): the preview is PARTIAL, remaining in-scope rows
-   * were not reached. NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE
-   * which never returns rows). The backend deliberately returns NO total, so the
-   * UI signals incompleteness without a count (hidden-row oracle guard).
+   * true → the batch BROKE EARLY: a provider/cache error, a quota/blocked/
+   * rate-limit hit mid-loop, or (#5838) the TABLE stopping being confirmable
+   * mid-loop. The preview is PARTIAL, remaining in-scope rows were not reached.
+   * NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE which never
+   * returns rows). The backend deliberately returns NO total, so the UI signals
+   * incompleteness without a count (hidden-row oracle guard).
+   *
+   * `capped` alone does NOT say WHICH cause: the causes differ in what the user
+   * should do next, and only the sheet-liveness one makes "write these, then
+   * re-run" wrong (both refuse on a table that is gone). Read `skipped[].reason`
+   * for `sheet_not_live` before rendering re-run advice. A sheet-liveness stop on
+   * the FIRST row usually does not reach here at all: with nothing generated and
+   * nothing charged the server re-reads the verdict and refuses 404 instead. It
+   * DOES reach here when that re-read comes back live (a transient lookup failure
+   * stopped the batch) — an empty, uncharged partial on a live table, which the
+   * re-run advice does fit.
    */
   capped: boolean
 }
@@ -1261,17 +2010,26 @@ export interface AiBulkCommitData {
 // wire (the same fixture-drift rule as B-3).
 
 /**
- * Job lifecycle status (the poll route's `state`, a WorkflowJobStatus). Job mode
+ * Job lifecycle status (the poll route's `state`). Job mode
  * cares about: `queued`/`running` (the worker is still generating — keep polling)
  * → `suspended` (generation done, AWAITING review — the diff is ready) /
  * `resolved` (already committed — terminal success) / `rejected` (cancelled —
  * already-generated rows stay committable) / `errored` (crashed mid-generate —
  * the persisted partial is still committable).
+ *
+ * `committing` (#5842) is the COMMIT phase, NOT a generating one: a commit request holds the
+ * job's claim and is writing records. The server returns it on the poll header, on a cancel it
+ * refused, and on a commit whose claim was lost — so the union must carry it or this contract
+ * lies about a value the API really sends. It is neither committable (a commit is already in
+ * flight → 409) nor terminal (keep polling for the outcome); see the exhaustive policy table in
+ * composables/useAiBulkFill.ts, which is keyed on THIS union so a new status cannot be added
+ * without deciding both questions.
  */
 export type AiBulkJobStatus =
   | 'queued'
   | 'running'
   | 'suspended'
+  | 'committing'
   | 'resolved'
   | 'rejected'
   | 'errored'
@@ -1369,6 +2127,11 @@ export interface AiBulkJobCancelData {
   state: AiBulkJobStatus
 }
 
+/** A11: GET /api/multitable/ai/availability — one bit, nothing else. */
+export interface AiAvailability {
+  available: boolean
+}
+
 export interface AiUsageSummary {
   callerDayTokens: number
   callerWeekTokens: number
@@ -1404,10 +2167,35 @@ function configRestoreConfirmForPreview(preview: ConfigRestorePreview): ConfigRe
   return undefined
 }
 
-export class MultitableApiClient {
+// S3a: MultitableApiClient is the first implementation of the shared CommentsApiClient interface
+// (listComments/createComment/resolveComment/updateComment/deleteComment/addReaction/
+// removeReaction below already have this exact shape — `implements` only adds a compile-time
+// check, no runtime change).
+export class MultitableApiClient implements CommentsApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
   private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
+  // Catalog caches: the bases/templates lists are small and change rarely, but
+  // were refetched by every mounting surface (workbench, home, field dialogs,
+  // template views) — ≥5 identical GETs in a single sheet-open session. Cached
+  // per client instance with in-flight dedup (same pattern as
+  // usePlugins.fetchPlugins); mutations on this client invalidate, and callers
+  // can pass { force: true } for an explicit refresh.
+  // Generation counters make invalidation win races: an invalidate/force bumps
+  // the generation, so a slower request started EARLIER that resolves LATER
+  // can no longer write its stale payload back into the cache (Codex review).
+  private basesCache: MetaBase[] | null = null
+  private basesGeneration = 0
+  private basesInflight: { promise: Promise<{ bases: MetaBase[] }>; generation: number } | null = null
+  private templatesCache: MetaTemplate[] | null = null
+  // 服务端说「自定义模板这一段读不出来」(未迁移 / 库没起来)时带回来的标志位。
+  // 跟着缓存一起存:缓存命中的那次调用也必须把它一起还给调用方,否则提示条会闪一下就消失。
+  private templatesCacheCustomUnavailable = false
+  private templatesGeneration = 0
+  private templatesInflight: { promise: Promise<ListTemplatesResult>; generation: number } | null = null
+  // #5861:「使用模板」的在途合并表。key = (模板 id, baseName, workspaceId);
+  // 只在请求在途期间有条目(settle 即删),所以它挡连点、不挡「稍后再装一次」。
+  private readonly installTemplateInflight = new Map<string, Promise<InstallTemplateResult>>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1425,9 +2213,55 @@ export class MultitableApiClient {
   }
 
   // --- Bases ---
-  async listBases(): Promise<{ bases: MetaBase[] }> {
-    const res = await this.fetch('/api/multitable/bases')
-    return this.parseJson(res)
+  invalidateBasesCache(): void {
+    this.basesCache = null
+    // Bump the generation and drop the joinable in-flight handle: any request
+    // already in flight is stale by definition and must neither populate the
+    // cache on resolution nor be joined by later callers.
+    this.basesGeneration++
+    this.basesInflight = null
+  }
+
+  invalidateTemplatesCache(): void {
+    this.templatesCache = null
+    this.templatesCacheCustomUnavailable = false
+    this.templatesGeneration++
+    this.templatesInflight = null
+  }
+
+  async listBases(opts?: { force?: boolean }): Promise<{ bases: MetaBase[] }> {
+    if (opts?.force) {
+      // Explicit refresh: supersede the cache AND any older in-flight fetch.
+      this.invalidateBasesCache()
+    } else {
+      // Return copies so a caller sorting/mutating the array cannot pollute the cache.
+      if (this.basesCache) return { bases: [...this.basesCache] }
+      if (this.basesInflight) {
+        return this.basesInflight.promise.then((data) => (Array.isArray(data?.bases) ? { bases: [...data.bases] } : data))
+      }
+    }
+    const generation = this.basesGeneration
+    const promise = (async () => {
+      const res = await this.fetch('/api/multitable/bases')
+      const data = await this.parseJson<{ bases?: MetaBase[] }>(res)
+      // Cache only a well-formed payload. Malformed/probe bodies pass through
+      // UNTOUCHED (and uncached): test routers and error shapes rely on the
+      // raw passthrough contract (see mount-behind-flow.spec).
+      if (Array.isArray(data?.bases)) {
+        // Generation check: only a latest-generation fetch may populate the
+        // cache — an invalidation while this request was in flight makes its
+        // payload stale, though the awaiting caller still receives it.
+        if (generation === this.basesGeneration) this.basesCache = data.bases
+        return { bases: [...data.bases] }
+      }
+      return data as { bases: MetaBase[] }
+    })()
+    this.basesInflight = { promise, generation }
+    try {
+      return await promise
+    } finally {
+      if (this.basesInflight?.promise === promise) this.basesInflight = null
+    }
   }
 
   async createBase(input: CreateBaseInput): Promise<{ base: MetaBase }> {
@@ -1436,12 +2270,68 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<{ base: MetaBase }>(res)
+    this.invalidateBasesCache()
+    return data
   }
 
-  async listTemplates(): Promise<{ templates: MetaTemplate[] }> {
-    const res = await this.fetch('/api/multitable/templates')
-    return this.parseJson(res)
+  // Rename gates server-side on canManageFields (admin role or multitable:manage-schema) — a 403
+  // here is expected for a caller lacking schema authority; the client throws (MultitableApiError)
+  // rather than swallowing it, so the caller can surface the server's message.
+  async renameBase(baseId: string, name: string): Promise<{ base: MetaBase }> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    const data = await this.parseJson<{ base: MetaBase }>(res)
+    this.invalidateBasesCache()
+    return data
+  }
+
+  /**
+   * customTemplatesUnavailable:服务端在自定义模板那一段读失败时(表没迁移 / 库没起来)
+   * 回退成「只有内置模板」并带上这个标志位。**必须原样透传** —— 丢掉它,未迁移环境看到的
+   * 就是一个「只有 8 张内置模板」的正常页面,恰恰是「假装用户没建过模板」。
+   */
+  async listTemplates(opts?: { force?: boolean }): Promise<ListTemplatesResult> {
+    if (opts?.force) {
+      this.invalidateTemplatesCache()
+    } else {
+      if (this.templatesCache) {
+        return {
+          templates: [...this.templatesCache],
+          ...(this.templatesCacheCustomUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
+      }
+      if (this.templatesInflight) {
+        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { ...data, templates: [...data.templates] } : data))
+      }
+    }
+    const generation = this.templatesGeneration
+    const promise = (async () => {
+      const res = await this.fetch('/api/multitable/templates')
+      const data = await this.parseJson<{ templates?: MetaTemplate[]; customTemplatesUnavailable?: boolean }>(res)
+      const customTemplatesUnavailable = data?.customTemplatesUnavailable === true
+      // Same passthrough + generation contract as listBases.
+      if (Array.isArray(data?.templates)) {
+        if (generation === this.templatesGeneration) {
+          this.templatesCache = data.templates
+          this.templatesCacheCustomUnavailable = customTemplatesUnavailable
+        }
+        return {
+          templates: [...data.templates],
+          ...(customTemplatesUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
+      }
+      return data as ListTemplatesResult
+    })()
+    this.templatesInflight = { promise, generation }
+    try {
+      return await promise
+    } finally {
+      if (this.templatesInflight?.promise === promise) this.templatesInflight = null
+    }
   }
 
   /**
@@ -1449,18 +2339,244 @@ export class MultitableApiClient {
    * template picker. Guarded server-side by `approvals:read` — an automation author lacking that permission
    * gets 401/403, which the editor degrades to a free-text template-id input (never a hard dependency).
    */
-  async listApprovalTemplates(): Promise<{ data: Array<{ id: string; name?: string }>; total: number }> {
-    const res = await this.fetch('/api/approval-templates')
+  async listApprovalTemplates(
+    params?: { status?: 'published' | 'draft' | 'archived'; pageSize?: number },
+  ): Promise<{ data: MetaApprovalTemplateSummary[]; total: number }> {
+    // 记录级送审 (design 5.1): the record drawer needs PUBLISHED templates only — the route already
+    // supports `?status=`, so the filter happens server-side. No argument = the pre-existing, unfiltered
+    // call the automation editor has always made (byte-identical URL, `qs` drops an undefined value).
+    // `pageSize` is likewise opt-in: only a caller that has a truncation story to tell (the submit
+    // dialog) sends it, so the editor's URL stays byte-identical to what #5747 shipped.
+    const res = await this.fetch(`/api/approval-templates${qs({ status: params?.status, pageSize: params?.pageSize })}`)
+    // The route answers `{ data: [...], total }`; parseJson unwraps the `data` envelope, so the body
+    // arrives here as the bare array. Re-wrap so callers get the documented `{ data, total }` shape
+    // (before this the editor read `.data` off the array, always got `[]`, and silently fell back to
+    // the free-text template-id input even when the roster loaded fine).
+    const body = await this.parseJson<unknown>(res)
+    const data = Array.isArray(body)
+      ? body
+      : isPlainObject(body) && Array.isArray(body.data)
+        ? body.data
+        : []
+    const items = data
+      .map((item) => normalizeApprovalTemplateSummary(item))
+      .filter((item): item is MetaApprovalTemplateSummary => item !== null)
+    return { data: items, total: items.length }
+  }
+
+  /**
+   * 记录级送审 (design 5.2): ONE approval template plus its active version's form fields, for the
+   * generic record-drawer submit form. Same route the approval centre's own `getTemplate` uses
+   * (`approvals:read` guarded) — but normalized HERE, values-free, rather than importing anything from
+   * `src/approvals/**` (separate window; the multitable surface must not depend on its DTO churn).
+   * A template with no readable form schema normalizes to an EMPTY field list (the dialog then has
+   * nothing required to enforce and submits `{}`), never a throw.
+   */
+  async getApprovalTemplate(templateId: string): Promise<MetaApprovalTemplateDetail> {
+    const res = await this.fetch(`/api/approval-templates/${encodeURIComponent(templateId)}`)
+    const body = await this.parseJson<unknown>(res)
+    return normalizeApprovalTemplateDetail(body, templateId)
+  }
+
+  /**
+   * 记录级送审 (design 4.1): create an approval instance BOUND to this record. The server owns every
+   * decision that matters (capability + `approvals:write`, template published + readable, the
+   * in-flight partial unique index, the snapshot/version anchor) — this method only carries
+   * `{ templateId, formData }` and normalizes the answer.
+   *
+   * 409 `RECORD_APPROVAL_IN_FLIGHT` is mapped to a TYPED error (see `isRecordApprovalInFlightError`)
+   * carrying the in-flight `approvalInstanceId`/`requestNo` when the server sends them, because the
+   * dialog's whole job in that case is to point at the existing instance. Every other non-2xx keeps
+   * the shared MultitableApiError shape (`.status`/`.code`) parseJson throws.
+   */
+  async submitRecordApproval(
+    sheetId: string,
+    recordId: string,
+    body: { templateId: string; formData: Record<string, unknown> },
+  ): Promise<MetaRecordApprovalSubmission> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateId: body.templateId, formData: body.formData }),
+      },
+    )
+    if (res.status === 409) {
+      const raw = await res.text()
+      const parsed = raw ? safeParseJson(raw) : null
+      const fields = recordApprovalConflictFields(parsed)
+      const payload = normalizeApiErrorPayload(parsed, this.resolveIsZh())
+      const error = new Error(
+        payload.message ?? apiDefaultErrorMessage(payload.code, res.status, this.resolveIsZh()),
+      ) as RecordApprovalInFlightError
+      error.name = RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
+      error.status = res.status
+      error.code = payload.code ?? optionalStringValue(fields.code)
+      const approvalInstanceId = optionalStringValue(fields.approvalInstanceId)
+        ?? optionalStringValue(fields.approval_instance_id)
+      const requestNo = optionalStringValue(fields.requestNo)
+        ?? optionalStringValue(fields.approvalRequestNo)
+        ?? optionalStringValue(fields.request_no)
+      if (approvalInstanceId) error.approvalInstanceId = approvalInstanceId
+      if (requestNo) error.requestNo = requestNo
+      throw error
+    }
+    const parsedBody = await this.parseJson<unknown>(res)
+    const envelope = isPlainObject(parsedBody) && isPlainObject(parsedBody.submission)
+      ? parsedBody.submission
+      : parsedBody
+    const submission = normalizeRecordApprovalSubmission(envelope)
+    if (!submission) {
+      const error = new Error(apiDefaultErrorMessage(undefined, res.status, this.resolveIsZh())) as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    return submission
+  }
+
+  /**
+   * 记录级送审 (design 4.1): ONE PAGE of this record's submissions, newest first, each with the
+   * server-computed `drift` (changed flag + changed FIELD IDS, never values). Needs only `canRead`; an
+   * unreadable or empty answer normalizes to `{ submissions: [], hasMore: false }` so the panel shows its
+   * empty state instead of breaking.
+   *
+   * `limit` is forwarded as `?limit=` and is the CALLER's page size, not a promise: the route clamps it to
+   * [1, 100] and falls back to its own default when it is absent, so an omitted/garbage value must NOT be
+   * sent as `?limit=` at all (an empty `?limit=` is "said nothing" on the server and a 0 would be clamped
+   * up to a one-row page). `hasMore` comes from the route's `limit + 1` probe and is FALSE when the field
+   * is absent — an old server that does not send it must not make the UI claim a truncation it cannot
+   * prove.
+   */
+  async listRecordApprovals(
+    sheetId: string,
+    recordId: string,
+    options: { limit?: number } = {},
+  ): Promise<MetaRecordApprovalListPage> {
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.trunc(options.limit)
+      : undefined
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/approvals${qs({ limit })}`,
+    )
+    const body = await this.parseJson<unknown>(res)
+    const rows = Array.isArray(body)
+      ? body
+      : isPlainObject(body) && Array.isArray(body.submissions)
+        ? body.submissions
+        : isPlainObject(body) && Array.isArray(body.items)
+          ? body.items
+          : isPlainObject(body) && Array.isArray(body.data)
+            ? body.data
+            : []
+    const submissions = rows
+      .map((row: unknown) => normalizeRecordApprovalSubmission(row))
+      .filter((row): row is MetaRecordApprovalSubmission => row !== null)
+    // Strictly boolean-true: a string 'false' / a count / a missing field all mean "do not claim more".
+    const hasMore = isPlainObject(body) && (body.hasMore === true || body.has_more === true)
+    return { submissions, hasMore }
+  }
+
+  /**
+   * FWB production authoring — server-owned confirmation hash (FWB0 §11 Q6 gate 3).
+   * The client sends the validated mapping subject; the server derives confirmationHash over
+   * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings, mode/link when
+   * updating}. Create targets the path sheet; update targets the approval template's record-link
+   * pin. Never invent a client-side hash or target identifiers.
+   */
+  async confirmFwbWriteback(
+    sheetId: string,
+    body: {
+      templateId: string
+      sourceTemplateVersionId: string
+      mappings: Array<{
+        formFieldId: string
+        targetFieldId: string
+        targetType: 'text' | 'number' | 'date' | 'select'
+        selectOptions?: readonly string[]
+      }>
+      mode?: 'update'
+      recordLinkFieldId?: string
+    },
+  ): Promise<{
+    confirmationHash: string
+    templateId: string
+    sourceTemplateVersionId: string
+    targetSheetId: string
+    targetBaseId: string
+  }> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/fwb/confirm`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
     return this.parseJson(res)
   }
 
-  async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
-    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
+  /**
+   * 把一个 Base 的**结构**存成模板(服务端只读 meta_sheets/meta_fields/meta_views,
+   * 不碰任何记录)。成功后模板列表缓存必须作废,否则模板中心刷不出刚建的模板。
+   */
+  async createTemplateFromBase(input: CreateTemplateFromBaseInput): Promise<CreateTemplateFromBaseResult> {
+    const res = await this.fetch('/api/multitable/templates', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<CreateTemplateFromBaseResult>(res)
+    this.invalidateTemplatesCache()
+    return data
+  }
+
+  /** 删除自定义模板(软删)。内置模板服务端会 403 —— 前端也不给入口。 */
+  async deleteTemplate(templateId: string): Promise<{ templateId: string }> {
+    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}`, {
+      method: 'DELETE',
+    })
+    const data = await this.parseJson<{ templateId: string }>(res)
+    this.invalidateTemplatesCache()
+    return data
+  }
+
+  /**
+   * #5861 —— 在途合并(前端侧的第二道闸门)。
+   *
+   * 客户在「使用模板」看起来没反应时反复点,装出了 4 个同名 Base。权威的去重在服务端
+   * (同一意图窗口内只落一个 Base);这里只负责让**同一个前端里**并发的重复调用共用一次
+   * 请求:同 (模板, 落点参数) 的调用在前一次还没落地之前返回同一个 promise,请求只发一次。
+   *
+   * 边界:只合并**在途**的调用 —— 上一次 settle(成功或失败)之后 key 立刻从表里删掉,
+   * 所以「装完之后真的想再装一次」不会被前端永久挡住(那由服务端的窗口决定)。
+   * 不做任何重试:重复发送由去重账本负责变得安全,不是由这里制造。
+   */
+  async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
+    // JSON 数组做键:每段都带引号+转义,任何分隔符都无法被模板 id / Base 名伪造出来。
+    const inflightKey = JSON.stringify([templateId, input.baseName ?? null, input.workspaceId ?? null])
+    const pending = this.installTemplateInflight.get(inflightKey)
+    if (pending) return pending
+
+    const run = (async () => {
+      const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      })
+      const data = await this.parseJson<InstallTemplateResult>(res)
+      // Installing a template creates a base — the cached bases list is stale.
+      this.invalidateBasesCache()
+      return data
+    })()
+
+    this.installTemplateInflight.set(inflightKey, run)
+    try {
+      return await run
+    } finally {
+      this.installTemplateInflight.delete(inflightKey)
+    }
   }
 
   // S2 — zero-write install simulation (design 20260611 §2.1). Same body
@@ -1477,7 +2593,10 @@ export class MultitableApiClient {
   // --- Context ---
   async loadContext(params: { baseId?: string; sheetId?: string; viewId?: string }): Promise<MetaContext> {
     const res = await this.fetch(`/api/multitable/context${qs(params)}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaContext>(res)
+    // 客户反馈 2026-09-24 #4c: adopt the server's business timezone for every date-time display/editor.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Sheets ---
@@ -1493,6 +2612,79 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
     })
     return this.parseJson(res)
+  }
+
+  // Rename gates server-side on canManageFields (admin role or multitable:manage-schema) — a 403
+  // here is expected for a caller lacking schema authority; the client throws (MultitableApiError)
+  // rather than swallowing it, so the caller can surface the server's message.
+  async renameSheet(sheetId: string, name: string): Promise<{ sheet: MetaSheet }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return this.parseJson(res)
+  }
+
+  // Soft-delete a whole sheet (DELETE /api/multitable/sheets/:id → `deleted_at = now()`; records and
+  // links are untouched and the sheet is restorable via restoreSheet). Server gate is
+  // hasSheetLifecycleAuthority; a 403 / 409 SHEET_PLUGIN_MANAGED / 409 SHEET_SYSTEM_MANAGED /
+  // 404 SHEET_DELETED all throw a MultitableApiError carrying `code`, so the caller can pick copy by code.
+  async deleteSheet(sheetId: string): Promise<{ deleted: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}`, { method: 'DELETE' })
+    return this.parseJson(res)
+  }
+
+  async listDeletedSheets(baseId: string, params?: { cursor?: string; limit?: number }): Promise<DeletedSheetPage> {
+    const res = await this.fetch(`/api/multitable/bases/${encodeURIComponent(baseId)}/trash${qs(params ?? {})}`)
+    const data = await this.parseJson<DeletedSheetPage>(res)
+    if (!data || !Array.isArray(data.sheets)
+      || !(data.nextCursor === null || (typeof data.nextCursor === 'string' && data.nextCursor.length > 0))
+      || !data.sheets.every((sheet) => sheet && typeof sheet.id === 'string' && sheet.id.length > 0
+        && sheet.baseId === baseId && typeof sheet.name === 'string'
+        && (sheet.description === null || typeof sheet.description === 'string')
+        && typeof sheet.deletedAt === 'string' && Number.isFinite(new Date(sheet.deletedAt).getTime()))) {
+      throw new Error('Invalid deleted sheets response')
+    }
+    return data
+  }
+
+  // Undo a soft delete through the same lifecycle-authority gate as deletion.
+  async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
+    return this.parseJson(res)
+  }
+
+  // 复制数据表（含数据）S1 (ADR multitable-copy-sheet-with-data-adr-20260926.md §3/§7.1). Session-only
+  // routes; the server runs the full-table-read gate on the source and the Base-writable gate on the
+  // target BEFORE counting anything, so a refusal (403 COPY_SOURCE_NOT_FULLY_READABLE) never carries a
+  // count. Both methods throw CopySheetError (never the server's message) on any non-2xx.
+  async dryRunCopySheet(sheetId: string, input: CopySheetInput): Promise<CopySheetDryRunResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/copy/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildCopySheetRequestBody(input)),
+    })
+    return normalizeCopySheetDryRun(await this.readCopySheetBody(res))
+  }
+
+  // 201 (or a 201 replay with `Idempotent-Replayed: true` inside the server's dedupe window) returns the
+  // new sheet. The caller refreshes the sheet list and selects it; this client caches no sheet list.
+  async copySheet(sheetId: string, input: CopySheetInput): Promise<CopySheetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildCopySheetRequestBody(input)),
+    })
+    const body = await this.readCopySheetBody(res)
+    return normalizeCopySheetResult(body, res.headers.get('Idempotent-Replayed'))
+  }
+
+  private async readCopySheetBody(res: Response): Promise<unknown> {
+    const raw = await res.text()
+    const body = raw ? safeParseJson(raw) : null
+    if (!res.ok) throw buildCopySheetError(res.status, body, this.resolveIsZh())
+    return unwrapDataBody(body) ?? body
   }
 
   async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {
@@ -1518,9 +2710,12 @@ export class MultitableApiClient {
       body: JSON.stringify({}),
     })
     const data = await this.parseJson<{ restored?: string; sheetId?: string }>(res)
+    if (data?.restored !== recordId || typeof data.sheetId !== 'string' || !data.sheetId) {
+      throw new Error('Invalid record restore response')
+    }
     return {
-      restored: typeof data?.restored === 'string' ? data.restored : recordId,
-      sheetId: typeof data?.sheetId === 'string' ? data.sheetId : '',
+      restored: data.restored,
+      sheetId: data.sheetId,
     }
   }
 
@@ -1537,14 +2732,37 @@ export class MultitableApiClient {
    * 2c-S3 — the assignable directory for ONE person field (source = B member-group directory).
    * Returns the same allowed set the write validator accepts (active-only, member-group-scoped),
    * so the picker offers exactly what a save will accept. Gated server-side on canEditRecord.
+   *
+   * #5781: the endpoint is now SEARCH-REQUIRED and capped. A call with no `q` answers 200 with an
+   * empty list and `requiresQuery: true` (not an error) — render "type to search", not "no members".
+   * `hasMore` is set when the answer was clamped to the server ceiling.
+   *
+   * #5809: `match: 'exact'` asks for an EXACT lookup (id / name / email equal to `q`, case-insensitive)
+   * instead of the substring search — used by the import resolver. Same gate, set and ceiling. A server
+   * that predates the mode ignores the parameter and answers the substring search, so callers must still
+   * filter for exact matches themselves.
    */
   async listPersonFieldDirectory(
     sheetId: string,
     fieldId: string,
-    params?: { q?: string },
-  ): Promise<{ items: Array<{ userId: string; name: string | null; email: string | null }>; total: number; query: string }> {
+    params?: { q?: string; match?: 'exact' },
+  ): Promise<{
+    items: Array<{ userId: string; name: string | null; email: string | null }>
+    total: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/person-fields/${encodeURIComponent(fieldId)}/directory${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>; total?: number; query?: string }>(res)
+    const data = await this.parseJson<{
+      items?: Array<{ userId?: unknown; name?: unknown; email?: unknown }>
+      total?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
     const items = (data.items ?? [])
       .map((it) => ({
         userId: String(it.userId ?? ''),
@@ -1552,7 +2770,14 @@ export class MultitableApiClient {
         email: typeof it.email === 'string' ? it.email : null,
       }))
       .filter((it) => it.userId.length > 0)
-    return { items, total: typeof data.total === 'number' ? data.total : items.length, query: typeof data.query === 'string' ? data.query : '' }
+    return {
+      items,
+      total: typeof data.total === 'number' ? data.total : items.length,
+      query: typeof data.query === 'string' ? data.query : '',
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   async updateSheetPermission(
@@ -2016,19 +3241,35 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  // A11 (customer feedback 2026-09-24 #7c): may the AI surfaces be shown at all?
+  // Any signed-in user; a values-free flat `{ available }`. Callers go through
+  // resolveAiAvailability (useAiShortcut.ts), which fails closed.
+  async aiAvailability(): Promise<AiAvailability> {
+    const res = await this.fetch('/api/multitable/ai/availability')
+    return this.parseJson(res)
+  }
+
   // --- Form context ---
   async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
     const path = `/api/multitable/form-context${qs(params)}`
     const res = params.publicToken && this.fetch === apiFetch
       ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
       : await this.fetch(path)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaFormContext>(res)
+    // The (public) form never loads /context — it learns the business timezone here.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Records ---
   async getRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<MetaRecordContext> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs(params ?? {})}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaRecordContext>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link, linked-record peek) may arrive
+    // before — or without — /context; it carries the same instance business timezone, so its date-times
+    // show the grid's wall clock. An older server omits the key and the current zone stays.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   async listRecordHistory(sheetId: string, recordId: string, params?: { limit?: number; offset?: number }): Promise<MetaRecordRevision[]> {
@@ -2087,25 +3328,184 @@ export class MultitableApiClient {
     this.configRestoreConfirmByToken.delete(previewToken)
   }
 
-  // T8-2: preview a sheet-wide Reset-to-T (DESTRUCTIVE — records created after T → recycle bin; survivors reverted).
+  // T8-2 / W2: preview an exact-anchor Reset (DESTRUCTIVE — records created after the anchor → recycle bin;
+  // survivors reverted). `anchor` is EXCLUSIVE (historyBatchId XOR anchorOperationId) — never a wall-clock time.
   // Server computes the revert set + delete-set + a signed previewIdentity binding BOTH scopes. Behind
   // MULTITABLE_ENABLE_PIT_RESET; `403 RESET_DISABLED` when off, `403` for non-sheet-admin, `413` over the size ceiling.
-  async resetPreview(sheetId: string, asOf: string): Promise<ResetPreview> {
+  async resetPreview(sheetId: string, anchor: ExactAnchorRequest): Promise<ResetPreview> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-preview`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asOf }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(anchor),
     })
     return this.parseJson<ResetPreview>(res)
   }
 
-  // T8-2: execute Reset-to-T. REQUIRES the typed `confirm:'reset'` (D4) + the server `previewIdentity` (binds the
-  // delete-set; a record created since preview re-enumerates → `409`). Single-transaction all-or-nothing on the server;
-  // `409 RESET_BLOCKED` if any target is locked/denied (zero writes).
-  async resetExecute(sheetId: string, asOf: string, previewIdentity: string): Promise<ResetResult> {
+  // T8-2 / W2: execute exact-anchor Reset. REQUIRES the typed `confirm:'reset'` (D4) + the server
+  // `previewIdentity` (token-bound anchor + scope; a record created since preview re-enumerates → `409`).
+  // The token is the SOLE authority — no anchor/asOf is re-sent here. Single-transaction all-or-nothing on
+  // the server; `409 RESET_BLOCKED` if any target is locked/denied (zero writes).
+  async resetExecute(sheetId: string, previewIdentity: string): Promise<ResetResult> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-execute`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ asOf, previewIdentity, confirm: 'reset' }),
+      body: JSON.stringify({ previewIdentity, confirm: 'reset' }),
     })
     return this.parseJson<ResetResult>(res)
+  }
+
+  // W2: preview an exact-anchor Revert. The anchor contract is identical to Reset, but Revert keeps records
+  // created after the anchor and is exposed only when the server-derived sheetRevertEnabled capability is on.
+  async revertPreview(sheetId: string, anchor: ExactAnchorRequest): Promise<ResetPreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(anchor),
+    })
+    return this.parseJson<ResetPreview>(res)
+  }
+
+  // Execute is token-only. Revert has no typed destructive confirmation because it cannot delete
+  // post-anchor-created records; the verified token binds both the exact anchor and mode server-side.
+  async revertExecute(sheetId: string, previewIdentity: string): Promise<ResetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/revert-execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previewIdentity }),
+    })
+    return this.parseJson<ResetResult>(res)
+  }
+
+  // Archive recovery stays server-led: catalog metadata is read-only, the preview
+  // binds a generation and scope, and both sync execute and async accept consume
+  // only that server identity. Job state and owner actions never accept a plan,
+  // worker fence, or caller-provided progress.
+  async captureRecoveryArchive(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId }),
+    })
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
+  async readRecoveryArchiveCapture(sheetId: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> {
+    requireRecoveryArchiveRequestId(requestId)
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/captures/${requestId}`)
+    return requireRecoveryArchiveCaptureStatus(await this.parseJson<unknown>(res), requestId)
+  }
+
+  async listRecoveryArchiveCatalog(
+    sheetId: string,
+    params?: { cursor?: string; limit?: number },
+  ): Promise<RecoveryArchiveCatalogPage> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/catalog${qs(params ?? {})}`,
+    )
+    const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
+    if (
+      !data
+      || !Array.isArray(data.entries)
+      || data.entries.some((entry) => !isRecoveryArchiveCatalogEntry(entry))
+      || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+    ) {
+      throw new Error('Invalid recovery archive catalog response')
+    }
+    return {
+      entries: data.entries,
+      nextCursor: data.nextCursor,
+    }
+  }
+
+  async previewRecoveryArchive(
+    sheetId: string,
+    input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope },
+  ): Promise<RecoveryArchivePreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return requireRecoveryArchivePreview(await this.parseJson<RecoveryArchivePreview>(res))
+  }
+
+  async executeRecoveryArchive(
+    sheetId: string,
+    input: { previewIdentity: string; scope: RecoveryArchiveScope },
+  ): Promise<RecoveryArchiveExecuteResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return requireRecoveryArchiveExecuteResult(await this.parseJson<RecoveryArchiveExecuteResult>(res))
+  }
+
+  async acceptRecoveryArchiveJob(
+    sheetId: string,
+    previewIdentity: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previewIdentity }),
+    })
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
+  }
+
+  async listRecoveryArchiveJobs(
+    sheetId: string,
+    params?: { cursor?: string; limit?: number },
+  ): Promise<RecoveryArchiveJobPage> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs${qs(params ?? {})}`,
+    )
+    const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
+    if (
+      !data
+      || !Array.isArray(data.entries)
+      || data.entries.some((entry) => !isRecoveryArchiveJobSnapshot(entry))
+      || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+    ) {
+      throw new Error('Invalid recovery archive job list response')
+    }
+    return {
+      entries: data.entries,
+      nextCursor: data.nextCursor,
+    }
+  }
+
+  async readRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}`,
+    )
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
+  }
+
+  async resumeRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}/resume`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    )
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
+  }
+
+  async cancelRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}/cancel`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    )
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---
@@ -2542,13 +3942,33 @@ export class MultitableApiClient {
     }
   }
 
+  /**
+   * #5795: the endpoint is SEARCH-REQUIRED and capped (same contract as listPersonFieldDirectory). A call
+   * without `q` answers 200 with no items and `requiresQuery: true` — render "type to search", never
+   * "no match". `hasMore` is set when the answer was clamped to the server ceiling; `total` is only the
+   * size of the returned page (the server no longer discloses a deployment-wide count).
+   *
+   * #5809: `match: 'exact-email'` asks for users whose (trimmed, case-folded) EMAIL EQUALS `q` instead of
+   * the name/email/id substring search — used by the legacy person importer. Same gate, term requirement
+   * and ceiling. A server that predates the mode ignores it and answers the substring search, so callers
+   * must still filter for exact matches themselves.
+   */
   async listCommentMentionSuggestions(params: {
     spreadsheetId: string
     q?: string
     limit?: number
-  }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
+    match?: 'exact-email'
+  }): Promise<{
+    items: MetaCommentMentionSuggestion[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    const data = await this.parseJson<Parameters<typeof normalizeCommentMentionSuggestions>[0]>(res)
     return normalizeCommentMentionSuggestions(data)
   }
 
@@ -2602,10 +4022,18 @@ export class MultitableApiClient {
 
   async listCommentPresence(params: { containerId: string; targetIds?: string[] }): Promise<{ items: MultitableCommentPresenceSummary[] }> {
     const targetIds = (params.targetIds ?? []).filter((targetId) => typeof targetId === 'string' && targetId.trim().length > 0)
-    const res = await this.fetch(`/api/comments/summary${qs({
-      spreadsheetId: params.containerId,
-      rowIds: targetIds.length ? targetIds.join(',') : undefined,
-    })}`)
+    // POST with the ids in the body: the grid sends every visible row id per
+    // page, and the previous comma-joined query string grew with page size
+    // toward URL-length limits (414). The backend keeps the GET variant for
+    // rolling-deploy compat; deploy core-backend before this client.
+    const res = await this.fetch('/api/comments/summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        spreadsheetId: params.containerId,
+        ...(targetIds.length ? { rowIds: targetIds } : {}),
+      }),
+    })
     const data = await this.parseJson<{ items?: MultitableCommentPresenceSummary[] }>(res)
     return normalizeCommentPresenceList(data)
   }
@@ -2627,7 +4055,9 @@ export class MultitableApiClient {
 
   async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
     const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context; adopt the zone its page carries.
+    setBusinessTimezone(data?.businessTimezone)
     return normalizeCommentInbox(data)
   }
 
@@ -2666,13 +4096,38 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * #5795: search-required like listPersonFieldDirectory — no `q` ⇒ 200 + no items + `requiresQuery`
+   * (render "type to search"); `hasMore` ⇒ the page was clamped (at most 50).
+   */
   async listFormShareCandidates(
     sheetId: string,
     params?: { q?: string; limit?: number },
-  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+  ): Promise<{
+    items: MetaSheetPermissionCandidate[]
+    total: number
+    limit: number
+    query: string
+    hasMore: boolean
+    requiresQuery: boolean
+    minQueryLength: number
+  }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
-    return normalizeSheetPermissionCandidates(data)
+    const data = await this.parseJson<{
+      items?: Array<Partial<MetaSheetPermissionCandidate>>
+      total?: number
+      limit?: number
+      query?: string
+      hasMore?: unknown
+      requiresQuery?: unknown
+      minQueryLength?: unknown
+    }>(res)
+    return {
+      ...normalizeSheetPermissionCandidates(data),
+      hasMore: data.hasMore === true,
+      requiresQuery: data.requiresQuery === true,
+      minQueryLength: typeof data.minQueryLength === 'number' ? data.minQueryLength : 1,
+    }
   }
 
   // --- API Tokens ---
@@ -2822,7 +4277,9 @@ export class MultitableApiClient {
     limit?: number
   }): Promise<AutomationRunView[]> {
     const res = await this.fetch(`/api/multitable/automation-executions${qs({ ...filters })}`)
-    const data = await this.parseJson<{ executions: AutomationRunView[] }>(res)
+    const data = await this.parseJson<{ executions: AutomationRunView[]; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context; adopt the zone the list carries.
+    setBusinessTimezone(data?.businessTimezone)
     return Array.isArray(data?.executions) ? data.executions : []
   }
 
@@ -2838,7 +4295,7 @@ export class MultitableApiClient {
    * The single-use `resumeToken` comes from the suspended step's C1 descriptor in the run detail.
    * `confirmSideEffects:true` is always sent (the UI confirm-gates this call). parseJson throws an
    * Error with `.code` (NOT_FOUND / ALREADY_RESUMED / RULE_CHANGED / RULE_MISSING_OR_DISABLED /
-   * RECORD_GONE) so the caller can map it to an inline message rather than a generic toast.
+   * RECORD_GONE / SHEET_DELETED) so the caller can map it to an inline message rather than a generic toast.
    */
   async resumeAutomation(resumeToken: string): Promise<AutomationRunView> {
     const res = await this.fetch('/api/multitable/automation/resume', {
@@ -2846,6 +4303,28 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resumeToken, confirmSideEffects: true }),
     })
+    return this.parseJson<AutomationRunView>(res)
+  }
+
+  /**
+   * A5: whole-execution retry (admin-only; RE-RUNS REAL SIDE EFFECTS — record writes / webhook /
+   * email / DingTalk — using the CURRENT enabled rule + the ORIGINAL stored trigger event). Returns
+   * the NEW execution (linked back via `rerunOfExecutionId`); the original execution row is never
+   * mutated. `confirmSideEffects:true` is always sent — the UI confirm-gates this call (same
+   * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
+   * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
+   * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
+   * RETRY_LEDGER_EVIDENCE_MISSING / SHEET_DELETED) so the caller can map it to an inline message.
+   */
+  async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
+    const res = await this.fetch(
+      `/api/multitable/automation-executions/${encodeURIComponent(executionId)}/retry`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmSideEffects: true }),
+      },
+    )
     return this.parseJson<AutomationRunView>(res)
   }
 

@@ -3,6 +3,7 @@ import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { configRevisionNoop } from './config-revision-mock'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 // ---------------------------------------------------------------------------
 // MOCK-POOL CONTRACT (read before editing — this is a hand-rolled SQL matcher).
@@ -84,6 +85,9 @@ const SHEET_OPS_FIELDS: FieldRow[] = [
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
+    // this fixture keeps its own notion of which sheets exist.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
     const cr = configRevisionNoop(sql); if (cr) return cr // narrowed INSERT-only match (shared helper)
     return queryHandler(sql, params)
   })
@@ -271,6 +275,103 @@ describe('Multitable view config API', () => {
       groupFieldId: 'fld_status',
       cardFieldIds: ['fld_title', 'fld_owner'],
     }))
+  })
+
+  // #6084/#6110: these characterize the PRE-EXISTING backend contract for groupInfo that the web-only fix
+  // (#6110) relies on — they do NOT pin the regression itself. `parsed.data.groupInfo ?? normalizeJson(row.
+  // group_info)` already treats an explicit `{}` as present (it is not nullish) and clears the stored value;
+  // an ABSENT key is genuinely `undefined` and keeps it. The actual bug was the WEB client sending
+  // `groupInfo: undefined` (dropped by JSON.stringify) instead of an explicit `{}` when clearing — #6110
+  // fixed that one line in useMultitableGrid.ts; the backend needed no change. `groupInfo` stays
+  // non-nullable here like filterInfo/sortInfo/hiddenFieldIds/config — see the "explicit null is rejected"
+  // test below. The mock "row" is STATEFUL (mutated by each UPDATE, like the real table) so the "explicit
+  // empty clears" and "absent keeps" assertions are checked against what a FOLLOWING read of the SAME row
+  // would see, not just the one UPDATE call — the closest equivalent of "GET afterwards returns no grouping"
+  // this mock-pool harness can exercise without standing up the full read path's dependency chain
+  // (apiTokenAuth/oapiScopeGuard/resolveMetaSheetId/...) that backs the frontend's actual GET /view.
+  function statefulKanbanRow(initialGroupInfo: Record<string, unknown>) {
+    const row = {
+      id: 'view_kanban',
+      sheet_id: 'sheet_ops',
+      name: 'Kanban',
+      type: 'kanban',
+      filter_info: {},
+      sort_info: {},
+      group_info: initialGroupInfo,
+      hidden_field_ids: [],
+      config: {},
+    }
+    return {
+      row,
+      queryHandler: async (sql: string, params?: unknown[]): Promise<QueryResult> => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) return { rows: [] }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return { rows: [{ ...row }] }
+        }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
+        if (sql.includes('UPDATE meta_views')) {
+          const p = params ?? []
+          row.name = String(p[1])
+          row.type = String(p[2])
+          row.filter_info = JSON.parse(String(p[3]))
+          row.sort_info = JSON.parse(String(p[4]))
+          row.group_info = JSON.parse(String(p[5]))
+          row.hidden_field_ids = JSON.parse(String(p[6]))
+          row.config = JSON.parse(String(p[7]))
+          return { rows: [], rowCount: 1 }
+        }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    }
+  }
+
+  test('PATCH with explicit empty groupInfo ({}) clears the stored grouping, and it stays cleared for the next read (#6084)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const first = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ groupInfo: {} })
+      .expect(200)
+    expect(first.body.data.view.groupInfo).toEqual({})
+    expect(row.group_info).toEqual({})
+
+    // A second, unrelated PATCH (no groupInfo key) must see — and keep — the now-cleared grouping, proving
+    // the clear was actually written to the row rather than only echoed back in the first response.
+    const second = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ name: 'Kanban renamed' })
+      .expect(200)
+    expect(second.body.data.view.groupInfo).toEqual({})
+    expect(row.group_info).toEqual({})
+  })
+
+  test('PATCH with explicit null groupInfo is rejected with 400 (groupInfo stays non-nullable, like filterInfo/sortInfo/hiddenFieldIds/config)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const response = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ groupInfo: null })
+      .expect(400)
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('VALIDATION_ERROR')
+    // Rejected before the handler ever ran — the stored row is untouched.
+    expect(row.group_info).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+  })
+
+  test('PATCH with NO groupInfo key keeps the stored grouping unchanged (#6084)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const response = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ name: 'Kanban renamed' })
+      .expect(200)
+    expect(response.body.data.view.groupInfo).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    expect(row.group_info).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
   })
 
   test('rejects Gantt dependency config when dependency field links to another sheet', async () => {

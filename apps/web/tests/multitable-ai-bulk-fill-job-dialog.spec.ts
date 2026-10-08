@@ -258,6 +258,56 @@ describe('MetaAiBulkFillDialog — async-job (over-cap) rendering', () => {
     app.unmount()
   })
 
+  // ── #5842: the commit phase has its own SERVER status (`committing`) ──
+  it('a cancel the server REFUSED (a commit is in flight) renders the truthful row diff but does NOT offer the write', async () => {
+    vi.useFakeTimers()
+    // The server refused the cancel because a commit request holds the job's claim: `cancelled`
+    // is false and the state it reports is the commit phase, not `rejected`.
+    let committing = false
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ state: committing ? 'committing' : 'running', suspendReason: null })),
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+      cancel: () => {
+        committing = true
+        return jsonResponse({ jobId: 'aibulkjob_1', cancelled: false, state: 'committing' })
+      },
+    })
+    const { app } = mountDialog(fetchFn as never, 2000)
+    ;(q('[data-test="ai-bulk-generate"]') as HTMLButtonElement).click()
+    await flush()
+    ;(q('[data-test="ai-bulk-job-cancel"]') as HTMLButtonElement).click()
+    await flush()
+
+    // Truthful review: the generated rows ARE shown …
+    expect(qa('[data-test="ai-bulk-job-row"]')).toHaveLength(2)
+    // … with a banner that says why, and the write is NOT on offer (a click would 409).
+    expect(q('[data-test="ai-bulk-job-banner"]')?.textContent).toContain('already in progress')
+    const confirm = q('[data-test="ai-bulk-job-confirm"]') as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    confirm.click()
+    await flush()
+    expect(fetchFn.mock.calls.filter(([u]) => String(u).endsWith('/commit'))).toHaveLength(0)
+    app.unmount()
+  })
+
+  it('a job in the COMMIT phase does not render "Queued" on the progress line', async () => {
+    vi.useFakeTimers()
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ state: 'committing', suspendReason: null })),
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+    })
+    const { app } = mountDialog(fetchFn as never, 2000)
+    ;(q('[data-test="ai-bulk-generate"]') as HTMLButtonElement).click()
+    await flush()
+
+    const status = q('[data-test="ai-bulk-job-status"]')?.textContent ?? ''
+    expect(status).toContain('Writing')
+    expect(status).not.toContain('Queued')
+    app.unmount()
+  })
+
   it('committing the job renders the commit summary (committed vocabulary) + stale guidance', async () => {
     const fetchFn = router({
       start: () => jsonResponse({ jobId: 'aibulkjob_1' }),

@@ -16,6 +16,8 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
+import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
@@ -38,9 +40,37 @@ import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { reconcileOrphanedBulkJobs } from './services/ai-bulk-job-service'
 import type { AiUsageQueryFn } from './services/ai-usage-ledger'
+// 列映射副驾 (schema-mapping copilot): the ONE governed AI boundary. Injected into
+// plugin-integration-core so its copilot routes can ask the boundary to PROPOSE column meanings with
+// business data routed local-only. The plugin never reaches a provider any other way.
+import { GovernedAiService } from './services/governed-ai-service'
+// 按项目导出物料 Excel: the xlsx BUFFER BUILDER, injected into plugin-integration-core ONLY, same
+// per-plugin-injected-service shape as GovernedAiService above and for the same reason — the plugin
+// has no `xlsx` dependency of its own (not resolvable from its node_modules under the workspace's
+// strict pnpm layout) and must not add one; this reuses the ONE existing builder instead of a second
+// implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
+// that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
+import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY port, injected into plugin-integration-core
+// ONLY — same per-plugin-injected-service shape as the two above. It exists because a plugin cannot
+// establish tenancy from `req.user.tenantId` alone (the auth middleware copies the `x-tenant-id`
+// header onto that field when the token carried no claim), and the plugin's first value-bearing
+// tenant-scoped read must not be built on a caller-supplied string.
+import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
+// 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
+// same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
+// — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
+// column). See the service file header for the load-bearing property and the removal path.
+import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
+// 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
+// ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
+// machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
+// and no new dependency. GROUP-ONLY: see the note on sendStockPreparationHandoffNotification below.
+import { sendStockPreparationHandoffNotificationToDestinations } from './multitable/stock-preparation-handoff-notifier'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
+import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
@@ -48,13 +78,22 @@ import {
   findObjectSheet as findProvisionedObjectSheet,
   getObjectSheetId as getProvisionedObjectSheetId,
   getObjectFieldId as getProvisionedObjectFieldId,
+  getObjectViewId as getProvisionedObjectViewId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
+  ensureMissingObjectFields as ensureMissingMultitableObjectFields,
+  resolveExistingObjectFieldIds as resolveExistingMultitableObjectFieldIds,
+  readObjectFieldsContent as readMultitableObjectFieldsContent,
   ensureView as ensureMultitableView,
+  ensureObjectDefaultView as ensureMultitableObjectDefaultView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
+  findObjectView as findProvisionedObjectView,
+  ensureSystemBase as ensureMultitableSystemBase,
+  runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
+import { runRelabelObjectDisplayNamesWith } from './multitable/object-display-name-relabel'
 import {
   createRecord as createMultitableRecord,
   deleteRecord as deleteMultitableRecord,
@@ -65,43 +104,178 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
+import { SheetNotLiveError, assertSheetLive, loadSheetLiveness } from './multitable/sheet-liveness'
 import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
+  isSheetOwnedByProject,
   createPluginScopedMultitableApi,
   MultitableObjectScopeError,
+  MultitableSheetScopeError,
 } from './multitable/plugin-scope'
-import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
+import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
+import {
+  acquireStockPreparationPersistUnitOfWorkLocks,
+  validateStockPreparationPersistUnitOfWorkInput,
+} from './multitable/stock-preparation-persist-unit-of-work'
+import {
+  installMetrics,
+  metrics as promMetrics,
+  recoveryArchiveObservability,
+  requestMetricsMiddleware,
+} from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import { startNotificationRetention } from './multitable/notification-retention'
+import {
+  approvalAttachmentRefsJsonParser,
+  isApprovalAttachmentsEnabled,
+} from './routes/approval-attachments'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+// W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
+// `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
+import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
+import {
+  refreshAttendanceReportProjectionAnchor,
+  withholdAttendanceReportProjectionAnchors,
+  readAttendanceCleaningSourceSeed,
+  assertAttendanceCleaningActor,
+  readAttendanceCleaningCompletedOperations,
+  cleanupAttendanceCleaningProposal,
+  lockAttendanceCleaningSource,
+} from './attendance/attendance-multitable-cleaning-authority'
+import {
+  buildAttendanceRequestCreationAttributionSnapshotV1,
+  createAttendanceLiveScheduledBoundaryV1,
+  computeAttendanceOuterSourceDefinitionFingerprintV1,
+} from './attendance/w4c2-live-scheduled-boundary'
+import { dispatchAttendanceResultEventOutboxV1 } from './attendance/w4c2-outbox-dispatcher'
+// W7-1b (#4556 comments 5293034619 + 5293478713): the single shared issuance
+// seam. Exposed on the SAME host-port mechanism
+// `computeOuterSourceDefinitionFingerprintV1` already uses, including its
+// presence guard — a host that exposes `createLiveScheduledBoundary` but not
+// this method must fail closed the way `w4LiveScheduledBoundary` already does,
+// never silently take the legacy arm.
+import {
+  issueAttendanceFrozenContextV1,
+  resolveAttendanceW7GroupArmSelectionV1,
+  type AttendanceW7IssuanceDepsV1,
+  type AttendanceW7IssuanceInputV1,
+} from './attendance/w7-resolver/w7-frozen-context-issuance-seam'
+import {
+  AttendanceW4IdentityError,
+  acquireAttendanceCalculationRolloutLock,
+  buildAttendanceCalculationRolloutAdvisoryKey,
+  buildAttendanceLegacyIdempotencyAdvisoryKey,
+  parseCanonicalAttendanceLegacyIdempotencyKeyV1,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+  type AttendanceW4TransactionClientV1,
+} from './attendance/w4c0-identity'
+import {
+  W4_ADVISORY_HELPER_WAIT_MS,
+  W4_TRANSACTION_LOCK_TIMEOUT_MS,
+} from './attendance/w4c0-operation-contract'
+// W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
+// connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
+// other `attendanceW4SegmentCalculation` port method below.
+import {
+  sweepAttendanceScheduledRunsOnceV1,
+  abandonScheduledRunOnceV1,
+  type AttendanceScheduledRunAdminAbandonInputV1,
+} from './attendance/w4c2-scheduled-run-ops-worker'
+import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
+import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
+import {
+  buildAttendanceImportAttributionFreezeV1,
+  buildAttendanceImportPolicySourceProofV1,
+} from './attendance/w4c3a-import-proof'
+import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
+import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import {
+  registerAttendanceCancellationExecutionProvider,
+  registerCancelRoundCancelledEventDelivery,
+} from './core/attendance-cancellation-execution-port'
+import { buildApprovalCancelRoundEntryPort } from './approvals/approval-cancel-round-entry-port'
+import {
+  deriveApprovalInstanceOrgIdWithSelector,
+  ApprovalOrgUnresolvedError,
+} from './services/approval-instance-org-derivation'
+import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
+import { createAttendanceRecordOperationBoundaryV1 } from './attendance/w4c3c-record-operation-boundary'
+import { appendOperatorRetirementCalculationV1 } from './attendance/w4c3c-ops-retirement'
+import { appendRecomputeCalculationV1 } from './attendance/w4c3c-recompute'
+import { appendManualOverrideCalculationV1 } from './attendance/w4c3c-manual-edit-apply'
+import {
+  ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+  ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+  loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+  listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+  loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+  listActiveCurrentOpenRecordsForWorkDateResolverV1,
+} from './attendance/w4c3c-active-current'
+// W4C-3b P12: immutable request calculation snapshot plumbing (lock §7.2 / §12.5).
+import {
+  appendAttendanceRequestCreateSnapshotV1,
+  appendAttendanceRequestEditSnapshotV1,
+  bindAttendanceRequestTerminalSnapshotV1,
+  lockAttendanceRequestSnapshotBeforeTerminalDecisionV1,
+  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+  computeAttendanceRequestPayloadFingerprintV1,
+  buildUnsupportedRequestAttributionSnapshotV1,
+  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+} from './attendance/w4c3b-request-snapshots'
 import {
   correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
   correlationIdMiddleware,
 } from './middleware/correlation'
-import { approvalsRouter } from './routes/approvals'
+import { approvalsRouter, publishApprovalCountsForUsers } from './routes/approvals'
+import { todoRouter } from './routes/todo'
+import { tasksRouter } from './routes/tasks'
+import { pendingSourceRegistry } from './services/pending-source-registry'
+import { approvalPendingSource } from './services/approval-pending-source'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
+import { approvalCommentsRouter } from './routes/approval-comments'
+import { approvalFormDraftsRouter } from './routes/approval-form-drafts'
+import {
+  setApprovalCommentMentionDelivery,
+  setApprovalCommentNotifyChecker,
+} from './services/approval-comment-service'
+import { canReadApprovalInstance } from './services/approval-instance-readability'
 import {
   resolveApprovalSlaSchedulerLeaderOptions,
   startApprovalSlaScheduler,
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
 import { ApprovalProductService } from './services/ApprovalProductService'
+// S7-1/S7-2/S7-3 (OD-S7-5=d): host-resolved chain-depth cap + org-scoped directory-read path the
+// attendance dynamic-assignee resolver PORT exposes to plugin-attendance. The plugin validates
+// `manager_at_level.level` against MAX (never re-parses APPROVAL_MANAGER_CHAIN_MAX_LEVELS) and freezes
+// direct_manager / dept_head via resolveApprovalRequesterOrgRelations (org-anchored, read-only).
+import {
+  MAX_MANAGER_CHAIN_LEVELS,
+  resolveApprovalRequesterOrgRelations,
+} from './services/ApprovalDirectoryOrg'
+import { query as pgQuery } from './db/pg'
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
@@ -152,37 +326,100 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
-import { createDataSourcePluginFacade, createDataSourceWritePluginFacade } from './data-adapters/data-source-plugin-facade'
+import {
+  createDataSourcePluginFacade,
+  createDataSourceSealedSnapshotConnectionFacade,
+  createDataSourceWritePluginFacade,
+} from './data-adapters/data-source-plugin-facade'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
+import {
+  createElearningAppInstallationRouter,
+  requireElearningAppInstallation,
+  requireElearningEnabled,
+} from './routes/elearning-app-installation'
+import { authenticate as authenticateElearningApp } from './middleware/auth'
+import { methodOverrideMiddleware } from './middleware/method-override'
+import { methodProbeRouter } from './routes/method-probe'
+import {
+  isElearningAssignmentSurfaceEnabled,
+  isElearningAnalyticsSurfaceEnabled,
+  isElearningContentSurfaceEnabled,
+  isElearningEnabled,
+  isElearningExamSurfaceEnabled,
+  isElearningWatchSurfaceEnabled,
+  resolveElearningCatalogFeature,
+} from './elearning/feature-flags'
+import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
+import { isElearningCreditSurfaceEnabled } from './services/elearning-credit-ledger'
+import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
+import { isElearningPracticeSurfaceEnabled } from './services/elearning-question-practice-postgres'
+import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
+import {
+  checkElearningAssignmentReminderEligibility,
+  ElearningAssignmentReminderError,
+  produceElearningAssignmentReminder,
+} from './services/elearning-assignment-reminder'
+import {
+  ElearningExamError,
+  settleExpiredElearningExamAttempt,
+} from './services/elearning-exam'
+import {
+  ElearningStatsDailyProjectionError,
+  projectElearningDepartmentStatsDaily,
+} from './services/elearning-stats-daily-projection'
+import {
+  ElearningStatsDailyJobProducerError,
+  enqueueElearningStatsDailyJobs,
+} from './services/elearning-stats-daily-job-producer'
+import {
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+} from './services/elearning-stats-multitable-projection'
+import {
+  cleanupElearningAnalyticsExport,
+  ElearningAnalyticsExportError,
+  materializeElearningAnalyticsExport,
+} from './services/elearning-analytics-export'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
 import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
+import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
+import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
+import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
 import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
-import workflowRouter from './routes/workflow'
-import workflowDesignerRouter from './routes/workflow-designer'
+import workflowRouter, { shutdownWorkflowEngine } from './routes/workflow'
+import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
-import { univerMetaRouter } from './routes/univer-meta'
+import { invalidateSheetDisplayNameCaches, univerMetaRouter } from './routes/univer-meta'
+import {
+  createRecoveryArchiveApplication,
+  type RecoveryArchiveApplication,
+  type RecoveryArchiveApplicationCompositionFactory,
+  type RecoveryArchiveApplicationDatabaseRuntime,
+} from './multitable/recovery-archive-application'
 import { isOapiAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
 import { automationWebhookJsonParser, createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
+import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -235,6 +472,93 @@ function disabledFeatureHandler(message: string): RequestHandler {
   }
 }
 
+export interface MetaSheetServerOptions {
+  readonly port?: number
+  readonly host?: string
+  readonly pluginDirs?: string[]
+  readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+  readonly startupSignal?: AbortSignal
+  readonly manageProcessSignals?: boolean
+}
+
+// 按项目导出物料 Excel: lazily imports `xlsx` (same lazy-import discipline as routes/univer-meta.ts's
+// own loadXlsxModule — never a top-level import, so a deployment that never touches an xlsx route
+// never pays for it) and wraps the existing buildXlsxBuffer behind the small duck-typed interface
+// plugin-integration-core's http-routes.cjs expects from services.stockPreparationXlsxExport.
+async function buildStockPreparationExportWorkbookBuffer(params: {
+  sheetName?: string
+  headers: string[]
+  rows: Array<Array<string | number | boolean | null | undefined>>
+}): Promise<Buffer> {
+  const xlsx = (await import('xlsx')) as unknown as XlsxModule
+  return buildXlsxBuffer(xlsx, params)
+}
+
+// 通知下一步: the DingTalk group-destination service used by the handoff notifier, built once and
+// reused. Lazily imported for the same reason `./db/db` is lazily imported everywhere else in this
+// file — importing it constructs a Kysely instance over the pool, which must not happen as a
+// side effect of loading this module.
+let stockPreparationHandoffDingTalkService:
+  | import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+  | undefined
+
+async function resolveStockPreparationHandoffDingTalkService(): Promise<
+  import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+> {
+  if (!stockPreparationHandoffDingTalkService) {
+    const { db: kyselyDbDingTalkGroups } = await import('./db/db')
+    const { DingTalkGroupDestinationService } = await import('./multitable/dingtalk-group-destination-service')
+    // Same construction the `/api/multitable/dingtalk-groups` routes use (see
+    // src/routes/api-tokens.ts): the shared Kysely handle, default global fetch.
+    stockPreparationHandoffDingTalkService = new DingTalkGroupDestinationService(kyselyDbDingTalkGroups)
+  }
+  return stockPreparationHandoffDingTalkService
+}
+
+// 通知下一步 (light 备料 handoff): fan one composed notification out to the configured DingTalk GROUP
+// destinations, and report how many actually landed.
+//
+// GROUP-ONLY, and that is a limitation rather than a preference. The group robot webhook is the only
+// DingTalk send path in this repository reachable WITHOUT an automation-rule record context: the
+// person-targeted `sendDingTalkWorkNotification` needs directory_account_links rows plus a
+// per-integration corp-app token that a stock-prep route has no access to. A DingTalk 待办/todo API DOES
+// now exist in this codebase (client.ts createDingTalkTodoTask), but it is bound to exactly ONE ledger —
+// the approval-seat one-way mirror (dingtalk_todo_mirrors, DINGTALK_TODO_MIRROR_ENABLED, #5772/#5768) —
+// which fires off an `approval.task_created` event, not off this stock-prep handoff. This 备料接力游标
+// (#5442) fan-out has no per-person todo of its own to ride, so it pings the group; it cannot put a task
+// in one person's DingTalk.
+//
+// This function is the WIRING (resolve the one service, hand it to the fan-out); the loop itself,
+// including the "one broken webhook must not silence the others" rule, lives in
+// multitable/stock-preparation-handoff-notifier.ts so a unit test can prove it.
+//
+// The seam takes destination ids, a title and a body, and nothing else. `sendToDestination` also
+// accepts an `initiatedBy` for the delivery ledger, but it is deliberately NOT plumbed through from
+// the plugin: an id arriving over this seam is not one the host authenticated, and a ledger row that
+// names an unverified human as the initiator of a server-originated send is worse than one that
+// honestly records none. Server sends land with `initiated_by: null`.
+async function sendStockPreparationHandoffNotification(params: {
+  destinationIds: string[]
+  title: string
+  body: string
+}): Promise<{ delivered: number; failed: number }> {
+  const service = await resolveStockPreparationHandoffDingTalkService()
+  return sendStockPreparationHandoffNotificationToDestinations(service, params)
+}
+
+export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
+  const pool = poolManager.get()
+  const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
+  const transaction: RecoveryArchiveApplicationDatabaseRuntime['transaction'] = async (work) =>
+    pool.transaction(async ({ query: transactionQuery }) =>
+      work(transactionQuery as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']))
+  return Object.freeze({
+    transaction,
+    query,
+    transactionDepthProbe: pool.transactionDepthProbe,
+  })
+}
+
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
@@ -255,16 +579,30 @@ export class MetaSheetServer {
   private port: number
   private host?: string
   private portLocked: boolean
-  private shuttingDown = false
+  private stopPromise: Promise<void> | null = null
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
+  private stopAuditPartitionEnsure?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  // E(2026-09-12): 通知中心保留期清理。默认关 —— 没配 MULTITABLE_NOTIFICATION_RETENTION_DAYS
+  // 时 startNotificationRetention 返回 no-op,这个句柄就是个空 async 函数,stop 时照调不误。
+  // async 是必须的:stop 要 await 在飞的那一轮 sweep,否则关停会和 pool.end() 赛跑(fix r1-A4)。
+  private stopNotificationRetention?: () => Promise<void>
+  private stopApprovalAttachmentWorkers?: () => void | Promise<void>
+  private stopElearningMediaWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
+  // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
+  // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
+  // succeeded — `Boolean(this.automationService)` alone was bypassable, because the field used to be
+  // assigned right after construction and never cleared when init()/load threw. The init block below is
+  // publish-last (field + this bit + singleton set only on full success), so the two can never disagree;
+  // the durable boot asserts THIS bit.
+  private automationServiceReady = false
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
@@ -277,7 +615,34 @@ export class MetaSheetServer {
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
   private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
-  
+  // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
+  // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
+  private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  /** Record-level submit-for-approval completion sink (eventBus leg + durable consumer share this object). */
+  private recordApprovalCompletionSink:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSink | null = null
+  private recordApprovalCompletionSubscription:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSubscription | null = null
+  private approvalProjectionService:
+    import('./multitable/approval-record-projection-service').ApprovalRecordProjectionService | null = null
+  private approvalProjectionSweepScheduler:
+    import('./services/ApprovalProjectionSweepScheduler').ApprovalProjectionSweepScheduler | null = null
+  /**
+   * DingTalk approval-todo ONE-WAY mirror sink (eventBus leg + durable consumer_key
+   * `dingtalk-todo-mirror` share this object). Built unconditionally — the sink itself is a no-op
+   * while DINGTALK_TODO_MIRROR_ENABLED is not exactly 'true', and the durable registry REQUIRES the
+   * adapter to exist (manifest v3 completeness) regardless of the flag.
+   */
+  private dingtalkTodoMirrorSink:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSink | null = null
+  private dingtalkTodoMirrorSubscription:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSubscription | null = null
+  /** Mirror delivery worker interval handle — only ever set when the mirror flag is ON. */
+  private stopDingTalkTodoMirrorWorker?: () => Promise<void>
+  private readonly recoveryArchiveApplication: RecoveryArchiveApplication
+  private readonly startupSignal?: AbortSignal
+  private readonly manageProcessSignals: boolean
+
   // IoC Container
   private injector: Injector
 
@@ -286,7 +651,7 @@ export class MetaSheetServer {
     return this.injector.get(IPluginLoader)
   }
 
-  constructor(options: { port?: number; host?: string; pluginDirs?: string[] } = {}) {
+  constructor(options: MetaSheetServerOptions = {}) {
     // Initialize IoC Container
     this.injector = createContainer({ pluginDirs: options.pluginDirs })
     
@@ -297,6 +662,14 @@ export class MetaSheetServer {
     this.portLocked = typeof options.port === 'number'
     this.port = options.port ?? parseInt(process.env.PORT || '7778')
     this.host = options.host ?? process.env.HOST
+    this.recoveryArchiveApplication = createRecoveryArchiveApplication(
+      options.createRecoveryArchiveComposition,
+      resolveRecoveryArchiveMainPoolRuntime,
+      process.env,
+      recoveryArchiveObservability,
+    )
+    this.startupSignal = options.startupSignal
+    this.manageProcessSignals = options.manageProcessSignals !== false
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
@@ -459,6 +832,29 @@ export class MetaSheetServer {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
+          // IS THIS SHEET OWNED BY THIS PROJECT. Backed by `plugin_multitable_object_registry`,
+          // the one place a sheet's project is actually recorded — `meta_sheets` has no project
+          // column, and the derived id is one-way and is not an invariant any consumer maintains.
+          // A boolean by design: see the type's doc for why returning the owner would leak across
+          // tenants of the same plugin. Read-only.
+          isSheetOwnedByProject: async (sheetId, projectId) => {
+            const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return isSheetOwnedByProject(txQuery, sheetId, projectId)
+          },
+          // Pure deterministic id derivation — no IO, no view touched, no access granted. The
+          // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
+          // link from this, AFTER proving the sheet itself exists through findObjectSheet.
+          getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -476,7 +872,14 @@ export class MetaSheetServer {
           resolveFieldIds: async ({ projectId, objectId, fieldIds }) => {
             return resolveProvisionedObjectFieldIds(projectId, objectId, fieldIds)
           },
-          ensureObject: async ({ projectId, baseId, descriptor }) => {
+          // `overwriteMode` must be destructured and forwarded explicitly: this
+          // hook is the FALLBACK that plugin-scope's ensureObject takes when no
+          // ensureObjectInScope hook is registered (multitable/plugin-scope.ts —
+          // the scoped branch spreads ...input, and index.ts's scoped hook does
+          // forward it). Dropping it here silently downgraded a caller's explicit
+          // opt-in to the fail-closed default, i.e. an advertised API option
+          // (types/plugin.ts EnsureObjectInput) was inert on this path.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -491,8 +894,106 @@ export class MetaSheetServer {
                 projectId,
                 baseId,
                 descriptor,
+                overwriteMode,
               })
             })
+          },
+          // W2: DB-backed field existence — repair discovers genuinely-missing
+          // template fields from meta_fields (resolveFieldIds is compute-only and
+          // never omits a field, so it cannot drive a repair).
+          resolveExistingObjectFieldIds: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return resolveExistingMultitableObjectFieldIds({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+          readObjectFieldsContent: async ({ projectId, objectId, fieldIds }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return readMultitableObjectFieldsContent({ query: txQuery, projectId, objectId, fieldIds })
+            })
+          },
+          // W2 template-evolution rung: ADDITIVE-ONLY missing-field provisioning
+          // (DO NOTHING) so an already-provisioned table can gain a new template
+          // column without the DO-UPDATE overwrite `ensureObject` would inflict.
+          ensureMissingObjectFields: async ({ projectId, objectId, fields }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMissingMultitableObjectFields({
+                query: txQuery,
+                projectId,
+                objectId,
+                fields,
+              })
+            })
+          },
+          // Default-view provisioning: a managed table is created WITH a view, because a
+          // sheet with zero views cannot be opened and blocks its whole base. Writes only
+          // when the sheet has NO views; any existing view list is left untouched.
+          ensureObjectDefaultView: async ({ projectId, objectId, name, type }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableObjectDefaultView({ query: txQuery, projectId, objectId, name, type })
+            })
+          },
+          // W2/P2-3 (round-5 review): ATOMIC repair transaction. Runs the caller's whole
+          // read → additive-write → re-read → verify sequence inside ONE DB transaction, so
+          // a thrown verify (mutated/incomplete/race) ROLLS BACK the additive write instead
+          // of leaving it committed. All four surface methods are bound to the SAME tx query;
+          // this is what upgrades the before/after guards from post-commit canaries (safe
+          // only because the wired write is append-only DO NOTHING) to a true atomic
+          // fail-close — the W3-entry gate for wiring repair into production routes.
+          runObjectFieldsRepairTransaction: async (fn) => {
+            // The whole runner is the tested glue runObjectFieldsRepairTransactionWith over
+            // the poolManager transaction primitive: ONE transaction, surface built from its
+            // query, throw ⇒ rollback. No atomicity logic lives inline here.
+            return runObjectFieldsRepairTransactionWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              fn,
+            )
           },
           ensureView: async ({ projectId, sheetId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {
@@ -534,6 +1035,19 @@ export class MetaSheetServer {
               })
             })
           },
+          findObjectView: async ({ projectId, objectId, viewId }) => {
+            // Read-only — a plain pooled query (no transaction needed for a SELECT), the read
+            // sibling of `ensureView` above.
+            const readQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+              }
+            }
+            return findProvisionedObjectView({ query: readQuery, projectId, objectId, viewId })
+          },
           getObjectField: async ({ projectId, objectId, fieldId }) => {
             // Read-only — a plain pooled query (no transaction needed for a SELECT).
             const readQuery: MultitableProvisioningQueryFn = async (sql, params) => {
@@ -549,8 +1063,58 @@ export class MetaSheetServer {
             }
             return getProvisionedObjectField({ query: readQuery, projectId, objectId, fieldId })
           },
+          // B3: plugin-owned system base. Runs in ONE transaction (insert + fail-closed re-read);
+          // the prefix rule is applied by the plugin-scope wrapper in front of this, and every
+          // refusal propagates unwrapped (connection-pool rethrows) so the plugin route sees
+          // `.status` / `.code` on the original error.
+          ensureSystemBase: async ({ baseId, name }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableSystemBase({ query: txQuery, baseId, name })
+            })
+          },
+          // Display-name relabel of an already-provisioned object: compare-and-set, one transaction,
+          // one config-history row per rename (multitable/object-display-name-relabel.ts). The whole
+          // runner is the tested glue over the poolManager transaction primitive; `afterCommit` drops
+          // univer-meta's process-lifetime field/sheet caches ONLY after a committed write, so the grid
+          // shows the new names without a restart. The plugin-scope wrapper in front of this adds the
+          // project-namespace and object-scope checks; the host itself binds the registry triple.
+          relabelObjectDisplayNames: async (args) => {
+            return runRelabelObjectDisplayNamesWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              args,
+              invalidateSheetDisplayNameCaches,
+            )
+          },
         },
         records: {
+          // W9: this records surface routes `queryRecords` straight to the multitable query
+          // service, which builds `data ->> $k = ANY($v::text[])` for an array filter value. The
+          // declaration lives HERE, next to the implementation it describes, so a caller can tell
+          // "the host cannot do this" from "the query was invalid" without guessing from an error
+          // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
+          // only when the surface underneath declares it.
+          supportsFilterValueLists: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -630,7 +1194,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -648,6 +1212,7 @@ export class MetaSheetServer {
                 sheetId,
                 recordId,
                 changes,
+                expectedVersion,
               })
             })
           },
@@ -937,6 +1502,120 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
+  // S7-1..S7-4 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host
+  // binding for the narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance
+  // consumes. Exposes the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env
+  // re-parse). S7-2 wires `direct_manager` (byte-identical to ApprovalDirectoryOrg §2.1); S7-3 adds
+  // `dept_head` (byte-identical to §2.2); S7-4 adds `manager_at_level` (dense chain positional pick,
+  // §2.3 B1 — includeManagerChain walk, self-exclusion, no continuous_managers). Directory READ-ONLY.
+  private buildApprovalAssigneeResolverPort(): NonNullable<
+    import('./types/plugin').PluginServices['approvalAssigneeResolver']
+  > {
+    return {
+      maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
+      implementedKinds: ['direct_manager', 'dept_head', 'manager_at_level'],
+      resolve: async (orgId, request) => {
+        const kind = typeof request?.kind === 'string' ? request.kind.trim() : ''
+        if (kind !== 'direct_manager' && kind !== 'dept_head' && kind !== 'manager_at_level') {
+          return { status: 'unimplemented' as const }
+        }
+
+        const normalizedOrgId = typeof orgId === 'string' ? orgId.trim() : ''
+        const requesterUserId =
+          typeof request?.requesterUserId === 'string' ? request.requesterUserId.trim() : ''
+        if (!normalizedOrgId || !requesterUserId) {
+          return { status: 'unresolved' as const, reason: 'missing_org_or_requester' }
+        }
+
+        // CREATE-TIME freeze only (§3.3/§3.4). Always directory-resolve with the attendance org anchor;
+        // never trust a caller-supplied snapshot for live re-resolution (step-advance must not call this).
+        // QueryFn is unconstrained (Row not bound to QueryResultRow); adapt pg's typed query.
+        const queryFn = <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> =>
+          pgQuery(text, params).then((r) => ({ rows: r.rows as Row[] }))
+
+        // manager_at_level needs the dense manager chain (includeManagerChain); other kinds do not.
+        const relations = await resolveApprovalRequesterOrgRelations(requesterUserId, queryFn, {
+          orgId: normalizedOrgId,
+          includeManagerChain: kind === 'manager_at_level',
+        })
+
+        // S7-2 direct_manager — preserved byte-for-byte (reads only managerId).
+        if (kind === 'direct_manager') {
+          const managerId =
+            typeof relations.managerId === 'string' && relations.managerId.trim().length > 0
+              ? relations.managerId.trim()
+              : null
+          // Self-exclusion at the resolver (§2.1): a manager that resolves to the requester is treated
+          // as unresolved — never written as a self-assignment.
+          if (!managerId || managerId === requesterUserId) {
+            return {
+              status: 'unresolved' as const,
+              reason: managerId === requesterUserId ? 'self_manager' : 'no_manager_linked',
+            }
+          }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+          }
+        }
+
+        // S7-3 dept_head — same org-anchored relations call; read ONLY deptHeadId (§2.2).
+        if (kind === 'dept_head') {
+          const deptHeadId =
+            typeof relations.deptHeadId === 'string' && relations.deptHeadId.trim().length > 0
+              ? relations.deptHeadId.trim()
+              : null
+          // Self-exclusion at the resolver (§2.2): a dept head that resolves to the requester is treated
+          // as unresolved — never written as a self-assignment.
+          if (!deptHeadId || deptHeadId === requesterUserId) {
+            return {
+              status: 'unresolved' as const,
+              reason: deptHeadId === requesterUserId ? 'self_dept_head' : 'no_dept_head_linked',
+            }
+          }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: deptHeadId }],
+          }
+        }
+
+        // S7-4 manager_at_level — dense chain from includeManagerChain walk (§2.3 B1).
+        // CREATE-TIME freeze (no level): return the FULL dense chain as ordered assignees so the
+        // plugin freezes requesterSnapshot.managerChainIds once; step-advance never re-calls this.
+        // With integer level: single positional pick chain[level-1] (1 = direct manager).
+        // Self-exclusion / unlinked walk-through / cycle / maxLevels are owned by ApprovalDirectoryOrg.
+        const rawChain = Array.isArray(relations.managerChainIds) ? relations.managerChainIds : []
+        const chain = rawChain
+          .map((id) => (typeof id === 'string' ? id.trim() : ''))
+          .filter((id) => id.length > 0 && id !== requesterUserId)
+
+        const level = request?.level
+        if (typeof level === 'number' && Number.isInteger(level) && level >= 1) {
+          const managerId = chain[level - 1] ?? null
+          if (!managerId) {
+            return {
+              status: 'unresolved' as const,
+              reason: chain.length === 0 ? 'no_manager_chain' : 'chain_shorter_than_level',
+            }
+          }
+          return {
+            status: 'resolved' as const,
+            assignees: [{ assignmentType: 'user' as const, assigneeId: managerId }],
+          }
+        }
+
+        // Freeze path (no level): empty chain ⇒ unresolved; else ordered assignees = dense chain.
+        if (chain.length === 0) {
+          return { status: 'unresolved' as const, reason: 'no_manager_chain' }
+        }
+        return {
+          status: 'resolved' as const,
+          assignees: chain.map((assigneeId) => ({ assignmentType: 'user' as const, assigneeId })),
+        }
+      },
+    }
+  }
+
   private registerPluginWorkdayCalendarProvider(pluginName: string, provider: WorkdayCalendarPort): (() => void) {
     getWorkdayCalendarRegistry().register(provider)
     this.workdayCalendarProviderOwner = pluginName
@@ -983,8 +1662,13 @@ export class MetaSheetServer {
     this.app.use(correlationIdMiddleware)
 
     // CORS
+    // `exposedHeaders` is an EXPLICIT list, so a header a cross-origin browser client must be able
+    // to read has to be named here. `X-Method-Overridden` is the receipt the DELETE method-override
+    // stamps on a rewritten request (middleware/method-override.ts); without it a client cannot tell
+    // "the server honoured my override" from "a hop stripped the header and a same-path POST twin
+    // ran instead". Same-origin fetches could read it regardless; cross-origin ones cannot.
     this.app.use(cors({
-      exposedHeaders: ['X-Correlation-ID'],
+      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden'],
     }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
@@ -1018,6 +1702,56 @@ export class MetaSheetServer {
     // narrower body limit than the general API. Parse this prefix before the global JSON parser.
     this.app.use('/api/multitable/automation/webhooks', automationWebhookJsonParser)
 
+    // `/refs` has a 64 KB contract. This exact-path parser MUST run before the global 10 MB parser;
+    // mounting it only in the late attachment router is ineffective once `req.body` already exists.
+    // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
+    if (isApprovalAttachmentsEnabled()) {
+      this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
+
+    // E-learning V0.1 public media playback. Token-auth GET; factory null is a
+    // no-op (no route, no DB query). Mount BEFORE the authenticated pilot, the
+    // global JSON parsers, request metrics/logger, and global JWT. The store is
+    // lazy: getBootedElearningMediaRangeStore is the exact successfully booted
+    // range store, or null until boot succeeds.
+    const elearningMediaPlaybackRouter = isElearningWatchSurfaceEnabled(process.env)
+      ? createElearningMediaPlaybackRouter({
+          db: poolManager.get(),
+          getStore: getBootedElearningMediaRangeStore,
+        })
+      : null
+    if (elearningMediaPlaybackRouter) {
+      this.app.use(elearningMediaPlaybackRouter)
+    }
+
+    // Installation writes follow the same master switch as the business routes below: while
+    // ELEARNING_ENABLED is off every method on this path answers 404 feature_disabled after
+    // authentication and touches no table (routes/elearning-app-installation.ts).
+    this.app.use(createElearningAppInstallationRouter({
+      getDb: () => poolManager.get(),
+      featureGate: requireElearningEnabled(),
+    }))
+    if (process.env.ELEARNING_ENABLED === 'true') {
+      this.app.use('/api/elearning', authenticateElearningApp,
+        requireElearningAppInstallation({ getDb: () => poolManager.get() }))
+    }
+
+    // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory
+    // returns null). Mount BEFORE the global 10 MB JSON parser so the router-local
+    // 16 KiB limit stays effective. poolManager.get() is the DB handle only —
+    // no startup query. Do not remount from start().
+    const elearningPilotRuntime = (
+      isElearningContentSurfaceEnabled(process.env)
+      || isElearningCreditSurfaceEnabled(process.env)
+      || isElearningAnalyticsSurfaceEnabled(process.env)
+      || isElearningPracticeSurfaceEnabled(process.env)
+    )
+      ? createElearningPilotRuntime({ db: poolManager.get() })
+      : null
+    if (elearningPilotRuntime) {
+      this.app.use(elearningPilotRuntime.router)
+    }
+
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
@@ -1037,7 +1771,17 @@ export class MetaSheetServer {
       }
     }
 
-    // 请求日志
+    // 请求日志。UNCHANGED BY THE METHOD-OVERRIDE WORK, ON PURPOSE — two other suites own this
+    // middleware, its literal AND its shape, and both fail closed:
+    //   - tests/unit/elearning-media-playback-runtime.test.ts locates the request logger by searching
+    //     index.ts for the exact template below and orders the whole pipeline around it. Interpolating
+    //     an override marker into it turned that search into -1 and made `test (18.x)/(20.x)` red.
+    //   - tests/unit/attendance-w6-group-effective-policy-authorization.test.ts partitions every `this`
+    //     use of this assembly scope against a FROZEN key census keyed by ancestor KIND. Wrapping the
+    //     logger call in a branch, or adding a second `this.logger` call here, produces keys nobody
+    //     enumerated, lands in its UNKNOWN bucket and reds it.
+    // So the override CLAIM is logged where the decision is actually made and where it can also record
+    // whether the claim was HONOURED — middleware/method-override.ts — instead of here.
     this.app.use((req, res, next) => {
       this.logger.info(`${req.method} ${req.path}`)
       next()
@@ -1052,7 +1796,10 @@ export class MetaSheetServer {
       // any non-allowlisted (method, path) falls through to jwtAuthMiddleware → 401, so a token can never
       // reach a write/side-effecting route outside the allowlist (kept in lockstep with the mounted guards).
       if (isOapiAllowlistRequest(req.method, req.path, req.headers.authorization)) return next()
-      if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
+      // API paths default INTO the session gate. `isApiPath` is the shared policy predicate
+      // (auth/api-path-policy.ts) that every layer asking this question uses, so the gate and the
+      // downstream audit/allowlist/limiter surfaces cannot disagree about what counts as API traffic.
+      if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
       return next()
     })
 
@@ -1075,6 +1822,29 @@ export class MetaSheetServer {
     // Attendance production guards (audit + security). Must run after auth so req.user is available.
     this.app.use(attendanceAuditMiddleware())
     this.app.use(attendanceSecurityMiddleware())
+
+    // DELETE method-override (POST + X-HTTP-Method-Override: DELETE -> DELETE).
+    //
+    // POSITION IS LOAD-BEARING, and it is pinned by tests/unit/method-override.test.ts:
+    //   - AFTER the global JWT gate above, so an unauthenticated override is just an unauthenticated
+    //     request (401, handler never runs). The middleware ALSO re-checks `req.user` itself, because
+    //     the gate lets whitelisted paths and the OAPI `mst_` method-bound allowlist through WITHOUT
+    //     setting `req.user`, and neither may be turned into a DELETE by a header.
+    //   - AFTER `attendanceSecurityMiddleware()`, so the rewrite cannot be used to dodge a
+    //     method-keyed guard. `pickLimiter` (middleware/attendance-production.ts) selects the import
+    //     prepare/preview/upload/commit buckets on `req.method === 'POST'`; rewriting to DELETE before
+    //     it ran would have made `POST /api/attendance/import/commit` + override consume NO limiter
+    //     token while the 50 MB import JSON parser still ran. The attendance audit record likewise
+    //     keeps the verb that actually arrived on the wire, and carries `meta.request.methodOverride`
+    //     so a tunnelled delete is still findable as a delete.
+    // WHO READS `req.method` IN THIS WINDOW — stated exactly, because "nothing does" was false:
+    // `attendanceAuditMiddleware` and `attendanceSecurityMiddleware` BOTH do, deliberately (the
+    // limiter is the whole reason for this mount position). Their reads are allow-listed line by
+    // line in the spec, so a NEW verb-keyed read there is caught rather than silently permitted.
+    // Nothing ELSE does: `correlationContextEnrichmentMiddleware` keys on user/tenant only and the
+    // tenant ALS wrapper keys on `req.user.tenantId` (both asserted in the spec). Any future
+    // method-keyed guard must be mounted ABOVE this line.
+    this.app.use(methodOverrideMiddleware)
 
     // 健康检查
     const healthHandler = (req: Request, res: Response) => {
@@ -1105,21 +1875,40 @@ export class MetaSheetServer {
     }
     this.app.get('/health', healthHandler)
     this.app.get('/api/health', healthHandler)
+    // DELETE transport probe (authenticated by the global gate above; see routes/method-probe.ts).
+    this.app.use(methodProbeRouter())
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
 
+    // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
+    // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would
+    // otherwise be SHADOWED by approvalsRouter's own generic `GET /api/approvals/:id` (Express
+    // matches routers in `app.use()` registration order, and `:id` matches the literal
+    // 'form-drafts' just as readily as a real approval id) — the same reasoning approvals.ts's own
+    // 'directory' / 'record-link-options' sub-routes document for why THEY must precede `:id`
+    // within that file. The `/api/approvals/form-drafts/:templateId` item routes have an extra path
+    // segment and never collided, but ordering this whole router first is simpler than special-
+    // casing just the list route, and cannot regress anything registered after it.
+    this.app.use(approvalFormDraftsRouter())
     // 路由：审批（示例）
     this.app.use(approvalsRouter({
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
+    // 路由：待办中心（v1 首切片,todo-center-design-lock §3/§4 —— 只注册审批源）
+    pendingSourceRegistry.register(approvalPendingSource)
+    this.app.use(todoRouter())
+    const taskRoutes = tasksRouter()
+    if (taskRoutes) this.app.use(taskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
     this.app.use(approvalHistoryRouter({ injector: this.injector }))
     // 路由：审批 SLA / 耗时指标（Wave 2 WP5）
     this.app.use(approvalMetricsRouter())
+    // 路由：审批评论（Lock-10 S2）
+    this.app.use(approvalCommentsRouter())
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
@@ -1178,7 +1967,13 @@ export class MetaSheetServer {
     }
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
-    this.app.use('/api/multitable', univerMetaRouter())
+    const recoveryArchiveRouterOptions = this.recoveryArchiveApplication.routerOptions
+    this.app.use(
+      '/api/multitable',
+      recoveryArchiveRouterOptions
+        ? univerMetaRouter(recoveryArchiveRouterOptions)
+        : univerMetaRouter(),
+    )
     // Chart / Dashboard CRUD (paths: /sheets/:sheetId/charts, /sheets/:sheetId/dashboards).
     // Mounted separately from univerMetaRouter because it lives in its own
     // module with a dedicated DashboardService.
@@ -1198,10 +1993,21 @@ export class MetaSheetServer {
     this.app.use('/api/multitable', createMultitableAiRoutes({ queue: new QueueServiceImpl() }))
     // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
     this.app.use('/api/multitable', createMultitableButtonRoutes())
+    // Record-level submit-for-approval (multitable x approval phase 2):
+    //   POST/GET /sheets/:sheetId/records/:recordId/approvals. See routes/multitable-record-approvals.ts.
+    this.app.use('/api/multitable', createMultitableRecordApprovalRoutes())
+    // 「复制数据表（含数据）」S1 (design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md):
+    //   POST /sheets/:sheetId/copy + /copy/dry-run — session auth only (CS-1). See routes/multitable-copy-sheet.ts.
+    this.app.use('/api/multitable', createMultitableCopySheetRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
-      this.app.use('/api/univer-meta', univerMetaRouter())
+      this.app.use(
+        '/api/univer-meta',
+        recoveryArchiveRouterOptions
+          ? univerMetaRouter(recoveryArchiveRouterOptions)
+          : univerMetaRouter(),
+      )
     }
 
     // 路由：事件总线
@@ -1257,10 +2063,15 @@ export class MetaSheetServer {
       }),
     }))
     this.app.use(adminUsersRouter())
+    // Transfer MVP T1 — mounted BEFORE the broader /api/admin/directory router so the more
+    // specific path wins outright; same `ensurePlatformAdmin` RBAC gate.
+    this.app.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
     this.app.use('/api/admin/directory', adminDirectoryRouter())
     // Canonical Org MVP B2 (local departments/accounts/memberships CRUD) — mounted alongside
     // adminDirectoryRouter under the same base path, sharing its `ensurePlatformAdmin` RBAC gate.
     this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
+    this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
+    this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'
@@ -1334,6 +2145,7 @@ export class MetaSheetServer {
     this.app.use('/api/platform/apps', createPlatformAppsRouter({
       pluginLoader: this.pluginLoader,
       pluginStatus: this.pluginStatus,
+      isCatalogFeatureEnabled: resolveElearningCatalogFeature,
     }))
 
     // Metrics (JSON minimal)
@@ -1375,7 +2187,7 @@ export class MetaSheetServer {
   }
 
   private async handleAfterSalesApprovalDecisionCallback(
-    approval: UnifiedApprovalDTO,
+    approval: import('./services/AfterSalesApprovalBridgeService').AfterSalesApprovalSummary,
     decision: {
       action: 'approve' | 'reject'
       actorId: string
@@ -1391,6 +2203,8 @@ export class MetaSheetServer {
     }
 
     try {
+      // Plugin callback receives the narrow AfterSalesApprovalSummary only (no formSnapshot /
+      // formSchema / record-link ids). Normal HTTP action DTOs stay UnifiedApprovalDTO.
       await handler({
         approval,
         projectId: approval.subject?.projectId,
@@ -1445,7 +2259,11 @@ export class MetaSheetServer {
       ? {
           ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
+            // P0-S S3: `overwriteMode` MUST stay in this destructure. It is the per-call
+            // destructive-reconcile opt-in, and this hook is the shipped host path for every
+            // plugin ensureObject — dropping it here would silently re-arm the fail-closed
+            // default for callers that legitimately own the columns they re-derive.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -1468,6 +2286,7 @@ export class MetaSheetServer {
                   projectId,
                   baseId,
                   descriptor,
+                  overwriteMode,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,
@@ -1532,9 +2351,83 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              await assertPluginOwnsSheet(txQuery, {
+              // Copy-sheet CS-14 / §6 (S8): a snapshot copied FROM a plugin-managed sheet has no
+              // registry row (it is deliberately unmanaged), which under the default 'observe' mode
+              // below would make it reachable by EVERY plugin. Refuse it FIRST, in every mode, off the
+              // server-written `meta_sheets.copied_from_kind` column — before the registry/mode decision.
+              await assertSheetNotCopiedFromPluginManaged(txQuery, { pluginName, sheetId })
+              // P0-S S4 — sheet-scope enforcement mode. `assertPluginOwnsSheet` throws on a
+              // DIFFERENT-owner sheet in every mode; for an UNREGISTERED sheet it returns
+              // false (test-pinned legacy tolerance). Default 'observe' logs+continues (zero
+              // functional change, adds visibility); 'enforce' rejects unregistered access
+              // (flipped per-deployment after registry backfill).
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, {
                 pluginName,
                 sheetId,
+              })
+              if (!ownsSheet) {
+                const scopeMode = resolvePluginSheetScopeMode()
+                this.logger.warn(
+                  `plugin ${pluginName} accessed unregistered sheet ${sheetId} via plugin-scope (mode=${scopeMode})`,
+                )
+                if (scopeMode === 'enforce') {
+                  throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+                }
+              }
+              // W8-4 (L1). Reporting `registered` keeps the tolerated-unregistered case OUT of the
+              // request-scoped memo (`plugin-scope.ts`), so the warning above still fires once per
+              // records call rather than once per scope — it is the signal P0-S S4 reads to decide
+              // whether the registry backfill is complete enough to flip this mode to `enforce`.
+              return { registered: ownsSheet }
+            },
+            runStockPreparationPersistUnitOfWork: async (
+              { pluginName, ...rawInput },
+              operation,
+            ) => {
+              const input = validateStockPreparationPersistUnitOfWorkInput(rawInput)
+              return poolManager.get().transaction(async ({ query }) => {
+                const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                  const result = await query(sql, params)
+                  return {
+                    rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                      ? (result as { rows: unknown[] }).rows
+                      : [],
+                    rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                      ? (result as { rowCount: number }).rowCount
+                      : undefined,
+                  }
+                }
+
+                for (const sheetId of input.sheetIds) {
+                  const ownsSheet = await assertPluginOwnsSheet(txQuery, { pluginName, sheetId })
+                  if (!ownsSheet) {
+                    throw new MultitableSheetScopeError(pluginName, sheetId, 'unclaimed')
+                  }
+                }
+                await acquireStockPreparationPersistUnitOfWorkLocks(txQuery, input)
+
+                return operation({
+                  queryRecords: ({ sheetId, filters, search, orderBy, limit, offset }) =>
+                    queryMultitableRecords({
+                      query: txQuery,
+                      sheetId,
+                      filters,
+                      search,
+                      orderBy,
+                      limit,
+                      offset,
+                    }),
+                  createRecord: ({ sheetId, data }) =>
+                    createMultitableRecord({ query: txQuery, sheetId, data }),
+                  patchRecord: ({ sheetId, recordId, changes, expectedVersion }) =>
+                    patchMultitableRecord({
+                      query: txQuery,
+                      sheetId,
+                      recordId,
+                      changes,
+                      expectedVersion,
+                    }),
+                })
               })
             },
           }),
@@ -1719,9 +2612,754 @@ export class MetaSheetServer {
         workdayCalendar: {
           register: (provider: WorkdayCalendarPort) => this.registerPluginWorkdayCalendarProvider(pluginName, provider),
         },
+        // S7-1 (OD-S7-5=d): the host binding for the dynamic approval-assignee resolver port. Unlike
+        // workdayCalendar (plugin-provided), core-backend is the PROVIDER here; plugin-attendance
+        // consumes it and fail-closes when it is absent. At S7-1 it reports every dynamic kind
+        // unimplemented, so a dynamic-kind step can never round-trip inert — see buildApprovalAssigneeResolverPort.
+        // S7-2 precursor (owner P3 on #4415): least-privilege — ONLY plugin-attendance receives the
+        // port (same posture as the plugin-integration-core dataSources facade above). Before the
+        // resolver reads real directory data, "narrow port" must be a capability boundary, not a type
+        // description; every other plugin gets undefined and the consumer's fail-closed path.
+        approvalAssigneeResolver:
+          manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // Approval change-request lock v5.9, product entry v2 phase A + A2 (P-1 Q1′ = (i)): the
+        // cancel-round entry port. Least-privilege like approvalAssigneeResolver — ONLY
+        // plugin-attendance receives it; every other plugin gets undefined, and without it the
+        // consumer registers none of its cancel-round routes.
+        // Phase C (增补 P-11): the port's post-action todo count refresh is bound to the SAME publisher
+        // the approval-side action routes call, on this server's injector.
+        approvalCancelRoundEntry:
+          manifest.name === 'plugin-attendance'
+            ? buildApprovalCancelRoundEntryPort({
+                publishCounts: (users, reason) =>
+                  publishApprovalCountsForUsers({ injector: this.injector }, users, reason),
+              })
+            : undefined,
+        // E-learning L2: core owns eligibility and delivery-ledger insertion.
+        // The persisted job worker gets only this narrow port; other plugins
+        // cannot submit reminder intents through the host service surface.
+        elearningReminderProducer:
+          manifest.name === 'plugin-elearning'
+            ? {
+                produce: async (
+                  input: import('./services/elearning-assignment-reminder').ProduceElearningAssignmentReminderInput,
+                ) => {
+                  if (!isElearningAssignmentSurfaceEnabled()) {
+                    throw new ElearningAssignmentReminderError('unavailable')
+                  }
+                  return produceElearningAssignmentReminder(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L3 timed-attempt jobs are only a materialization path. Core repeats
+        // the same feature gate and owns the database-clock settlement logic.
+        elearningExamExpirySettlement:
+          manifest.name === 'plugin-elearning'
+            ? {
+                settle: async (
+                  input: import('./services/elearning-exam').SettleExpiredElearningExamAttemptInput,
+                ) => {
+                  if (!isElearningExamSurfaceEnabled()) {
+                    throw new ElearningExamError('unavailable')
+                  }
+                  return settleExpiredElearningExamAttempt(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L5 analytics jobs are materialization requests only. Core repeats
+        // the exact flag gate and owns the current-directory projection.
+        elearningStatsDailyProjection:
+          manifest.name === 'plugin-elearning'
+            ? {
+                enqueueDue: async () => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningStatsDailyJobProducerError('unavailable')
+                  }
+                  await reconcileElearningStatsMultitable(poolManager.get()).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_reconcile_failed')
+                  })
+                  return enqueueElearningStatsDailyJobs(poolManager.get())
+                },
+                project: async (
+                  input: import('./services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningStatsDailyProjectionError('unavailable')
+                  }
+                  const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_projection_failed')
+                  })
+                  return result
+                },
+              }
+            : undefined,
+        // L5 aggregate exports are at-least-once job effects. Core owns the
+        // request ledger, suppression-safe CSV bytes and idempotent storage.
+        elearningAnalyticsExport:
+          manifest.name === 'plugin-elearning'
+            ? {
+                materialize: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return materializeElearningAnalyticsExport(poolManager.get(), input)
+                },
+                cleanup: async (
+                  input: import('./services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+                ) => {
+                  if (!isElearningAnalyticsSurfaceEnabled()) {
+                    throw new ElearningAnalyticsExportError('disabled')
+                  }
+                  return cleanupElearningAnalyticsExport(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L2 send-time guard: only plugin-elearning can ask core to recheck a
+        // persisted delivery against current assignment/course completion.
+        elearningNotificationEligibility:
+          manifest.name === 'plugin-elearning'
+            ? {
+                check: async (
+                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+                    | { orgId: string; deliveryId: string; recipientUserId: string },
+                ) => {
+                  if ('deliveryId' in input) {
+                    if (!isElearningNotificationDispatchEnabled()) return false
+                    return checkElearningEventNotificationEligibility(poolManager.get(), input)
+                  }
+                  if (!isElearningAssignmentSurfaceEnabled()) {
+                    throw new ElearningAssignmentReminderError('unavailable')
+                  }
+                  return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationDispatch:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                dispatch: async (input: import('./services/elearning-notification-dispatch').ElearningNotificationDispatchInput) => {
+                  if (!isElearningNotificationDispatchEnabled()) {
+                    return { outcome: 'retryable' as const, code: 'NOTIFICATION_DISABLED' }
+                  }
+                  return dispatchElearningNotification(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationSource:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                collect: () => {
+                  if (!isElearningNotificationDispatchEnabled()) return Promise.resolve({ inserted: 0 })
+                  return collectElearningNotificationEvents(poolManager.get(), {
+                    since: process.env.ELEARNING_NOTIFICATIONS_SINCE ?? '',
+                    assignments: isElearningAssignmentSurfaceEnabled(),
+                    enrollments: process.env.ELEARNING_ENROLLMENT_ENABLED === 'true',
+                    results: isElearningExamSurfaceEnabled(),
+                  })
+                },
+              }
+            : undefined,
+        // ACP-1B: core owns the canonical anchor ledger. The attendance plugin only receives
+        // this narrow sync port; it cannot query or write the ledger generically.
+        attendanceMultitableCleaningAuthority:
+          manifest.name === 'plugin-attendance'
+            ? {
+                cleanupProposal: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof cleanupAttendanceCleaningProposal>[1],
+                  seed: Parameters<typeof cleanupAttendanceCleaningProposal>[2], reason: string) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return cleanupAttendanceCleaningProposal(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed, reason)
+                },
+                readCompletedInTransaction: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return readAttendanceCleaningCompletedOperations(async (statement, params) => ({ rows: await trx.query(statement, params) }), input)
+                },
+                readCompleted: (input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningCompletedOperations(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                assertActor: (input: Parameters<typeof assertAttendanceCleaningActor>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => {
+                    await assertAttendanceCleaningActor(async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input)
+                  }),
+                readSeed: (input: Parameters<typeof readAttendanceCleaningSourceSeed>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningSourceSeed(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                lockSource: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof lockAttendanceCleaningSource>[1],
+                  seed: Parameters<typeof lockAttendanceCleaningSource>[2]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return lockAttendanceCleaningSource(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed)
+                },
+                refresh: async (input: {
+                  projectionRecordId: string
+                  canonicalRecordId: string
+                  sourceFingerprint: string
+                }) => poolManager.get().transaction(async ({ query }) => {
+                  await refreshAttendanceReportProjectionAnchor(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, input)
+                }),
+                withhold: async (projectionRecordIds: readonly string[]) => poolManager.get().transaction(async ({ query }) => {
+                  await withholdAttendanceReportProjectionAnchors(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, projectionRecordIds)
+                }),
+              }
+            : undefined,
+        // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
+        // segment-calculation port. Least-privilege like approvalAssigneeResolver —
+        // only plugin-attendance receives it; every other plugin gets undefined and the
+        // consumer's fail-closed path. `validateIanaTimezone` is the ONE strict IANA
+        // validator (`w4c1-strict-time`); the plugin never re-implements it, so
+        // default-rule/shift timezone writes and the calculator share a single source.
+        attendanceW4SegmentCalculation:
+          manifest.name === 'plugin-attendance'
+            ? {
+                validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
+                // decision. The plugin's canonical live adapter consumes this
+                // instead of the removed second mutable post-upsert pass — the
+                // plugin never copies the branch logic, one source, no drift.
+                applyMergePolicyPure: (input: unknown) =>
+                  applyAttendanceInOutMergePolicyPureV1(
+                    input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],
+                  ),
+                // W4C-2: canonical live/scheduled write boundary (lock 8.1).
+                // The factory captures a dedicated-connection provider over the
+                // core pool; the plugin injects its legacy adapters once at
+                // activate and cuts P01-P04 over to the returned boundary.
+                createLiveScheduledBoundary: (config: {
+                  legacyAdapters: import('./attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+                }) =>
+                  createAttendanceLiveScheduledBoundaryV1({
+                    legacyAdapters: config.legacyAdapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                createRequestOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+                }) =>
+                  createAttendanceRequestOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: () => client.release() }
+                    },
+                  }),
+                // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as
+                // the cancel-round 完整业务取消 provider. One line, because the object registered is
+                // the same boundary the plugin already uses for its HTTP routes: 判据 II's C-1 call
+                // and every HTTP cancellation run the IDENTICAL W4 protocol, differing only in who
+                // owns the connection and the transaction.
+                registerCancelRoundExecutionBoundary: (boundary) =>
+                  registerAttendanceCancellationExecutionProvider(boundary),
+                // Codex 审阅第 3 条修复 (2026-09-19) — the sibling POST-COMMIT delivery. One line
+                // for the same reason the line above is one line: what is bound is the plugin's
+                // own single `attendance.request.cancelled` send site, the one its HTTP cancel
+                // route already calls, so the redemption path announces the cancellation with the
+                // identical gate and the identical payload instead of not announcing it at all.
+                registerCancelRoundCancelledEventDelivery: (deliver) =>
+                  registerCancelRoundCancelledEventDelivery(deliver),
+                // W4C-3c: manual_edit / recompute / ops_retirement boundary.
+                createRecordOperationBoundary: (config: {
+                  adapters: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+                }) =>
+                  createAttendanceRecordOperationBoundaryV1({
+                    adapters: config.adapters,
+                    acquireConnection: async () => {
+                      const client = await poolManager.get().getInternalPool().connect()
+                      return { client, release: (error?: Error) => client.release(error) }
+                    },
+                  }),
+                appendOperatorRetirementCalculation: (input) =>
+                  appendOperatorRetirementCalculationV1(input),
+                appendRecomputeCalculation: (input) =>
+                  appendRecomputeCalculationV1(input),
+                appendManualOverrideCalculation: (input) =>
+                  appendManualOverrideCalculationV1(input),
+                activeCurrent: Object.freeze({
+                  relation: ATTENDANCE_ACTIVE_CURRENT_RELATION_V1,
+                  visibilityPredicate: ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1,
+                  loadForDecisionTrace: loadActiveCurrentAttendanceRecordForDecisionTraceV1,
+                  listForAnomalyListing: listActiveCurrentAttendanceRecordsForAnomalyListingV1,
+                  loadForMakeupAnomalyFacts: loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1,
+                  listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1,
+                }),
+                appendApprovedLeaveCancellationCalculation: (input) =>
+                  appendApprovedLeaveCancellationCalculationV1(input),
+                resolveOrgSegmentCalculationPosture: async (
+                  trx: import('./types/plugin').DatabaseTransaction,
+                  orgId: string,
+                ) => {
+                  const shapedTrx = trx as import('./types/plugin').DatabaseTransaction & {
+                    readonly __w4CanonicalTrx?: true
+                  }
+                  const rawClient = trx?.__rawClient as AttendanceW4TransactionClientV1 | undefined
+                    ?? (shapedTrx?.__w4CanonicalTrx === true && typeof shapedTrx.query === 'function'
+                      ? {
+                          query: async (sqlText: string, params?: readonly unknown[]) => ({
+                            rows: await shapedTrx.query(sqlText, [...(params ?? [])]),
+                          }),
+                        }
+                      : undefined)
+                  if (!rawClient || typeof rawClient.query !== 'function') {
+                    throw new Error('W4C3B_TRANSACTION_CLIENT_REQUIRED')
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'legacy', referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(rawClient, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(rawClient, orgKey)
+                  return {
+                    effectiveState: posture.effectiveState,
+                    referenceSegments: posture.referenceSegments,
+                  }
+                },
+                // Lock-11 §10 W-4: least-privilege wrapper over the ONE shared org-derivation
+                // primitive (services/approval-instance-org-derivation.ts). Result-shaped —
+                // never lets an `ApprovalOrgUnresolvedError` instance cross the plugin boundary
+                // (feedback_attack_your_own_criterion: the plugin must never `instanceof` a
+                // host error class). `trxQuery` is supplied by the caller already bound to its
+                // own open transaction client; this wrapper only adapts the return shape
+                // ({rows: [...]} the derivation module expects) around the plugin's bare-rows
+                // `trx.query`.
+                deriveApprovalInstanceOrgIdForAttendanceSubjectV1: async (input: {
+                  trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+                  subjectUserId: string
+                  requestNamedOrgId: string | null
+                }) => {
+                  const queryFn = async (sql: string, params?: unknown[]) => ({
+                    rows: await input.trxQuery(sql, params),
+                  })
+                  try {
+                    const orgId = await deriveApprovalInstanceOrgIdWithSelector(
+                      queryFn,
+                      input.subjectUserId,
+                      input.requestNamedOrgId,
+                    )
+                    return { ok: true as const, orgId }
+                  } catch (error) {
+                    if (error instanceof ApprovalOrgUnresolvedError) {
+                      return { ok: false as const, reason: error.reason }
+                    }
+                    throw error
+                  }
+                },
+                // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
+                // round) — lock §8.2 step 7 second clause. Pure; no DB
+                // access; wraps the module's own private
+                // `attributionFromResolution` so the plugin can only ever
+                // ask "what fingerprint would THIS resolution+context
+                // produce", never reach the raw builder/fingerprint
+                // primitives for arbitrary data.
+                computeOuterSourceDefinitionFingerprintV1: (input: unknown) =>
+                  computeAttendanceOuterSourceDefinitionFingerprintV1(
+                    input as Parameters<typeof computeAttendanceOuterSourceDefinitionFingerprintV1>[0],
+                  ),
+                // W7-1b (#4556) — the ONE arm-selection seam, reachable from the
+                // CJS plugin. Every frozen-context producer routes through here;
+                // two copies of the selection rule is the drift ruling 3 forbids.
+                //
+                // The plugin injects its own deps because three of them live in
+                // plugin-owned modules the host cannot import (the FSER pure
+                // derivation, the canonical producer-key builder) and because the
+                // legacy builder takes a PLUGIN-shaped client while the W7
+                // resolvers take a CORE-shaped one — see the seam's own header.
+                // W7-1b — the ARM-SELECTION rule without issuance. The mirror's
+                // W7 disjunct and OD-W7-10's `currentProducer` both need to ask
+                // "group or legacy" WITHOUT minting a context as a side effect.
+                resolveAttendanceW7GroupArmSelectionV1: async (trx: unknown, orgId: string) => {
+                  try {
+                    return await resolveAttendanceW7GroupArmSelectionV1(
+                      trx as Parameters<typeof resolveAttendanceW7GroupArmSelectionV1>[0],
+                      orgId,
+                    )
+                  } catch (error) {
+                    // EXACTLY the precedent `resolveOrgSegmentCalculationPosture`
+                    // above already sets, and for the same reason. W7-1b makes
+                    // this read UNCONDITIONAL on the punch route, so an org whose
+                    // id is not a canonical rollout org key would newly throw on
+                    // every punch — a regression the pre-1b tree never had,
+                    // because the mirror only ran under the W4 env.
+                    //
+                    // Fail-closed and provably total: the posture table's primary
+                    // key IS the canonical org key, so an org whose id cannot be
+                    // canonicalised CANNOT have a posture row, and "does not
+                    // select the group arm" is the only answer consistent with the
+                    // data. The catch is narrowed to that ONE code — W7-1a's three
+                    // corruption throws (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` /
+                    // `_STATE_INVALID` / `_SCOPE_INVALID`) must still propagate,
+                    // which is the whole reason the read is not short-circuited.
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { effectiveState: 'off' as const, selectsGroupArm: false }
+                    }
+                    throw error
+                  }
+                },
+                issueAttendanceFrozenContextV1: async (
+                  trx: unknown,
+                  deps: unknown,
+                  input: unknown,
+                ) => {
+                  const issuanceDeps = deps as AttendanceW7IssuanceDepsV1
+                  const issuanceInput = input as AttendanceW7IssuanceInputV1
+                  try {
+                    return await issueAttendanceFrozenContextV1(
+                      trx as Parameters<typeof issueAttendanceFrozenContextV1>[0],
+                      issuanceDeps,
+                      issuanceInput,
+                    )
+                  } catch (error) {
+                    // P2-3 FIX — the SAME discipline as the two sibling reads
+                    // above, for the same reason, and it was missing here.
+                    //
+                    // W7-1b puts this seam on the request-creation, batch-import
+                    // and recompute paths, all of which accept an org id from an
+                    // unvalidated request string. Without this catch, an org id
+                    // that is not a canonical rollout org key made the POSTURE
+                    // RESOLVER throw and the whole producer 5xx — a regression
+                    // the pre-1b tree never had, because the legacy builder
+                    // never canonicalised anything.
+                    //
+                    // FAIL-CLOSED AND PROVABLY TOTAL, not a soft default: the
+                    // posture table's PRIMARY KEY *is* the canonical org key, so
+                    // an org whose id cannot be canonicalised CANNOT have a
+                    // posture row, cannot be group-postured, and the LEGACY arm
+                    // is the only answer consistent with the data. That is also
+                    // exactly what the pre-1b tree did for such an org.
+                    //
+                    // Narrowed to that ONE code: W7-1a's three corruption throws
+                    // (`W7_CONTEXT_SOURCE_STATE_AMBIGUOUS` / `_STATE_INVALID` /
+                    // `_SCOPE_INVALID`) must still propagate — making a corrupt
+                    // posture row indistinguishable from an unconfigured org is
+                    // the exact blindness the unconditional read exists to
+                    // prevent.
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      const context = await issuanceDeps.buildLegacyFrozenContext({
+                        orgId: issuanceInput.orgId,
+                        userId: issuanceInput.userId,
+                        workDate: issuanceInput.workDate,
+                        timezone: issuanceInput.timezone,
+                        isWorkday: issuanceInput.isWorkday,
+                        holidayKind: issuanceInput.holidayKind,
+                        shiftId: issuanceInput.shiftId,
+                      })
+                      return { arm: 'legacy' as const, context: context ?? null, reason: null }
+                    }
+                    throw error
+                  }
+                },
+                buildRequestCreationAttributionSnapshotV1: (input: unknown) =>
+                  buildAttendanceRequestCreationAttributionSnapshotV1(
+                    input as Parameters<typeof buildAttendanceRequestCreationAttributionSnapshotV1>[0],
+                  ),
+                // W4C-2: one outbox drain pass (lock 7.1a delivery side).
+                drainResultEventOutbox: async (options: {
+                  emit: (delivery: {
+                    eventKind: string
+                    payload: unknown
+                    payloadSchemaVersion: number
+                  }) => void | Promise<void>
+                  batchLimit?: number
+                }) => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  try {
+                    return await dispatchAttendanceResultEventOutboxV1(client, {
+                      emit: options.emit,
+                      batchLimit: options.batchLimit,
+                    })
+                  } finally {
+                    client.release()
+                  }
+                },
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7 "No
+                // stuck absorbing state — recovery sweep, fully specified"). ONE sweep tick:
+                // all-terminal candidates finalize in core; nonterminal candidates call back
+                // into the plugin to rebuild current scheduling context and resume the exact
+                // scanned run id.
+                sweepScheduledRuns: async (options: {
+                  limit?: number
+                  recoverCandidate(candidate: {
+                    orgId: string
+                    initiator: 'cron' | 'admin_run'
+                    workDate: string
+                    runId: string
+                  }): Promise<void>
+                }) =>
+                  sweepAttendanceScheduledRunsOnceV1(poolManager.get().getInternalPool(), {
+                    limit: options.limit,
+                    recoverCandidate: options.recoverCandidate,
+                    // #4770: values-free tick-summary observability (counts/backlog only —
+                    // `Logger` never receives an org id / user id / work date / run id here).
+                    // #4774 P2-1: this line is the ONLY thing that makes the tick line actually
+                    // emit in production — covered by leg 4 in
+                    // attendance-w4c2-sweep-call-through.db.test.ts (deleting it turns that leg
+                    // red while every other test in both new files stays green).
+                    logger: this.logger,
+                  }),
+                // W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the
+                // `abandoned` transition). `adminActorId` is the route's OWN authenticated actor
+                // id (already RBAC-gated by `withPermission('attendance:admin', ...)` at the
+                // call site) — never a request-body-supplied identity — matching the SAME
+                // P1-4 discipline `admin_run`'s scheduled-run initiator already follows.
+                abandonScheduledRun: async (input: {
+                  orgId: string
+                  runId: string
+                  adminActorId: string
+                  reasonCode: string
+                }) =>
+                  abandonScheduledRunOnceV1(
+                    poolManager.get().getInternalPool(),
+                    input as unknown as AttendanceScheduledRunAdminAbandonInputV1,
+                  ),
+                // W4C-3a: values-free V1 legacy-plan processor. Plugin supplies
+                // only jobId; core owns SERIALIZABLE assembly and fixed effects.
+                processLegacyImportPlan: async (input: { jobId: string }) => {
+                  const jobId =
+                    typeof input === 'object' &&
+                    input !== null &&
+                    typeof input.jobId === 'string'
+                      ? input.jobId
+                      : ''
+                  const processor = createAttendanceLegacyPlanProcessorV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return processor.processLegacyImportPlanV1(jobId)
+                },
+                reserveLegacyImportPlan: async (input) => {
+                  const host = createAttendanceLegacyPlanReservationHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.reserveLegacyImportPlanV1(input)
+                },
+                // W4C-3a P06: least-privilege sync commit. Plugin supplies the
+                // prepareOnly plan; core owns the independent SERIALIZABLE
+                // source/effect transaction (no V1 job/plan/terminal DML).
+                commitSyncImportPlan: async (input) => {
+                  const host = createAttendanceSyncImportHostV1({
+                    acquireConnection: async () => {
+                      const client = await poolManager
+                        .get()
+                        .getInternalPool()
+                        .connect()
+                      return { client, release: () => client.release() }
+                    },
+                  })
+                  return host.commitSyncImportPlanV1(input)
+                },
+                buildImportAttributionFreeze:
+                  buildAttendanceImportAttributionFreezeV1,
+                buildImportPolicySourceProof:
+                  buildAttendanceImportPolicySourceProofV1,
+                buildLegacyImportReservationLockWitness: (input: {
+                  orgId: string
+                  idempotencyKey: string
+                }) => {
+                  let orgKey: ReturnType<
+                    typeof parseCanonicalAttendanceRolloutOrgKeyV1
+                  >
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(
+                      input?.orgId,
+                    )
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return null
+                    }
+                    throw error
+                  }
+                  const legacyKey =
+                    parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+                      orgId: orgKey,
+                      idempotencyKey: input?.idempotencyKey,
+                    })
+                  return {
+                    rolloutKey:
+                      buildAttendanceCalculationRolloutAdvisoryKey(
+                        orgKey,
+                      ).toString(),
+                    legacyIdempotencyKey:
+                      buildAttendanceLegacyIdempotencyAdvisoryKey(
+                        legacyKey,
+                      ).toString(),
+                    helperWaitMs: W4_ADVISORY_HELPER_WAIT_MS,
+                    transactionLockTimeoutMs:
+                      W4_TRANSACTION_LOCK_TIMEOUT_MS,
+                  }
+                },
+                // W4C-3b P12 (lock §4.2 / §7.2 / §12.5 / OD-W4C-33):
+                // least-privilege immutable request snapshot plumbing.
+                // Plugin supplies the existing request transaction client;
+                // core owns closed payload fingerprint, append, and terminal
+                // binding. No calculation/outbox/cancellation (P13/P14).
+                appendRequestCalculationSnapshotOnCreate: (
+                  input: Parameters<typeof appendAttendanceRequestCreateSnapshotV1>[0],
+                ) => appendAttendanceRequestCreateSnapshotV1(input),
+                appendRequestCalculationSnapshotOnEdit: (
+                  input: Parameters<typeof appendAttendanceRequestEditSnapshotV1>[0],
+                ) => appendAttendanceRequestEditSnapshotV1(input),
+                lockRequestSnapshotBeforeTerminalDecision: (
+                  input: Parameters<
+                    typeof lockAttendanceRequestSnapshotBeforeTerminalDecisionV1
+                  >[0],
+                ) => lockAttendanceRequestSnapshotBeforeTerminalDecisionV1(input),
+                bindRequestSnapshotOnTerminalDecision: (
+                  input: Parameters<typeof bindAttendanceRequestTerminalSnapshotV1>[0],
+                ) => bindAttendanceRequestTerminalSnapshotV1(input),
+                buildRequestCalculationPayloadFromRequestRow:
+                  buildAttendanceRequestCalculationPayloadFromRequestRowV1,
+                computeRequestPayloadFingerprint:
+                  computeAttendanceRequestPayloadFingerprintV1,
+                buildUnsupportedRequestAttributionSnapshot:
+                  buildUnsupportedRequestAttributionSnapshotV1,
+                requestSnapshotTerminalBindingMetaKey:
+                  W4C3B_REQUEST_SNAPSHOT_TERMINAL_BINDING_META_KEY,
+              }
+            : undefined,
+        // W4C-3a P11/P23: separate least-privilege rollback port. The CJS
+        // plugin can submit only authenticated request identity + batch id;
+        // core owns target discovery, authorization, ids, locks and DML.
+        attendanceImportRollback:
+          manifest.name === 'plugin-attendance'
+            ? createAttendanceImportRollbackBoundaryV1({
+                acquireConnection: async () => {
+                  const client = await poolManager.get().getInternalPool().connect()
+                  return { client, release: () => client.release() }
+                },
+              })
+            : undefined,
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        // 列映射副驾: the governed AI boundary for plugin-integration-core ONLY. The plugin's
+        // schema-mapping copilot calls `governedAi.suggest({ dataClass: 'business', ... })`; the
+        // boundary enforces local-only routing for business data. Absent for every other plugin.
+        governedAi: manifest.name === 'plugin-integration-core' ? new GovernedAiService() : undefined,
+        // 按项目导出物料 Excel: the xlsx buffer builder for plugin-integration-core ONLY. The plugin's
+        // new prep-lines/export route calls `stockPreparationXlsxExport.buildWorkbookBuffer(...)`;
+        // absent for every other plugin.
+        stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
+          ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
+        // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which
+        // carries the caller's own project numbers and names) must not accept `req.user.tenantId` as
+        // proof of tenancy — hydrateAuthenticatedUser copies the `x-tenant-id` HEADER onto that field
+        // when the verified token carried no claim. This narrow port lets the plugin ask the host to
+        // vouch for the (user, tenant) pairing instead, submitting two identity strings and receiving
+        // one boolean; the host keeps the table, the SQL and the pool. Absent for every other plugin,
+        // and REQUIRED (not fail-open) by the one read that uses it.
+        tenantPrincipalDirectory: manifest.name === 'plugin-integration-core'
+          ? createTenantPrincipalDirectoryBoundaryV1({
+              query: (sql: string, params?: unknown[]) =>
+                poolManager.get().query(sql, params) as unknown as Promise<{ rows: unknown[] }>,
+            })
+          : undefined,
+        // 备料按部门列写权限: the per-column WRITE-scope port for plugin-integration-core ONLY. The
+        // plugin declares "this ROLE may NOT WRITE this column" and the host writes the ONE table the
+        // grid's write gate actually reads (`field_permissions`). WRITE-only by construction — it
+        // cannot restrict READ, because 采购 and 仓库 must keep seeing the production band and each
+        // other's responses (see the service file's load-bearing property).
+        //
+        // THIS CAPABILITY CAN DELETE A PERMISSION ROW. Additive by default — with no `reconcile`
+        // region the call only upserts and emits no DELETE at all. With one, the same transaction
+        // also retires this PACK's own still-denying rows inside the declared (columns × roles)
+        // rectangle, bounded five ways: the target sheet only; this pack's provenance marker, PLUS
+        // the pack-less legacy marker ONLY when the caller proves (from the install ledger) that
+        // this pack is the sheet's only pack — a row an operator authored and a sibling pack's row
+        // are outside the predicate either way; `read_only = true` only; inside the declared region
+        // only; and never a row the same call just wrote. The statement's row set is then CHECKED
+        // against the same classification the rehearsal ran, and a mismatch aborts the transaction.
+        // It exists because upsert-only silently locks a column for EVERY declared role the moment a
+        // revision moves that column's owner. Removals are returned, never silent. Broad removal
+        // remains an operator action on PUT /sheets/:sheetId/field-permissions. The one thing it
+        // cannot see: an operator edit made BEFORE that route started stamping `operator:<actorId>`
+        // left the pack's marker on the row, so such a row is indistinguishable from installer
+        // output. Absent for every other plugin.
+        stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
+          ? new StockPreparationFieldPermissionsService()
+          : undefined,
+        // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
+        // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
+        // title, body })`; this wraps the EXISTING group-destination machinery
+        // (multitable/dingtalk-group-destination-service.ts) rather than giving the plugin a DingTalk
+        // client or a new dependency of its own. GROUP-ONLY: the group robot webhook is the only send
+        // path here that works without an automation-rule record context, and there is no per-person
+        // 待办 to ride. Absent for every other plugin; absent entirely, the handoff still moves the turn
+        // and reports `not_configured`.
+        stockPreparationHandoffNotifier: manifest.name === 'plugin-integration-core'
+          ? { sendToDestinations: sendStockPreparationHandoffNotification }
+          : undefined,
+        // Secret-bearing SQL Server projection for the sealed snapshot runtime. Keep this as a
+        // separate, plugin-scoped capability; the ordinary dataSources facade never carries
+        // credentials, and every other plugin receives no capability at all.
+        dataSourceSealedSnapshotConnections:
+          manifest.name === 'plugin-integration-core'
+            ? createDataSourceSealedSnapshotConnectionFacade(getDataSourceManager)
+            : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -1761,6 +3399,12 @@ export class MetaSheetServer {
     const context = this.createPluginContext(loaded)
     try {
       await pluginInstance.activate(context)
+      // plugin-elearning's activate() returns before registering any route, service or timer while
+      // its master switch is off (plugins/plugin-elearning/index.cjs, same exact-'true' rule as
+      // isElearningEnabled). Call that what it is -- loaded, inactive -- instead of 'active'.
+      if (name === 'plugin-elearning' && !isElearningEnabled(process.env)) {
+        return this.setPluginRuntimeState(name, 'inactive')
+      }
       return this.setPluginRuntimeState(name, 'active')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1839,13 +3483,169 @@ export class MetaSheetServer {
     return this.httpServer.address()
   }
 
+  private stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void {
+    void this.stop(signal).then(
+      () => process.exit(0),
+      () => process.exit(1),
+    )
+  }
+
   /**
    * 停止服务器
    */
-  async stop(signal = 'SIGTERM'): Promise<void> {
-    if (this.shuttingDown) return
-    this.shuttingDown = true
+  stop(signal = 'SIGTERM'): Promise<void> {
+    this.stopPromise ??= this.stopOnce(signal)
+    return this.stopPromise
+  }
+
+  private closeHttpServerForShutdown(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        if (!this.httpServer.listening) {
+          resolve()
+          return
+        }
+        this.httpServer.close((error?: Error) => {
+          if (error) {
+            reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+            return
+          }
+          this.logger.info('HTTP server closed')
+          resolve()
+        })
+      } catch {
+        reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+      }
+    })
+  }
+
+  /** Internal operator composition only; no route, timer or caller-supplied storage path. */
+  async retireExpiredRecoveryAttachmentStage(objectId: string): Promise<void> {
+    if (this.stopPromise) throw new Error('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
+    await this.recoveryArchiveApplication.retireExpiredAttachmentStage(objectId)
+  }
+
+  private async waitForShutdownBarrier(
+    tasks: Array<Promise<unknown>>,
+    failureCode: string,
+    timeoutMessage: string,
+  ): Promise<void> {
+    let timeout: NodeJS.Timeout | null = null
+    const settled = Promise.allSettled(tasks).then((results) => {
+      if (results.some((result) => result.status === 'rejected')) {
+        throw new Error(failureCode)
+      }
+    })
+    try {
+      await Promise.race([
+        settled,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            this.logger.warn(timeoutMessage)
+            reject(new Error(failureCode))
+          }, 10_000)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private observeShutdownTask<T>(task: Promise<T>): Promise<T> {
+    // Some producer drains can reject before the recovery worker finishes and before the shared
+    // allSettled barrier is installed. Observe immediately without changing the original promise,
+    // so the later barrier still sees and propagates the rejection as a values-free failure code.
+    void task.catch(() => undefined)
+    return task
+  }
+
+  private async stopOnce(signal: string): Promise<void> {
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
+
+    // Close every approval-completion producer admission synchronously. Their drains run while the
+    // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
+    const approvalProducerDrains: Array<Promise<unknown>> = []
+    approvalProducerDrains.push(this.observeShutdownTask(this.closeHttpServerForShutdown()))
+    approvalProducerDrains.push(this.observeShutdownTask(stopApprovalSlaScheduler()))
+    if (this.automationService) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.automationService.stopProducerAdmissions()))
+    }
+    if (this.approvalProjectionSweepScheduler) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.approvalProjectionSweepScheduler.stop()))
+    }
+    if (this.durableDeliveryLoop) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
+    }
+    if (this.stopDingTalkTodoMirrorWorker) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.stopDingTalkTodoMirrorWorker()))
+      this.stopDingTalkTodoMirrorWorker = undefined
+    }
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      approvalProducerDrains.push(
+        this.observeShutdownTask(
+          this.dingtalkInteractiveCardStreamWorker.shutdown().then((status) => {
+            if (status.state === 'failed') throw new Error('DINGTALK_CARD_STREAM_DRAIN_FAILED')
+          }),
+        ),
+      )
+    }
+
+    try {
+      await this.stopElearningMediaWorkers?.()
+    } catch {
+      this.logger.warn('elearning_media_workers_stop_failed')
+    }
+    this.stopElearningMediaWorkers = undefined
+
+    let recoveryArchiveWorkerDrained = false
+    let recoveryArchiveWorkerStopFailed = false
+    try {
+      // This must finish before the pool-close task is even created: an in-flight chunk may still
+      // be completing its transaction while the worker loop drains.
+      await this.recoveryArchiveApplication.stopWorker()
+      recoveryArchiveWorkerDrained = true
+    } catch {
+      recoveryArchiveWorkerStopFailed = true
+      this.logger.warn('Recovery archive restore worker stop failed')
+    }
+
+    let approvalCompletionBarrierFailed = false
+    try {
+      await this.waitForShutdownBarrier(
+        approvalProducerDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion producer drain timeout',
+      )
+      if (this.automationService) {
+        await this.waitForShutdownBarrier(
+          [this.automationService.drainTransitiveCompletionProducers()],
+          'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+          'Approval completion transitive producer drain timeout',
+        )
+      }
+
+      // No producer can add another completion callback after this point. Detach only IDs owned by
+      // these consumers, then drain callbacks that were admitted before the synchronous detach.
+      this.automationService?.detachCompletionConsumers()
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      this.recordApprovalCompletionSubscription?.detach()
+      this.dingtalkTodoMirrorSubscription?.detach()
+      const approvalSinkDrains: Array<Promise<unknown>> = []
+      if (this.automationService) approvalSinkDrains.push(this.automationService.drainCompletionConsumers())
+      if (this.approvalProjectionService) approvalSinkDrains.push(this.approvalProjectionService.drainCompletionHandlers())
+      if (this.recordApprovalCompletionSubscription) approvalSinkDrains.push(this.recordApprovalCompletionSubscription.drain())
+      if (this.dingtalkTodoMirrorSubscription) approvalSinkDrains.push(this.dingtalkTodoMirrorSubscription.drain())
+      await this.waitForShutdownBarrier(
+        approvalSinkDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion sink drain timeout',
+      )
+      this.automationServiceReady = false
+      setAutomationServiceInstance(null)
+    } catch {
+      approvalCompletionBarrierFailed = true
+      this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    }
 
     const shutdownTasks: Promise<void>[] = []
 
@@ -1859,10 +3659,9 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
-        this.automationService?.shutdown()
-        setAutomationServiceInstance(null)
+        this.stopAuditPartitionEnsure?.()
       } catch (err) {
-        this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+        this.logger.warn(`Audit log partition ensure stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -1887,6 +3686,25 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    // This task must settle before pool.end(). The bounded shutdown barrier below clears its timeout on
+    // success and rejects on a real timeout, leaving the pool open instead of reporting a false completion.
+    shutdownTasks.push(Promise.resolve().then(async () => {
+      try {
+        await this.stopNotificationRetention?.()
+        this.stopNotificationRetention = undefined
+      } catch (err) {
+        this.logger.warn(`Notification retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(async () => {
+      try {
+        // stop awaits any in-flight GC/purge/reconcile tick before the pool closes.
+        await this.stopApprovalAttachmentWorkers?.()
+        this.stopApprovalAttachmentWorkers = undefined
+      } catch (err) {
+        this.logger.warn(`Approval attachment workers stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         if (this.yjsCleanupTimer) {
@@ -1907,48 +3725,6 @@ export class MetaSheetServer {
       )
     }
 
-    // 0c. Shut down optional DingTalk interactive-card Stream worker
-    if (this.dingtalkInteractiveCardStreamWorker) {
-      shutdownTasks.push(
-        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
-          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
-        }) as Promise<void>,
-      )
-    }
-
-    // 1. Close HTTP server
-    shutdownTasks.push(new Promise<void>((resolve) => {
-      try {
-        if (this.httpServer.listening) {
-          this.httpServer.close((err: Error | undefined) => {
-            if (err) {
-              this.logger.warn(`HTTP server close error: ${err.message}`)
-            } else {
-              this.logger.info('HTTP server closed')
-            }
-            resolve()
-          })
-        } else {
-          resolve()
-        }
-      } catch (err) {
-        this.logger.warn(`HTTP server close error: ${err instanceof Error ? err.message : String(err)}`)
-        resolve()
-      }
-    }))
-
-    // 2. Close database pool
-    shutdownTasks.push((async () => {
-      try {
-        const { pool } = await import('./db/pg')
-        if (pool) {
-          await pool.end()
-          this.logger.info('Database pool closed')
-        }
-      } catch (err) {
-        this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
 
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {
@@ -1983,17 +3759,37 @@ export class MetaSheetServer {
 
     shutdownTasks.push((async () => {
       try {
-        stopApprovalSlaScheduler()
-      } catch (err) {
-        this.logger.warn(`Approval SLA scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
-
-    shutdownTasks.push((async () => {
-      try {
         stopAttendanceScheduler()
       } catch (err) {
         this.logger.warn(`Attendance scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // BPMN workflow engine's `node-cron` minute poller (see `routes/workflow.ts` /
+    // `BPMNWorkflowEngine.shutdown()`; env-gated OFF by default via
+    // `ENABLE_BPMN_TIMER_POLLER`, see `bpmnTimerPollerConfig.ts`): previously only stopped
+    // on a real OS SIGTERM, never reached from a direct `.stop()` call (the common path in
+    // tests) — leaving it to keep querying the DB pool this same `stop()` closes just
+    // above. `BPMNWorkflowEngine.shutdown()` itself awaits any in-flight poller tick,
+    // which is the actual race-closing guarantee this needs.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // Symmetric to the above (P3-a, #4783 review): `routes/workflow-designer.ts`
+    // constructs its OWN independent `BPMNWorkflowEngine` instance (lazily, on first
+    // designer-route call), which the shutdown call above does not reach. Same
+    // env-gated poller, same in-flight-tick drain guarantee via
+    // `BPMNWorkflowEngine.shutdown()`, and equally safe to call when never initialized.
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownWorkflowDesignerEngine()
+      } catch (err) {
+        this.logger.warn(`Workflow designer engine shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -2041,14 +3837,38 @@ export class MetaSheetServer {
       }
     })())
 
-    // Wait for all shutdown tasks with timeout
-    await Promise.race([
-      Promise.all(shutdownTasks),
-      new Promise<void>((resolve) => setTimeout(() => {
-        this.logger.warn('Shutdown timeout, forcing exit')
-        resolve()
-      }, 10000)) // 10 second timeout
-    ])
+    await this.waitForShutdownBarrier(
+      shutdownTasks,
+      'SHUTDOWN_TIMEOUT',
+      'Shutdown timeout; database pool left open',
+    )
+
+    if (recoveryArchiveWorkerStopFailed) {
+      throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+    if (approvalCompletionBarrierFailed) {
+      throw new Error('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    }
+    if (!recoveryArchiveWorkerDrained) {
+      throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+
+    // Custody outlives accepted HTTP work as well as worker chunks. Never revoke on a failed drain.
+    try {
+      this.recoveryArchiveApplication.releaseCustody()
+    } catch {
+      throw new Error('RECOVERY_ARCHIVE_CUSTODY_RELEASE_FAILED')
+    }
+
+    try {
+      const { pool } = await import('./db/pg')
+      if (pool) {
+        await pool.end()
+        this.logger.info('Database pool closed')
+      }
+    } catch (err) {
+      this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
+    }
 
     this.logger.info('Shutdown complete')
   }
@@ -2057,6 +3877,20 @@ export class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
+    try {
+      await this.startOnce()
+    } catch (error) {
+      try {
+        await this.stop('STARTUP_FAILED')
+      } catch {
+        this.logger.warn('STARTUP_ROLLBACK_FAILED')
+      }
+      throw error
+    }
+  }
+
+  private async startOnce(): Promise<void> {
+    this.assertStartupNotCancelled()
     // IoC: Load configuration
     if (!this.portLocked) {
       try {
@@ -2129,7 +3963,15 @@ export class MetaSheetServer {
       )
     }
 
-    // Initialize AutomationService
+    // Initialize AutomationService — PUBLISH-LAST (owner P1, head 1d3854c7a). The field, the readiness
+    // bit, and the module singleton are set ONLY after the FULL init chain (constructor + init() +
+    // loadAndRegisterAllScheduled()) has succeeded. Previously `this.automationService` was assigned right
+    // after construction and never cleared on failure, so an init()/load throw left a half-initialized
+    // service that `Boolean(this.automationService)` happily accepted — bypassing the durable fail-closed
+    // assert. Now a mid-chain failure rolls the instance back (best-effort shutdown: unsubscribe bus
+    // handlers, destroy scheduler timers) and publishes NOTHING: flag-OFF this is the legacy
+    // degrade-and-continue, flag-ON the durable boot below fail-closes on automationServiceReady=false.
+    let pendingAutomationService: AutomationService | undefined
     try {
       const pool = poolManager.get()
       const { db: kyselyDb } = await import('./db/db')
@@ -2140,7 +3982,7 @@ export class MetaSheetServer {
       // behaviour) when the flag is off or Redis is unavailable, so this
       // call is safe in every deployment.
       const schedulerLeaderOptions = await resolveAutomationSchedulerLeaderOptions()
-      this.automationService = new AutomationService(
+      pendingAutomationService = new AutomationService(
         eventBus,
         kyselyDb,
         pool.query.bind(pool),
@@ -2149,11 +3991,23 @@ export class MetaSheetServer {
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
         notificationService,
       )
-      this.automationService.init()
-      setAutomationServiceInstance(this.automationService)
-      await this.automationService.loadAndRegisterAllScheduled()
+      pendingAutomationService.init()
+      await pendingAutomationService.loadAndRegisterAllScheduled()
+      // Full chain succeeded — publish atomically (nothing downstream can ever observe a partial init).
+      this.automationService = pendingAutomationService
+      this.automationServiceReady = true
+      setAutomationServiceInstance(pendingAutomationService)
       this.logger.info('AutomationService initialized')
     } catch (e) {
+      // Roll back the half-built instance. It was never published (no field, no singleton, routes see
+      // undefined), so this only reaps whatever the partial init managed to start.
+      try {
+        await pendingAutomationService?.shutdown()
+      } catch {
+        // best-effort rollback — the instance is unpublished either way
+      }
+      this.automationService = undefined
+      this.automationServiceReady = false
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
     }
 
@@ -2169,15 +4023,103 @@ export class MetaSheetServer {
         resolveApprovalProjectionSweepLeaderOptions,
         resolveApprovalProjectionSweepIntervalMs,
       } = await import('./services/ApprovalProjectionSweepScheduler')
-      getApprovalRecordProjectionService().subscribe(eventBus)
+      const projectionService = getApprovalRecordProjectionService()
+      projectionService.subscribe(eventBus)
+      this.approvalProjectionService = projectionService
       const projectionSweepLeaderOptions = await resolveApprovalProjectionSweepLeaderOptions()
-      startApprovalProjectionSweepScheduler({
+      this.approvalProjectionSweepScheduler = startApprovalProjectionSweepScheduler({
         leaderOptions: projectionSweepLeaderOptions,
         intervalMs: resolveApprovalProjectionSweepIntervalMs(),
       })
       this.logger.info('Approval record projection initialized')
     } catch (e) {
+      const scheduler = this.approvalProjectionSweepScheduler
+      this.approvalProjectionSweepScheduler = null
+      await scheduler?.stop().catch(() => undefined)
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      await this.approvalProjectionService?.drainCompletionHandlers().catch(() => undefined)
+      this.approvalProjectionService = null
       this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // Multitable x approval phase 2: the RECORD-LEVEL submit-for-approval completion sink. TWO LEGS, ONE
+    // idempotent handler, exactly like the bridge/projection consumers above: this eventBus subscription
+    // (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF, because `emitApprovalCompletionEvent` returns
+    // early when it is ON) and the durable consumer_key `multitable-record-approval` wired in the
+    // durable-delivery block below (manifest v2). The sink's UPDATE is guarded on `status = 'pending'`, so
+    // a double delivery through both legs cannot double-notify.
+    try {
+      const { createRecordApprovalCompletionSink, createPoolTransactionRunner, subscribeRecordApprovalCompletionBus } = await import(
+        './multitable/record-approval-submission-service'
+      )
+      const recordApprovalPool = poolManager.get()
+      this.recordApprovalCompletionSink = createRecordApprovalCompletionSink(
+        recordApprovalPool.query.bind(recordApprovalPool),
+        // ATOMIC completion: the terminal UPDATE and the requester's notification INSERT share one
+        // transaction. Without it a notification INSERT that fails after the UPDATE committed is lost for
+        // good — the durable retry re-runs the guarded UPDATE, matches zero rows and ACKs.
+        { runInTransaction: createPoolTransactionRunner(recordApprovalPool) },
+      )
+      this.recordApprovalCompletionSubscription = subscribeRecordApprovalCompletionBus(
+        eventBus,
+        this.recordApprovalCompletionSink,
+        (eventType, error) => this.logger.warn(
+          `Record approval completion handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      this.logger.info('Record approval completion sink initialized')
+    } catch (e) {
+      this.recordApprovalCompletionSubscription = null
+      this.recordApprovalCompletionSink = null
+      this.logger.error('Record approval completion sink initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk approval-todo ONE-WAY mirror (plan B). TWO LEGS, ONE SINK, exactly like the record-approval
+    // consumer above: this eventBus subscription (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF)
+    // and the durable consumer_key `dingtalk-todo-mirror` (manifest v3) wired in the block below. The sink
+    // carries its OWN gate — with DINGTALK_TODO_MIRROR_ENABLED not exactly 'true' every handler returns
+    // before touching the database, so both legs are inert and no ledger row is ever written.
+    //
+    // The delivery WORKER is a different matter: it is the only thing that can talk to DingTalk, so it is
+    // started ONLY when the flag is ON (and never under vitest, like the other interval workers here).
+    try {
+      const { createDingTalkTodoMirrorSink, subscribeDingTalkTodoMirrorBus } = await import(
+        './services/dingtalk-todo-mirror-service'
+      )
+      const todoMirrorPool = poolManager.get()
+      this.dingtalkTodoMirrorSink = createDingTalkTodoMirrorSink(todoMirrorPool.query.bind(todoMirrorPool))
+      this.dingtalkTodoMirrorSubscription = subscribeDingTalkTodoMirrorBus(
+        eventBus,
+        this.dingtalkTodoMirrorSink,
+        (eventType, error) => this.logger.warn(
+          `DingTalk todo mirror handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      const { isDingTalkTodoMirrorEnabled } = await import('./integrations/dingtalk/todo-mirror-flag')
+      if (isDingTalkTodoMirrorEnabled() && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+        const { DingTalkTodoMirrorWorker } = await import('./services/dingtalk-todo-mirror-worker')
+        const todoMirrorWorker = new DingTalkTodoMirrorWorker({
+          query: todoMirrorPool.query.bind(todoMirrorPool) as never,
+        })
+        const intervalMs = Math.max(5_000, Number(process.env.DINGTALK_TODO_MIRROR_INTERVAL_MS) || 30_000)
+        const timer = setInterval(() => {
+          todoMirrorWorker.runBatch().catch((err) => {
+            this.logger.warn(`DingTalk todo mirror worker tick error: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }, intervalMs)
+        timer.unref?.()
+        this.stopDingTalkTodoMirrorWorker = async () => {
+          clearInterval(timer)
+          await todoMirrorWorker.stopAndDrain()
+        }
+        this.logger.info('DingTalk todo mirror worker started (DINGTALK_TODO_MIRROR_ENABLED)')
+      }
+      this.logger.info('DingTalk todo mirror sink initialized')
+    } catch (e) {
+      // Degrade-and-continue is the RIGHT posture here and not a copy-paste: the mirror is an OUTBOUND
+      // convenience with its own ledger — a missing mirror loses no platform state, and the durable
+      // consumer keeps ACKing through the registry entry below.
+      this.logger.error('DingTalk todo mirror initialization failed; continuing in degraded mode', e as Error)
     }
 
     // Bind external data-source manager to DB and load persisted sources (A0)
@@ -2275,6 +4217,13 @@ export class MetaSheetServer {
       this.logger.error('Webhook event bridge initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // Webhook retry scheduler — started BEFORE the durable dispatch loop ON PURPOSE (owner P2, head
+    // 1d3854c7a): flag-ON it is a load-bearing durable runtime dependency (the durable webhook leg persists
+    // a `pending` row and fire-and-forgets the send; crash recovery — incl. the first-attempt stray-grace
+    // leg — IS this scheduler), and the activation sequence must validate EVERY dependency before the loop
+    // starts, so a fail-closed abort can never leave a live loop handle ticking the pool. Flag-OFF the order
+    // swap is behavior-neutral: the two blocks are independent (the scheduler is webhook_deliveries
+    // row-driven and never reads the loop), only the log-line order changes.
     try {
       const webhookRetryLeaderOptions = await resolveWebhookRetrySchedulerLeaderOptions()
       const webhookRetryScheduler = startWebhookRetryScheduler({
@@ -2286,8 +4235,178 @@ export class MetaSheetServer {
           ? 'Webhook retry scheduler initialized'
           : 'Webhook retry scheduler disabled (WEBHOOK_RETRY_SCHEDULER_DISABLED=1)',
       )
+      // Owner P1 (head 5afe30f26): with durable delivery ON the retry scheduler is LOAD-BEARING (see the
+      // ordering note above). Disabled (env) ⇒ throw here; init failure ⇒ the catch below. Both abort
+      // startup flag-ON; flag-OFF keeps the legacy degrade-and-continue.
+      const { assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
+      assertDurableRuntimeDependency('webhook retry scheduler (durable webhook crash recovery)', webhookRetryScheduler != null)
     } catch (e) {
+      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
+      if (durableBootFailureDisposition() === 'fail-closed') {
+        // Roll back anything this block managed to start — an aborted startup must leave no ticking DB timer.
+        try {
+          stopWebhookRetryScheduler()
+        } catch {
+          // best-effort rollback; the abort below is the authoritative outcome
+        }
+        this.logger.error('Webhook retry scheduler unavailable with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: the durable webhook leg depends on it for crash recovery)', e as Error)
+        throw e
+      }
       this.logger.error('Webhook retry scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // P2 durable-delivery S5: start the transactional-outbox dispatch loop. Gated by
+    // AUTOMATION_DURABLE_DELIVERY_ENABLED — bootDurableDelivery returns null when the flag is OFF, so this
+    // block registers no loop, opens no poll, and reads no rows (byte-identical startup). When ON, it builds
+    // the six REAL consumer adapters (delegating to the SAME service methods the legacy bus subscribers call —
+    // handleApprovalCompletionEvent / ...Trigger / projection reconcile / handleEvent / webhook deliverEvent),
+    // asserts manifest completeness before any claim, and drains meta_automation_outbox_consumer. The legacy
+    // bus subscriptions above stay wired — with the flag ON they serve only UN-routed event types (routed
+    // families' producers enqueue same-txn and SUPPRESS their legacy emit, the P1#2 REPLACE contract), and
+    // with the flag OFF they are the delivery path exactly as before. stop() is registered in this.stop().
+    //
+    // ACTIVATION IS A ROLLBACK-ABLE SEQUENCE (owner P2, head 1d3854c7a): every durable dependency is
+    // validated BEFORE the loop starts — the retry scheduler in the block above, AutomationService readiness
+    // and manifest completeness below — and the loop start is the LAST fallible step, so a fail-closed abort
+    // structurally cannot leave a live loop. The catch still stops+nulls any started handle (defense in
+    // depth) and tears down the retry scheduler on abort.
+    try {
+      const { bootDurableDelivery, assertDurableRuntimeDependency } = await import('./multitable/automation-durable-activation')
+      const { buildDurableConsumerHandlers } = await import('./multitable/automation-durable-consumer-handlers')
+      const { getApprovalRecordProjectionService } = await import('./multitable/approval-record-projection-service')
+      const { WebhookService } = await import('./multitable/webhook-service')
+      const { db: kyselyDbDurable } = await import('./db/db')
+      // Owner P1 (head 5afe30f26): an earlier degraded AutomationService init must not silently SKIP durable
+      // boot — with the flag ON, skipping is the same outage as a boot crash (no dispatcher, outbox stranded)
+      // but with no exception to catch. The assert throws flag-ON (→ the disposition catch below aborts
+      // startup) and no-ops flag-OFF (the `if` skip below keeps the legacy degrade behavior).
+      // Owner P1 (head 1d3854c7a): the assert consumes the explicit READINESS bit, not the object's mere
+      // existence — publish-last (above) guarantees the bit is true only after constructor+init()+load ALL
+      // succeeded, so a half-initialized service can no longer slip past `Boolean(this.automationService)`.
+      assertDurableRuntimeDependency(
+        'AutomationService (durable consumer handlers delegate; requires the FULL init chain: constructor + init() + loadAndRegisterAllScheduled())',
+        this.automationServiceReady && Boolean(this.automationService),
+      )
+      if (this.automationServiceReady && this.automationService) {
+        const {
+          createRecordApprovalCompletionSink: createRecordApprovalSink,
+          createPoolTransactionRunner: createRecordApprovalTxnRunner,
+        } = await import('./multitable/record-approval-submission-service')
+        const { createDingTalkTodoMirrorSink: createDingTalkTodoMirrorSinkForDurable } = await import(
+          './services/dingtalk-todo-mirror-service'
+        )
+        // Reuse the SAME sink object the eventBus leg subscribed (built above); fall back to a fresh one
+        // only if that init degraded — the durable leg must never be missing its handler (the manifest v2
+        // completeness assertion would abort boot, which is the intended fail-closed outcome).
+        const durablePool = poolManager.get()
+        const recordApprovalSink = this.recordApprovalCompletionSink
+          ?? createRecordApprovalSink(durablePool.query.bind(durablePool), {
+            runInTransaction: createRecordApprovalTxnRunner(durablePool),
+          })
+        const handlers = buildDurableConsumerHandlers({
+          automationService: this.automationService,
+          projectionService: getApprovalRecordProjectionService(),
+          webhookService: new WebhookService(kyselyDbDurable),
+          recordApprovalService: recordApprovalSink,
+          // Manifest v3 consumer. Reuse the SAME sink the eventBus leg subscribed; fall back to a fresh
+          // one only if that init degraded — the durable leg must never be missing its handler (the
+          // completeness assertion would abort boot, which is the intended fail-closed outcome).
+          todoMirrorService: this.dingtalkTodoMirrorSink
+            ?? createDingTalkTodoMirrorSinkForDurable(durablePool.query.bind(durablePool)),
+        })
+        this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
+          onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),
+          onTickError: (err) => this.logger.error('Durable delivery dispatch tick error', err instanceof Error ? err : new Error(String(err))),
+          onHeartbeatError: (info) => this.logger.warn(`Durable delivery heartbeat renew DB error for ${info.consumerKey} (outbox ${info.outboxId}); row left for reclaim`),
+          onClaimTimePoison: (info) => this.logger.warn(`Durable delivery dead-lettered ${info.consumerKey} (outbox ${info.outboxId}) after ${info.attempts} attempts`),
+        }, {
+          // Clock alignment (sink audit 2026-07-17): the OUTBOX consumer lease must outlive the SINK leases
+          // (EVENT_DELIVERY_LEASE_MS / BRIDGE_COMPLETION_LEASE_MS, both 60s) — with the 30s default, a crash
+          // redelivers while the dead worker's sink lease is still live, burning retries on 'busy'. 90s means
+          // the first post-crash redelivery already finds the sink lease expired and reclaims. The busy→
+          // retryable mapping in the sinks is the structural guard; this alignment just avoids wasted spins.
+          leaseMs: 90_000,
+        })
+        if (this.durableDeliveryLoop) this.logger.info('Durable delivery dispatch loop started (AUTOMATION_DURABLE_DELIVERY_ENABLED)')
+      }
+    } catch (e) {
+      // Owner closure item 4 — startup fail-closed. With the flag ON the producer families suppress their
+      // legacy emits, so continuing without a dispatch loop is not "degraded": it silently strands every
+      // outbox row (total delivery outage). The disposition helper (unit-tested) decides per flag.
+      //
+      // ROLLBACK FIRST (owner P2, head 1d3854c7a): if a loop handle was started before the throw, stop it
+      // and null the field NOW — the prior shape left the S1 rejection with a live loop whose next tick hit
+      // "Cannot use a pool after calling end on the pool" in the green Node20 CI log. With the reordered
+      // sequence above nothing fallible remains after the loop starts, so this is defense in depth.
+      if (this.durableDeliveryLoop) {
+        const startedLoop = this.durableDeliveryLoop
+        this.durableDeliveryLoop = null
+        await startedLoop.stop().catch((stopErr: unknown) => {
+          this.logger.warn(`Durable delivery dispatch loop rollback stop error: ${stopErr instanceof Error ? stopErr.message : String(stopErr)}`)
+        })
+      }
+      const { durableBootFailureDisposition } = await import('./multitable/automation-durable-activation')
+      if (durableBootFailureDisposition() === 'fail-closed') {
+        // The retry scheduler (started in the block above) must not outlive the aborted startup either.
+        try {
+          stopWebhookRetryScheduler()
+        } catch {
+          // best-effort rollback; the abort below is the authoritative outcome
+        }
+        this.logger.error('Durable delivery boot FAILED with AUTOMATION_DURABLE_DELIVERY_ENABLED=true — aborting startup (fail-closed: legacy emits are suppressed, a loop-less process would strand all outbox rows)', e as Error)
+        throw e
+      }
+      this.logger.error('Durable delivery dispatch loop initialization failed (flag OFF — nothing suppressed, legacy path delivers); continuing', e as Error)
+    }
+
+    // B3-07 approval attachment pipeline (#4195 §7/§9) — flag-gated boot: route mount + GC sweep +
+    // purge drain + bucket reconciler. APPROVAL_ATTACHMENTS_ENABLED OFF ⇒ bootApprovalAttachmentRuntime
+    // returns null: nothing mounts, nothing ticks, byte-identical startup (D5/G1). Flag ON ⇒ the boot
+    // resolves storage per the ratified O3 decision (production requires the built-in S3-compatible
+    // provider's complete bucket+region configuration; otherwise uploads/downloads fail closed 503;
+    // dev/test probe a local-FS root) and a FAILED probe/boot ABORTS startup — the same doctrine as
+    // durableBootFailureDisposition (flag ON means a storage-less boot is an outage, not a degrade).
+    try {
+      const { bootApprovalAttachmentRuntime } = await import('./services/approval-attachment-runtime')
+      const attachmentRuntime = await bootApprovalAttachmentRuntime({ db: poolManager.get(), logger: this.logger })
+      if (attachmentRuntime) {
+        this.app.use(attachmentRuntime.router)
+        if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+          this.stopApprovalAttachmentWorkers = attachmentRuntime.startWorkers()
+        }
+        this.logger.info('Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)')
+      }
+    } catch (e) {
+      // Only reachable flag-ON (flag-OFF returns null before anything fallible) ⇒ always fail-closed.
+      this.logger.error('Approval attachment runtime boot FAILED with APPROVAL_ATTACHMENTS_ENABLED=true — aborting startup (fail-closed: an unusable blob store must not boot a live upload surface)', e as Error)
+      throw e
+    }
+
+    // E-learning V0.1 M1 media ingest — flag-gated boot. ELEARNING_ENABLED and
+    // ELEARNING_MEDIA_ENABLED must both be exact 'true' or nothing mounts. Production
+    // requires complete S3 bucket+region (never local disk); missing quotas/storage
+    // fail closed 503 on the upload path. A failed local/S3 probe aborts startup.
+    // Mount the route during early boot; defer startWorkers until listen + signals
+    // succeed so a later start failure cannot leave a live interval behind.
+    let startElearningMediaWorkers: (() => () => Promise<void>) | undefined
+    try {
+      const { bootElearningMediaRuntime } = await import('./services/elearning-media-runtime')
+      const mediaRuntime = await bootElearningMediaRuntime({ db: poolManager.get(), logger: this.logger })
+      if (mediaRuntime) {
+        this.app.use(mediaRuntime.router)
+        startElearningMediaWorkers = mediaRuntime.startWorkers
+        this.logger.info('elearning_media_pipeline_initialized')
+      }
+    } catch (e) {
+      if (this.stopElearningMediaWorkers) {
+        const stopWorkers = this.stopElearningMediaWorkers
+        this.stopElearningMediaWorkers = undefined
+        await Promise.resolve(stopWorkers()).catch(() => {
+          this.logger.warn('elearning_media_workers_rollback_stop_failed')
+        })
+      }
+      this.logger.error('elearning_media_boot_failed')
+      throw e
     }
 
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of
@@ -2404,7 +4523,15 @@ export class MetaSheetServer {
             sheetId,
             userId,
           )
-          return capabilities.canRead
+          if (!capabilities.canRead) return false
+          // SHEET LIVENESS (soft delete). resolveSheetCapabilitiesForUser does not report it, so a
+          // soft-deleted sheet's room stayed joinable. Same `false` as a caller who may not read the
+          // sheet, so the answer is not a liveness oracle. The three sibling checkers below and the Yjs
+          // subscribe checker do the same (closed world: tests/unit/
+          // multitable-sheet-liveness-closure-all-routes.guard.test.ts, "collab auth checkers").
+          const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+          if (liveness !== 'live') return false
+          return true
         } catch {
           return false
         }
@@ -2419,6 +4546,9 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // Liveness before the admin short-circuit: a deleted sheet's comment rooms are closed to all.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           if (rowId) {
             return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
@@ -2441,12 +4571,24 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // No mention notification about a comment on a soft-deleted sheet.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
         } catch {
           return false
         }
       })
+      // Lock-10 (S2) OD-S1-15 / G-S1-9 — the approval-comment notify seam. Wired here, in the
+      // SAME block as the multitable comment seam above, so production always has a real checker
+      // before any request can reach the approval-comment routes. The module-level default
+      // (`approval-comment-service.ts`) is FAIL-CLOSED (`async () => false`) — this is the ONE
+      // place that opens it, by delegating to the SAME S1 predicate the routes themselves gate on
+      // (a mentioned user can be notified iff they could read the instance).
+      setApprovalCommentNotifyChecker(async ({ instanceId, userId }) =>
+        canReadApprovalInstance(poolManager.get(), userId, instanceId))
+      setApprovalCommentMentionDelivery((userId, event, payload) => collabService.sendTo(userId, event, payload))
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
@@ -2462,6 +4604,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
@@ -2525,6 +4668,10 @@ export class MetaSheetServer {
               sheetId,
               userId,
             )
+            // Soft delete: a deleted sheet's records are not subscribable (the flush below already
+            // refuses writes). Same answer as a caller without read, so not a liveness oracle.
+            const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+            if (liveness !== 'live') return { canRead: false, canWrite: false }
             // T36-1 review P1: sheet-level canRead is not enough — the doc seeder loads the
             // record's FULL data, so a row-level-denied record (projection non-participant row,
             // or any row-deny-flagged sheet) must not be subscribable at all. DENY-WINS.
@@ -2600,6 +4747,16 @@ export class MetaSheetServer {
               if (recResult.rows.length === 0) return null
               const sheetId = String((recResult.rows[0] as any).sheet_id)
 
+              // SHEET LIVENESS (soft delete). The subscribe-time auth check runs ONCE, so a session
+              // already open when the sheet is deleted underneath it would keep flushing writes into a
+              // "deleted" sheet — and those writes fire its automations. This closure runs on EVERY
+              // debounced flush, so it is the point that actually stops an open session.
+              //
+              // THROWN, not null-returned: `return null` is the quiet "context unavailable" path, which
+              // would make the refusal metric-invisible. This follows the FieldWritePermissionDeniedError
+              // precedent below — rethrown past the generic catch so it reaches flushNow's failure counter.
+              await assertSheetLive(pool.query.bind(pool), sheetId)
+
               const fieldResult = await pool.query(
                 'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
                 [sheetId],
@@ -2620,7 +4777,10 @@ export class MetaSheetServer {
                   const prop = f.property || {}
                   const isReadOnly = isFieldAlwaysReadOnly(f)
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
-                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
+                  // `property` rides along exactly as routes/univer-meta.ts buildFieldMutationGuardMap carries it:
+                  // RecordWriteService.validateChanges reads it for person `limitSingleRecord`, longText config and
+                  // the dateTime field zone (客户反馈 2026-09-24 #4c) — the realtime path must not lose it.
+                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden, property: prop }
                   if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
                     guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
                   }
@@ -2694,6 +4854,9 @@ export class MetaSheetServer {
               // (DB unavailable, record deleted mid-build, etc.) keeps the existing coarse-log + null-return
               // behavior.
               if (err instanceof FieldWritePermissionDeniedError) throw err
+              // Same posture for a sheet deleted underneath an open session: a LOUD, coded refusal, not
+              // a silent drop that would look identical to "record went away".
+              if (err instanceof SheetNotLiveError) throw err
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
               return null
             }
@@ -2711,15 +4874,12 @@ export class MetaSheetServer {
         // pending flushes FIRST — without that a 200–500ms debounced
         // bridge write would re-materialize the stale Yjs-cached value
         // on top of the just-committed REST change.
-        const yjsInvalidate = async (recordIds: string[]) => {
-          if (recordIds.length === 0) return
-          yjsBridge.cancelPending(recordIds)
-          try {
-            await yjsSyncService.invalidateDocs(recordIds)
-          } finally {
-            yjsWsAdapter.notifyInvalidated(recordIds)
-          }
-        }
+        const yjsInvalidate = createYjsInvalidator({ bridge: yjsBridge, syncService: yjsSyncService, adapter: yjsWsAdapter })
+        // Field retype slice 3b: a realtime edit refused because its column changed type while the flush waited
+        // (409 FIELD_SCHEMA_CHANGED) is no longer dropped in silence — the record's document is invalidated, so
+        // its editors are told with the message they already handle. Inert unless the conversion flag AND the
+        // writer fence are on; every other refusal on the bridge is left as it was.
+        yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))
         recordWriteService.setPostCommitHooks([
           createYjsInvalidationPostCommitHook(yjsInvalidate),
         ])
@@ -2768,6 +4928,7 @@ export class MetaSheetServer {
 
     this.installGlobalErrorHandler()
 
+    this.assertStartupNotCancelled()
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {
       const onError = (err: NodeJS.ErrnoException) => {
@@ -2784,6 +4945,7 @@ export class MetaSheetServer {
       this.httpServer.once('error', onError)
       const onListening = () => {
         this.httpServer.off('error', onError)
+        try { this.assertStartupNotCancelled() } catch (error) { reject(error); return }
 
         // If port=0, update port to actual assigned port
         const addr = this.httpServer.address()
@@ -2808,27 +4970,58 @@ export class MetaSheetServer {
       }
     })
 
+    try {
+      this.assertStartupNotCancelled()
+      // The injected worker is deliberately activated only after the HTTP listener is live.
+      this.recoveryArchiveApplication.startWorker()
+    } catch (error) {
+      await this.stop('RECOVERY_ARCHIVE_RESTORE_WORKER_BOOT_FAILED')
+      throw error
+    }
+
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      this.stopAuditPartitionEnsure = startAuditLogPartitionEnsure({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
       this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
+      this.stopNotificationRetention = startNotificationRetention({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.
-    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-      process.on('SIGTERM', () => this.stop('SIGTERM').then(() => process.exit(0)))
-      process.on('SIGINT', () => this.stop('SIGINT').then(() => process.exit(0)))
+    if (this.manageProcessSignals && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+      process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))
+      process.on('SIGINT', () => this.stopForSignal('SIGINT'))
     }
+
+    if (startElearningMediaWorkers && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+      this.stopElearningMediaWorkers = startElearningMediaWorkers()
+    }
+  }
+
+  private assertStartupNotCancelled(): void {
+    if (this.startupSignal?.aborted || this.stopPromise) throw new Error('SERVER_STARTUP_CANCELLED')
   }
 }
 
-// 启动 - 仅在直接运行时启动服务器，测试导入时不启动
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  const server = new MetaSheetServer()
-  server.start().catch((err) => {
+export function isCoreBackendDirectEntry(mainModule: unknown, currentModule: unknown): boolean {
+  return mainModule === currentModule
+}
+
+export const coreBackendIsDirectEntry = isCoreBackendDirectEntry(require.main, module)
+
+// 启动 - 仅在直接运行时启动服务器，测试或注入式 launcher 导入时不启动
+if (
+  coreBackendIsDirectEntry &&
+  process.env.NODE_ENV !== 'test' &&
+  !process.env.VITEST
+) {
+  Promise.resolve().then(async () => {
+    const server = new MetaSheetServer()
+    await server.start()
+  }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to start MetaSheet v2 core:', err)
     process.exit(1)
@@ -2942,3 +5135,4 @@ export type {
  */
 export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'
+export { MultitableRecordVersionConflictError } from './multitable/record-errors'

@@ -33,6 +33,11 @@ interface OrgModel {
 
 function makeOrgQuery(org: OrgModel) {
   return async <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> => {
+    // 0) B5-b routing-policy probe (`org_directory_routing_policy`). Empty rows = no policy
+    //    → legacy fixture path (same contract as pre-B5-b). Do not stub other SQL shapes here.
+    if (text.includes('FROM directory_account_links l') && text.includes('org_directory_routing_policy')) {
+      return { rows: [] }
+    }
     // 1) requester lookup by local user id
     if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
       if (String(params?.[0]) !== org.requesterLocalId) return { rows: [] }

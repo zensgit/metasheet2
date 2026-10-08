@@ -47,22 +47,27 @@
       <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
+      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
     </div>
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
       :pit-reset-enabled="pitResetEnabled"
+      :sheet-revert-enabled="sheetRevertEnabled"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
       :list-history-events="listHistoryEventsWire"
       :reset-preview="resetPreviewWire"
       :reset-execute="resetExecuteWire"
-      :on-done="onResetDone"
+      :revert-preview="revertPreviewWire"
+      :revert-execute="revertExecuteWire"
+      :on-done="onRecoveryDone"
     />
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
@@ -84,15 +89,133 @@
         />
       </div>
       <footer class="mt-template-library__footer">
-        <router-link
+        <!-- F5: programmatic navigation (NOT <router-link>) so closing this panel can wait for the
+             push RESULT. A router-link fires its inline @click synchronously while the guard
+             (MultitableEmbedHost onBeforeRouteLeave -> confirmPageLeave) can still abort the
+             navigation, which looked like "clicked, nothing happened, panel just closed".
+             The href is still real (resolved through the router) so Ctrl/Cmd/middle click, "copy
+             link address" and the status-bar preview keep working; onGoToTemplateCenter only
+             preventDefault()s the plain left click it actually handles. -->
+        <a
           class="mt-template-library__more"
-          :to="{ name: TemplateCenterRouteName }"
+          :href="templateCenterHref"
+          role="link"
+          tabindex="0"
           data-testid="multitable-workbench-template-center-link"
-          @click="showTemplateLibrary = false"
+          @click="onGoToTemplateCenter"
+          @keydown.enter="onGoToTemplateCenter"
         >
           {{ wb('tpl.more', isZh) }}
-        </router-link>
+        </a>
       </footer>
+    </div>
+    <!--
+      F7「把当前数据表存为模板」。作用于**当前激活的数据表**,提交
+      { baseId, sheetIds: [activeSheetId], fieldIds: 勾选的那几个 } —— 服务端把这两个选择器
+      当成收窄参数下推,可读性/授权闸一条不少。这里的显隐只是 UX,门在服务端
+      (univer-meta.ts 的 canManageFields 判定)。
+    -->
+    <div v-if="showSaveSheetAsTemplate" class="mt-save-tpl__overlay">
+      <div class="mt-save-tpl" role="dialog" aria-modal="true" data-testid="save-sheet-as-template-dialog">
+        <header class="mt-save-tpl__header">
+          <strong>{{ wb('saveTpl.title', isZh) }}</strong>
+          <button class="mt-save-tpl__close" data-action="save-sheet-as-template-close" @click="closeSaveSheetAsTemplate">&times;</button>
+        </header>
+        <!-- A10 phase 1(客户反馈 2026-09-24 #8):对话框不点名来源,用户存错表都不知道。 -->
+        <p class="mt-save-tpl__source" data-testid="save-sheet-as-template-source">{{ fmtSaveTplSource(activeBaseName, activeSheetName, isZh) }}</p>
+        <p class="mt-save-tpl__hint">{{ wb('saveTpl.hint', isZh) }}</p>
+        <template v-if="!saveTemplateResult">
+          <label class="mt-save-tpl__row">
+            <span class="mt-save-tpl__label">{{ wb('saveTpl.nameLabel', isZh) }}</span>
+            <input
+              v-model="saveTemplateName"
+              class="mt-save-tpl__input"
+              type="text"
+              maxlength="255"
+              data-testid="save-sheet-as-template-name"
+            />
+          </label>
+          <div class="mt-save-tpl__fields">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.fieldsLabel', isZh) }}</span>
+              <span class="mt-save-tpl__count" data-testid="save-sheet-as-template-count">{{ saveTemplateFieldIds.length }} / {{ saveTemplateFieldChoices.length }}</span>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-all" @click="setAllSaveTemplateFields(true)">{{ wb('saveTpl.selectAll', isZh) }}</button>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-none" @click="setAllSaveTemplateFields(false)">{{ wb('saveTpl.selectNone', isZh) }}</button>
+            </div>
+            <ul class="mt-save-tpl__list">
+              <li v-for="field in saveTemplateFieldChoices" :key="field.id" class="mt-save-tpl__item">
+                <label>
+                  <input
+                    type="checkbox"
+                    :data-save-template-field="field.id"
+                    :checked="saveTemplateFieldIds.includes(field.id)"
+                    @change="toggleSaveTemplateField(field.id)"
+                  />
+                  <span class="mt-save-tpl__item-name">{{ field.name }}</span>
+                  <em class="mt-save-tpl__item-type">{{ fieldTypeLabel(field.type, isZh) }}</em>
+                </label>
+              </li>
+            </ul>
+          </div>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示——服务端把这张表的**全部**
+               视图都存进模板(custom-template-store.ts 不按 sheetIds/fieldIds 之外再收窄视图),
+               这里的清单必须是 workbench.views(未做权限过滤),才能和实际保存范围对得上。 -->
+          <div class="mt-save-tpl__views">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.viewsLabel', isZh) }}</span>
+            </div>
+            <ul class="mt-save-tpl__list" data-testid="save-sheet-as-template-views">
+              <li v-for="view in saveTemplateViewChoices" :key="view.id" class="mt-save-tpl__item">
+                <span class="mt-save-tpl__item-name">{{ view.name }}</span>
+                <em class="mt-save-tpl__item-type">{{ viewTypeLabel(view.type, isZh) }}</em>
+              </li>
+            </ul>
+            <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-views-note">{{ wb('saveTpl.viewsNote', isZh) }}</p>
+          </div>
+          <label class="mt-save-tpl__share">
+            <input v-model="saveTemplateShare" type="checkbox" data-testid="save-sheet-as-template-share" />
+            <span>{{ wb('saveTpl.shareLabel', isZh) }}</span>
+          </label>
+          <p class="mt-save-tpl__hint">{{ wb('saveTpl.shareHint', isZh) }}</p>
+          <p v-if="saveTemplateError" class="mt-save-tpl__error" data-testid="save-sheet-as-template-error">{{ saveTemplateError }}</p>
+          <footer class="mt-save-tpl__footer">
+            <MtButton data-action="save-sheet-as-template-cancel" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.cancel', isZh) }}</MtButton>
+            <MtButton
+              variant="primary"
+              data-action="save-sheet-as-template-submit"
+              :disabled="saveTemplateSubmitting"
+              @click="onSaveSheetAsTemplate"
+            >
+              {{ saveTemplateSubmitting ? wb('saveTpl.saving', isZh) : wb('saveTpl.submit', isZh) }}
+            </MtButton>
+          </footer>
+          <button v-if="canCopySheet" type="button" class="mt-save-tpl__link" data-action="save-sheet-as-template-copy-with-data" @click="openCopySheetFromSaveTemplate">{{ copySheetLabel('copySheet.entryFromTemplate', isZh) }}</button>
+        </template>
+        <div v-else class="mt-save-tpl__result" data-testid="save-sheet-as-template-result">
+          <strong>{{ wb('saveTpl.successTitle', isZh) }}</strong>
+          <span class="mt-save-tpl__result-name">{{ saveTemplateResult.template.name }}</span>
+          <template v-if="saveTemplateResult.warnings.length > 0">
+            <p class="mt-save-tpl__label">{{ wb('saveTpl.warningsTitle', isZh) }}</p>
+            <ul class="mt-save-tpl__warnings" data-testid="save-sheet-as-template-warnings">
+              <li v-for="(warning, index) in saveTemplateResult.warnings" :key="index">{{ warning }}</li>
+            </ul>
+          </template>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):存完之后说清楚「装模板」是什么后果——
+               新建工作区+空表,不是把这张表复制一份数据。 -->
+          <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-install-note">{{ wb('saveTpl.installNote', isZh) }}</p>
+          <footer class="mt-save-tpl__footer">
+            <RouterLink
+              class="mt-save-tpl__link"
+              :to="{ name: TemplateCenterRouteName }"
+              data-testid="save-sheet-as-template-center-link"
+              @click="closeSaveSheetAsTemplate"
+            >
+              {{ wb('saveTpl.openCenter', isZh) }}
+            </RouterLink>
+            <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
+          </footer>
+        </div>
+      </div>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -143,9 +266,11 @@
               :bases="basePickerBases"
               :active-base-id="activeBaseId"
               :can-create="canCreateBasesAndSheets"
+              :can-manage-fields="caps.canManageFields.value"
               @select="onSelectBase"
               @create="onCreateBase"
               @toggle-favorite="onToggleFavoriteBase"
+              @rename="onRenameBase"
             />
           </div>
           <button
@@ -159,7 +284,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -167,6 +292,7 @@
           :sheet-id="workbench.activeSheetId.value"
           :fields="scopedAllFields"
           :client="workbench.client"
+          @close="exitDashboard"
         />
         <MetaFormView
           v-else-if="activeViewType === 'form'"
@@ -284,7 +410,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -297,12 +423,13 @@
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           :conditional-formatting="conditionalFormattingByRecord"
           :conditional-formatting-scale="conditionalFormattingScaleByField"
-          :ai-run-enabled="effectiveRowActions.canEdit"
+          :ai-run-enabled="aiAvailable && effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
           :button-run-pending="buttonRunPending"
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
+          :mention-search="searchCommentMentions"
           :remote-cursors-by-cell="sheetPresenceState.remoteCursorsByCell.value"
           @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
@@ -311,6 +438,7 @@
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
+          @set-frozen-rows="onSetFrozenRows"
           @set-aggregation="onSetAggregation"
           @toggle-group="onToggleGroup"
           @open-comments="onOpenRecordComments"
@@ -319,13 +447,22 @@
           @ai-run="onGridAiRun"
           @run-button="onRunButton"
           @selection-change="onGridSelectionChange"
+          @expand-record="onExpandRecord"
         />
       </div>
       <MetaRecordInspector
+        ref="recordInspectorRef"
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
-        :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :inspector-field-layout="inspectorFieldLayout"
+        :fetch-record="fetchLinkedRecordFn"
+        :opener-el="inspectorOpenerEl"
+        :field-errors="inspectorFieldErrors"
+        :sheet-id="workbench.activeSheetId.value ?? undefined"
+        :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
+        :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
@@ -337,8 +474,10 @@
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
         :ai-shortcut="aiShortcut.state"
+        :ai-available="aiAvailable"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :mention-search="searchCommentMentions"
         :comments="commentsState.comments.value"
         :comments-loading="commentsState.loading.value"
         :can-resolve-comments="effectiveRowActions.canComment"
@@ -359,12 +498,14 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
+        @approval-submitted="onRecordApprovalSubmitted"
         @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
@@ -383,6 +524,8 @@
           <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>{{ wb('kbd.paste', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>{{ wb('kbd.undo', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>{{ wb('kbd.redo', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+,</kbd><span>{{ wb('kbd.recordPrev', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+.</kbd><span>{{ wb('kbd.recordNext', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>?</kbd><span>{{ wb('kbd.toggleHelp', isZh) }}</span></div>
         </div>
       </div>
@@ -404,9 +547,13 @@
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
       :fields="importSurfaceFields"
+      :existing-field-names="importExistingFieldNames"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      :can-create-fields="caps.canManageFields.value"
+      :create-fields-error="importCreateFieldsError"
+      :created-field-columns="importCreatedFieldColumns"
       @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
@@ -419,6 +566,17 @@
       :initial-format="exportInitialFormat"
       @confirm="onExportDialogConfirm"
       @cancel="exportDialogVisible = false"
+    />
+    <MetaCopySheetDialog
+      :visible="showCopySheetDialog"
+      :sheet-id="copySheetSourceId"
+      :sheet-name="copySheetSourceName"
+      :base-name="copySheetBaseName"
+      :fields="copySheetFieldChoices"
+      :views="copySheetViewChoices"
+      :client="workbench.client"
+      @close="closeCopySheetDialog"
+      @copied="onCopySheetCopied"
     />
     <RestorePreviewDialog
       :visible="restorePreview.visible"
@@ -435,6 +593,7 @@
       :visible="batchRestore.visible"
       :phase="batchRestore.phase"
       :loading="batchRestore.loading"
+      :executing="batchRestoreExecuting"
       :target-version="batchRestore.targetVersion"
       :preview-records="batchRestore.records"
       :restorable-count="batchRestore.restorableCount"
@@ -457,10 +616,12 @@
       @confirm="onLinkPickerConfirm"
     />
     <MetaPersonPicker
+      v-if="personPickerVisible || workbench.activeSheetId.value"
       :visible="personPickerVisible"
       :field="personPickerField"
       :sheet-id="workbench.activeSheetId.value"
       :current-value="personPickerCurrentValue"
+      :current-summaries="personPickerCurrentSummaries"
       @close="personPickerVisible = false"
       @confirm="onPersonPickerConfirm"
     />
@@ -476,6 +637,8 @@
       :ai-preview-busy="aiShortcutBusy"
       :ai-usage-summary-fn="aiUsageSummaryFn"
       :formula-suggest-fn="formulaSuggestFn"
+      :ai-available="aiAvailable"
+      :ai-unavailable-confirmed="aiUnavailableConfirmed"
       :list-bases-fn="listBasesForFieldFn"
       :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
       :list-foreign-fields-fn="listForeignFieldsForFieldFn"
@@ -496,12 +659,14 @@
       @committed="onBulkFillCommitted"
     />
     <MetaViewManager
+      v-if="showViewManager || workbench.activeSheetId.value"
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value" :field-permissions="effectiveFieldPermissions"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
     <MetaSheetPermissionManager
+      v-if="showPermissionManager || workbench.activeSheetId.value"
       :visible="showPermissionManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
@@ -518,6 +683,7 @@
          it maintains its own list state in place; only an explicit close does. Closing on every
          update forced users to reopen the modal after each toggle/delete/save. -->
     <MetaAutomationManager
+      v-if="showAutomationManager || workbench.activeSheetId.value"
       :visible="showAutomationManager"
       :sheet-id="workbench.activeSheetId.value"
       :fields="grid.fields.value"
@@ -526,6 +692,7 @@
       @close="showAutomationManager = false"
     />
     <MetaFormShareManager
+      v-if="showFormShareManager || workbench.activeSheetId.value"
       :visible="showFormShareManager"
       :sheet-id="workbench.activeSheetId.value"
       :view-id="workbench.activeViewId.value"
@@ -541,12 +708,12 @@
       @close="showApiTokenManager = false"
     />
 
-    <TrashModal
+    <SheetTrashModal
       :open="showTrash"
-      :sheet-id="workbench.activeSheetId.value"
-      :fields="twoLayerVisibleFields"
+      :base-id="activeBaseId || ''"
+      :client="workbench.client"
       @close="showTrash = false"
-      @restored="onTrashRestored"
+      @restored="onSheetTrashRestored"
     />
 
     <HistoryCenterModal
@@ -557,11 +724,14 @@
       :link-summaries="grid.linkSummaries.value"
       :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
+      :can-restore-records="caps.canDeleteRecord.value"
       @close="closeHistory"
       @open-record="onHistoryOpenRecord"
+      @restored="onHistoryRecordRestored"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
+      :scope-key="workbench.activeSheetId.value"
       :items="configHistory.items"
       :loading="configHistory.loading"
       :entity-type="configHistory.entityType"
@@ -573,15 +743,38 @@
       @filter-change="onConfigHistoryFilter"
       @reverted="onConfigReverted"
     />
+    <RecoveryArchiveModal
+      v-if="showRecoveryArchive || workbench.activeSheetId.value"
+      :visible="showRecoveryArchive"
+      :sheet-id="workbench.activeSheetId.value"
+      :sheet-name="activeSheetExportName"
+      :capture-archive="recoveryArchiveCaptureWire"
+      :read-capture="recoveryArchiveReadCaptureWire"
+      :is-zh="isZh"
+      :fields="scopedGridFields"
+      :selected-record-ids="[...exportSelectedRecordIds]"
+      :list-catalog="recoveryArchiveCatalogWire"
+      :list-jobs="recoveryArchiveListJobsWire"
+      :preview-archive="recoveryArchivePreviewWire"
+      :execute-archive="recoveryArchiveExecuteWire"
+      :accept-job="recoveryArchiveAcceptJobWire"
+      :read-job="recoveryArchiveReadJobWire"
+      :resume-job="recoveryArchiveResumeJobWire"
+      :cancel-job="recoveryArchiveCancelJobWire"
+      @close="showRecoveryArchive = false"
+      @executed="onRecoveryArchiveExecuted"
+      @refresh="onRecoveryArchiveChanged"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
+import { scheduleIdle } from '../../utils/scheduleIdle'
 import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -606,9 +799,16 @@ import {
   duplicateRowsSkipped as fmtDuplicateRowsSkipped,
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
+  sheetDeleteConfirm as fmtSheetDeleteConfirm,
+  sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
+  fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
+  saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
+import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
   bulkFailureSamples as fmtBulkFailureSamples,
@@ -623,6 +823,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadContext,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearchResult,
   MetaCommentMentionSuggestion,
   MetaCommentsScope,
   MetaFieldPermission,
@@ -630,11 +831,13 @@ import type {
   MetaFieldCreateType,
   MetaFieldType,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
   MetaViewPermission,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
   MetaTemplate,
+  CreateTemplateFromBaseResult,
   PersonSummary,
   RowDensity,
 } from '../types'
@@ -642,6 +845,9 @@ import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
+import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
+import { viewTypeLabel } from '../utils/meta-manager-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -657,9 +863,23 @@ import MetaSheetViewRail from '../components/MetaSheetViewRail.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
+import MetaCopySheetDialog from '../components/MetaCopySheetDialog.vue'
+import { copySheetLabel, copySheetSuccessToast } from '../utils/meta-copy-sheet-labels'
+import type { CopySheetResult } from '../types'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
-import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
+import type {
+  ConfigRestoreExecuteConfirm,
+  ExactAnchorRequest,
+  RecoveryArchiveExecuteResult,
+  RecoveryArchiveJobPage,
+  RecoveryArchiveJobSnapshot,
+  RecoveryArchivePreview,
+  RecoveryArchiveScope,
+  RestoreBatchExecuteRecord,
+  RestoreBatchPreviewRecord,
+  RestorePreviewChange,
+} from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
@@ -671,9 +891,10 @@ import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaAiBulkFillDialog from '../components/MetaAiBulkFillDialog.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
-import TrashModal from '../components/TrashModal.vue'
+import SheetTrashModal from '../components/SheetTrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import RecoveryArchiveModal from '../components/RecoveryArchiveModal.vue'
 import ResetToPointPicker from '../components/ResetToPointPicker.vue'
 import { refreshAfterConfigRevert } from './config-revert-refresh'
 import type { MetaConfigRevision } from '../api/client'
@@ -696,8 +917,31 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import {
+  createImportAbortError,
+  extractImportTokens,
+  type ImportBuildFailure,
+  type ImportResolveContext,
+  type ImportValueResolver,
+} from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import { dateTimeExportText } from '../utils/field-display'
+import { loadLookupTargetFields, lookupTargetSignature } from '../utils/lookup-target-fields'
+import {
+  MAX_FIELD_NAME_LENGTH,
+  MAX_SHEET_FIELDS,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
+import {
+  importLabel,
+  createFieldFailed as fmtCreateFieldFailed,
+  createFieldLimitReached as fmtCreateFieldLimitReached,
+  createFieldNameInvalid as fmtCreateFieldNameInvalid,
+  createFieldNameTooLong as fmtCreateFieldNameTooLong,
+  importPersonValueTooBroad as fmtImportPersonValueTooBroad,
+} from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
@@ -706,6 +950,7 @@ import {
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { parseFrozenIds } from '../utils/frozen-columns'
+import { parseFrozenTopRowCount } from '../utils/frozen-rows'
 import {
   parseColumnWidths,
   parseRowDensity,
@@ -714,7 +959,7 @@ import {
   mergeRowDensity,
   mergeGroupCollapse,
 } from '../utils/view-display-prefs'
-import { useAiShortcut } from '../composables/useAiShortcut'
+import { resolveAiAvailability, useAiShortcut, type AiAvailabilityState } from '../composables/useAiShortcut'
 import { useAiBulkFill } from '../composables/useAiBulkFill'
 import type { AiShortcutConfigInput } from '../api/client'
 import { buildFieldScaleMap, buildRecordFormattingMap, decideScaleStatsRefetch, extractRulesFromConfig, extractScaleRulesFromConfig, scaleStatsFieldIds, type FieldScaleServerStats } from '../utils/conditional-formatting'
@@ -741,6 +986,7 @@ import {
   Delete as IconTrash,
   Clock as IconHistory,
   Setting as IconConfigHistory,
+  FolderOpened as IconArchiveRecovery,
 } from '@element-plus/icons-vue'
 
 // Feature-row chrome icon map (UI-P1b). Same idiom as MetaToolbar's ICON map (UI-P1 slice-1): keyed by
@@ -762,6 +1008,7 @@ const ICON = {
   trash: IconTrash,
   history: IconHistory,
   configHistory: IconConfigHistory,
+  archiveRecovery: IconArchiveRecovery,
 } as const
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
@@ -799,19 +1046,86 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
-const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId, isPersonalMode: personalView.isPersonalMode })
+const grid = useMultitableGrid({
+  sheetId: workbench.activeSheetId,
+  viewId: workbench.activeViewId,
+  isPersonalMode: personalView.isPersonalMode,
+  // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
+  // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
+  // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
+  onSortFilterWriteFailed: () => showError(wb('toast.sortFilterSaveFailed', isZh.value)),
+})
 
-// T8-2 Reset UI T-source entry wiring (#3250/#3251 flagged the missing T-source). Gate on the flag-derived
-// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass Global History listing plus the raw
-// reset client signatures so the picker owns + tests the (sheetId, asOf) composition; refresh the grid after success.
+// W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
+// owns the (sheetId, exact-anchor) composition and the dialogs execute token-only. Revert keeps post-anchor-created
+// records; Reset may delete them and retains its typed confirmation. No wall-clock asOf crosses either wire.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
+const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEnabled === true)
+// Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only shape as
+// pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
+// so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
+const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
+// 记录级送审 (多维表 × 审批 阶段二 §4.2/§5): server-derived `multitable:submit-approval`, read with the
+// SAME shape as canDeleteSheet/pitResetEnabled above — straight off the /context capabilities object
+// (`=== true`), never a role fallback, so an old backend, a legacy role-string source or a stale object
+// all fail CLOSED (送审 entry hidden). `useMultitableCapabilities` exposes the same key for any other
+// consumer (composable-tier contract, see that file); this view deliberately reads the source object so a
+// capability the server has not sent is `undefined`, not a lookup on a partially-shaped capabilities bag.
+const canSubmitApproval = computed(() => capabilitySource.value?.canSubmitApproval === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
 ) => workbench.client.listHistoryEvents(baseId, params)
-const resetPreviewWire = (sid: string, asOf: string) => workbench.client.resetPreview(sid, asOf)
-const resetExecuteWire = (sid: string, asOf: string, previewIdentity: string) => workbench.client.resetExecute(sid, asOf, previewIdentity)
-const onResetDone = () => { void grid.reloadCurrentPage() }
+const resetPreviewWire = (sid: string, anchor: ExactAnchorRequest) => workbench.client.resetPreview(sid, anchor)
+const resetExecuteWire = (sid: string, previewIdentity: string) => workbench.client.resetExecute(sid, previewIdentity)
+const revertPreviewWire = (sid: string, anchor: ExactAnchorRequest) => workbench.client.revertPreview(sid, anchor)
+const revertExecuteWire = (sid: string, previewIdentity: string) => workbench.client.revertExecute(sid, previewIdentity)
+const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage() }
+
+// D6 archive recovery is a server-led sheet surface. There is no local flag or capability inference:
+// catalog, preview, sync execute, and durable job actions render only the server's current decision.
+const showRecoveryArchive = ref(false)
+const recoveryArchiveCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.captureRecoveryArchive(sheetId, requestId)
+const recoveryArchiveReadCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.readRecoveryArchiveCapture(sheetId, requestId)
+const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
+  workbench.client.listRecoveryArchiveCatalog(sheetId, params)
+const recoveryArchiveListJobsWire = (
+  sheetId: string,
+  params?: { cursor?: string; limit?: number },
+): Promise<RecoveryArchiveJobPage> => workbench.client.listRecoveryArchiveJobs(sheetId, params)
+const recoveryArchivePreviewWire = (
+  sheetId: string,
+  input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope },
+): Promise<RecoveryArchivePreview> => workbench.client.previewRecoveryArchive(sheetId, input)
+const recoveryArchiveExecuteWire = (
+  sheetId: string,
+  input: { previewIdentity: string; scope: RecoveryArchiveScope },
+): Promise<RecoveryArchiveExecuteResult> => workbench.client.executeRecoveryArchive(sheetId, input)
+const recoveryArchiveAcceptJobWire = (
+  sheetId: string,
+  previewIdentity: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.acceptRecoveryArchiveJob(sheetId, previewIdentity)
+const recoveryArchiveReadJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.readRecoveryArchiveJob(sheetId, jobId)
+const recoveryArchiveResumeJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.resumeRecoveryArchiveJob(sheetId, jobId)
+const recoveryArchiveCancelJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.cancelRecoveryArchiveJob(sheetId, jobId)
+async function onRecoveryArchiveExecuted(): Promise<void> {
+  await grid.reloadCurrentPage()
+  showSuccess(isZh.value ? '归档恢复已完成。' : 'Archive recovery completed.')
+}
+async function onRecoveryArchiveChanged(): Promise<void> {
+  await grid.reloadCurrentPage()
+}
 
 // Slice 3: per-view personal-toggle click + "reset to shared". Reset deletes the actor's own personal-config
 // row then re-fetches via loadSheetMeta so the rendered config becomes whatever the server now resolves
@@ -858,6 +1172,71 @@ const sheetPresenceState = useMultitableSheetPresence({
 })
 
 const selectedRecordId = ref<string | null>(null)
+// Record inspector v3 (2026-09-05, PR-A §1.1 explicit-open erratum): `selectedRecordId` stays the
+// grid CURSOR (row highlight, collab presence, comment scope, `aria-selected`) — every one of its
+// 69 pre-existing consumers is untouched by this line. `inspectorOpen` is the NEW, second axis: the
+// panel is visible only while BOTH are true (`:visible="inspectorOpen && !!selectedRecordId"` on
+// `<MetaRecordInspector>` below). Session-only (no storage, OD-W2-2 discipline) — a fresh mount
+// always starts closed regardless of what a previous tab session left it at.
+const inspectorOpen = ref(false)
+// Captured by `openRecord` below (see its own comment), written by `selectRecord`'s open branch, and
+// forwarded to the inspector's `openerEl` prop for focus-restore-on-close; `null` for a caller that
+// has no natural opener element (a deep-link/comment-click-through open) — the inspector itself
+// falls back to the element focused at the moment it becomes visible in that case (see
+// MetaRecordInspector.vue's `captureOpenerAndFocusTitle`). Round 4 (2026-09-05, refuter P2): this
+// ref describes the CURRENT open only — `onCloseDrawer` clears it, and a fresh open reached without
+// an opener resets it to `null` inside `selectRecord` — so an opener from an earlier, already-closed
+// open can never be handed to a later open that did not come from that element (expand-icon open →
+// close → comment click-through open used to restore focus to the expand icon on Escape).
+const inspectorOpenerEl = ref<HTMLElement | null>(null)
+
+/** Record inspector v3 (2026-09-05, PR-A §1.1): the SINGLE explicit-open entry point — every
+ *  trigger that should OPEN the panel (not just move the cursor) routes through this, per the
+ *  design's own enumeration: (i) the grid row-number expand icon, (ii) Shift+Space on a focused
+ *  grid row, (iv) `resolveDeepLink` (see that function's own comment), (v) every
+ *  `selectRecord(..., { openComments: true })` caller. `opener` names the element that triggered
+ *  this open (when the caller has one to hand — the grid handlers below read
+ *  `document.activeElement` themselves, which at the moment their synchronous handler runs IS the
+ *  element the user just interacted with); omitted for a deep-link/programmatic open.
+ *  `inspectorOpen` itself is set INSIDE `selectRecord` (via `{ open: true }`), AFTER that
+ *  function's own discard-guard passes — not here, eagerly — so a DECLINED discard-changes prompt
+ *  (navigating away from an unsaved edit on a different record) cancels the open too, instead of
+ *  opening the panel on the record that was never actually navigated away from. Round 4
+ *  (2026-09-05, refuter P2): the resolved opener is now THREADED through `selectRecord`'s opts (not
+ *  written eagerly here) so the single open branch there is the ONE writer of `inspectorOpenerEl`
+ *  and can tell "this open has an opener" (this caller) from "this open has none" (deep-link /
+ *  comment click-through) — the latter must not inherit a stale opener from an earlier open. A
+ *  consequence: a DECLINED discard prompt now leaves the opener untouched too (the panel it kept
+ *  open was opened by something else, and that is what Escape should restore focus to). Round 5
+ *  (2026-09-05, refuter P3): the resolved candidate — explicit or `document.activeElement` — goes
+ *  through `resolveOpenerEl` below, so `document.body` (what `activeElement` IS at the instant the
+ *  expand handler runs in Safari and Firefox/macOS, where a mouse click does not focus a `<button>`,
+ *  and after any programmatic `.click()`), a disconnected element and `null` all reach `selectRecord`
+ *  as `opener: null` — the "this open has no opener" value the inspector already handles — never as
+ *  an element whose close-time `.focus()` would be a no-op that also pre-empts the inspector's
+ *  `.meta-grid` last resort. */
+function openRecord(recordId: string, opener?: HTMLElement | null) {
+  const candidate = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
+  void selectRecord(recordId, { open: true, opener: resolveOpenerEl(candidate) })
+}
+
+/** Round 5 (2026-09-05, refuter P3): the ONE filter `openRecord` applies to whatever opener it
+ *  resolved. `document.body` is what `document.activeElement` reports when NOTHING is focused — it is
+ *  not an element the user interacted with, and restoring focus to it on close is a no-op that (in
+ *  the inspector) also pre-empted the `.meta-grid` fallback. A disconnected element can never be
+ *  refocused either. Both collapse to `null` here so the inspector's own fallbacks (pre-open
+ *  activeElement, then `.meta-grid`) run. The inspector applies the same predicate to its `openerEl`
+ *  prop on its side too (`isRestorableOpener` in MetaRecordInspector.vue) — each side guards
+ *  independently, so neither relies on the other having done it. */
+function resolveOpenerEl(candidate: HTMLElement | null | undefined): HTMLElement | null {
+  if (!candidate || !candidate.isConnected) return null
+  if (typeof document !== 'undefined' && candidate === document.body) return null
+  return candidate
+}
+
+function onExpandRecord(recordId: string) {
+  openRecord(recordId)
+}
 
 // --- A3: AI field shortcut — ONE instance drives all three trigger surfaces
 // (drawer preview/run, cell-editor run, field-manager config-time preview) so
@@ -873,6 +1252,15 @@ const aiShortcut = useAiShortcut({
 // run button (aiRunBusy) and field-manager config preview (aiPreviewBusy) —
 // so no surface offers a click the composable guard would silently refuse.
 const aiShortcutBusy = aiShortcut.busy
+// A11 (customer feedback 2026-09-24 #7c): the AI surfaces (drawer preview/run, cell-editor run,
+// field-manager AI section + bulk fill + usage card, formula AI-suggest) render only when the server
+// reports AI available. Starts 'unknown' (hidden) and stays hidden on any failure
+// (resolveAiAvailability is fail-closed, one retry for network/5xx); set once per mount in onMounted
+// below. UI-only — every AI request is still gated server-side. The field manager says 「未开通」
+// only when the server EXPLICITLY answered available:false; an error gets neutral wording.
+const aiAvailabilityState = ref<AiAvailabilityState>('unknown')
+const aiAvailable = computed(() => aiAvailabilityState.value === 'available')
+const aiUnavailableConfirmed = computed(() => aiAvailabilityState.value === 'unavailable')
 
 function onAiPreviewField(field: MetaField) {
   const recordId = selectedRecordId.value
@@ -924,9 +1312,12 @@ function bulkFillFieldName(fieldId: string): string {
 function bulkFillRecordName(recordId: string): string {
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (!row) return recordId
-  // Prefer the first readable text field's value as a human label; fall back to the id.
-  const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
-  const label = primaryFieldId ? row.data[primaryFieldId] : undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces this
+  // function's own field-picking — previously the first `string`/`longText` field, now the same
+  // primary-field convention the inspector title uses (fields[0]). Falls back to the id when that
+  // field's value isn't a non-empty string (unchanged discipline).
+  const primary = resolvePrimaryField(grid.visibleFields.value)
+  const label = primary ? row.data[primary.id] : undefined
   return typeof label === 'string' && label.trim().length > 0 ? label : recordId
 }
 
@@ -1000,6 +1391,12 @@ const personPickerVisible = ref(false)
 const personPickerField = ref<MetaField | null>(null)
 const personPickerRecordId = ref<string | null>(null)
 const personPickerCurrentValue = ref<unknown>(null)
+// #5781 follow-up: the display names we ALREADY hold for the cell being edited, handed to the picker
+// so its "Selected" chips (and the summaries it echoes back on confirm) are real names. Since #5781
+// the picker's own term-less open fetch returns nothing, so it can no longer learn them itself, and
+// an un-searched assignee would round-trip into the grid as a raw userId. Snapshot (not a computed)
+// so a background refetch mid-dialog cannot swap the set under the open picker.
+const personPickerCurrentSummaries = ref<PersonSummary[]>([])
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
@@ -1050,18 +1447,50 @@ function syncRailViewportState(): void {
 // sets), so NEITHER watch ever writes state at desktop — reusing that existing P2-2c invariant rather
 // than re-proving it, so desktop behavior (both rail and inspector may be open together, push layout,
 // OD-W2-3=a) stays a byte-for-byte no-op versus pre-S7 code.
-watch(selectedRecordId, (rid) => {
-  // Opening the inspector (a record just got selected) while the rail drawer is open: close the drawer.
-  if (rid && isRailDrawerOpen.value) railCollapsed.value = true
+// Record inspector v3 (2026-09-05, PR-A §1.1): both watches below keyed on `selectedRecordId`
+// alone pre-PR-A, back when that ref WAS the inspector's own visibility (`visible="!!selectedRecordId"`).
+// Now that a selected record can exist with the panel CLOSED, "the inspector opened" means
+// `inspectorOpen && selectedRecordId` together — watching `selectedRecordId` alone would collapse
+// the rail on a plain cursor move that never opened anything.
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
+  // Opening the inspector (not just moving the cursor) while the rail drawer is open: close the drawer.
+  if (rid && open && isRailDrawerOpen.value) railCollapsed.value = true
 })
 watch(isRailDrawerOpen, (open) => {
-  // Opening the rail drawer while the inspector is open: close the inspector.
-  if (open && selectedRecordId.value) selectedRecordId.value = null
+  // Opening the rail drawer while the inspector is open: close the inspector — `inspectorOpen=false`
+  // (unified close semantics with `onCloseDrawer`/Esc/×), NOT clearing `selectedRecordId` (the
+  // cursor survives a close exactly like every other close path now does).
+  if (open && inspectorOpen.value) inspectorOpen.value = false
 })
 
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
+// F7「把当前数据表存为模板」对话框状态。字段清单直接用 workbench.fields(已经在手上,零新请求),
+// 默认全勾。注意 fieldIds 只是**收窄**参数:它是经视图/权限过滤后的字段集,不是权威 ——
+// 服务端拿到它只做交集,读不到的字段不会因为出现在这个清单里就进模板。
+const showSaveSheetAsTemplate = ref(false)
+const saveTemplateName = ref('')
+const saveTemplateShare = ref(false)
+const saveTemplateFieldIds = ref<string[]>([])
+const saveTemplateSubmitting = ref(false)
+const saveTemplateError = ref<string | null>(null)
+const saveTemplateResult = ref<CreateTemplateFromBaseResult | null>(null)
+
+// F5: the "More templates ->" entry navigates programmatically (so the panel can wait for the push
+// RESULT), but it must keep the native link affordances a <router-link> used to give it -- Ctrl/Cmd
+// or middle click opening a new tab, "copy link address", the status-bar preview. Hence a REAL href
+// resolved through the router (never a hardcoded path: createWebHistory(import.meta.env.BASE_URL)
+// means the app can be served from a sub-path). Guarded because several specs mock useRouter() with
+// a push-only object; a missing href only costs the new-tab affordance, the click path still works.
+const templateCenterHref = computed<string | undefined>(() => {
+  if (typeof router.resolve !== 'function') return undefined
+  try {
+    return router.resolve({ name: TemplateCenterRouteName }).href
+  } catch {
+    return undefined
+  }
+})
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
@@ -1082,6 +1511,11 @@ function openHistoryForBatch(batchId: string) {
 async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // S4 (2026-09-25 review): the same-sheet branch skips onSelectSheet (and its own exitDashboard
+    // call) entirely — same gap as onNotificationNavigate's same-sheet case. No confirm gates this
+    // branch (nothing is switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   closeHistory()
   await resolveDeepLink(payload.recordId)
@@ -1095,6 +1529,7 @@ function closeHistory() {
 // T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
 // (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
 const configHistory = ref<{ visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string }>({ visible: false, items: [], loading: false, entityType: '' })
+let configHistoryGeneration = 0
 const configHistoryLabelOf = (entityId: string): string => {
   const f = scopedAllFields.value.find((x) => x.id === entityId)
   if (f) return f.name
@@ -1102,13 +1537,19 @@ const configHistoryLabelOf = (entityId: string): string => {
   return v?.name ?? entityId
 }
 async function loadConfigHistory(entityType: string) {
+  const baseId = workbench.activeBaseId.value
   const sheetId = workbench.activeSheetId.value
-  if (!sheetId) return
+  if (!sheetId || !configHistory.value.visible) return
+  const generation = ++configHistoryGeneration
+  const isCurrent = () => generation === configHistoryGeneration && configHistory.value.visible
+    && baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value
   configHistory.value = { ...configHistory.value, loading: true, entityType }
   try {
     const items = await workbench.client.getConfigHistory(sheetId, entityType ? { entityType } : {})
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items }
   } catch (error) {
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items: [] }
     showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
   }
@@ -1117,8 +1558,18 @@ async function loadConfigHistory(entityType: string) {
 function configRestorePreview(revisionId: string) {
   return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
 }
-function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
-  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
+async function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
+  // #6075 round 3 (S3): a revert may restore the current view's sort/filter, so the toolbar's staged, unapplied edits
+  // are discarded BEFORE the revert is sent — a realtime reload or a pending search reload running while it is in
+  // flight must not PATCH them over what it restores — and put back if it fails. (onConfigReverted discards again
+  // before its reload, for whatever was staged after this point.)
+  const restoreToolbarEdits = grid.discardUnappliedSortFilterEdits()
+  try {
+    return await workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
+  } catch (error) {
+    restoreToolbarEdits()
+    throw error
+  }
 }
 async function onConfigReverted() {
   // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
@@ -1126,6 +1577,7 @@ async function onConfigReverted() {
   // user sees "撤销成功" over stale config until manual refresh). See refreshAfterConfigRevert.
   await refreshAfterConfigRevert({
     sheetId: workbench.activeSheetId.value,
+    discardUnappliedEdits: () => grid.discardUnappliedSortFilterEdits(),
     loadSheetMeta: (id) => workbench.loadSheetMeta(id),
     loadViewData: (off) => grid.loadViewData(off),
     offset: grid.page.value.offset,
@@ -1138,11 +1590,29 @@ function openConfigHistory() {
   void loadConfigHistory('')
 }
 function onConfigHistoryFilter(entityType: string) { void loadConfigHistory(entityType) }
-function closeConfigHistory() { configHistory.value = { ...configHistory.value, visible: false } }
+function closeConfigHistory() {
+  configHistoryGeneration += 1
+  configHistory.value = { visible: false, items: [], loading: false, entityType: '' }
+}
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  closeConfigHistory,
+  { flush: 'sync' },
+)
 
-// After an undelete, the restored record is back in the sheet → refresh the current page so it appears.
-function onTrashRestored(): void {
-  void grid.reloadCurrentPage()
+function onHistoryRecordRestored(payload: { sheetId: string; recordId: string }): void {
+  if (payload.sheetId === workbench.activeSheetId.value) void grid.reloadCurrentPage()
+}
+async function onSheetTrashRestored(payload: { baseId: string; sheetId: string }): Promise<void> {
+  if (payload.baseId !== workbench.activeBaseId.value) return
+  // Keep a live current sheet selected; recover an empty base through its existing context loader.
+  const sheetId = workbench.activeSheetId.value
+  const ok = sheetId
+    ? await workbench.loadSheetMeta(sheetId)
+    : await workbench.loadBaseContext(payload.baseId, { sheetId: payload.sheetId })
+  if (!ok && payload.baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value) {
+    showError(wb('toast.sheetRefreshFailed', isZh.value))
+  }
 }
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
@@ -1153,14 +1623,37 @@ const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
+// PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
+// `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline
+// entry and keeps today's toast when the alert could not render (other tab active, field row not
+// rendered, inspector closed or showing another record). Same idiom as `toastRef.showError` above.
+const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
+// #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
+// only remembers people the mention editors' searches returned on the active sheet (newest first,
+// capped) — a secondary label source for buildEditingMentionSuggestions (the list response's own
+// `mentionLabels` is the primary one, #5808), without a term-less fetch. Cleared on sheet switch.
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
-const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
+// A10 phase 1(客户反馈 2026-09-24 #8):openTemplateLibrary 原来只在 templates 为空时才拉取,
+// 面板一旦加载过一次,后面新建的自定义模板就永远进不来,直到整页刷新。存模板成功后打一个
+// "需要刷新"的标记,面板不管当前是不是空列表都会在下次打开时重新拉;若面板此刻正开着,直接重拉。
+//
+// S3/N4(2026-09-26 对抗评审):用两个单调递增的标记而不是一个布尔值——一个更早发起、比较晚才
+// 落地的成功响应,不能把**它开始之后**才打上的"需要刷新"标记误清掉(那样会看着像刷新过了,
+// 其实还是漏了刚存的那条)。loadTemplateLibrary 在**发起时**记下当时的 dirty 值,只有响应落地
+// 时这个值仍然是"最新的"才把 loaded 赶上去;如果中途又有新的存模板事件把 dirty 继续推高,
+// loaded 就追不上,下一次开面板/存模板还会再重试。两者都不进模板、不进任何 computed,只在这段
+// 脚本逻辑内部读写,不用 ref。
+let templateLibraryDirtyMark = 0
+let templateLibraryLoadedMark = 0
+function markTemplateLibraryStale(): void {
+  templateLibraryDirtyMark += 1
+}
 const calendarHolidays = ref<CalendarEffectiveChip[]>([])
 const calendarHolidayFetchState = ref<CalendarHolidayFetchState>('idle')
 // Composite cache key `${from}|${to}|${userId}` — when userId arrives later
@@ -1206,6 +1699,11 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// Import → "create the missing columns as new text fields": the modal only ASKS (payload.createFields);
+// the write happens here, behind the same manage-fields capability that gates the field manager, and
+// behind the server's own 403 on POST /api/multitable/fields.
+const importCreateFieldsError = ref<string | null>(null)
+const importCreatedFieldColumns = ref<Record<number, string> | null>(null)
 // --- Display prefs (column width / row density / group collapse): server-persisted in view.config
 // (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
 // instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
@@ -1219,13 +1717,48 @@ const columnWidthOverrides = ref<Record<string, number>>({})
 const collapsedGroupKeys = ref<string[]>([])
 const peopleResolverCache = new Map<string, Promise<ImportValueResolver | null>>()
 const linkResolverCache = new Map<string, Map<string, Promise<string[] | null>>>()
-// Native person (人员) import: resolve tokens (userId / name / email) → USERIDs against the
-// sheet member candidates (member-scoped, NOT the People-sheet recordIds). Keyed by sheetId.
-const nativePersonResolverCache = new Map<string, Promise<ImportValueResolver>>()
+// Native person (人员) import (#5809): one bounded, exact directory lookup per UNIQUE token, keyed by
+// sheet + field + normalized token, so a token repeated across the whole import costs one request.
+const nativePersonTokenCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Legacy person email fallback (#5807 sibling): People-sheet id + active sheet + normalized email.
+const legacyPersonEmailCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Every per-token person lookup of the import path shares this gate (≤ 4 requests in flight).
+const IMPORT_PERSON_LOOKUP_CONCURRENCY = 4
+const runImportPersonLookup = createBoundedLookupRunner(IMPORT_PERSON_LOOKUP_CONCURRENCY)
+// Rows per person lookup — the servers' own ceiling (PERSON_DIRECTORY_MAX_ITEMS /
+// MENTION_CANDIDATES_MAX_ITEMS), stated explicitly so the request never relies on a server default.
+const IMPORT_PERSON_LOOKUP_PAGE_SIZE = 50
+// #5809 refuter round — the longest token a person lookup is sent for. users.id / name / email are
+// TEXT, so this is a policy ceiling, not a schema bound: it sits well above what the app writes (the
+// admin user create/update routes cap a name at 100 characters; RFC 5321 caps an address at 254) and
+// low enough that the request line stays inside common proxy limits (nginx's default 8 KiB) even when
+// every UTF-16 unit percent-encodes to 9 bytes (512 × 9 = 4608). A longer token cannot be one person's
+// id / name / email under that policy, so it counts as "no match" without a request. In practice it is
+// the whole-cell token extractImportTokens adds for a multi-person cell (an exported list of ~200 user
+// ids is ~8 KB and would otherwise 414 at the proxy and fail the whole row).
+const IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH = 512
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
+// Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+// "Field-anchored server errors", §4 item 11): per-field server rejections for the OPEN inspector
+// record, keyed by fieldId — the inspector-side twin of `formFieldErrors` above (same prop shape, same
+// `:field-errors` idiom, WB → MetaRecordInspector → MetaRecordFieldsPanel). Written only by
+// `onDrawerPatch` (field / conflict routes, and only when the inspector confirms the alert can render —
+// see `recordInspectorRef`), cleared per field on that field's next successful patch, wholesale on
+// record/view change, and — for entries the VERSION_CONFLICT path wrote, and ONLY those — when
+// `grid.conflict` clears. Round 2: each entry is tagged with its ORIGIN so the conflict-clear watch
+// cannot wipe a validation alert that happens to sit on the same field (e.g. a grid-path conflict on
+// that field raised and dismissed while the drawer's validation alert is up); the panel-facing prop
+// (`inspectorFieldErrors`) is the derived fieldId → message map, recomputed as a fresh object on every
+// write so the panel's prev/next `fieldErrors` watch keeps seeing distinct snapshots.
+type InspectorFieldErrorOrigin = 'field' | 'conflict'
+const inspectorFieldErrorEntries = ref<Record<string, { message: string; origin: InspectorFieldErrorOrigin }>>({})
+const inspectorPatchOwners = new Map<string, object>()
+const inspectorFieldErrors = computed<Record<string, string>>(() =>
+  Object.fromEntries(Object.entries(inspectorFieldErrorEntries.value).map(([fieldId, entry]) => [fieldId, entry.message])),
+)
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
@@ -1243,6 +1776,11 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let dialogMetaVisibilityListener: (() => void) | null = null
+// Cleared on unmount so an idle-deferred callback scheduled during mount, or a dialog-meta refresh
+// that was still in flight, can never fire into a torn-down workbench (or eat a later test's
+// mocked fetch). Declared up here because refreshDialogMeta() below reads it.
+let workbenchAlive = true
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -1267,6 +1805,14 @@ function showSuccess(msg: string, action?: ToastAction) {
 function historyLinkAction(batchId: string | null): ToastAction | undefined {
   if (!batchId) return undefined
   return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
+}
+
+// 记录级送审 (多维表 × 审批 阶段二 §5): the inspector owns the dialog and its own panel refresh; the
+// workbench's whole job here is the toast, so a user who submitted from a drawer that is about to close
+// still sees the server-issued request number. No capability decision is made here — `canSubmitApproval`
+// (passed to the inspector above) already gated the entry, and the route re-enforces it.
+function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showSuccess(recordApprovalSubmittedToast(submission.requestNo, isZh.value))
 }
 
 function ensureCanCreateRecord(): boolean {
@@ -1322,9 +1868,14 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   const activeViewId = workbench.activeViewId.value
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
+// P3-2 (2026-09-05, record inspector v3 header follow-up): routed through the SAME
+// `resolveMentionDisplayField` (utils/recordDisplay.ts) that hoists this idiom — see that
+// function's own comment for why "prefer the primary field, fall back to the first text field" is
+// byte-identical to the plain `.find()` this replaces for every input, and unifies with the
+// inspector title / bulk-fill idioms whenever the sheet's primary field is itself text.
 const mentionDisplayFieldId = computed(() =>
-  grid.visibleFields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
-  ?? grid.fields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
+  resolveMentionDisplayField(grid.visibleFields.value)?.id
+  ?? resolveMentionDisplayField(grid.fields.value)?.id
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
@@ -1421,6 +1972,24 @@ const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedA
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the details tab's two-section field
+// layout. §1 `ordered` = view order ∩ layer-2 ∩ layer-3 — `scopedGridFields` is `grid.visibleFields`
+// (the active view's resolved `fieldOrder`, fail-soft on stale ids, minus the view's hidden ids and
+// property-hidden fields, useMultitableGrid.ts `visibleFields`) re-filtered through THIS file's
+// `effectiveFieldPermissions` (layer-3 with the deep-link/standalone-form overrides the grid's own
+// permission ref does not carry); `filterPropertyVisibleFields` is applied again explicitly so the
+// layer-2 conjunct is stated here, not inherited from the grid computed's internals. §2 `hiddenInView`
+// = the rest of `twoLayerVisibleFields` (layer-2 ∩ layer-3, sheet order) — fields this viewer may see
+// but the active view hides. Disjoint by construction; MetaRecordFieldsPanel re-applies both layers
+// anyway (negative golden N3). Applying layer-2 to the details tab is a declared behaviour change
+// (design §4 item 4): it previously received `scopedAllFields` (layer-3 only) and rendered
+// property-hidden fields.
+const inspectorFieldLayout = computed<MetaRecordInspectorFieldLayout>(() => {
+  const ordered = filterPropertyVisibleFields(scopedGridFields.value)
+  const orderedIds = new Set(ordered.map((field) => field.id))
+  const hiddenInView = twoLayerVisibleFields.value.filter((field) => !orderedIds.has(field.id))
+  return { ordered, hiddenInView }
+})
 const conditionalFormattingRules = computed(() =>
   extractRulesFromConfig(workbench.activeView.value?.config),
 )
@@ -1463,25 +2032,48 @@ const importSurfaceFields = computed(() =>
     return permission?.visible !== false && permission?.readOnly !== true
   }),
 )
+/**
+ * Names of EVERY field on the sheet, including the ones importSurfaceFields strips (formula /
+ * lookup / rollup / readonly / permission-hidden). The modal needs them to tell "this header is
+ * missing from the sheet" apart from "this header exists but is not writable" — otherwise a header
+ * matching a formula column defaults to "create a new field" and a shadow `X (2)` text column
+ * appears. Same source list applyImportCreateFields plans against, so read side and write side can
+ * not disagree. Names only; no values leave the sheet through this prop.
+ */
+const importExistingFieldNames = computed(() => workbench.fields.value.map((field) => field.name))
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
     // Native person (人员) OR link (incl. legacy link-backed person). isLinkField no longer
     // matches native person, so include it explicitly.
     if (!isLinkField(field) && !isNativePersonField(field)) continue
-    resolvers[field.id] = async (rawValue, currentField) => {
+    const resolver: ImportValueResolver = async (rawValue, currentField, context) => {
       // Kind-aware switch: native person → USERIDs (member candidates); legacy person → People-sheet
       // recordIds (getPeopleResolver); plain link → linked recordIds.
       if (isNativePersonField(currentField)) {
-        const resolver = await getNativePersonResolver()
-        return resolver(rawValue, currentField)
+        return resolveNativePersonImportValue(rawValue, currentField, context)
       }
       if (isPersonField(currentField)) {
-        const resolver = await getPeopleResolver(currentField)
-        return resolver ? resolver(rawValue, currentField) : null
+        const peopleResolver = await getPeopleResolver(currentField)
+        return peopleResolver ? peopleResolver(rawValue, currentField, context) : null
       }
       return resolveLinkedImportValue(rawValue, currentField)
     }
+    // #5809: queue the person lookups of the WHOLE import up front (still one request per unique
+    // token, still ≤ 4 in flight), so rows are not resolved one lookup at a time. Plain link fields
+    // keep their per-row lookups.
+    resolver.prime = (rawValues, currentField, context) => {
+      if (isNativePersonField(currentField)) {
+        primeNativePersonImport(rawValues, currentField, context)
+        return
+      }
+      if (isPersonField(currentField)) {
+        void getPeopleResolver(currentField)
+          .then((peopleResolver) => peopleResolver?.prime?.(rawValues, currentField, context))
+          .catch(() => undefined)
+      }
+    }
+    resolvers[field.id] = resolver
   }
   return resolvers
 })
@@ -1594,9 +2186,17 @@ const activeEditingComment = computed(() => (
     ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
     : null
 ))
-const commentComposerInitialMentions = computed(() => (
-  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
-))
+// #5808: the composer's starting mentions are a SNAPSHOT taken when an edit starts (onEditComment).
+// Deriving them live re-sent a new array whenever `commentMentionSuggestions` changed (every mention
+// search) or the comment list did (realtime), and the composer restarts its selection from each new
+// `initialMentions` — dropping whatever the user had picked or removed since the edit began.
+const editingMentionSnapshot = shallowRef<{ commentId: string; mentions: MetaCommentMentionSuggestion[] } | null>(null)
+const NO_COMPOSER_INITIAL_MENTIONS: MetaCommentMentionSuggestion[] = []
+const commentComposerInitialMentions = computed(() => {
+  const comment = activeEditingComment.value
+  const snapshot = editingMentionSnapshot.value
+  return comment && snapshot?.commentId === comment.id ? snapshot.mentions : NO_COMPOSER_INITIAL_MENTIONS
+})
 const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
   fmtPresenceLabel(sheetPresenceState.activeCollaboratorCount.value, isZh.value)
@@ -1651,20 +2251,37 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   }
 }
 
+// #5781 follow-up — a raw-id placeholder must never EVICT a display name we already had. `patchCell`
+// does not re-hydrate personSummaries, so whatever this writes is what the grid/drawer show until the
+// next full refetch: an entry that is still `{ id, display: <the id> }` (the picker's fallback for an
+// id it could not resolve) is downgraded to the previously known summary for the same id, if any.
+// Belt-and-braces behind the `currentSummaries` prop: that seam stops the placeholder from being
+// produced, this one stops any future producer's placeholder from overwriting a good name.
+function mergePersonSummaryDisplays(prev: PersonSummary[] | undefined, next: PersonSummary[]): PersonSummary[] {
+  if (!prev?.length) return next
+  const prevById = new Map(prev.map((entry) => [entry.id, entry] as const))
+  return next.map((entry) => {
+    if (entry.display && entry.display !== entry.id) return entry
+    const known = prevById.get(entry.id)
+    return known && known.display && known.display !== entry.id ? known : entry
+  })
+}
+
 // Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
 // name immediately (grid + drawer) instead of a raw userId until the next refetch.
 function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  const gridNext = mergePersonSummaryDisplays(grid.personSummaries.value[recordId]?.[fieldId], summaries)
   grid.personSummaries.value = {
     ...grid.personSummaries.value,
     [recordId]: {
       ...(grid.personSummaries.value[recordId] ?? {}),
-      [fieldId]: summaries,
+      [fieldId]: gridNext,
     },
   }
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordPersonSummaries.value = {
       ...deepLinkedRecordPersonSummaries.value,
-      [fieldId]: summaries,
+      [fieldId]: mergePersonSummaryDisplays(deepLinkedRecordPersonSummaries.value[fieldId], summaries),
     }
   }
 }
@@ -1707,20 +2324,45 @@ function formatCommentDraftContent(content: string): string {
   return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
 }
 
-function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+// #5808: a mention id is any non-empty string the create route accepted, so it can be an
+// Object.prototype key ("constructor", "toString", "__proto__"). Only the map's OWN string entries count.
+function ownMentionLabel(labels: Record<string, string> | undefined, mentionId: string): string {
+  if (!labels || !Object.hasOwn(labels, mentionId)) return ''
+  const label: unknown = labels[mentionId]
+  return typeof label === 'string' ? label.trim() : ''
+}
+
+function buildEditingMentionSuggestions(comment: {
+  content: string
+  mentions: string[]
+  mentionLabels?: Record<string, string>
+}): MetaCommentMentionSuggestion[] {
   const byId = new Map<string, MetaCommentMentionSuggestion>()
   for (const token of parseCommentMentionTokens(comment.content)) {
     byId.set(token.id, token)
   }
+  // A token's own label is what the draft text shows (formatCommentDraftContent), so it stays the chip
+  // label — the composer matches chips against the text by label. A remembered search hit only adds
+  // its subtitle; letting it replace the label (e.g. after a rename) unbound the chip from the text.
   for (const suggestion of commentMentionSuggestions.value) {
-    if (byId.has(suggestion.id)) {
-      byId.set(suggestion.id, { ...suggestion })
+    const token = byId.get(suggestion.id)
+    if (token) {
+      byId.set(suggestion.id, { ...suggestion, label: token.label })
     }
   }
+  // #5808: a mention that is not a token in the body (e.g. created through the API with an explicit
+  // `mentions` array) is named by the list response's own `mentionLabels`, else by a person a search
+  // already returned. Nobody to name it: the composer shows a neutral placeholder — never the raw id —
+  // and still keeps the id, so saving the edit does not silently remove the mention.
   for (const mentionId of comment.mentions) {
     if (byId.has(mentionId)) continue
+    const serverLabel = ownMentionLabel(comment.mentionLabels, mentionId)
+    if (serverLabel) {
+      byId.set(mentionId, { id: mentionId, label: serverLabel })
+      continue
+    }
     const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
-    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: '', unresolved: true })
   }
   return [...byId.values()]
 }
@@ -1751,6 +2393,136 @@ async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
   return { records, displayMap }
 }
 
+// #5809 — what ONE bounded person lookup says about ONE import token.
+type ImportPersonTokenOutcome =
+  | { kind: 'match'; id: string }
+  | { kind: 'none' }
+  | { kind: 'ambiguous' }
+  | { kind: 'too-broad' }
+
+// #5809 — at most `limit` lookups run at once; the rest wait in FIFO order. A lookup whose `signal`
+// is aborted before it starts is dropped (rejected with an AbortError, its task never runs); one that
+// has already started runs to completion.
+function createBoundedLookupRunner(limit: number) {
+  let active = 0
+  const waiting: Array<() => void> = []
+  const release = () => {
+    active -= 1
+    waiting.shift()?.()
+  }
+  return function runLookup<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createImportAbortError(isZh.value))
+        return
+      }
+      const onAbort = () => {
+        const index = waiting.indexOf(start)
+        if (index < 0) return
+        waiting.splice(index, 1)
+        reject(createImportAbortError(isZh.value))
+      }
+      function start() {
+        signal?.removeEventListener('abort', onAbort)
+        active += 1
+        let pending: Promise<T>
+        try {
+          pending = Promise.resolve(task())
+        } catch (error) {
+          pending = Promise.reject(error)
+        }
+        pending.then(resolve, reject).finally(release)
+      }
+      if (active < limit) {
+        start()
+        return
+      }
+      waiting.push(start)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+}
+
+// #5809 — the tokens of one cell that are worth a person lookup: non-blank and no longer than
+// IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH.
+function importPersonLookupTokens(rawValue: string): string[] {
+  return extractImportTokens(rawValue).filter((token) => {
+    const trimmed = token.trim()
+    return trimmed.length > 0 && trimmed.length <= IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH
+  })
+}
+
+// #5809 — exact matching only: a row counts when its user id, name or email EQUALS the token after
+// trim + case folding; a partial match never resolves. Two or more distinct users ⇒ ambiguous. A
+// clamped answer (`hasMore`) cannot prove that nobody past the ceiling also equals the token, so
+// there only a user-id match (unique by construction) is trusted, and anything else is reported as
+// too broad — never silently as an unknown person.
+function classifyPersonLookupAnswer(
+  token: string,
+  answer: { items: Array<{ userId: string; name: string | null; email: string | null }>; hasMore: boolean },
+): ImportPersonTokenOutcome {
+  const key = normalizeImportLookupKey(token)
+  const exactUserIds = new Set<string>()
+  let matchedById = false
+  for (const item of answer.items) {
+    const byId = normalizeImportLookupKey(item.userId) === key
+    const byName = typeof item.name === 'string' && normalizeImportLookupKey(item.name) === key
+    const byEmail = typeof item.email === 'string' && normalizeImportLookupKey(item.email) === key
+    if (!byId && !byName && !byEmail) continue
+    exactUserIds.add(item.userId)
+    if (byId) matchedById = true
+  }
+  if (exactUserIds.size > 1) return { kind: 'ambiguous' }
+  const only = [...exactUserIds][0]
+  if (only !== undefined && (!answer.hasMore || matchedById)) return { kind: 'match', id: only }
+  return answer.hasMore ? { kind: 'too-broad' } : { kind: 'none' }
+}
+
+const EMAIL_SHAPED_IMPORT_TOKEN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+// #5807 sibling — resolves an email-shaped token the People sheet could not match locally through the
+// comment @-mention directory of the sheet being imported into (GET /api/comments/mention-candidates,
+// gated on comments:read + reading that sheet). It is a request this caller can already send there —
+// term required, at most 50 rows (asked for explicitly) — in the server's `match=exact-email` mode,
+// which only NARROWS the substring search the comment composer uses to rows whose email EQUALS the
+// term: a substring page could be filled by `wangli@…` / `zhangli@…` before the owner of `li@…`.
+// The answer carries no separate email field: a candidate's email is its `subtitle`, or its `label`
+// when it has no subtitle — no name, a name equal to the email, or a name with an EMPTY email (then the
+// label is the name; a server that honours the mode never returns such a row, an older one might).
+// Returns the matched USER id; the caller maps it to a People record through the sheet's own User ID
+// column, so only people already on the People sheet resolve. A 403 (no comment access here) is "not
+// matched", never a load failure, and is remembered like any other miss.
+function lookupLegacyPersonEmail(
+  peopleSheetId: string,
+  sourceSheetId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([peopleSheetId, sourceSheetId, normalizeImportLookupKey(token)])
+  const cached = legacyPersonEmailCache.get(cacheKey)
+  if (cached) return cached
+  const promise = runImportPersonLookup(
+    () => workbench.client.listCommentMentionSuggestions({
+      spreadsheetId: sourceSheetId,
+      q: token.trim(),
+      limit: IMPORT_PERSON_LOOKUP_PAGE_SIZE,
+      match: 'exact-email',
+    }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, {
+      items: answer.items.map((item) => ({ userId: item.id, name: null, email: item.subtitle ?? item.label })),
+      hasMore: answer.hasMore,
+    }))
+    .catch((error: unknown): ImportPersonTokenOutcome => {
+      if ((error as { status?: unknown } | null)?.status === 403) return { kind: 'none' }
+      legacyPersonEmailCache.delete(cacheKey)
+      throw error
+    })
+  legacyPersonEmailCache.set(cacheKey, promise)
+  return promise
+}
+
 async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver | null> {
   if (!isPersonField(field)) return null
   const targetSheetId = typeof field.property?.foreignSheetId === 'string' ? field.property.foreignSheetId.trim() : ''
@@ -1768,22 +2540,37 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     const fallbackAliasFieldId = stringFields.find(
       (targetField) => !emailFieldIds.includes(targetField.id) && !nameFieldIds.includes(targetField.id),
     )?.id
+    const aliasHydrateFieldIds = [
+      ...aliasFieldIds,
+      ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
+    ]
+    // The email fallback maps userId → People record through the sheet's own `User ID` column, and
+    // only when that column is one this resolver already reads (the preset sheet's fallback alias) —
+    // it adds no read of its own to the People sheet.
+    const userIdFieldId = stringFields.find(
+      (targetField) => /^user\s*id$/i.test(targetField.name.trim())
+        && [...emailFieldIds, ...nameFieldIds, ...aliasHydrateFieldIds].includes(targetField.id),
+    )?.id
 
     const recordIdLookup = new Map<string, string | null>()
     const emailLookup = new Map<string, string | null>()
     const nameLookup = new Map<string, string | null>()
     const aliasLookup = new Map<string, string | null>()
+    const userIdLookup = new Map<string, string | null>()
 
     async function hydrateLookup(fieldIds: string[], targetLookup: Map<string, string | null>) {
       await Promise.all(fieldIds.map(async (displayFieldId) => {
         const summary = await loadAllRecordSummaries(targetSheetId, displayFieldId)
+        const isUserIdColumn = displayFieldId === userIdFieldId
         for (const record of summary.records ?? []) {
           addPeopleLookupToken(recordIdLookup, record.id, record.id)
           addPeopleLookupToken(targetLookup, record.display, record.id)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, record.display, record.id)
         }
         for (const [recordId, display] of Object.entries(summary.displayMap ?? {})) {
           addPeopleLookupToken(recordIdLookup, recordId, recordId)
           addPeopleLookupToken(targetLookup, display, recordId)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, display, recordId)
         }
       }))
     }
@@ -1791,17 +2578,41 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     await Promise.all([
       hydrateLookup(emailFieldIds, emailLookup),
       hydrateLookup(nameFieldIds, nameLookup),
-      hydrateLookup(
-        [
-          ...aliasFieldIds,
-          ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
-        ],
-        aliasLookup,
-      ),
+      hydrateLookup(aliasHydrateFieldIds, aliasLookup),
     ])
 
-    return async (rawValue: string, currentField?: MetaField) =>
-      resolvePeopleImportValue({
+    const matchedLocally = (key: string) =>
+      recordIdLookup.has(key) || emailLookup.has(key) || nameLookup.has(key) || aliasLookup.has(key)
+
+    const pendingEmailTokens = (rawValue: string) => importPersonLookupTokens(rawValue).filter((token) =>
+      EMAIL_SHAPED_IMPORT_TOKEN.test(token.trim()) && !matchedLocally(normalizeImportLookupKey(token)))
+
+    const resolver: ImportValueResolver = async (rawValue: string, currentField?: MetaField, context?: ImportResolveContext) => {
+      // #5807 sibling: the People sheet no longer carries emails, so an email-shaped token nothing
+      // local matches is looked up once (per token, bounded) and, on an exact hit, recorded in the
+      // email bucket — resolvePeopleImportValue then applies its usual email-first priority to it.
+      let tooBroad = false
+      if (userIdFieldId) {
+        const sourceSheetId = workbench.activeSheetId.value
+        const pending = pendingEmailTokens(rawValue)
+        const outcomes = await Promise.allSettled(
+          pending.map((token) => lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal)),
+        )
+        for (const [index, outcome] of outcomes.entries()) {
+          if (outcome.status === 'rejected') throw outcome.reason
+          const key = normalizeImportLookupKey(pending[index])
+          const result = outcome.value
+          if (result.kind === 'ambiguous') {
+            emailLookup.set(key, null)
+          } else if (result.kind === 'too-broad') {
+            tooBroad = true
+          } else if (result.kind === 'match') {
+            const recordId = userIdLookup.get(normalizeImportLookupKey(result.id))
+            if (recordId !== undefined) emailLookup.set(key, recordId)
+          }
+        }
+      }
+      const resolved = resolvePeopleImportValue({
         rawValue,
         currentField,
         lookups: {
@@ -1812,6 +2623,24 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
         },
         isZh: isZh.value,
       })
+      // A too-broad email is ignored like any other unmatched token when the rest of the cell resolves
+      // (what an unmatched token always did here); it becomes the row's error only when nothing did.
+      if (resolved === null && tooBroad) {
+        throw new Error(fmtImportPersonValueTooBroad(currentField?.name ?? field.name, isZh.value))
+      }
+      return resolved
+    }
+    if (userIdFieldId) {
+      resolver.prime = (rawValues, _currentField, context) => {
+        const sourceSheetId = workbench.activeSheetId.value
+        for (const rawValue of rawValues) {
+          for (const token of pendingEmailTokens(rawValue)) {
+            void lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal).catch(() => undefined)
+          }
+        }
+      }
+    }
+    return resolver
   })().catch((error) => {
     peopleResolverCache.delete(targetSheetId)
     throw error
@@ -1821,60 +2650,74 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
   return promise
 }
 
-// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
-// returns People-sheet recordIds). Resolves each token to a member USERID by matching the sheet's
-// permission-candidate users on userId / label (name) / subtitle (email). Member-scoped: only the
-// candidate set the picker offers is resolvable; an unknown token fails the row (no egress).
-async function getNativePersonResolver(): Promise<ImportValueResolver> {
-  const sheetId = workbench.activeSheetId.value
-  const cached = nativePersonResolverCache.get(sheetId)
+function lookupNativePersonToken(
+  sheetId: string,
+  fieldId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([sheetId, fieldId, normalizeImportLookupKey(token)])
+  const cached = nativePersonTokenCache.get(cacheKey)
   if (cached) return cached
-
-  const promise = (async (): Promise<ImportValueResolver> => {
-    const { items } = await workbench.client.listSheetPermissionCandidates(sheetId, { limit: 10000 })
-    const userIdByToken = new Map<string, string | null>()
-    const register = (token: string | null | undefined, userId: string) => {
-      if (!token) return
-      const key = normalizeImportLookupKey(token)
-      if (!key) return
-      const current = userIdByToken.get(key)
-      if (current !== undefined && current !== userId) {
-        userIdByToken.set(key, null) // ambiguous
-        return
-      }
-      userIdByToken.set(key, userId)
-    }
-    for (const item of items) {
-      if (item.subjectType !== 'user' || !item.isActive) continue
-      register(item.subjectId, item.subjectId)
-      register(item.label, item.subjectId)
-      register(item.subtitle ?? undefined, item.subjectId)
-    }
-
-    return async (rawValue: string, currentField?: MetaField): Promise<string[] | null> => {
-      const tokens = extractImportTokens(rawValue)
-      if (!tokens.length) return null
-      const resolved: string[] = []
-      for (const token of tokens) {
-        const key = normalizeImportLookupKey(token)
-        if (!key) continue
-        const match = userIdByToken.get(key)
-        if (match === null) throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
-        if (typeof match === 'string') pushUniqueIds(resolved, [match])
-      }
-      if (!resolved.length) return null
-      if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
-        throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
-      }
-      return resolved
-    }
-  })().catch((error) => {
-    nativePersonResolverCache.delete(sheetId)
-    throw error
-  })
-
-  nativePersonResolverCache.set(sheetId, promise)
+  const promise = runImportPersonLookup(
+    () => workbench.client.listPersonFieldDirectory(sheetId, fieldId, { q: token.trim(), match: 'exact' }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, answer))
+    .catch((error: unknown) => {
+      // A failed lookup is not cached (the next row / a retry pass asks again) and propagates as-is,
+      // so a 403 reads as the permission refusal it is, not as an unknown person.
+      nativePersonTokenCache.delete(cacheKey)
+      throw error
+    })
+  nativePersonTokenCache.set(cacheKey, promise)
   return promise
+}
+
+// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
+// returns People-sheet recordIds). Resolves each token to a member USERID through the field's own
+// directory (GET /sheets/:sheetId/person-fields/:fieldId/directory?match=exact): the same
+// canEditRecord gate as filling the cell, the same candidate set the write validator accepts, at most
+// 50 rows per request, one request per unique token across the import (#5809 — this used to pull the
+// canManageSheetAccess-gated /permission-candidates once, which the server clamps to 50 people).
+// Member-scoped: an unknown token fails the row (no egress).
+async function resolveNativePersonImportValue(
+  rawValue: string,
+  currentField: MetaField,
+  context?: ImportResolveContext,
+): Promise<string[] | null> {
+  const sheetId = workbench.activeSheetId.value
+  const tokens = importPersonLookupTokens(rawValue)
+  if (!tokens.length) return null
+  const outcomes = await Promise.allSettled(
+    tokens.map((token) => lookupNativePersonToken(sheetId, currentField.id, token, context?.signal)),
+  )
+  const resolved: string[] = []
+  // Token order, not completion order, decides which failure a row reports.
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === 'rejected') throw outcome.reason
+    const token = tokens[index]
+    const result = outcome.value
+    if (result.kind === 'ambiguous') throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
+    if (result.kind === 'too-broad') throw new Error(fmtImportPersonValueTooBroad(currentField.name, isZh.value))
+    if (result.kind === 'match') pushUniqueIds(resolved, [result.id])
+  }
+  if (!resolved.length) return null
+  if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
+    throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
+  }
+  return resolved
+}
+
+// #5809 — look-ahead for a native person column: queue the lookup of every unique token of the import
+// (cached, bounded, dropped on cancel). Errors are left to the row that resolves the token.
+function primeNativePersonImport(rawValues: string[], field: MetaField, context?: ImportResolveContext) {
+  const sheetId = workbench.activeSheetId.value
+  for (const rawValue of rawValues) {
+    for (const token of importPersonLookupTokens(rawValue)) {
+      void lookupNativePersonToken(sheetId, field.id, token, context?.signal).catch(() => undefined)
+    }
+  }
 }
 
 async function resolveLinkToken(field: MetaField, token: string): Promise<string[] | null> {
@@ -1982,10 +2825,9 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
       containerType: 'meta_sheet',
       containerId: workbench.activeSheetId.value,
     }
-  await Promise.all([
-    commentsState.loadComments(scope),
-    ensureCommentMentionSuggestions(),
-  ])
+  // #5795: no mention-roster preload here any more — the composer searches as the user types
+  // (searchCommentMentions), so opening a thread issues no term-less candidate request.
+  await commentsState.loadComments(scope)
   highlightedCommentId.value = options?.highlightCommentId ?? null
   if (!selectedCommentFieldId.value && options?.highlightCommentId) {
     const derivedFieldId = resolveCommentThreadFieldId(options.highlightCommentId)
@@ -2018,33 +2860,72 @@ function resolveCommentThreadFieldId(commentId: string): string | null {
   return null
 }
 
-async function ensureCommentMentionSuggestions(force = false) {
-  const sheetId = workbench.activeSheetId.value
-  if (!sheetId) {
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-    return
-  }
-  if (!force && commentMentionSuggestionsLoadedForSheetId.value === sheetId) return
+// #5795 — server-side @-mention search, handed to every mention editor the workbench hosts (comment
+// composer via the inspector, rich-longText editors via the grid and the inspector's fields panel).
+// The endpoint answers a term-less call with `requiresQuery` (the editors render "type to search")
+// and caps every answer; 20 leaves headroom over the 6 rows an editor shows once already-picked
+// people are excluded. Errors propagate: the editors treat a failed search as "no remote matches".
+const COMMENT_MENTION_SEARCH_LIMIT = 20
+const COMMENT_MENTION_REMEMBERED_MAX = 50
 
-  try {
-    const result = await workbench.client.listCommentMentionSuggestions({
-      spreadsheetId: sheetId,
-      limit: 100,
+function rememberCommentMentionSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const seen = new Set<string>()
+  commentMentionSuggestions.value = [...items, ...commentMentionSuggestions.value]
+    .filter((item) => {
+      if (seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
     })
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = result.items
-    commentMentionSuggestionsLoadedForSheetId.value = sheetId
-  } catch {
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-  }
+    .slice(0, COMMENT_MENTION_REMEMBERED_MAX)
 }
 
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+async function searchCommentMentions(query: string): Promise<MetaCommentMentionSearchResult> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  const result = await workbench.client.listCommentMentionSuggestions({
+    spreadsheetId: sheetId,
+    q: query,
+    limit: COMMENT_MENTION_SEARCH_LIMIT,
+  })
+  // A sheet switch while the request was in flight: the answer belongs to the old sheet's editors.
+  if (workbench.activeSheetId.value !== sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  if (result.items.length > 0) rememberCommentMentionSuggestions(result.items)
+  return { items: result.items, requiresQuery: result.requiresQuery === true, hasMore: result.hasMore === true }
+}
+
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line "every selectRecord(...,
+// { openComments: true }) caller"): rather than touching each such call site individually
+// (onMentionPopoverSelect, onOpenRecordComments, onOpenGridFieldComments — all named in the
+// design's own enumeration), the `openComments: true` transition is detected once, HERE, since
+// every one of those callers already threads it through this single function. `select-record` from
+// the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
+// the cursor (see `onSelectRecord` below), never this branch.
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
+  // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
+  // guard above has already passed (not before calling this function): setting it earlier let a
+  // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
+  // panel on the PREVIOUS record instead of the one the user actually navigated away from. See
+  // `openRecord`'s own comment for the two callers this fixes.
+  if (opts?.open || opts?.openComments) {
+    // Round 4 (2026-09-05, refuter P2 — stale opener): this is the ONLY place `inspectorOpen` flips
+    // to true, so it is also the one place that can keep `inspectorOpenerEl` honest for every open
+    // path. A caller that has an opener (`openRecord`, via `opts.opener` — possibly `null` when it
+    // could not resolve one) always writes it, open or already-open alike, exactly as before. A
+    // caller with NO opener (`resolveDeepLink`, the `openComments: true` click-through callers) on a
+    // FRESH open (panel currently closed) resets it to `null`, so the inspector's own
+    // pre-open-activeElement fallback runs instead of restoring focus to whatever element opened
+    // some EARLIER, already-closed panel. `onCloseDrawer` clears it on close as well, but two close
+    // paths bypass `onCloseDrawer` (the rail-drawer watcher and the `selectedRecordId → null`
+    // force-close watcher, both below), so a close-side reset alone is not sufficient — this
+    // open-side check covers those too. An opener-less call while the panel is ALREADY open (e.g. a
+    // comment click-through on another row from inside an open panel) leaves the current open's
+    // opener in place, unchanged from before.
+    if (opts.opener !== undefined) inspectorOpenerEl.value = opts.opener
+    else if (!inspectorOpen.value) inspectorOpenerEl.value = null
+    inspectorOpen.value = true
+  }
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
@@ -2056,10 +2937,24 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
     selectedEditingCommentId.value = null
   }
   showComments.value = opts?.openComments === true
-  await loadCommentsForRecord(recordId, {
-    highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
-    markReadCommentId: opts?.markReadCommentId ?? null,
-  })
+  // Comment fetch moved out of the general "cursor moved" path (P12, §1.1/§2 graft table): a
+  // closed-panel `select-record` (arrowing/clicking through the grid with the inspector closed)
+  // must make ZERO comment requests — pre-check (grep `commentsState`/`loadCommentsForRecord`
+  // consumers) found the grid's OWN comment indicators read a separate, independent
+  // `commentPresenceState` (useMultitableCommentPresence), never `commentsState`/
+  // `loadCommentsForRecord`, so there is no closed-panel consumer of this fetch to preserve. Firing
+  // it here, gated on the panel actually being open (this call's own `openComments: true` sets
+  // `inspectorOpen` above before this check runs; OR `inspectorOpen` is already true from a prior
+  // `openRecord`/deep-link open, which every such caller sets synchronously before invoking THIS
+  // function), replaces the old unconditional fetch. "Follow while open" (arrowing through an
+  // ALREADY-open panel) hits this same branch on every later `select-record`, since `inspectorOpen`
+  // stays true until the panel is explicitly closed.
+  if (inspectorOpen.value) {
+    await loadCommentsForRecord(recordId, {
+      highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
+      markReadCommentId: opts?.markReadCommentId ?? null,
+    })
+  }
 }
 
 function onSelectRecord(recordId: string) {
@@ -2238,16 +3133,27 @@ const restorePreview = ref<{
 
 const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
 
+let restoreRequestId = 0
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  onCancelRestore,
+  { flush: 'sync' },
+)
+onBeforeUnmount(onCancelRestore)
+
 async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
+  const requestId = ++restoreRequestId
   // Full-record AND per-field (column-subset) both go through preview→confirm→execute now — fieldIds is carried
   // through so the preview shows exactly the selected changes and the identity binds that filtered set.
   restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion, fieldIds: payload.fieldIds } }
   try {
     const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion, payload.fieldIds)
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, visible: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
@@ -2256,21 +3162,25 @@ async function onRestoreRecordVersion(payload: { recordId: string; targetVersion
 async function onConfirmRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = restorePreview.value
-  if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
+  if (!sheetId || !state.visible || state.loading || !state.payload || !state.identity) return
+  const requestId = ++restoreRequestId
   const { recordId, targetVersion, expectedVersion, fieldIds } = state.payload
   restorePreview.value = { ...state, visible: false }
   try {
     const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity, fieldIds)
+    if (requestId !== restoreRequestId) return
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
-    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+    if (requestId === restoreRequestId && selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
 function onCancelRestore() {
-  restorePreview.value = { ...restorePreview.value, visible: false }
+  restoreRequestId++
+  restorePreview.value = { visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null }
 }
 
 // BS-4: scoped (multi-record) restore. Default entry = revert-to-original (v1); the dialog's Advanced picker
@@ -2297,7 +3207,9 @@ const batchRestore = ref<{
 // later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
 const gridSelectionLabels = ref<Record<string, string>>({})
 function captureSelectionLabels(recordIds: string[]): void {
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces the
+  // inline `visibleFields[0]` read — same field (position 0), now the single shared definition.
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
 }
 const batchRecordLabel = (recordId: string): string => {
@@ -2305,7 +3217,7 @@ const batchRecordLabel = (recordId: string): string => {
   if (captured) return captured
   // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
   const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   const val = row && pf ? row.data?.[pf.id] : undefined
   return val != null && val !== '' ? String(val) : recordId
 }
@@ -2313,11 +3225,18 @@ const batchRecordLabel = (recordId: string): string => {
 // Monotonic token: rapid Advanced version-switching (v3 → v4) can resolve out of order — only the LAST request's
 // response may land, or a slow v3 could overwrite v4's preview (wrong diff shown / identity mismatch at confirm).
 let batchPreviewSeq = 0
+const batchRestoreExecuting = computed(() => batchRestore.value.loading && batchRestore.value.identity !== null)
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  invalidateBatchRestore,
+  { flush: 'sync' },
+)
+onBeforeUnmount(invalidateBatchRestore)
 async function runBatchPreview(version: number) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
   const seq = ++batchPreviewSeq
-  batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version }
+  batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version, identity: null, executable: false }
   try {
     const pv = await workbench.client.restoreBatchPreview(sheetId, batchRestore.value.recordIds, version)
     if (seq !== batchPreviewSeq) return // a newer preview superseded this one → drop the stale response
@@ -2336,13 +3255,15 @@ function onBulkRestoreRequest(recordIds: string[]) {
 }
 
 function onBatchPreviewVersion(version: number) {
+  if (!batchRestore.value.visible || batchRestore.value.phase !== 'preview') return
+  if (batchRestore.value.loading && batchRestore.value.identity) return
   void runBatchPreview(version)
 }
 
 async function onConfirmBatchRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = batchRestore.value
-  if (!sheetId || !state.identity || state.scope.length === 0) { batchRestore.value = { ...state, visible: false }; return }
+  if (!sheetId || !state.visible || state.loading || state.phase !== 'preview' || !state.identity || state.scope.length === 0) return
   const expectedVersions = buildBatchExpectedVersions(state.records, state.scope) // wire-drift guard
   // [P3] FE fail-closed: if any scope record lacks a previewVersion, expectedVersions would be incomplete and the
   // server would 400 — block the execute and show a restore error (the user re-opens batch restore to retry) rather
@@ -2354,22 +3275,31 @@ async function onConfirmBatchRestore() {
     return
   }
   batchRestore.value = { ...state, loading: true }
+  const seq = ++batchPreviewSeq
   try {
     const result = await workbench.client.restoreBatchExecute(sheetId, state.scope, state.targetVersion, expectedVersions, state.identity)
+    if (seq !== batchPreviewSeq) return
     batchRestore.value = { ...batchRestore.value, loading: false, phase: 'result', resultRecords: result.records, restoredCount: result.restoredCount, skippedCount: result.skippedCount }
     await grid.loadViewData(grid.page.value.offset)
+    if (seq !== batchPreviewSeq) return
     showSuccess(`${result.restoredCount} ${recordLabel('record.batchRestoreRestored', isZh.value)} · ${result.skippedCount} ${recordLabel('record.batchRestoreSummarySkipped', isZh.value)}`)
   } catch (error) {
+    if (seq !== batchPreviewSeq) return
     batchRestore.value = { ...batchRestore.value, loading: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
 function onBatchRestoreDone() {
-  batchRestore.value = { ...batchRestore.value, visible: false }
+  onBatchRestoreCancel()
 }
 function onBatchRestoreCancel() {
-  batchRestore.value = { ...batchRestore.value, visible: false }
+  if (batchRestoreExecuting.value) return
+  invalidateBatchRestore()
+}
+function invalidateBatchRestore() {
+  batchPreviewSeq++
+  batchRestore.value = { visible: false, phase: 'preview', loading: false, targetVersion: 1, recordIds: [], records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 }
 }
 
 async function onReloadConflict() {
@@ -2392,15 +3322,81 @@ async function onRetryConflict() {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
+// prev/next pair (it prunes a rejected-value draft exactly when that field's error goes set → unset).
+function setInspectorFieldError(fieldId: string, message: string, origin: InspectorFieldErrorOrigin) {
+  inspectorFieldErrorEntries.value = { ...inspectorFieldErrorEntries.value, [fieldId]: { message, origin } }
+}
+/** Drop the entry for `fieldId`; with `onlyOrigin`, drop it only if THAT path wrote it (round 2: the
+ *  conflict-clear watch passes 'conflict' so it never wipes a validation alert on the same field). */
+function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldErrorOrigin) {
+  const current = inspectorFieldErrorEntries.value[fieldId]
+  if (!current) return
+  if (onlyOrigin && current.origin !== onlyOrigin) return
+  const next = { ...inspectorFieldErrorEntries.value }
+  delete next[fieldId]
+  inspectorFieldErrorEntries.value = next
+}
+
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
-  await grid.patchCell(record.id, fieldId, value, record.version)
+  const patchOwner = {}
+  inspectorPatchOwners.set(fieldId, patchOwner)
+  // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
+  // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
+  // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
+  // toast the second's message and lose its own alert when both rejections landed in one flush.
+  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
+  if (failure) {
+    // Route by the failure the composable returned for THIS patch — still guarded on record + field
+    // (defensive: the composable builds both from its own arguments, so a mismatch means a foreign
+    // object and falls through to today's toast). `resolvePatchFailureRoute` holds the one rule (its
+    // doc comment states the matrix: fieldErrors / 422 / VALIDATION_ERROR → field; VERSION_CONFLICT →
+    // conflict; everything else — including a plain 400 with any other code — → toast).
+    const own = failure.recordId === record.id && failure.fieldId === fieldId
+    const route = own ? resolvePatchFailureRoute(failure) : 'toast'
+    // Can the inline alert RENDER right now? Only the inspector knows (details tab active, field row
+    // rendered, still open on this record). Asked synchronously, before any write — see the doc on
+    // `canAnchorFieldError` in MetaRecordInspector.vue. `false`/unmounted → today's toast, no entry.
+    const anchorable = own && recordInspectorRef.value?.canAnchorFieldError(record.id, fieldId) === true && latestRequest
+    const toastText = (text: string) => text || metaCoreLabel('grid.errorPatchCell', isZh.value)
+    if (route === 'field') {
+      const message = fieldAnchoredPatchMessage(failure)
+      // Inline iff it can render AND the server gave us text to render; an empty message has nothing to
+      // anchor (the alert node would be blank) and falls back to the toast with the generic label.
+      if (anchorable && message) {
+        setInspectorFieldError(fieldId, message, 'field')
+        return
+      }
+      showError(toastText(message))
+      return
+    }
+    if (route === 'conflict') {
+      // The conflict banner is already up (root template `v-if="grid.conflict.value"`, set by the
+      // composable — unchanged). Add the field marker under the control with the SAME text the banner
+      // shows (when it can render), tagged 'conflict' so it clears WITH the conflict — reload / retry /
+      // dismiss, see the `grid.conflict` watch beside the record-change watch — and KEEP the toast this
+      // path always fired: round 1 suppressed it, round 2 restores it so §4 item 11's "all other codes
+      // keep the toast" is true verbatim (banner + marker + toast).
+      if (anchorable) setInspectorFieldError(fieldId, conflictMessage.value || failure.message, 'conflict')
+      showError(toastText(failure.message))
+      return
+    }
+    showError(toastText(failure.message))
+    return
+  }
   if (grid.error.value) {
+    // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
+    // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
     showError(grid.error.value)
     return
   }
+  // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
+  // panel's watch, its draft). Other fields' errors are untouched.
+  if (latestRequest) clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
@@ -2409,6 +3405,26 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
+}
+
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Copy link"): the inspector's copy-link icon only
+// EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
+// while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
+// through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
+// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
+// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+async function onCopyRecordLink() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+    return
+  }
+  try {
+    await clipboard.writeText(window.location.href)
+    showSuccess(recordLabel('record.copyLinkDone', isZh.value))
+  } catch {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+  }
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -2497,6 +3513,8 @@ async function onResolveComment(commentId: string) {
 function onEditComment(commentId: string) {
   const comment = commentsState.comments.value.find((item) => item.id === commentId)
   if (!comment) return
+  // #5808: taken once, here — see commentComposerInitialMentions.
+  editingMentionSnapshot.value = { commentId: comment.id, mentions: buildEditingMentionSuggestions(comment) }
   selectedEditingCommentId.value = comment.id
   selectedReplyCommentId.value = null
   selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null
@@ -2590,6 +3608,8 @@ function openPersonPicker(field: MetaField) {
   personPickerField.value = field
   personPickerRecordId.value = selectedRecordId.value
   personPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null
+  // Drawer/form open: same summaries the drawer itself renders from (grid first, deep-record fallback).
+  personPickerCurrentSummaries.value = selectedRecordPersonSummaries.value[field.id] ?? []
   personPickerVisible.value = true
 }
 function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
@@ -2597,6 +3617,8 @@ function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
   personPickerField.value = ctx.field
   personPickerRecordId.value = ctx.recordId
   personPickerCurrentValue.value = row?.data[ctx.field.id] ?? null
+  // Grid open: same summaries MetaCellRenderer is displaying for this cell right now.
+  personPickerCurrentSummaries.value = grid.personSummaries.value[ctx.recordId]?.[ctx.field.id] ?? []
   personPickerVisible.value = true
 }
 async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {
@@ -2664,12 +3686,16 @@ async function onUpdateField(fieldId: string, input: { name?: string; order?: nu
   } catch (e: any) { showError(e.message ?? wb('toast.fieldUpdateFailed', isZh.value)) }
 }
 
+// #5707 follow-up: the server refuses a field delete on a plugin-managed sheet with a coded 409
+// (MANAGED_FIELD_DELETE_REFUSED) whose message is English. Pick the copy by CODE -- same shape as
+// onDeleteSheet -- so zh-CN users get a Chinese sentence; every other failure still surfaces the
+// server's own message (and the generic toast when it sent none).
 async function onDeleteField(fieldId: string) {
   try {
     await workbench.client.deleteField(fieldId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? wb('toast.fieldDeleteFailed', isZh.value)) }
+  } catch (e: any) { showError(fmtFieldDeleteErrorMessage(e, isZh.value)) }
 }
 
 // --- View management ---
@@ -2694,6 +3720,7 @@ async function onCreateView(input: {
     })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     workbench.selectView(res.view.id)
+    exitDashboard()
     await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? wb('toast.viewCreateFailed', isZh.value)) }
 }
@@ -2705,7 +3732,12 @@ async function onUpdateView(viewId: string, input: {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
 }) {
-  await updateViewInternal(viewId, input, true)
+  // A 视图管理 save of the CURRENT view's sort/filter wins over the toolbar's staged, unapplied edits (#6075 round 2) —
+  // and only that save (round 3, N4): a rename, a config-only save or a save of another view leaves the staged edits
+  // alone. (An omitted facet is kept by the server; `undefined` is dropped by JSON, so it does not count either.)
+  const rewritesToolbarRules = viewId === workbench.activeViewId.value
+    && (input.sortInfo !== undefined || input.filterInfo !== undefined)
+  await updateViewInternal(viewId, input, true, { discardToolbarEdits: rewritesToolbarRules })
 }
 
 async function onPersistActiveViewConfig(input: {
@@ -2724,6 +3756,15 @@ const activeFrozenLeftColumnIds = computed(() => parseFrozenIds(workbench.active
 function onSetFrozen(frozenLeftColumnIds: string[]) {
   void onPersistActiveViewConfig({
     config: { ...(workbench.activeView.value?.config ?? {}), frozenLeftColumnIds },
+  })
+}
+
+// frozen top rows (#5863c) — same opaque-config pattern as frozen columns above; view.config is
+// freeform JSON, so no backend key allowlist to update (see frozen-rows.ts narrowing).
+const activeFrozenTopRowCount = computed(() => parseFrozenTopRowCount(workbench.activeView.value?.config))
+function onSetFrozenRows(frozenTopRowCount: number) {
+  void onPersistActiveViewConfig({
+    config: { ...(workbench.activeView.value?.config ?? {}), frozenTopRowCount },
   })
 }
 
@@ -2831,6 +3872,16 @@ const listForeignSheetsForFieldFn = async (baseId: string) =>
 // 3c foreign-field picker: read-gated source for the lookup/rollup target + filter field pickers.
 const listForeignFieldsForFieldFn = async (sheetId: string) =>
   (await workbench.client.listFields(sheetId)).fields
+// 客户反馈 2026-09-24 #4c follow-up: a lookup of a dateTime field shows / exports the target column's wall clock.
+// The target's TYPE is not on the lookup field, so resolve it through the same read-gated field listing the
+// lookup target picker uses — once per change of the lookup wiring, not per render (lookup-target-fields.ts).
+watch(
+  () => lookupTargetSignature(grid.fields.value),
+  (signature) => {
+    if (signature) void loadLookupTargetFields(grid.fields.value, listForeignFieldsForFieldFn)
+  },
+  { immediate: true },
+)
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -2964,9 +4015,26 @@ async function updateViewInternal(
     groupInfo?: Record<string, unknown>
   },
   notify: boolean,
+  options: { discardToolbarEdits?: boolean } = {},
 ) {
+  // 客户反馈 2026-09-24 #5 / #6075 round 2: a 视图管理 save of the current view's sort/filter rewrites them behind the
+  // toolbar. Staged, unapplied toolbar edits were made against the old rules — drop them, so the reload below
+  // re-syncs the toolbar from the saved view instead of PATCHing them over it. Dropped BEFORE the PATCH is sent
+  // (round 3, S3): a realtime reload or a pending search reload that runs while it is in flight would otherwise still
+  // PATCH the staged edits over the dialog's save. If the save fails, they are put back (restore no-ops when a load
+  // re-synced the toolbar meantime).
+  const restoreToolbarEdits = options.discardToolbarEdits ? grid.discardUnappliedSortFilterEdits() : null
   try {
     await workbench.client.updateView(viewId, input)
+  } catch (e: any) {
+    restoreToolbarEdits?.()
+    showError(e.message ?? wb('toast.viewUpdateFailed', isZh.value))
+    return
+  }
+  // …and again once it succeeded: an edit staged WHILE the PATCH was in flight (a realtime reload may have re-synced the
+  // toolbar to the pre-save rules meanwhile) was made against those rules too — as onConfigReverted does for a revert.
+  if (options.discardToolbarEdits) grid.discardUnappliedSortFilterEdits()
+  try {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
     if (notify) showSuccess(wb('toast.viewSettingsSaved', isZh.value))
@@ -2974,10 +4042,18 @@ async function updateViewInternal(
 }
 
 async function onDeleteView(viewId: string) {
+  // S3 (2026-09-25 review): loadSheetMeta below re-syncs the view list AND resets activeViewId (it
+  // falls back to views[0] once the deleted view is gone), so checking `activeViewId.value ===
+  // viewId` AFTER the reload never matches — the exit (and the fallback selectView) silently never
+  // ran. Capture whether the deleted view was active BEFORE the reload.
+  const wasActive = workbench.activeViewId.value === viewId
   try {
     await workbench.client.deleteView(viewId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
-    if (workbench.activeViewId.value === viewId) workbench.selectView(workbench.views.value[0]?.id ?? '')
+    if (wasActive) {
+      workbench.selectView(workbench.views.value[0]?.id ?? '')
+      exitDashboard()
+    }
   } catch (e: any) { showError(e.message ?? wb('toast.viewDeleteFailed', isZh.value)) }
 }
 
@@ -3040,7 +4116,109 @@ async function onCreateSheet(name: string) {
       showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
   } catch (e: any) { showError(e.message ?? wb('toast.sheetCreateFailed', isZh.value)) }
+}
+
+// Rename gates server-side on canManageFields — the affordance is hidden client-side for that
+// same reason (MetaSheetViewRail's canManageFields prop), but a 403 here (stale capability, a
+// role change mid-session) still surfaces through the same showError path as every other mutation
+// on this file, never a silent no-op. Refreshed the same way onUpdateField refreshes field
+// changes: workbench.loadSheetMeta re-pulls the base's full sheet list (renamed sheet included)
+// regardless of whether sheetId is the currently active sheet.
+async function onRenameSheet(sheetId: string, name: string) {
+  try {
+    await workbench.client.renameSheet(sheetId, name)
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  } catch (e: any) { showError(e.message ?? wb('toast.sheetRenameFailed', isZh.value)) }
+}
+
+// Whole-sheet soft delete (DELETE /api/multitable/sheets/:id). The rail only shows the trash button
+// for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
+// re-checks that bit so a stale rail can never issue the request. Confirm first — the same
+// window.confirm idiom every other destructive prompt in this file uses — with copy that names the
+// sheet and states the consequence (records hidden with it; lifecycle-authorized recycle-bin restore).
+// Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
+// plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
+//
+// Refresh: if the deleted sheet is the ACTIVE one, re-pull the base with `loadBaseContext(baseId)`
+// — NOT `switchBase`, which short-circuits to `return true` for the same base with no sheetId
+// (useMultitableWorkbench.ts) and would leave the workbench pointing at a sheet that no longer
+// exists. /context with only baseId selects the first remaining readable sheet server-side, and
+// syncContextState falls back to the first listed sheet (or '' when the base is now empty — the
+// existing no-sheet state). If another sheet was deleted, `loadSheetMeta` re-pulls the list the way
+// onRenameSheet does.
+async function onDeleteSheet(sheetId: string) {
+  if (!canDeleteSheet.value) return
+  const target = workbench.sheets.value.find((s) => s.id === sheetId)
+  if (!window.confirm(fmtSheetDeleteConfirm(target?.name ?? sheetId, isZh.value))) return
+  try {
+    await workbench.client.deleteSheet(sheetId)
+  } catch (e: any) {
+    showError(fmtSheetDeleteErrorMessage(e, isZh.value))
+    if (e?.code === 'SHEET_DELETED') await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    return
+  }
+  showSuccess(wb('toast.sheetDeleted', isZh.value))
+  if (sheetId === workbench.activeSheetId.value) {
+    const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
+    if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    exitDashboard() // S4 (2026-09-25 review)
+  } else {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  }
+}
+
+// --- 复制数据表（含数据）S1 (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md) ---
+// Entry ① = the rail's copy button (selected sheet only); entry ② = the 「存为模板」 dialog's hand-off
+// link. Both are gated on the server-derived `canCopySheet` bit, read straight off the /context
+// capabilities object exactly like canDeleteSheet (`=== true`): an old backend without the key, a legacy
+// role-string source, or a stale object all fail CLOSED (no entry anywhere). Hiding is UX only — the
+// copy route re-runs the full-table-read and Base-writable gates. Entry ③ (template center) is S4.
+const canCopySheet = computed(() => capabilitySource.value?.canCopySheet === true)
+const showCopySheetDialog = ref(false)
+// Pinned when the dialog opens, so a sheet switch underneath can never retarget an open dialog.
+const copySheetSourceId = ref('')
+const copySheetSourceName = computed(() => workbench.sheets.value.find((s) => s.id === copySheetSourceId.value)?.name ?? '')
+// S1 target = the source sheet's Base (the active one); shown disabled in the dialog.
+const copySheetBaseName = computed(() => bases.value.find((b) => b.id === activeBaseId.value)?.name ?? '')
+const copySheetFieldChoices = computed(() => workbench.fields.value.map((f) => ({ id: f.id, name: f.name })))
+const copySheetViewChoices = computed(() => workbench.views.value.map((v) => ({ id: v.id, name: v.name })))
+
+function onOpenCopySheet(sheetId?: string): void {
+  const target = sheetId || workbench.activeSheetId.value
+  // The bit describes the ACTIVE sheet only; a request for any other sheet (stale rail) is refused.
+  if (!canCopySheet.value || !target || target !== workbench.activeSheetId.value) return
+  // Success navigates to the copy, so ask about unsaved edits up front — same order as onCreateSheet.
+  if (!confirmDiscardContextChanges()) return
+  copySheetSourceId.value = target
+  showCopySheetDialog.value = true
+}
+
+function openCopySheetFromSaveTemplate(): void {
+  closeSaveSheetAsTemplate()
+  onOpenCopySheet()
+}
+
+function closeCopySheetDialog(): void {
+  showCopySheetDialog.value = false
+}
+
+async function onCopySheetCopied(result: CopySheetResult): Promise<void> {
+  showCopySheetDialog.value = false
+  // Same refresh + select path as onCreateSheet: /context for the new sheet re-pulls the Base's sheet
+  // list (the copy included, with its copiedFrom badge) and makes it the active sheet.
+  const ok = await workbench.syncExternalContext({
+    baseId: (result.sheet.baseId ?? activeBaseId.value) || undefined,
+    sheetId: result.sheet.id,
+  })
+  if (!ok) {
+    showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    return
+  }
+  exitDashboard()
+  showSuccess(copySheetSuccessToast(result.sheet.name, result.summary, result.replayed, isZh.value))
+  if (result.formulaRecompute?.failed) showError(copySheetLabel('copySheet.formulaRecomputeFailed', isZh.value))
 }
 
 // --- Base management ---
@@ -3063,9 +4241,26 @@ async function loadBases() {
   } catch { /* silent */ }
 }
 
+// A2 (2026-09-25, 客户反馈 2026-09-24 #6, 裁定见 PR #6074): once the dashboard is open, none of the
+// sidebar navigation paths reset `showDashboardView` — there was no way back to the grid short of
+// re-clicking the toggle button itself. This one-line helper is called from every path below
+// (including the early-return "already active" branches, so re-clicking the current sheet/view
+// while the dashboard is open also returns to the grid instead of doing nothing).
+function exitDashboard() {
+  showDashboardView.value = false
+}
+
 async function onSelectBase(baseId: string) {
-  if (baseId === workbench.activeBaseId.value) return
+  // N1 (2026-09-25 review): exitDashboard() must not run until the switch actually happens — a
+  // discard-changes confirm the user CANCELS must leave the dashboard exactly as it was. The
+  // already-active equality branch never prompts, so it still exits immediately (re-clicking the
+  // current base while the dashboard is open returns to the grid instead of doing nothing).
+  if (baseId === workbench.activeBaseId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   const ok = await workbench.switchBase(baseId)
   if (!ok) {
     showError(workbench.error.value ?? wb('toast.baseLoadFailed', isZh.value))
@@ -3086,8 +4281,14 @@ function rememberWorkbenchBaseOpen(baseId: string) {
 // user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
 // notification bell's click-to-locate) MUST honor a false return.
 function onSelectSheet(sheetId: string): boolean {
-  if (sheetId === workbench.activeSheetId.value) return true
+  // N1 (2026-09-25 review): same reasoning as onSelectBase — do not exit until the switch is
+  // actually going to happen, so a cancelled discard-changes confirm leaves the dashboard open.
+  if (sheetId === workbench.activeSheetId.value) {
+    exitDashboard()
+    return true
+  }
   if (!confirmDiscardContextChanges()) return false
+  exitDashboard()
   workbench.selectSheet(sheetId)
   return true
 }
@@ -3098,18 +4299,34 @@ function onSelectSheet(sheetId: string): boolean {
 // up in the wrong sheet and report not-found.
 async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    // The different-sheet case delegates entirely to onSelectSheet, which (N1, 2026-09-25 review)
+    // only exits the dashboard once the switch actually happens — a cancelled discard-changes
+    // confirm here must leave the dashboard open, not close it and then abort the navigate.
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // A2: a same-sheet locate skips onSelectSheet (and its own exitDashboard call) entirely, so this
+    // path needs its own reset — otherwise locating a record while the dashboard is open would leave
+    // the dashboard showing instead of surfacing the record. No confirm gates this branch (nothing is
+    // switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   await resolveDeepLink(payload.recordId)
 }
 
 function onSelectView(viewId: string) {
-  if (viewId === workbench.activeViewId.value) return
+  // N1 (2026-09-25 review): same reasoning as onSelectBase/onSelectSheet.
+  if (viewId === workbench.activeViewId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   workbench.selectView(viewId)
 }
 
 function onOpenImportModal() {
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
   showImportModal.value = true
 }
 
@@ -3123,12 +4340,22 @@ function flushActiveFieldEdit() {
   if (el && typeof el.blur === 'function') el.blur()
 }
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2 / §4 item 2): close
+// (× or Esc, routed through `onInspectorKeydown` → this same `close` emit) now sets
+// `inspectorOpen=false` and RETAINS `selectedRecordId` — a graft from P2/P3 (row highlight/collab
+// cursor survive; Shift+Space reopens instantly). The `flushActiveFieldEdit` → discard-guard →
+// `showComments=false` → `resetCommentInteractionState` order is unchanged. Round 4 (2026-09-05,
+// refuter P2): the opener is consumed by this close — the inspector restores focus from the target it
+// captured on ITS open edge, not from the prop at close time — so it is cleared here, last, and can
+// no longer be inherited by a later open that did not come from that element (see `selectRecord`'s
+// open branch for the open-side half of the same fix).
 function onCloseDrawer() {
   flushActiveFieldEdit()
   if (!confirmDiscardRecordChanges()) return
-  selectedRecordId.value = null
+  inspectorOpen.value = false
   showComments.value = false
   resetCommentInteractionState()
+  inspectorOpenerEl.value = null
 }
 
 // W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
@@ -3143,9 +4370,17 @@ function onCloseDrawer() {
 // inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
 // already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
+  // #5813 final review: this button is reachable from the Details tab too, and while an edit is open
+  // `showComments` is already true, so the inspector stays on Details — dropping the edited text below
+  // would be invisible there. Ask first (non-empty edit only); on cancel nothing changes at all.
+  if (!confirmDiscardCommentEdit()) return
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
+  // #5813 follow-up: ending an active EDIT here must also drop the edited text, as
+  // `onCancelCommentEdit` does — otherwise the composer keeps the body but loses the edit's mention
+  // snapshot, and Send posts it as a NEW comment with `mentions: []`. A new-comment draft is kept.
+  if (selectedEditingCommentId.value) commentDraft.value = ''
   selectedEditingCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
 }
@@ -3203,6 +4438,13 @@ function confirmDiscardRecordChanges() {
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
 }
 
+// #5813: only an in-progress EDIT with text is at stake (a new-comment draft is kept by
+// `onToggleComments`); `hasRecordScopedDrafts` is not reused because a dirty form alone must not prompt.
+function confirmDiscardCommentEdit() {
+  if (!selectedEditingCommentId.value || !hasCommentDraft.value) return true
+  return window.confirm(wb('confirm.discardCommentEdit', isZh.value))
+}
+
 function discardWorkbenchDraftsForExternalContextChange() {
   formDirty.value = false
   fieldManagerDirty.value = false
@@ -3245,8 +4487,32 @@ function serializeExternalContext(input: { baseId: string; sheetId: string; view
   return `${input.baseId}::${input.sheetId}::${input.viewId}`
 }
 
+// #5750: the incoming baseId is what the embedding host / URL says, while activeBaseId is what the
+// LOADED CONTEXT said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+// ctx.sheet.baseId). Comparing the two verbatim makes this fast path miss forever whenever they
+// spell the same base differently, and a host that re-sends the same context on a timer then
+// re-enters applyExternalContext -- plus the busy / unsaved-draft defer toasts -- every tick.
+// A sheet belongs to exactly one base, so once the ACTIVE sheet is known (from the loaded sheet
+// list) to live in the active base, the requested base id carries nothing the sheet id does not
+// already carry. It is only ignored, never trusted: the caller still requires the sheet id (and the
+// view id) to equal the active one, so a foreign base can never select a sheet through this path,
+// and an unknown active sheet (empty/not-yet-loaded sheet list) keeps the strict comparison.
+function externalContextBaseMatchesWorkbench(inputBaseId: string) {
+  const activeBaseId = workbench.activeBaseId.value ?? ''
+  if (inputBaseId === activeBaseId || !inputBaseId) return true
+  if (!activeBaseId) return false
+  // A base id this workbench KNOWS (it is in the loaded base list) is never a different spelling of
+  // the active base -- it is a real base switch request. Ignoring it would answer 'applied' to a
+  // host that posted only { baseId } (handleNavigateMessage fills sheetId/viewId in from the
+  // current ones) while nothing switched; that request has to go down the normal path and fail
+  // loudly, as it did before this fast path existed.
+  if (bases.value.some((base) => base.id === inputBaseId)) return false
+  const activeSheet = workbench.sheets.value.find((sheet) => sheet.id === (workbench.activeSheetId.value ?? ''))
+  return !!activeSheet && activeSheet.baseId === activeBaseId
+}
+
 function externalContextMatchesWorkbench(input: { baseId: string; sheetId: string; viewId: string }) {
-  return input.baseId === (workbench.activeBaseId.value ?? '') &&
+  return externalContextBaseMatchesWorkbench(input.baseId) &&
     input.sheetId === (workbench.activeSheetId.value ?? '') &&
     input.viewId === (workbench.activeViewId.value ?? '')
 }
@@ -3257,6 +4523,34 @@ function getCurrentExternalContext() {
     sheetId: workbench.activeSheetId.value ?? '',
     viewId: workbench.activeViewId.value ?? '',
   }
+}
+
+// #5750 follow-up (review round 2): which triple an 'applied' result echoes. getCurrentExternalContext()
+// reads the LIVE refs, and every caller below reads them AFTER an await -- loadBaseContext applies the
+// context and only THEN awaits /fields, so a rail click (selectSheet/selectView) or a second overlapping
+// sync can move the active triple inside that window. useMultitableWorkbench documents exactly this hazard
+// and keeps per-sync `inFlightExternalSyncs` so its memo never records another writer's result as this
+// request's; tests/multitable-external-context-sync.spec.ts pins the window as reachable (a sync for
+// sheet_orders resolves true while the rail click's sheet_deals is on screen).
+// So: echo the live triple only when it is still a RESOLUTION OF THIS REQUEST --
+//   - the base the request named is the one in effect (or a spelling of it: the fast-path matcher),
+//   - the sheet the request named is the one in effect,
+//   - the view the request named is in effect, or is not a view this sheet HAS (the dead/renamed view
+//     the loaded context legitimately falls back to views[0] for -- the case this echo change is for).
+// Otherwise this request lost a race: echo the REQUEST, which is what shipped before, so the embed host
+// pins the requested triple and the props watcher carries the frame back to it.
+function resolveAppliedExternalContextEcho(request: { baseId: string; sheetId: string; viewId: string }) {
+  const current = getCurrentExternalContext()
+  if (!externalContextBaseMatchesWorkbench(request.baseId)) return request
+  if (request.sheetId && request.sheetId !== current.sheetId) return request
+  if (
+    request.viewId
+    && request.viewId !== current.viewId
+    && workbench.views.value.some((view) => view.id === request.viewId)
+  ) {
+    return request
+  }
+  return current
 }
 
 async function applyExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
@@ -3289,8 +4583,16 @@ async function replayPendingExternalContextIfReady() {
   const ok = await applyExternalContext(replay.context)
   emit('external-context-result', ok
     ? {
+      // #5750 follow-up: echo what is ACTUALLY on screen, not what was asked for. The loaded
+      // context decides the active triple (syncContextState overwrites activeBaseId with
+      // ctx.base.id / ctx.sheet.baseId and falls activeViewId back to views[0] when the requested
+      // view is not in ctx.views), so a request naming a dead view applies successfully while the
+      // workbench lands on another view. Echoing the request made the embed host pin that dead
+      // triple into the URL and re-send it forever; the resolved triple round-trips -- but only
+      // when it IS this request's resolution (see resolveAppliedExternalContextEcho). FAILURES keep
+      // echoing the request -- there is no applied context to report for them.
       status: 'applied',
-      context: replay.context,
+      context: resolveAppliedExternalContextEcho(replay.context),
       requestId: replay.requestId,
     }
     : {
@@ -3382,7 +4684,18 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: nextContext, requestId: options?.requestId }
+  // S4 (2026-09-25 review): a real context switch just landed (from the props watcher or the embed's
+  // postMessage handler) — same "you actually navigated" trigger as onSelectSheet/onSelectView, so the
+  // dashboard should not still be covering the grid. NOT called on the fast 'applied' path above (the
+  // requested context already matched — nothing moved) nor on 'blocked'/'deferred'/'failed' — those
+  // never navigated, and 'blocked' in particular is the user cancelling the discard-changes confirm.
+  exitDashboard()
+  // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
+  // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
+  // at the top of this function already reports the live triple (it has just proved the refs equal the
+  // request, synchronously), so a caller could otherwise get two different shapes of 'applied' for the
+  // same context.
+  return { status: 'applied', context: resolveAppliedExternalContextEcho(nextContext), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
@@ -3397,16 +4710,157 @@ async function onCreateBase(name: string) {
   } catch (e: any) { showError(e.message ?? wb('toast.baseCreateFailed', isZh.value)) }
 }
 
+// Rename gates server-side on canManageFields — the affordance is hidden client-side for that
+// same reason (MetaBasePicker's canManageFields prop), but a 403 here still surfaces through
+// showError, never a silent no-op. Local array update mirrors onCreateBase's push above (bases
+// pass through client.renameBase's own invalidateBasesCache, so a later force-refresh will not
+// see a stale cached name either).
+async function onRenameBase(baseId: string, name: string) {
+  try {
+    const res = await workbench.client.renameBase(baseId, name)
+    const idx = bases.value.findIndex((base) => base.id === baseId)
+    if (idx >= 0) bases.value[idx] = { ...bases.value[idx], ...res.base }
+  } catch (e: any) { showError(e.message ?? wb('toast.baseRenameFailed', isZh.value)) }
+}
+
 async function loadTemplateLibrary() {
+  // N4 (adversarial review of #6091, 2026-09-26): loadTemplateLibrary is now called from more than
+  // one path in quick succession (save-while-panel-open below, and openTemplateLibrary's own
+  // auto-reload gate) — without this guard two concurrent calls would both flip
+  // templateLibraryLoading and race on templates.value, and whichever network response lands LAST
+  // wins regardless of which call was actually launched last. Skipping while one is already in
+  // flight does not lose the refresh: whoever tried to trigger it already called
+  // markTemplateLibraryStale() beforehand (see onSaveSheetAsTemplate), and the in-flight load
+  // notices that mark when it settles and runs one follow-up load (N-1, the tail of this function).
+  if (templateLibraryLoading.value) return
+  // S3/N4: snapshot the dirty mark BEFORE awaiting the network call. If something calls
+  // markTemplateLibraryStale() again WHILE this request is in flight, templateLibraryDirtyMark
+  // moves past this snapshot — on success below we only advance templateLibraryLoadedMark up to
+  // what we captured here, so a same-or-newer dirty mark keeps the panel "needs refresh" instead
+  // of a stale (pre-save) response silently marking it fresh.
+  const requestedMark = templateLibraryDirtyMark
   templateLibraryLoading.value = true
   templateLibraryError.value = null
   try {
     const data = await workbench.client.listTemplates()
     templates.value = data.templates ?? []
+    // Only a SUCCESSFUL load advances the loaded mark — a failed reload (network blip / 5xx) must
+    // leave the panel retryable, see the throw-site comment in onSaveSheetAsTemplate and the gate
+    // in openTemplateLibrary below.
+    if (requestedMark > templateLibraryLoadedMark) templateLibraryLoadedMark = requestedMark
   } catch (e: any) {
     templateLibraryError.value = e.message ?? wb('tpl.errorLoad', isZh.value)
   } finally {
     templateLibraryLoading.value = false
+  }
+  // N-1 (second adversarial review of #6091): a save that succeeded WHILE this request was in flight
+  // bumped the dirty mark past what this request captured, and its own reload call was skipped by
+  // the single-flight guard above — so this response predates the new template. With the panel
+  // still open, run exactly one follow-up load now instead of leaving the stale list up until the
+  // user closes and reopens the panel. Loop guard: the trigger is "the dirty mark moved DURING this
+  // request", never "the panel is still stale" — a follow-up that fails does not schedule another
+  // one (only a further save during it would), so a persistently failing endpoint is not hammered.
+  // Panel closed meanwhile: nothing is fetched behind the user's back; the stale mark makes the
+  // next openTemplateLibrary() reload.
+  if (templateLibraryDirtyMark > requestedMark && showTemplateLibrary.value) {
+    await loadTemplateLibrary()
+  }
+}
+
+const saveTemplateFieldChoices = computed(() =>
+  workbench.fields.value.map((field) => ({ id: field.id, name: field.name, type: field.type })),
+)
+// A10 phase 1(客户反馈 2026-09-24 #8):只读展示将被保存的视图——workbench.views 是**未经
+// 视图权限过滤**的清单(与 visibleWorkbenchViews 不同),必须用这个才和服务端实际保存的范围
+// (custom-template-store.ts:整张 sheet 的全部 meta_views,不按视图权限收窄)对得上。
+const saveTemplateViewChoices = computed(() =>
+  workbench.views.value.map((view) => ({ id: view.id, name: view.name, type: view.type })),
+)
+const activeSheetName = computed(() => {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return ''
+  return workbench.sheets.value.find((sheet) => sheet.id === sheetId)?.name ?? ''
+})
+// A10 phase 1:对话框头部「来源：<工作区名> / <数据表名>」用的工作区名。`bases` 是本组件自己
+// 维护的 Base 列表(loadBases 从 client.listBases() 填),不是 workbench composable 的字段。
+const activeBaseName = computed(() => {
+  const baseId = activeBaseId.value
+  if (!baseId) return ''
+  return bases.value.find((base) => base.id === baseId)?.name ?? ''
+})
+
+function openSaveSheetAsTemplate(): void {
+  // 与工具栏的 v-if 同档再判一次:显隐是 UX,这里是本地的第二道;真正的门在服务端。
+  if (!caps.canManageFields.value || !workbench.activeSheetId.value) return
+  saveTemplateResult.value = null
+  saveTemplateError.value = null
+  saveTemplateSubmitting.value = false
+  // 默认不勾「共享给本租户」——模板带着表名与全部字段名,默认全租户可见等于绕过表级权限
+  // 的元数据读面(和服务端 normalizeCustomTemplateVisibility 的默认同向)。
+  saveTemplateShare.value = false
+  // 模板名默认取**当前数据表名**(不是工作区名)——入口在工作台,心智是「存这张表」。
+  saveTemplateName.value = activeSheetName.value
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value.map((field) => field.id)
+  showSaveSheetAsTemplate.value = true
+}
+
+function closeSaveSheetAsTemplate(): void {
+  showSaveSheetAsTemplate.value = false
+}
+
+function toggleSaveTemplateField(fieldId: string): void {
+  const next = new Set(saveTemplateFieldIds.value)
+  if (next.has(fieldId)) next.delete(fieldId)
+  else next.add(fieldId)
+  // 保持与字段清单同序,提交出去的 fieldIds 顺序稳定(便于用例逐字比对 payload)。
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value
+    .map((field) => field.id)
+    .filter((id) => next.has(id))
+}
+
+function setAllSaveTemplateFields(selected: boolean): void {
+  saveTemplateFieldIds.value = selected ? saveTemplateFieldChoices.value.map((field) => field.id) : []
+}
+
+async function onSaveSheetAsTemplate(): Promise<void> {
+  const baseId = activeBaseId.value
+  const sheetId = workbench.activeSheetId.value
+  if (!baseId || !sheetId) return
+  const name = saveTemplateName.value.trim()
+  if (!name) {
+    saveTemplateError.value = wb('saveTpl.errorNoName', isZh.value)
+    return
+  }
+  if (saveTemplateFieldIds.value.length === 0) {
+    // 零字段服务端也会 400,这里只是不白跑一趟(不是把服务端那道校验搬到前端)。
+    saveTemplateError.value = wb('saveTpl.errorNoFields', isZh.value)
+    return
+  }
+  saveTemplateSubmitting.value = true
+  saveTemplateError.value = null
+  try {
+    saveTemplateResult.value = await workbench.client.createTemplateFromBase({
+      baseId,
+      name,
+      sheetIds: [sheetId],
+      fieldIds: [...saveTemplateFieldIds.value],
+      visibility: saveTemplateShare.value ? 'tenant' : 'private',
+    })
+    // A10 phase 1(客户反馈 2026-09-24 #8):存成功了,模板面板的列表要能看见它——
+    // 面板此刻正开着就立刻重拉;没开着就打一个"需要刷新"的标记,下次 openTemplateLibrary 会重拉
+    // (旧逻辑只在 templates.value.length === 0 时才拉,面板加载过一次之后就再也不会重拉了)。
+    // S3(2026-09-26 对抗评审):先打标记再重拉,不是反过来——loadTemplateLibrary 只有在这次重拉
+    // 结束时"赶上"了发起时的标记才会消掉待刷新状态,所以哪怕这次重拉失败(网络抖动/服务端 5xx),
+    // 待刷新状态仍然成立,下次开面板(openTemplateLibrary 的门)或再存一次模板都会重试,不会卡死
+    // 在一条失败的错误提示上、也不会让面板看起来"刷新过了"但其实还是旧列表。
+    markTemplateLibraryStale()
+    if (showTemplateLibrary.value) {
+      await loadTemplateLibrary()
+    }
+  } catch (e: any) {
+    saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
+  } finally {
+    saveTemplateSubmitting.value = false
   }
 }
 
@@ -3416,7 +4870,13 @@ async function openTemplateLibrary() {
     return
   }
   showTemplateLibrary.value = true
-  if (templates.value.length === 0 && !templateLibraryLoading.value) {
+  // N4: loadTemplateLibrary itself now no-ops while a load is already in flight (e.g. the
+  // save-while-open path just kicked one off), so calling it here is always safe — it either runs
+  // or is a harmless skip, never a second race. S3: also retry when the LAST load errored
+  // (templateLibraryError set) — a failed load never advances templateLibraryLoadedMark, but
+  // checking the error flag explicitly here too means a caller that ever sets error without going
+  // through the mark bookkeeping still gets retried on next open, not stuck on a dead error state.
+  if (templates.value.length === 0 || templateLibraryLoadedMark < templateLibraryDirtyMark || templateLibraryError.value) {
     await loadTemplateLibrary()
   }
 }
@@ -3442,6 +4902,7 @@ async function onInstallTemplate(template: MetaTemplate) {
       showError(workbench.error.value ?? wb('toast.templateRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
     rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
     showSuccess(fmtTemplateInstalled(result.template.name, isZh.value))
@@ -3480,11 +4941,17 @@ function onAutoFitColumns() {
 // Slice 3c: route by personal-vs-shared. Personal mode ON → write ONLY personal-config.fieldOrder (never the
 // shared field.order); OFF → the unchanged shared path. Logic + goldens live in utils/reorder-view-fields.ts.
 function onReorderField(fromId: string, toId: string) {
+  const viewId = workbench.activeViewId.value
+  const isPersonal = personalViewsEnabled.value && personalView.isPersonalMode(viewId)
+  // 客户反馈 2026-09-24 #5 / #6075 round 2: a personal order is the WHOLE visible-column list, derived from the grid's
+  // hidden / order state. While the view's load is in flight or has failed that state is not the view's own (it
+  // was reset on the switch), so writing it would replace the view's stored personal order — drop the drag.
+  if (isPersonal && !grid.isViewStateLoadedFor(viewId)) return
   void reorderViewFields({
     fromId,
     toId,
-    isPersonal: personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
-    viewId: workbench.activeViewId.value,
+    isPersonal,
+    viewId,
     sharedFields: grid.fields.value,
     visibleFieldIds: grid.visibleFields.value.map((f) => f.id),
     client: workbench.client,
@@ -3494,12 +4961,121 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(payload: ImportBuildResult) {
+/**
+ * Create the fields the import modal asked for, then rewrite the placeholder keys the modal used for
+ * those columns to the new field ids. Fail-closed: any refusal or backend error aborts BEFORE a
+ * single record is written (records are only rewritten after every create succeeded).
+ *
+ * Returns false when the caller must abort the import.
+ */
+async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<boolean> {
+  const requests = payload.createFields ?? []
+  if (!requests.length) return true
+  // WRITE-SIDE GATE. The modal's `canCreateFields` prop only controls what it OFFERS; a stale prop,
+  // a revoked role, or a hand-built payload must not reach `createField` from here.
+  if (!caps.canManageFields.value) {
+    importCreateFieldsError.value = importLabel('import.createFieldsForbidden', isZh.value)
+    return false
+  }
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    importCreateFieldsError.value = wb('toast.fieldCreateFailed', isZh.value)
+    return false
+  }
+  const existingFields = workbench.fields.value
+  const plan = planCreateFieldNames({
+    requests,
+    existingNames: existingFields.map((field) => field.name),
+    existingFieldCount: existingFields.length,
+  })
+  if (!plan.ok) {
+    importCreateFieldsError.value = plan.reason === 'field-limit'
+      ? fmtCreateFieldLimitReached(MAX_SHEET_FIELDS, isZh.value)
+      : plan.reason === 'name-too-long'
+        ? fmtCreateFieldNameTooLong(plan.header, MAX_FIELD_NAME_LENGTH, isZh.value)
+        : fmtCreateFieldNameInvalid(plan.header, isZh.value)
+    return false
+  }
+
+  const createdColumns: Record<number, string> = {}
+  for (const [index, request] of requests.entries()) {
+    try {
+      const created = await workbench.client.createField({
+        sheetId,
+        name: plan.names[index],
+        type: 'string' as MetaFieldType,
+      })
+      createdColumns[request.columnIndex] = created.field.id
+    } catch (e: any) {
+      importCreateFieldsError.value = fmtCreateFieldFailed(
+        request.header,
+        e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
+        isZh.value,
+      )
+      // A create can not be rolled back (there is no transaction across these calls), so the fields
+      // built before the failure are already on the sheet. Publish them: the modal rebinds those
+      // columns from the sentinel to their real ids, so the retry the user is about to make asks
+      // only for the column that actually failed. Dropping createdColumns here (the previous
+      // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
+      // — meta_fields has no (sheet_id, name) unique index to stop it.
+      try {
+        await publishCreatedImportFields(payload, sheetId, createdColumns)
+      } catch {
+        // A failed sheet-meta refresh must NOT mask the create error the user has to act on; the
+        // column → id map is published regardless (see the finally inside), which is what stops the
+        // retry from duplicating.
+      }
+      return false
+    }
+  }
+
+  await publishCreatedImportFields(payload, sheetId, createdColumns)
+  return true
+}
+
+/**
+ * Adopt the fields that were actually created: rewrite the modal's placeholder keys to the real
+ * field ids, refresh the sheet meta (so a retry plans names against the CURRENT field list instead
+ * of a stale one), and hand the column → id map to the modal. Used on both the success path and the
+ * partial-failure path; on the failure path it must not clobber importCreateFieldsError.
+ */
+async function publishCreatedImportFields(
+  payload: ImportSubmitPayload,
+  sheetId: string,
+  createdColumns: Record<number, string>,
+): Promise<void> {
+  if (!Object.keys(createdColumns).length) return
+  // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
+  // placeholder key must disappear everywhere, not just in this attempt's copy.
+  for (const record of payload.records) {
+    for (const [columnIndex, fieldId] of Object.entries(createdColumns)) {
+      const placeholder = createFieldPlaceholderId(Number(columnIndex))
+      if (!(placeholder in record)) continue
+      record[fieldId] = record[placeholder]
+      delete record[placeholder]
+    }
+  }
+  try {
+    await workbench.loadSheetMeta(sheetId)
+  } finally {
+    // Published even when the refresh threw: the modal must learn which columns now exist, or the
+    // retry asks for them again and a second same-named field appears. The throw still propagates
+    // on the success path, where a stale grid was already treated as a reason to abort.
+    importCreatedFieldColumns.value = { ...createdColumns }
+  }
+}
+
+async function onBulkImport(payload: ImportSubmitPayload) {
   const controller = new AbortController()
   importAbortController.value = controller
   importSubmitting.value = true
   importResult.value = null
+  importCreateFieldsError.value = null
   try {
+    if (!(await applyImportCreateFields(payload))) {
+      showError(importCreateFieldsError.value ?? wb('toast.fieldCreateFailed', isZh.value))
+      return
+    }
     const recordsToImport = payload.records
     const rowIndexesToImport = payload.rowIndexes
     const skippedRows: ImportFailure[] = []
@@ -3605,6 +5181,8 @@ function closeImportModal() {
   importSubmitting.value = false
   importResult.value = null
   importAbortController.value = null
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
 }
 
 // --- CSV export ---
@@ -3629,7 +5207,11 @@ function onGridSelectionChange(recordIds: string[]) {
 //     fieldIds selection (selection narrows within the permitted set, never
 //     widens). NOTE: "all rows" exports the view's FULL set respecting the view's
 //     row filter + sort + hidden-fields (#3010) — the entire (filtered) view, not
-//     just the loaded page; a view with no filter exports the full sheet.
+//     just the loaded page; a view with no filter exports the full sheet. The
+//     toolbar's search box (searchText) is NOT part of that filter: exportSheet's
+//     params are sheetId/viewId/fieldIds/format only, and export-xlsx accepts no
+//     search param — a search-narrowed grid still exports the view's UNsearched
+//     rows (S2, adversarial review of #6091; export.allRows's label says so).
 //   - "selected rows" → stays CLIENT-SIDE over grid.rows. Those rows are the
 //     /view response, already field-permission AND §2a.3-taint masked at read
 //     time (univer-meta.ts GET /view: filterRecordDataByFieldIds over the
@@ -3706,12 +5288,18 @@ function triggerDownloadNamed(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+// 客户反馈 2026-09-24 #4c (B1): the "selected rows" client export writes date-times as the SAME
+// `YYYY-MM-DD HH:mm` business wall clock the grid shows (dateTime: explicit non-UTC field zone, else the
+// business zone; createdTime/modifiedTime: business zone) — matching the server's "all rows" route, so
+// both files re-import to the same instants. A non-date-time value keeps its raw projection.
 function doExportCsv(fields: GridExportField[], rowList: GridExportRow[]) {
   const header = fields.map((f) => csvEscape(f.name)).join(',')
   const rows = rowList.map((row) =>
     fields.map((f) => {
       const v = row.data[f.id]
       if (v === null || v === undefined) return ''
+      const wallClock = dateTimeExportText(f, v)
+      if (wallClock !== null) return csvEscape(wallClock)
       if (typeof v === 'boolean') return v ? 'true' : 'false'
       if (Array.isArray(v)) return csvEscape(v.map(String).join('; '))
       return csvEscape(String(v))
@@ -3734,6 +5322,8 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
       fields.map((f) => {
         const v = row.data[f.id]
         if (v === null || v === undefined) return ''
+        const wallClock = dateTimeExportText(f, v)
+        if (wallClock !== null) return wallClock
         if (typeof v === 'boolean') return v
         if (typeof v === 'number') return v
         if (Array.isArray(v)) return v.map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item))).join('; ')
@@ -3806,12 +5396,28 @@ async function applyCommentDeepLink(recordId: string, options?: {
   })
 }
 
-// Update URL hash when a record is selected
-watch(selectedRecordId, (rid) => {
+// Update URL hash — record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2): the
+// hash means "this record is EXPANDED", so it is written only while `inspectorOpen &&
+// selectedRecordId` (both, not `selectedRecordId` alone) and stripped the moment either goes
+// false — a reload must not resurrect a panel the user explicitly closed (`selectedRecordId` alone
+// now survives close, per `onCloseDrawer` above, so it can no longer be the sole hash trigger).
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
   try {
-    if (rid) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
+    if (rid && open) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
     else if (window.location.hash.includes('recordId=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
   } catch { /* */ }
+})
+
+// Record inspector v3 (2026-09-05, PR-A §1.1): several PRE-EXISTING paths clear `selectedRecordId`
+// outright (record deleted, bulk-delete removed it, an external-context switch, a merge finding it
+// gone) — every one of them relied, pre-PR-A, on `selectedRecordId` alone gating the panel's
+// visibility, so clearing it was sufficient to close the panel too. Now that visibility is
+// `inspectorOpen && selectedRecordId`, a stale `inspectorOpen=true` left behind by any of those
+// paths would silently reopen the panel the moment `selectedRecordId` is set again by an ordinary
+// cursor move (e.g. a plain grid click) — a real, not merely stale-state, bug. One watcher here
+// closes that loop for every current AND future such call site, rather than patching each one.
+watch(selectedRecordId, (rid) => {
+  if (!rid) inspectorOpen.value = false
 })
 
 watch([selectedRecordId, () => workbench.activeViewId.value], () => {
@@ -3820,7 +5426,26 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formFieldErrors.value = {}
 })
 
+// PR-B2 (§1.3): field-anchored errors belong to the record they were raised on — the same
+// record/view edge that resets the form-field errors above discards them (MetaRecordFieldsPanel drops
+// its rejected-value drafts on the record-id edge on its side, so control and alert reset together).
+watch([selectedRecordId, () => workbench.activeViewId.value], () => {
+  // Invalidates older requests even when navigation returns to the same record and field.
+  inspectorPatchOwners.clear()
+  inspectorFieldErrorEntries.value = {}
+}, { flush: 'sync' })
+// PR-B2 (§1.3): the VERSION_CONFLICT field marker lives exactly as long as the conflict it mirrors —
+// reload / retry / dismiss (and any later patchCell, which resets `conflict` first) all clear
+// `grid.conflict` in the composable (unchanged); the marker for that field follows. Round 2: ONLY the
+// marker — an entry the conflict path wrote. A validation alert on the same field (origin 'field')
+// survives a conflict on that field being raised and cleared, e.g. by a grid-path edit.
+watch(() => grid.conflict.value, (current, previous) => {
+  if (!current && previous) clearInspectorFieldError(previous.fieldId, 'conflict')
+})
+
 async function refreshDialogMeta() {
+  // A background poll must not supersede a pending base-context switch.
+  if (workbench.loading.value) return
   const activeSheetId = workbench.activeSheetId.value
   if (!activeSheetId) return
   if (dialogMetaRefreshInFlight) {
@@ -3831,14 +5456,27 @@ async function refreshDialogMeta() {
   try {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
-    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
+    // workbenchAlive: this write lands AFTER an await, so a refresh still in flight when the
+    // workbench unmounted must not write into a torn-down grid.
+    if (refreshed && workbenchAlive && workbench.activeSheetId.value === activeSheetId) {
+      // #5743: an unchanged poll no longer replaces workbench.fields, so the computed hands back the
+      // very same field objects — reseating grid.fields anyway would invalidate every grid computed
+      // and re-render the table on each keep-alive tick for nothing.
+      const nextFields = propertyVisibleWorkbenchFields.value
+      const currentFields = grid.fields.value
+      const sameFields = currentFields.length === nextFields.length
+        && currentFields.every((field, index) => field === nextFields[index])
+      if (!sameFields) grid.fields.value = [...nextFields]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    // workbenchAlive: the dialog refs dialogMetaRefreshWanted() reads survive unmount and the
+    // "sheet changed mid-flight" clause below is true by construction after a teardown that
+    // switched sheets, so without this a refresh in flight during teardown would issue one more
+    // GET /fields + GET /context into a dead component.
+    const shouldRefresh = workbenchAlive && dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -3846,30 +5484,74 @@ async function refreshDialogMeta() {
   }
 }
 
+// Same predicate the watch below uses to arm/disarm the keep-alive — the visibility listener has to
+// re-check it because a dialog can close between a tab being hidden and it coming back.
+function dialogMetaRefreshWanted(): boolean {
+  return Boolean(
+    (showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value)
+    && workbench.activeSheetId.value,
+  )
+}
+
 function stopDialogMetaRefresh() {
   if (dialogMetaRefreshTimer != null) {
     window.clearInterval(dialogMetaRefreshTimer)
     dialogMetaRefreshTimer = null
   }
+  if (dialogMetaVisibilityListener) {
+    document.removeEventListener('visibilitychange', dialogMetaVisibilityListener)
+    dialogMetaVisibilityListener = null
+  }
   dialogMetaRefreshQueued = false
 }
 
+// #5743 follow-up: a refresh that is NOT an interval tick (dialog open, visibility catch-up) also
+// RESTARTS the cadence. Without the re-arm the interval kept the phase it had before the tab went
+// hidden, so "hidden 20 s -> visible" fired the catch-up and then let the pre-existing tick land a
+// few seconds later: two refreshes inside one 15 s window. The re-arm lives in this helper instead
+// of inline in the listener body so the listener closure identity never changes (the very function
+// object that was added is what stopDialogMetaRefresh must hand removeEventListener), and so at
+// most one interval is ever alive: the previous id is cleared before the new one lands in the same
+// slot stopDialogMetaRefresh reads.
+function armDialogMetaRefreshTimer() {
+  if (dialogMetaRefreshTimer != null) window.clearInterval(dialogMetaRefreshTimer)
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    void refreshDialogMeta()
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+}
+
+// #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
+// hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
+// tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
+// unchanged answer from re-seating sheets/views/fields identities on every tick.
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
-  dialogMetaRefreshTimer = window.setInterval(() => {
-    void refreshDialogMeta()
-  }, 1200)
+  armDialogMetaRefreshTimer()
+  if (typeof document !== 'undefined') {
+    dialogMetaVisibilityListener = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!dialogMetaRefreshWanted()) return
+      void refreshDialogMeta()
+      armDialogMetaRefreshTimer()
+    }
+    document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
+  }
 }
 
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
   if (recordIds.some((recordId) => !ensureCanDeleteRecord(recordId))) return
-  try {
-    await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
-    if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
-    showSuccess(fmtRecordsDeleted(recordIds.length, isZh.value))
-  } catch (e: any) { showError(e.message ?? wb('toast.bulkDeleteFailed', isZh.value)) }
+  const results = await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
+  const deletedIds = recordIds.filter((_, i) => results[i])
+  const failedIds = recordIds.filter((_, i) => !results[i])
+  if (selectedRecordId.value && deletedIds.includes(selectedRecordId.value)) selectedRecordId.value = null
+  if (deletedIds.length > 0) showSuccess(fmtRecordsDeleted(deletedIds.length, isZh.value))
+  if (failedIds.length > 0) {
+    showError(grid.error.value || wb('toast.bulkDeleteFailed', isZh.value))
+    await grid.reloadCurrentPage()
+  }
 }
 
 const bulkEditDialog = reactive<{
@@ -3943,11 +5625,23 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 
 // --- Deep-link record fetch (when record not in current page) ---
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line names `resolveDeepLink` as an
+// open trigger): every call here opens the inspector, including its two pre-existing "refresh an
+// ALREADY-selected/open record" call sites (onTimelinePatchDates/onHierarchyReparentRecord, guarded
+// there on `selectedRecordId.value === payload.recordId`, and onReloadConflict/onRetryConflict) —
+// in every one of those the panel was already open for that exact record (the conflict banner and
+// the timeline/hierarchy edit surfaces are themselves only reachable with the record already
+// selected in an open inspector), so this is a no-op re-assertion there, not a surprise reopen of a
+// panel the user had deliberately closed for some OTHER record.
 async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+  // `open: true` is merged into whatever `selectRecord` opts this call already builds — NOT set on
+  // `inspectorOpen` directly here — so a declined discard-changes prompt inside `selectRecord`'s own
+  // guard cancels the open too (see that function's own comment; same fix as `openRecord`).
+  const selectOpts = { ...options, open: true }
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
     return
   }
   // Fetch from server
@@ -3964,7 +5658,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }
@@ -4157,6 +5851,47 @@ function openCommentInbox() {
   })
 }
 
+// F5 "More templates ->": close the template library ONLY when the navigation actually happened.
+// Leaving this route runs MultitableEmbedHost's onBeforeRouteLeave -> confirmPageLeave(), which
+// returns false whenever the user keeps unsaved drafts (form / field manager / view manager /
+// import wizard / comment draft) and declines the confirm. vue-router then resolves push() with a
+// NavigationFailure instead of throwing, so the old inline `@click="showTemplateLibrary = false"`
+// swallowed the block: panel gone, page unchanged. A rejected push (guard error) is treated the
+// same way -- navigation did not happen, so the panel stays open and the user gets a toast.
+//
+// NOT every NavigationFailure means "the guard blocked you": vue-router also resolves push() with
+// `cancelled` (a later navigation superseded this one -- e.g. the user double-clicks this entry and
+// the lazy template-center chunk is still loading, or MultitableEmbedHost's applyHostOverrides
+// router.replace() lands mid-flight) and with `duplicated` (already on the target route). Those are
+// not user-facing errors: the succeeding navigation owns the outcome, so we stay silent and leave
+// the panel untouched instead of flashing a bogus "unsaved changes" toast.
+function navigationWasSuperseded(failure: unknown): boolean {
+  return (
+    isNavigationFailure(failure, NavigationFailureType.cancelled) ||
+    isNavigationFailure(failure, NavigationFailureType.duplicated)
+  )
+}
+
+async function onGoToTemplateCenter(event?: MouseEvent | KeyboardEvent) {
+  if (event) {
+    // Mirror <router-link>'s guardEvent: leave modified / non-primary clicks to the browser so
+    // Ctrl/Cmd/middle click still opens the template center in a new tab via the real href.
+    if (event.defaultPrevented) return
+    if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
+    if ('button' in event && typeof event.button === 'number' && event.button !== 0) return
+    event.preventDefault()
+  }
+  const failure = await router
+    .push({ name: TemplateCenterRouteName })
+    .catch((error: unknown) => error ?? new Error('navigation failed'))
+  if (!failure) {
+    showTemplateLibrary.value = false
+    return
+  }
+  if (navigationWasSuperseded(failure)) return
+  showError(wb('toast.templateCenterBlocked', isZh.value))
+}
+
 async function loadCalendarHolidays(range: CalendarVisibleRange) {
   const from = String(range.from || '').trim()
   const to = String(range.to || '').trim()
@@ -4231,7 +5966,6 @@ watch(
     unsubscribeMentionRealtime?.()
     unsubscribeMentionRealtime = null
     commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
 
     if (!sheetId) {
       mentionInboxState.clearSummary()
@@ -4239,7 +5973,8 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
-    void ensureCommentMentionSuggestions(true)
+    // Mention candidates are never loaded as a list (#5795): the endpoint is search-required, and the
+    // mention editors query it through searchCommentMentions as the user types.
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
       onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,
@@ -4326,8 +6061,18 @@ onMounted(async () => {
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
+  // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
+  // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.
+  void resolveAiAvailability(() => workbench.client.aiAvailability()).then((state) => {
+    aiAvailabilityState.value = state
+  })
   try {
-    await loadBases()
+    // Perf: the bases rail must NOT gate the sheet's own context load — it only
+    // determines base *selection* when the URL anchors nothing (loadBases picks
+    // bases[0] via selectBase, and its guard already skips that when a sheetId
+    // is anchored or a base is active). Anchored opens run it in parallel so an
+    // uncached, sheet-irrelevant list stops serializing ahead of the grid.
+    const basesLoaded = loadBases()
     let contextLoaded = false
     if (workbench.activeBaseId.value) {
       contextLoaded = await workbench.loadBaseContext(workbench.activeBaseId.value, {
@@ -4340,13 +6085,24 @@ onMounted(async () => {
       // activeBaseId from ctx.sheet.baseId.
       contextLoaded = await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
     } else {
-      await workbench.loadSheets()
-      contextLoaded = !workbench.error.value
+      // Nothing anchored: base selection depends on the bases list, so this
+      // branch (and only this branch) waits for it before loading context.
+      await basesLoaded
+      if (workbench.activeBaseId.value) {
+        contextLoaded = await workbench.loadBaseContext(workbench.activeBaseId.value, {
+          sheetId: props.sheetId,
+          viewId: props.viewId,
+        })
+      } else {
+        await workbench.loadSheets()
+        contextLoaded = !workbench.error.value
+      }
     }
+    await basesLoaded
     if (contextLoaded && workbench.activeBaseId.value) {
       rememberWorkbenchBaseOpen(workbench.activeBaseId.value)
     }
-    await commentInboxState.refreshUnreadCount().catch(() => undefined)
+    // Ambient unread badge — deferred off the critical path (see finally).
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) {
       await applyCommentDeepLink(deepRecordId, {
@@ -4367,10 +6123,22 @@ onMounted(async () => {
       sheetId: workbench.activeSheetId.value ?? '',
       viewId: workbench.activeViewId.value ?? '',
     })
+    // Ambient comment unread badge: idle-deferred so it never adds a round
+    // trip to the sheet-open critical path. Defensive: this runs OUTSIDE the
+    // mount try/catch (idle callback), so a mocked/non-promise return must not
+    // become an unhandled error.
+    scheduleIdle(() => {
+      if (!workbenchAlive) return
+      try {
+        void Promise.resolve(commentInboxState.refreshUnreadCount()).catch(() => undefined)
+      } catch { /* ambient badge is best-effort */ }
+    })
   }
 })
 
 onBeforeUnmount(() => {
+  workbenchAlive = false
+  closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()
@@ -4442,7 +6210,7 @@ defineExpose({
    `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
    warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
-.mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
   padding: 3px 10px;
@@ -4456,7 +6224,7 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
   color: var(--ms-text-2, #646a73);
-  max-width: 100%;
+  max-width: calc(100% - 32px);
 }
 .mt-workbench__capability-banner::before {
   content: '\1F512';
@@ -4501,6 +6269,9 @@ defineExpose({
 .mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+/* A2 (2026-09-25): the toggle-dashboard button had a `--active` class bound but no matching rule —
+   it visually looked identical whether the dashboard was open or not. */
+.mt-workbench__mgr-btn--active { background: #ecf5ff; color: #409eff; border-color: #409eff; }
 .mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
@@ -4566,8 +6337,37 @@ defineExpose({
 .mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
 .mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
-.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; }
+/* F5: the href can be absent when the router cannot resolve it, so pin the link affordance. */
+.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; cursor: pointer; }
 .mt-template-library__more:hover { text-decoration: underline; }
+.mt-save-tpl__overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
+.mt-save-tpl { background: #fff; border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); max-height: 82vh; overflow: auto; box-shadow: 0 12px 32px rgba(15,23,42,.18); display: flex; flex-direction: column; gap: 10px; }
+.mt-save-tpl__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mt-save-tpl__header strong { font-size: 15px; color: #0f172a; }
+.mt-save-tpl__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+/* A10 phase 1(客户反馈 2026-09-24 #8):来源行——比 __hint 稍重一点,先看清「存的是哪张表」。 */
+.mt-save-tpl__source { margin: 0; font-size: 12px; color: #334155; font-weight: 600; }
+.mt-save-tpl__hint { margin: 0; font-size: 12px; color: #64748b; }
+.mt-save-tpl__label { font-size: 12px; color: #334155; font-weight: 600; }
+.mt-save-tpl__row { display: flex; flex-direction: column; gap: 4px; }
+.mt-save-tpl__input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.mt-save-tpl__fields { display: flex; flex-direction: column; gap: 6px; }
+.mt-save-tpl__fields-head { display: flex; align-items: center; gap: 10px; }
+.mt-save-tpl__count { font-size: 12px; color: #64748b; margin-right: auto; }
+.mt-save-tpl__link { border: none; background: transparent; color: #2563eb; font-size: 12px; cursor: pointer; text-decoration: none; padding: 0; }
+.mt-save-tpl__link:hover { text-decoration: underline; }
+.mt-save-tpl__list { list-style: none; margin: 0; padding: 6px 8px; max-height: 240px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 8px; display: flex; flex-direction: column; gap: 2px; }
+.mt-save-tpl__item label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; cursor: pointer; }
+.mt-save-tpl__item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-save-tpl__item-type { font-size: 11px; color: #94a3b8; font-style: normal; }
+/* A10 phase 1:视图清单没有勾选框,item 本身就要 flex(字段清单的 flex 挂在内层 label 上)。 */
+.mt-save-tpl__views .mt-save-tpl__item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
+.mt-save-tpl__share { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
+.mt-save-tpl__error { margin: 0; font-size: 12px; color: #b91c1c; }
+.mt-save-tpl__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
+.mt-save-tpl__result { display: flex; flex-direction: column; gap: 8px; }
+.mt-save-tpl__result-name { font-size: 13px; color: #0f172a; }
+.mt-save-tpl__warnings { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #92400e; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
 .mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }
@@ -4576,7 +6376,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-save-tpl__overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }

@@ -1,5 +1,6 @@
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const authServiceMocks = vi.hoisted(() => ({
   verifyToken: vi.fn(),
@@ -8,6 +9,8 @@ const authServiceMocks = vi.hoisted(() => ({
 vi.mock('../../src/auth/AuthService', () => ({
   authService: authServiceMocks,
 }))
+
+const pinned = usePinnedServer()
 
 describe('PLM disable switch', () => {
   beforeEach(() => {
@@ -33,7 +36,8 @@ describe('PLM disable switch', () => {
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
     const app = (server as unknown as { app: Parameters<typeof request>[0] }).app
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/views/team?kind=documents')
       .set('Authorization', 'Bearer live-token')
 
@@ -46,7 +50,8 @@ describe('PLM disable switch', () => {
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
     const app = (server as unknown as { app: Parameters<typeof request>[0] }).app
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .post('/api/federation/plm/query')
       .set('Authorization', 'Bearer live-token')
       .send({ operation: 'searchProducts' })
@@ -60,7 +65,8 @@ describe('PLM disable switch', () => {
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
     const app = (server as unknown as { app: Parameters<typeof request>[0] }).app
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .post('/api/federation/import/plm')
       .set('Authorization', 'Bearer live-token')
       .send({ productId: 'prod-1', includeDocuments: true, includeBOM: true })

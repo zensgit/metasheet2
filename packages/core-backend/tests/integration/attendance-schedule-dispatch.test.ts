@@ -1,10 +1,27 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { createRequire } from 'module'
 import { Pool } from 'pg'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
+
+// Same-process handle on the attendance plugin module (CJS require cache — the server started in
+// beforeAll loads the SAME module instance), used to drop its 60s module-level settings cache after
+// each test so the row restore below is what the next test actually reads.
+const requireCjs = createRequire(import.meta.url)
+function resetAttendanceSettingsCache(): void {
+  const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+    resetAttendanceSettingsCacheForTests?: () => void
+  }
+  plugin.resetAttendanceSettingsCacheForTests?.()
+}
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
@@ -43,11 +60,25 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  // Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row: this
+  // suite both WRITES it (saveAttendanceSettings below) and was the recorded VICTIM of another
+  // suite's leaked shiftCompliance state (W4 wave-verification MD §7.5). Snapshot once, restore
+  // the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Lock-11 §10 W-4 fixture delta: schedule-dispatch's route.orgId is session-derived
+    // (getAuthenticatedOrgId) — per the punch-route precedent, session fields are NEVER a
+    // "named" selector, so arm (a) always applies here regardless of `tenantId` above. Seed
+    // exactly one active membership in ORG so arm (a) resolves for every subject/actor minted.
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -90,7 +121,12 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   }
 
   function dateOnly(value: unknown): string {
-    if (value instanceof Date) return value.toISOString().slice(0, 10)
+    if (value instanceof Date) {
+      const year = value.getFullYear()
+      const month = String(value.getMonth() + 1).padStart(2, '0')
+      const day = String(value.getDate()).padStart(2, '0')
+      return `${year}-${month}-${day}`
+    }
     return String(value ?? '').slice(0, 10)
   }
 
@@ -135,6 +171,17 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   }
 
   async function createScheduleDispatchRequest(token: string, payload: Record<string, unknown>): Promise<string> {
+    // Lock-11 §10 W-4: schedule-dispatch is cross-user capable — the derivation's SUBJECT is
+    // `payload.userId` (the dispatch TARGET), which may differ from the actor whose token
+    // mints this request and may never have had mintToken called for it. Seed the target too.
+    const targetUserId = payload.userId
+    if (typeof targetUserId === 'string' && targetUserId) {
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [targetUserId, ORG],
+      )
+    }
     const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
       method: 'POST',
       headers: authHeaders(token),
@@ -175,9 +222,24 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
+  })
+
+  afterEach(async () => {
+    // Exact-restore the settings row after EVERY test (including failed ones — the in-test
+    // `finally` restores only rewrite a hardcoded baseline, which is NOT the pre-suite state and
+    // can itself CREATE a row that never existed), then drop the plugin's 60s settings cache so
+    // the next test re-reads the restored row instead of a cache primed by this test's PUTs.
+    if (pool) {
+      await restoreAttendanceSettingsRow(pool, settingsRowSnapshot)
+    }
+    resetAttendanceSettingsCache()
   })
 
   afterAll(async () => {
+    if (pool) {
+      await restoreAttendanceSettingsRow(pool, settingsRowSnapshot).catch(() => undefined)
+    }
     await cleanupPrefix('dispatch-').catch(() => undefined)
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
@@ -273,6 +335,13 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       reason: `${prefix} support`,
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     try {
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
         method: 'POST',
@@ -663,6 +732,13 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       slotIndex: 0,
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     try {
       const [first, second] = await Promise.all([
         requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
@@ -754,6 +830,15 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       endDate: '2049-08-20',
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    // Membership does not bypass the scheduler-scope checks this test exercises earlier
+    // (those refuse 403 before the writer is ever reached).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [dispatchedUserId, ORG],
+    )
     try {
       process.env.RBAC_BYPASS = 'false'
       const noScope = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {

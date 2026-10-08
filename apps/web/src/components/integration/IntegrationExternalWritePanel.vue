@@ -38,9 +38,22 @@
       <p class="integration-workbench__hint" data-testid="external-write-token-state">
         {{ externalWriteDryRunToken ? 'token 已签发（隐藏）' : '未签发可 apply token' }}
       </p>
+      <div
+        v-if="externalWriteAcceptanceSummary"
+        class="integration-workbench__acceptance"
+        data-testid="external-write-acceptance-policy"
+        :data-ready="externalWriteAcceptanceReady ? 'true' : 'false'"
+      >
+        <strong>测试快车道</strong>
+        <p>{{ externalWriteAcceptanceSummary }}</p>
+      </div>
       <label class="integration-workbench__inline-check">
         <input v-model="externalWriteAcceptReview" type="checkbox" data-testid="external-write-accept-review" />
         <span>我已复核 dry-run counts / status / error token；apply 将使用本次 dry-run token，服务端会重新计算并校验 revision。</span>
+      </label>
+      <label v-if="externalWriteCleanupRequired" class="integration-workbench__inline-check">
+        <input v-model="externalWriteAcceptCleanup" type="checkbox" data-testid="external-write-accept-cleanup" />
+        <span>我确认已指定 K3 管理员，并准备好只处理本次精确两条测试物料的原生清理与验证；这不会授权 Submit / Audit。</span>
       </label>
       <pre v-if="externalWriteEvidenceText" data-testid="external-write-evidence">{{ externalWriteEvidenceText }}</pre>
     </div>
@@ -77,6 +90,9 @@ defineProps<{
   externalWriteCanApply: boolean
   externalWriteDryRunResult: IntegrationExternalWriteDryRunResult | null
   externalWriteReviewSummary: string
+  externalWriteAcceptanceSummary: string
+  externalWriteAcceptanceReady: boolean
+  externalWriteCleanupRequired: boolean
   externalWriteDryRunMetrics: MetricRow[]
   externalWriteDryRunToken: string
   externalWriteEvidenceText: string
@@ -88,6 +104,7 @@ defineProps<{
 }>()
 
 const externalWriteAcceptReview = defineModel<boolean>('externalWriteAcceptReview', { default: false })
+const externalWriteAcceptCleanup = defineModel<boolean>('externalWriteAcceptCleanup', { default: false })
 </script>
 
 <style scoped>
@@ -173,6 +190,17 @@ const externalWriteAcceptReview = defineModel<boolean>('externalWriteAcceptRevie
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.integration-workbench__acceptance {
+  padding: 10px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+}
+
+.integration-workbench__acceptance[data-ready='false'] {
+  border-color: var(--el-color-danger-light-3);
 }
 
 .integration-workbench__metric-row {

@@ -411,18 +411,19 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     expect(ck?.system_kind).toBe('approval_projection')
   })
 
-  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) ───────────────────────────────────────────
-  test('checkStrictEnablementPrecondition detects the active-checkpoint half against a real DB, and stays fail-closed until L6', async () => {
+  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) — seam true after the L8 route wiring ─────
+  test('checkStrictEnablementPrecondition: checkpoint-less sheet lists only no_active_checkpoint; a checkpoint-bearing sheet can enable (seam true after L8 wiring)', async () => {
     const S = await mkSheet()
-    // No checkpoint yet: both conditions unmet.
+    // No checkpoint yet; reconstruction causality is true ⇒ ONLY the checkpoint half is unmet.
     const before = await checkStrictEnablementPrecondition(q, S)
     expect(before.canEnable).toBe(false)
-    expect([...before.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
+    expect(before.unmet).toEqual(['no_active_checkpoint'])
 
     await activate(S)
-    // Checkpoint half now satisfied — ONLY reconstruction remains unmet (still fail-closed: L6 not landed).
+    // Both halves satisfied after the L8 route wiring flipped the seam. Activating the checkpoint changed
+    // the unmet SET (not just its size), proving the checkpoint half is evaluated independently.
     const after = await checkStrictEnablementPrecondition(q, S)
-    expect(after.canEnable).toBe(false) // GUARD stays fail-closed until L6 — must not pass
-    expect(after.unmet).toEqual(['reconstruction_non_causal'])
+    expect(after.canEnable).toBe(true)
+    expect(after.unmet).toEqual([])
   })
 })

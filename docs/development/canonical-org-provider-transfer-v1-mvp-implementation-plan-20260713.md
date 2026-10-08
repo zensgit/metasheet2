@@ -4,9 +4,11 @@ Date: 2026-07-13
 Milestone: **Canonical Org & Provider Transfer v1** (the SECOND milestone — distinct from DingTalk
 Sync Hardening v1, which is a runtime-closeout milestone tracked by the DT-CLOSE tickets).
 Baseline: `origin/main` (post-#4215 / #3944).
-Status: **IN PROGRESS** (owner go given 2026-07-15). B1 merged `849f1d53d` (#4304), B2 merged
-`bf52b9513` (#4317), B3 merged `65dec7b36` (#4318). Rolling status lives in
-`canonical-org-mvp-progress-ledger-20260716.md` — this file stays the sequencing/design reference.
+Status: **CANONICAL ORG DEV-SIDE DONE; TRANSFER IN PROGRESS**. B1-B7 are merged through
+`b004c5797` (#4436). The composed closeout proof is
+`canonical-org-mvp-done-gate-20260719.md`; rolling status lives in
+`canonical-org-mvp-progress-ledger-20260716.md`. Production release remains owner/ops-gated by the
+real-enterprise UAT and switch ledger; this file stays the sequencing/design reference.
 
 This plan does NOT re-design anything — the design is already ratified-by-merge:
 

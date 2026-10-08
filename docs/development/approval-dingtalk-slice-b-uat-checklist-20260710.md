@@ -87,7 +87,7 @@ DingTalk interactive-card callback corp anchor
 
 | # | 步骤 | 期望 | 结果 |
 |---|---|---|---|
-| U9 | U4 成功后卡面 | `已由 <A 的服务端本地显示名> 同意 · <时间>`（显示名非钉钉 payload 回显） | ⬜ |
+| U9 | U4 成功后卡面 | `已由 <A 的服务端本地显示名> 同意 · <时间>`（显示名非钉钉 payload 回显），且「同意」「驳回」操作区消失；模板须定义默认值为 `true` 的公共布尔变量 `actionsVisible`，两个按钮均以其为显示条件 | ⬜ |
 | U10 | 卡片更新 API 人为置失败（如临时错模板）后 A 同意 | **审批已提交不回滚**；日志 values-free 错误；再次点击经 stale summary 收敛出真实终态 | ⬜ |
 | U11 | 伪造/过期 outTrackId 的回调（技术注入） | 卡面中性文案，与 operator-未解析场景**字节等同**（无存在性 oracle） | ⬜ |
 | **U11-a** | **真实点击的企业来源（#4116 跨企业门实证）** | 一次**真实**的同意点击必须**通过**跨企业门（而不是被 `corp_mismatch` 拒掉）。这是 §0-a 的验收面：worker values-free 日志应显示门读到了企业锚点（header `eventCorpId` 或 body `corpId`）**且与台账 `integration_id` 所属企业一致**。**若真实点击被判 `corp_mismatch` ⇒ 说明真实帧根本不带任何 corp 字段 ⇒ 立刻停止 UAT、关 flag**（这正是 §0-a 预警的 dead-on-arrival）。 | ⬜ |

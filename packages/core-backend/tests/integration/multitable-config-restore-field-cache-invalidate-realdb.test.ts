@@ -46,7 +46,8 @@ const FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let actor: { id: string; roles: string[]; perms: string[] }
-const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
 
 type ViewField = { id: string; type: string }
 

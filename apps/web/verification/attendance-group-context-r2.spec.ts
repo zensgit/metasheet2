@@ -1,0 +1,363 @@
+import { expect, test, type BrowserContext, type Page, type Route } from '@playwright/test'
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
+
+const GROUP_ID = '2f6b1d2c-9a3e-4c5b-8d7e-1a2b3c4d5e6f'
+const OTHER_ORG_GROUP_ID = '9c4d2b1a-7e6f-4a3b-8c5d-1e2f3a4b5c6d'
+const RETURN_TO = '/attendance?tab=admin&section=attendance-admin-groups'
+const ASSIGNMENTS_ROUTE = `/attendance/admin/groups/${GROUP_ID}/schedule`
+  + `?surface=assignments&returnTo=${encodeURIComponent(RETURN_TO)}`
+const EVIDENCE_DIR = path.resolve(
+  process.cwd(),
+  '../../docs/development/assets/attendance-r2-20260804',
+)
+
+type RequestFact = { method: string; pathname: string }
+
+const group = {
+  id: GROUP_ID,
+  orgId: 'org-a',
+  name: 'Authorized Operations',
+  code: 'authorized-operations',
+  timezone: 'Asia/Shanghai',
+  ruleSetId: 'rule-set-1',
+  attendanceType: 'fixed_shift',
+  description: 'Synthetic browser-verification group',
+  memberCount: 1,
+}
+
+function json(route: Route, payload: unknown, status = 200) {
+  return route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify(payload),
+  })
+}
+
+async function installSession(context: BrowserContext): Promise<void> {
+  const payload = btoa(JSON.stringify({
+    sub: 'browser-admin',
+    tenantId: 'org-a',
+    roles: ['admin'],
+    permissions: ['*:*', 'attendance:admin'],
+  }))
+  await context.addInitScript(({ token }) => {
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    localStorage.setItem('tenantId', 'org-a')
+    localStorage.setItem('workspaceId', 'org-a')
+    localStorage.setItem('metasheet_locale', 'en')
+  }, { token: `eyJhbGciOiJub25lIn0.${payload}.signature` })
+}
+
+async function installApiStubs(
+  page: Page,
+  requests: RequestFact[],
+  options: { groupStatus?: number } = {},
+): Promise<void> {
+  await page.route('**/*', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    if (!url.pathname.startsWith('/api/')) {
+      return route.continue()
+    }
+    requests.push({ method: request.method(), pathname: url.pathname })
+
+    if (url.pathname === '/api/auth/me') {
+      return json(route, {
+        ok: true,
+        data: {
+          user: {
+            id: 'browser-admin',
+            tenantId: 'org-a',
+            roles: ['admin'],
+            permissions: ['*:*', 'attendance:admin'],
+            features: {
+              attendance: true,
+              attendanceAdmin: true,
+              attendanceImport: true,
+              workflow: false,
+              plm: false,
+              mode: 'attendance',
+            },
+          },
+        },
+      })
+    }
+    if (url.pathname === '/api/plugins') {
+      return json(route, [{ name: 'plugin-attendance', status: 'active' }])
+    }
+    if (url.pathname === `/api/attendance/groups/${GROUP_ID}`) {
+      const status = options.groupStatus ?? 200
+      return json(route, status === 200 ? { ok: true, data: group } : { ok: false }, status)
+    }
+    if (url.pathname === `/api/attendance/groups/${OTHER_ORG_GROUP_ID}`) {
+      return json(route, { ok: false, error: { code: 'FORBIDDEN' } }, 403)
+    }
+    if (url.pathname === `/api/attendance/groups/${GROUP_ID}/members`) {
+      return json(route, {
+        ok: true,
+        data: { items: [{ id: 'member-1', groupId: GROUP_ID, userId: 'user-1' }], total: 1 },
+      })
+    }
+    if (url.pathname === `/api/attendance/groups/${GROUP_ID}/managers`) {
+      return json(route, { ok: true, data: { items: [], total: 0 } })
+    }
+    if (url.pathname === '/api/attendance/groups') {
+      return json(route, { ok: true, data: { items: [group], total: 1, page: 1, pageSize: 200 } })
+    }
+    if (url.pathname === '/api/attendance/shifts') {
+      return json(route, {
+        ok: true,
+        data: {
+          items: [{
+            id: 'shift-1',
+            orgId: 'org-a',
+            name: 'Day Shift',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            workingDays: [1, 2, 3, 4, 5],
+          }],
+          total: 1,
+        },
+      })
+    }
+    if (url.pathname === '/api/attendance/rule-sets') {
+      return json(route, {
+        ok: true,
+        data: { items: [{ id: 'rule-set-1', name: 'Operations Rules', version: 1, isDefault: true }], total: 1 },
+      })
+    }
+    if (url.pathname === '/api/attendance/settings') {
+      return json(route, { ok: true, data: {} })
+    }
+    return json(route, { ok: true, data: { items: [], total: 0 } })
+  })
+}
+
+async function assertReadyAssignments(page: Page): Promise<void> {
+  await expect(page.locator('[data-attendance-group-context="ready"]')).toBeVisible()
+  const breadcrumb = page.locator('.attendance-group-context__breadcrumb')
+  await expect(breadcrumb).toBeVisible()
+  await expect(breadcrumb).toHaveText('Authorized Operations/Schedule')
+  await expect(page.locator('[data-attendance-group-workflow-step="schedule"]')).toHaveAttribute('aria-current', 'step')
+  await expect(page.locator('#attendance-admin-assignments')).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`/attendance/admin/groups/${GROUP_ID}/schedule\\?`))
+}
+
+async function assertNoHorizontalOverflow(page: Page): Promise<void> {
+  const overflow = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))
+  expect(
+    overflow.scrollWidth,
+    `horizontal overflow: scrollWidth ${overflow.scrollWidth} vs clientWidth ${overflow.clientWidth}`,
+  ).toBeLessThanOrEqual(overflow.clientWidth + 1)
+}
+
+async function assertElementsFitViewport(page: Page, selector: string, viewportWidth: number): Promise<void> {
+  const bounds = await page.locator(selector).evaluateAll(elements => elements.map((element) => {
+    const rect = element.getBoundingClientRect()
+    return { left: rect.left, right: rect.right, width: rect.width }
+  }))
+  expect(bounds.length, `expected elements for ${selector}`).toBeGreaterThan(0)
+  for (const bound of bounds) {
+    expect(bound.width, `${selector} width`).toBeGreaterThan(0)
+    expect(bound.left, `${selector} left edge`).toBeGreaterThanOrEqual(-1)
+    expect(bound.right, `${selector} right edge`).toBeLessThanOrEqual(viewportWidth + 1)
+  }
+}
+
+test.beforeAll(() => {
+  mkdirSync(EVIDENCE_DIR, { recursive: true })
+})
+
+test('desktop drawer navigation survives Back, Forward, and refresh', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  await installSession(context)
+  const page = await context.newPage()
+  const requests: RequestFact[] = []
+  await installApiStubs(page, requests)
+
+  await page.goto(RETURN_TO)
+  await page.locator('[data-attendance-group-workflow-step="policies"]').click()
+  await expect(page.locator('[data-attendance-group-summaries]')).toBeVisible()
+  await page.locator('[data-attendance-group-summary-action="open-work-time-drawer"]').click()
+  await expect(page.locator('[data-attendance-group-work-time-drawer]')).toBeVisible()
+  await page.locator('[data-attendance-group-work-time-assignments-open]').click()
+  await assertReadyAssignments(page)
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await expect(page.locator('.attendance-group-context__breadcrumb')).toBeVisible()
+
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, 'r2-desktop-assignments-1440x900.png'),
+    fullPage: true,
+  })
+
+  await page.goBack()
+  await expect(page).toHaveURL(new RegExp('/attendance\\?tab=admin&section=attendance-admin-groups$'))
+  await expect(page.locator('[data-attendance-group-list]')).toBeVisible()
+  await expect(page.locator('[data-attendance-group-workflow-step="basics"]')).toHaveAttribute('aria-current', 'step')
+
+  await page.goForward()
+  await assertReadyAssignments(page)
+  await page.reload()
+  await assertReadyAssignments(page)
+
+  // WRITES, not "non-GET verbs". Two endpoints in this app are verb-shaped like a write and are not
+  // one, so the claim this test makes — navigating, going Back/Forward and refreshing never mutates
+  // anything — is about effects, not about methods:
+  //   * POST /api/attendance-admin/users/batch/resolve — a batch READ whose input is too long for a
+  //     query string.
+  //   * DELETE /api/method-probe — the DELETE transport probe (src/utils/delete-fallback.ts, fired
+  //     once per page session from main.ts after bootstrapSession). The route reads no request input
+  //     and touches no data; it exists only so the client can learn whether HTTP DELETE survives the
+  //     customer's egress at all (packages/core-backend/src/routes/method-probe.ts). One entry per
+  //     page load is expected here: the reload gives the probe a fresh JS context.
+  // Anything else non-GET is a real mutation and still fails this test.
+  const writes = requests.filter(({ method, pathname }) => !(
+    method === 'GET'
+    || (method === 'POST' && pathname === '/api/attendance-admin/users/batch/resolve')
+    || (method === 'DELETE' && pathname === '/api/method-probe')
+  ))
+  expect(writes).toEqual([])
+  // Positive control: the probe really did fire, so the exemption above is carrying weight rather
+  // than quietly covering for a probe that stopped running.
+  expect(requests).toContainEqual({ method: 'DELETE', pathname: '/api/method-probe' })
+  await context.close()
+})
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+] as const) {
+  test(`${viewport.name} attendance group workspace fits the issue #4354 viewport contract`, async ({ browser }) => {
+    const context = await browser.newContext({
+      viewport: { width: viewport.width, height: viewport.height },
+      hasTouch: viewport.name === 'mobile',
+    })
+    await installSession(context)
+    const page = await context.newPage()
+    const requests: RequestFact[] = []
+    await installApiStubs(page, requests)
+
+    await page.goto(RETURN_TO)
+    const list = page.locator('[data-attendance-group-list]')
+    const detail = page.locator('[data-attendance-group-detail]')
+    await expect(list).toBeVisible()
+    await expect(detail).toBeVisible()
+
+    const positions = await page.locator('[data-attendance-group-list], [data-attendance-group-detail]')
+      .evaluateAll(elements => elements.map((element) => {
+        const rect = element.getBoundingClientRect()
+        return { x: rect.x, y: rect.y }
+      }))
+    expect(positions).toHaveLength(2)
+    if (viewport.name === 'mobile') {
+      expect(positions[0]!.y).toBeLessThan(positions[1]!.y)
+    } else {
+      expect(positions[0]!.x).toBeLessThan(positions[1]!.x)
+    }
+
+    const rowMeta = page.locator('[data-attendance-group-row]').first().locator('.attendance__group-list-meta span')
+    await expect(rowMeta).toHaveCount(3)
+    await expect(rowMeta.nth(0)).toContainText('member')
+    await expect(rowMeta.nth(1)).toContainText('Fixed shift')
+    await expect(rowMeta.nth(2)).toContainText('Operations Rules')
+
+    await assertElementsFitViewport(page, '[data-attendance-group-list], [data-attendance-group-detail]', viewport.width)
+    await assertElementsFitViewport(page, '[data-attendance-group-workflow-step]', viewport.width)
+    await assertElementsFitViewport(page, '#attendance-group-stage-basics input, #attendance-group-stage-basics select', viewport.width)
+    await assertNoHorizontalOverflow(page)
+
+    const stages = page.locator('[data-attendance-group-workflow-step]')
+    await expect(stages).toHaveCount(4)
+    for (let index = 0; index < 4; index += 1) {
+      const stage = stages.nth(index)
+      const targetId = await stage.getAttribute('aria-controls')
+      expect(targetId).toBeTruthy()
+      await stage.click()
+      await expect(stage).toHaveAttribute('aria-current', 'step')
+      await expect(page.locator(`#${targetId}`)).toBeVisible()
+      await assertElementsFitViewport(page, `#${targetId}`, viewport.width)
+      await assertNoHorizontalOverflow(page)
+    }
+
+    await page.screenshot({
+      path: path.resolve(process.cwd(), `verification-output/attendance-group-4354-${viewport.name}.png`),
+      fullPage: true,
+    })
+    await context.close()
+  })
+}
+
+test('narrow touch keeps the route intact and blocks all group probes', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  })
+  await installSession(context)
+  const page = await context.newPage()
+  const requests: RequestFact[] = []
+  await installApiStubs(page, requests)
+
+  await page.goto(ASSIGNMENTS_ROUTE)
+  await expect(page.getByText('Desktop recommended')).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`/attendance/admin/groups/${GROUP_ID}/schedule\\?`))
+  await expect(page.locator('[data-attendance-group-context]')).toHaveCount(0)
+  await expect(page.locator('.attendance__drawer-backdrop')).toHaveCount(0)
+  expect(requests.some(({ pathname }) => pathname.startsWith('/api/attendance/groups'))).toBe(false)
+
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, 'r2-narrow-touch-blocked-390x844.png'),
+    fullPage: true,
+  })
+  await page.getByRole('button', { name: 'Back to Overview' }).click()
+  await expect(page).toHaveURL(new RegExp(
+    '/attendance\\?tab=admin&section=attendance-admin-groups(?:#attendance-admin-groups)?$',
+  ))
+  await context.close()
+})
+
+test('wide coarse pointer remains unblocked', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    hasTouch: true,
+    isMobile: false,
+  })
+  await installSession(context)
+  const page = await context.newPage()
+  const requests: RequestFact[] = []
+  await installApiStubs(page, requests)
+
+  await page.goto(ASSIGNMENTS_ROUTE)
+  await assertReadyAssignments(page)
+  await expect(page.getByText('Desktop recommended')).toHaveCount(0)
+  expect(requests.some(({ pathname }) => pathname === `/api/attendance/groups/${GROUP_ID}`)).toBe(true)
+
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, 'r2-wide-coarse-ready-1440x900.png'),
+    fullPage: true,
+  })
+  await context.close()
+})
+
+for (const [name, groupId, status] of [
+  ['unavailable', GROUP_ID, 404],
+  ['cross-org', OTHER_ORG_GROUP_ID, 403],
+] as const) {
+  test(`${name} group fails closed before scoped requests`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    await installSession(context)
+    const page = await context.newPage()
+    const requests: RequestFact[] = []
+    await installApiStubs(page, requests, { groupStatus: status })
+
+    await page.goto(`/attendance/admin/groups/${groupId}/schedule?surface=assignments`)
+    await expect(page.locator('[data-attendance-group-context="unavailable"]')).toBeVisible()
+    expect(requests.filter(({ pathname }) => pathname.startsWith(`/api/attendance/groups/${groupId}/`))).toEqual([])
+    await context.close()
+  })
+}

@@ -200,6 +200,13 @@ function mockPublishedTemplatePool(
         rowCount: 1,
       }
     }
+    // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+    // effective node operations, which reads the SAME published-definition row through a
+    // narrower projection. Answered from the same fixture — this suite asserts metrics and
+    // publish gates, not the carrier (that is the real-DB lane's job).
+    if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+      return { rows: [] }
+    }
     if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
       return {
         rows: [{
@@ -235,22 +242,80 @@ function mockInsertOnlyClient() {
     if (statement.startsWith('INSERT INTO approval_records')) {
       return { rows: [], rowCount: 1 }
     }
-    { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+    { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
   })
 }
 
-// nodeEntryEpoch (2026-07-03): the per-test mock routers predate the epoch columns, but the two
-// epoch queries flow through EVERY create/approve/return/mutation path. Answer them uniformly here
-// (checked right before each router's "Unhandled" throw) so no router needs to enumerate them:
-//   - the activation-seq bump returns a stable value callers only thread onward as the epoch;
-//   - currentNodeEntryEpoch returns a single NULL row, which keeps mock instances on the legacy
-//     cutoff fallback (§6) so every pre-existing round-scoping / metadata assertion is unaffected.
-function epochMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+// Shared queries added to every approval write path are answered here, immediately before each
+// per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
+// infrastructure-only fixtures into every behavioral test.
+function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2 全局锁序). It runs BEFORE
+  // `BEGIN` on EVERY dispatch and short-circuits on the first row for anything that is not a
+  // cancel round, which is what every fixture in this file is — so the honest mock is a real row
+  // carrying a non-cancel-round `workflow_key`, and the three further reads the resolver would do
+  // for a cancel round are deliberately NOT mocked: a fixture that ever reached them would fail
+  // loudly here rather than silently taking the `none` branch.
+  //
+  // This is a MOCK, not the contract (`feedback_mock_is_not_the_contract.md`). The production
+  // behaviour of that resolver — including WHICH org it returns and when it demands no lock at
+  // all — is measured against real PostgreSQL in the Q-F census legs of
+  // `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, not here.
+  if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+    return { rows: [{ id: 'approval-1', workflow_key: null }], rowCount: 1 }
+  }
+
+  // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
+  // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
     return { rows: [{ node_activation_seq: 1 }], rowCount: 1 }
   }
   if (statement.startsWith('SELECT DISTINCT entry_epoch FROM approval_assignments')) {
     return { rows: [{ entry_epoch: null }], rowCount: 1 }
+  }
+
+  // Final create-boundary template visibility recheck (2026-07-22). Dedicated visibility/auth
+  // tests exercise deny and mutation cases; unrelated create tests use this ordinary active actor.
+  if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR SHARE')) {
+    return { rows: [{ id: 'requester-1' }], rowCount: 1 }
+  }
+  if (
+    statement === 'SAVEPOINT record_link_actor_groups'
+    || statement === 'RELEASE SAVEPOINT record_link_actor_groups'
+  ) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR SHARE')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT role, department, is_admin, is_active FROM users WHERE id = $1')) {
+    return { rows: [{ role: 'user', department: null, is_admin: false, is_active: true }], rowCount: 1 }
+  }
+  if (statement.startsWith('SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+    return { rows: [{ code: 'approvals:write' }], rowCount: 1 }
+  }
+  if (statement.startsWith('SELECT permissions FROM users WHERE id = $1')) {
+    return { rows: [{ permissions: [] }], rowCount: 1 }
+  }
+  if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
+    return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
+  }
+  // Lock-11 W-1/W-2 org derivation (deriveApprovalInstanceOrgId) — the shared queries added to
+  // every create path are answered here per this function's docblock. Exactly ONE active
+  // membership so unrelated create tests reach a 201, not a 422. Dedicated positive/negative
+  // (0-row, 2-row) coverage lives in its own describe block below, which overrides this default
+  // per-test via a narrower mockImplementation.
+  if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+    return { rows: [{ org_id: 'default' }], rowCount: 1 }
   }
   return null
 }
@@ -326,7 +391,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -400,7 +465,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -466,7 +531,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -524,7 +589,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -608,7 +673,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -704,7 +769,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -800,11 +865,28 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
-    const service = new ApprovalProductService()
+    // H-1: the node-activation metrics hook is now AWAITED (see
+    // `ApprovalProductService.emitNodeActivationMetric`). With the real shared metrics singleton, that
+    // hook's own short transaction borrows and returns THIS SAME mocked client (both sides import
+    // `pool` from `src/db/pg`, which this file mocks with ONE client), so `pgState.client.release`
+    // would stop being a measure of dispatchAction's own connection discipline — which is exactly what
+    // the assertion at the end of this test is for. Inject a metrics stub so the two accountings stay
+    // separate. The metrics writes keep their own coverage: tests/unit/approval-metrics-service.test.ts
+    // (SQL shape) and tests/integration/approval-dedup-return-round-scoping.db.test.ts (real DB,
+    // including that the activation stamp is durable before the action response returns).
+    const metricsStub = {
+      recordInstanceStart: vi.fn(async () => {}),
+      recordNodeActivation: vi.fn(async () => {}),
+      recordNodeDecision: vi.fn(async () => {}),
+      recordTerminal: vi.fn(async () => {}),
+    }
+    const service = new ApprovalProductService(
+      metricsStub as unknown as ConstructorParameters<typeof ApprovalProductService>[0],
+    )
     vi.spyOn(service, 'getApproval').mockResolvedValue(
       buildApprovalDto({
         currentStep: 1,
@@ -850,7 +932,11 @@ describe('ApprovalProductService', () => {
       nextNodeKey: 'approval_1',
     })
     expect(completionEventState.emitApprovalCompletionEvent).not.toHaveBeenCalled()
+    // dispatchAction's OWN connection: taken once, released exactly once (no leak, no double release).
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+    // H-1: the return branch still emits the re-entered node's activation stamp, and dispatchAction
+    // does not resolve until that call has settled.
+    expect(metricsStub.recordNodeActivation).toHaveBeenCalledTimes(1)
   })
 
   it('keeps all-mode approvals pending until every assignee has acted', async () => {
@@ -945,7 +1031,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1026,6 +1112,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: [sourceVersion], rowCount: 1 }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return { rows: [], rowCount: 0 }
       }
@@ -1086,7 +1179,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1201,7 +1294,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1240,6 +1333,20 @@ describe('ApprovalProductService', () => {
         id: 'items', type: 'detail', label: '明细',
         columns: [{ id: 'sub', type: 'detail', label: 'sub', columns: [{ id: 'x', type: 'text', label: 'x' }] }],
       }))).rejects.toThrow(/detail cannot be nested inside a detail group/)
+    })
+
+    it('rejects attachment fields inside detail rows (attachment v1 is top-level only)', async () => {
+      const previous = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+      try {
+        await expect(create(wrap({
+          id: 'items', type: 'detail', label: '明细',
+          columns: [{ id: 'proof', type: 'attachment', label: '附件' }],
+        }))).rejects.toThrow(/attachment fields are not allowed inside detail groups/)
+      } finally {
+        if (previous === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        else process.env.APPROVAL_ATTACHMENTS_ENABLED = previous
+      }
     })
 
     it('rejects an unknown sub-field type', async () => {
@@ -1348,6 +1455,646 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('record-link field contract (FWB-0 Layer 2 author-time)', () => {
+    // assertFormSchema runs BEFORE pool.connect(), so reject cases throw without any query mock.
+    const wrap = (field: Record<string, unknown>, extra: Record<string, unknown>[] = []) => ({
+      key: `rl-${Date.now()}`,
+      name: 'Record Link Tpl',
+      formSchema: { fields: [field, ...extra] },
+      approvalGraph: buildRuntimeGraph(),
+    })
+    const create = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    it('rejects record-link without non-blank props.baseId/props.sheetId', async () => {
+      await expect(create(wrap({ id: 'linked', type: 'record-link', label: '关联' })))
+        .rejects.toThrow(/record-link requires non-blank props\.baseId and props\.sheetId/)
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联', props: { baseId: '  ', sheetId: 's' },
+      }))).rejects.toThrow(/record-link requires non-blank props\.baseId and props\.sheetId/)
+    })
+
+    it('rejects record-link nested inside a detail group (top-level only)', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        }],
+      }))).rejects.toThrow(/record-link cannot nest inside a detail group|not a valid leaf sub-field/)
+    })
+
+    it('rejects record-link props keys outside baseId/sheetId (OpenAPI additionalProperties:false)', async () => {
+      // Fail-closed: do not silently drop author extras (mutation removing this reject reds the contract).
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: 'b', sheetId: 's', extra: 1 },
+      }))).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: 'b', sheetId: 's', foreignSheetId: 'x', displayField: 'name' },
+      }))).rejects.toThrow(/unknown: foreignSheetId, displayField/)
+    })
+
+    it('pins only trimmed baseId/sheetId on create (positive control; no extra keys)', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-rl', template_id: 'tpl-rl', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl', key: 'rl-tpl', name: 'RL', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-rl', latest_version_id: 'ver-rl',
+            created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: '  base_x  ', sheetId: '  sheet_y  ' },
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.type).toBe('record-link')
+      expect(field.props).toEqual({ baseId: 'base_x', sheetId: 'sheet_y' })
+      expect(Object.keys(field.props as object).sort()).toEqual(['baseId', 'sheetId'])
+    })
+
+    it('rejects record-link extra props keys on update (assertFormSchema on request body)', async () => {
+      // updateTemplate validates request.formSchema before any write — no DB needed for reject.
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      await expect(service.updateTemplate('tpl-any', {
+        formSchema: {
+          fields: [{
+            id: 'linked', type: 'record-link', label: '关联',
+            props: { baseId: 'b', sheetId: 's', stale: true },
+          }],
+        },
+        approvalGraph: graph,
+      } as never)).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+    })
+
+    it('rejects record-link extra props keys on publish (asFormSchema re-validates stored schema)', async () => {
+      // publishTemplate loads the draft version and re-runs assertFormSchema (STORED context).
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      const badSchema = {
+        fields: [{
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's', leftover: 'x' },
+        }],
+      }
+      const templateRow = {
+        id: 'tpl-rl-pub', key: 'rl-pub', name: 'RL', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-rl-pub',
+        created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-rl-pub', template_id: 'tpl-rl-pub', version: 1, status: 'draft',
+        form_schema: badSchema,
+        approval_graph: graph,
+        created_at: new Date('2026-07-21T00:00:00.000Z'), updated_at: new Date('2026-07-21T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.includes('FROM approval_templates') && s.includes('FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+
+      await expect(service.publishTemplate('tpl-rl-pub', {
+        policy: { allowRevoke: true },
+        actorUserId: 'admin-1',
+      } as never)).rejects.toThrow(/record-link props may only contain baseId and sheetId/)
+    })
+
+    it('P1-2: rejects visibilityRule that depends on a record-link field (fail-closed v1)', async () => {
+      await expect(create(wrap(
+        {
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        },
+        [{
+          id: 'note', type: 'text', label: '备注',
+          visibilityRule: { fieldId: 'linked', operator: 'notEmpty' },
+        }],
+      ))).rejects.toThrow(/cannot reference a record-link field/)
+    })
+
+    it('P1-2: rejects simple condition rules that compare a record-link field (fail-closed v1)', async () => {
+      const request = {
+        key: `rl-cond-${Date.now()}`,
+        name: 'Record Link Cond',
+        formSchema: {
+          fields: [{
+            id: 'linked', type: 'record-link', label: '关联',
+            props: { baseId: 'b', sheetId: 's' },
+          }],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'route',
+              type: 'condition',
+              config: {
+                branches: [{
+                  edgeKey: 'edge-yes',
+                  rules: [{ fieldId: 'linked', operator: 'eq', value: 'anything' }],
+                }],
+                defaultEdgeKey: 'edge-no',
+              },
+            },
+            { key: 'yes', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u1'] } },
+            { key: 'no', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u1'] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-route', source: 'start', target: 'route' },
+            { key: 'edge-yes', source: 'route', target: 'yes' },
+            { key: 'edge-no', source: 'route', target: 'no' },
+            { key: 'edge-yes-end', source: 'yes', target: 'end' },
+            { key: 'edge-no-end', source: 'no', target: 'end' },
+          ],
+          policy: { allowRevoke: true },
+        },
+      }
+      await expect(create(request)).rejects.toThrow(/cannot reference record-link field/)
+    })
+  })
+
+  describe('department field contract (Lock-2 L2-A author-time)', () => {
+    const create = async (field: Record<string, unknown>) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate({
+        key: `department-${Date.now()}`,
+        name: 'Department',
+        formSchema: {
+          fields: [
+            field,
+            ...(field.visibilityRule !== undefined
+              ? [{ id: 'toggle', type: 'text', label: '显示联系人' }]
+              : []),
+          ],
+        },
+        approvalGraph: buildRuntimeGraph(),
+      } as never)
+    }
+
+    it('rejects missing, unknown, and invalid department props before any write', async () => {
+      await expect(create({ id: 'dept', type: 'department', label: '部门' }))
+        .rejects.toThrow(/props\.selection/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'single', display: 'full_path', externalDepartmentId: 'leak' },
+      })).rejects.toThrow(/unknown keys/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'many', display: 'full_path' },
+      })).rejects.toThrow(/props\.selection/)
+      await expect(create({
+        id: 'dept', type: 'department', label: '部门',
+        props: { selection: 'multi', display: 'full_path', defaultDepartmentIds: ['d1', 'd1'] },
+      })).rejects.toThrow(/unique non-blank ids/)
+    })
+
+    it('rejects department inside detail rows', async () => {
+      await expect(create({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{
+          id: 'dept', type: 'department', label: '部门',
+          props: { selection: 'single', display: 'leaf_only' },
+        }],
+      })).rejects.toThrow(/department cannot nest inside a detail group|not a valid leaf sub-field/)
+    })
+  })
+
+  describe('user field contract (Lock-2 L2-B author-time)', () => {
+    const create = async (
+      field: Record<string, unknown>,
+      sourceKind?: 'form_field_user' | 'form_field_user_manager' | 'form_field_user_dept_head',
+    ) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate({
+        key: `user-${Date.now()}`,
+        name: 'Contact',
+        formSchema: {
+          fields: [
+            field,
+            ...(field.visibilityRule !== undefined
+              ? [{ id: 'toggle', type: 'text', label: '显示联系人' }]
+              : []),
+          ],
+        },
+        approvalGraph: sourceKind
+          ? {
+              nodes: [
+                { key: 'start', type: 'start', config: {} },
+                {
+                  key: 'approval_1',
+                  type: 'approval',
+                  config: {
+                    assigneeSources: [{ kind: sourceKind, fieldId: field.id, ...(sourceKind === 'form_field_user' ? {} : { level: 1 }) }],
+                  },
+                },
+                { key: 'end', type: 'end', config: {} },
+              ],
+              edges: [
+                { key: 'e1', source: 'start', target: 'approval_1' },
+                { key: 'e2', source: 'approval_1', target: 'end' },
+              ],
+            }
+          : buildRuntimeGraph(),
+      } as never)
+    }
+
+    it('pins the exact five-key props allowlist, including the ratified multi cap', async () => {
+      const { USER_FIELD_ALLOWED_PROP_KEYS } = await import('../../src/services/ApprovalProductService')
+      expect([...USER_FIELD_ALLOWED_PROP_KEYS].sort()).toEqual(
+        ['allowSelf', 'defaultMode', 'defaultUserIds', 'maxSelections', 'selection'].sort(),
+      )
+    })
+
+    it('rejects unknown and malformed user props before any write', async () => {
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { selection: 'single', externalUserId: 'leak' },
+      })).rejects.toThrow(/user props contain unknown keys/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { allowSelf: 'true' },
+      })).rejects.toThrow(/props\.allowSelf must be a boolean/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { selection: 'many' },
+      })).rejects.toThrow(/props\.selection must be single or multi/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultMode: 'current' },
+      })).rejects.toThrow(/props\.defaultMode is invalid/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultUserIds: ['u1', 'u1'] },
+      })).rejects.toThrow(/unique non-blank ids/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { selection: 'single', maxSelections: 2 },
+      })).rejects.toThrow(/single user fields require maxSelections 1/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { selection: 'multi', maxSelections: 1, defaultMode: 'designated', defaultUserIds: ['u1', 'u2'] },
+      })).rejects.toThrow(/user defaults exceed maxSelections/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人',
+        props: { allowSelf: true, defaultMode: 'requester', defaultUserIds: ['u1'] },
+      })).rejects.toThrow(/requester defaults cannot carry defaultUserIds/)
+      await expect(create({
+        id: 'contact', type: 'user', label: '联系人', props: { defaultMode: 'requester' },
+      })).rejects.toThrow(/requester defaults require allowSelf/)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it.each(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'] as const)(
+      '%s rejects optional, conditional, and uncapped multi routing controls',
+      async (sourceKind) => {
+        await expect(create(
+          { id: 'contact', type: 'user', label: '联系人' },
+          sourceKind,
+        )).rejects.toThrow(/must reference a required user field/)
+        await expect(create(
+          {
+            id: 'contact', type: 'user', label: '联系人', required: true,
+            visibilityRule: { fieldId: 'toggle', operator: 'notEmpty' },
+          },
+          sourceKind,
+        )).rejects.toThrow(/must not reference a field with a visibility rule/)
+        await expect(create(
+          { id: 'contact', type: 'user', label: '联系人', required: true, props: { selection: 'multi' } },
+          sourceKind,
+        )).rejects.toThrow(/requires maxSelections for a multi-select user field/)
+      },
+    )
+
+    it('fails closed with a values-free 503 when active contact verification cannot be read', async () => {
+      pgState.pool.query.mockRejectedValueOnce(new Error('db failed for secret-contact-id'))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const assertUserValues = (service as unknown as {
+        assertUserFormValuesAtSubmit(
+          formSchema: { fields: Array<Record<string, unknown>> },
+          formData: Record<string, unknown>,
+          requesterId: string,
+          fieldDerivedSources: Map<string, unknown>,
+        ): Promise<void>
+      }).assertUserFormValuesAtSubmit.bind(service)
+
+      const requiredContactSchema = {
+        fields: [{
+          id: 'contact',
+          type: 'user',
+          label: '联系人',
+          required: true,
+          props: { allowSelf: true },
+        }],
+      }
+      await expect(assertUserValues(
+        requiredContactSchema,
+        { contact: '   ' },
+        'requester-1',
+        new Map(),
+      )).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION_ERROR' })
+      await expect(assertUserValues(
+        requiredContactSchema,
+        { contact: '   ' },
+        'requester-1',
+        new Map([['route', { source: { fieldId: 'contact' } }]]),
+      )).resolves.toBeUndefined()
+
+      let caught: unknown
+      try {
+        await assertUserValues(
+          requiredContactSchema,
+          { contact: 'secret-contact-id' },
+          'requester-1',
+          new Map(),
+        )
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toMatchObject({
+        statusCode: 503,
+        code: 'APPROVAL_FORM_USER_DIRECTORY_UNRESOLVED',
+      })
+      expect(JSON.stringify(caught)).not.toContain('secret-contact-id')
+      expect(JSON.stringify(caught)).not.toContain('db failed')
+    })
+  })
+
+  describe('number field props contract (L8-C formatted-number, approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7)', () => {
+    // M10 verbatim: props on the EXISTING `number` type — NOT a new union member (OD-L8-6). The
+    // allowlist mirrors record-link's fail-closed shape (§1.3/OD-L8-7): unknown keys REJECT at
+    // publish, known keys are canonicalized (no residual spread, original key order preserved —
+    // §2.5/X-1). Reject cases run before pool.connect() (assertFormSchema is synchronous), same as
+    // record-link above.
+    const wrap = (field: Record<string, unknown>, extra: Record<string, unknown>[] = []) => ({
+      key: `num-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name: 'Number Props Tpl',
+      formSchema: { fields: [field, ...extra] },
+      approvalGraph: buildRuntimeGraph(),
+    })
+    const create = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    it('N-1 style census: the allowlist is EXACTLY the shipped keys + the three L8-C display keys', async () => {
+      const { NUMBER_FIELD_ALLOWED_PROP_KEYS } = await import('../../src/services/ApprovalProductService')
+      // Mutation-provable: dropping any member here (or adding one without updating this list)
+      // reds this exact-equality assertion directly — the census IS the test, not a claim about it.
+      expect([...NUMBER_FIELD_ALLOWED_PROP_KEYS].sort()).toEqual(
+        ['currencySymbol', 'derivedFrom', 'max', 'min', 'precision', 'step', 'thousandsSeparator', 'uppercaseCny'].sort(),
+      )
+    })
+
+    it('rejects a number field props key outside the allowlist (fail-closed, not silently dropped)', async () => {
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { precision: 2, exact: true },
+      }))).rejects.toThrow(/number props may only contain/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { currencySymbol: '¥', moneyType: 'exact' },
+      }))).rejects.toThrow(/unknown: moneyType/)
+    })
+
+    it('rejects the three new display keys when wrong-typed (publish-time type gate, not FE-only)', async () => {
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { currencySymbol: true },
+      }))).rejects.toThrow(/currencySymbol must be a string/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { thousandsSeparator: 'true' },
+      }))).rejects.toThrow(/thousandsSeparator must be a boolean/)
+      await expect(create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: { uppercaseCny: 1 },
+      }))).rejects.toThrow(/uppercaseCny must be a boolean/)
+    })
+
+    it('a detail column carrying the extra key is ALSO rejected (same function handles nested columns)', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{ id: 'unit_price', type: 'number', label: '单价', props: { min: 0, extraneous: 1 } }],
+      }))).rejects.toThrow(/number props may only contain/)
+    })
+
+    it('accepts and canonicalizes all three L8-C display props alongside pre-existing shipped keys, ORIGINAL key order preserved', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-num', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-num', template_id: 'tpl-num', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-num', key: 'num-tpl', name: 'Num', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-num', latest_version_id: 'ver-num',
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'amount', type: 'number', label: '数字',
+        props: {
+          min: 0, precision: 2,
+          currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true,
+        },
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.type).toBe('number')
+      // Original insertion order preserved (min, precision, currencySymbol, thousandsSeparator,
+      // uppercaseCny) — a rebuild in the allowlist's own order would still equal-compare here, so
+      // this is a genuine order assertion (not merely value equality).
+      expect(Object.keys(field.props as object)).toEqual(
+        ['min', 'precision', 'currencySymbol', 'thousandsSeparator', 'uppercaseCny'],
+      )
+      expect(field.props).toEqual({
+        min: 0, precision: 2,
+        currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true,
+      })
+    })
+
+    it('OD-L8-7 sized-by-sweep gate C-2: a detail column carrying the shipped derivedFrom shape (commonTemplatePresets subtotal) still publishes', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-deriv', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-deriv', template_id: 'tpl-deriv', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-deriv', key: 'deriv-tpl', name: 'Deriv', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-deriv', latest_version_id: 'ver-deriv',
+            created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [
+          { id: 'quantity', type: 'number', label: '数量', required: true, props: { min: 1 } },
+          { id: 'unit_price', type: 'number', label: '单价', required: true, props: { min: 0 } },
+          {
+            id: 'subtotal', type: 'number', label: '小计',
+            props: { min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } },
+          },
+        ],
+      }))
+      const columns = result.formSchema.fields[0].columns as Array<{ id: string; props?: Record<string, unknown> }>
+      expect(columns.find((c) => c.id === 'subtotal')?.props).toEqual({
+        min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' },
+      })
+    })
+
+    it('OD-L8-7 gate C-2, RESTORE half: restoreTemplateVersion re-validates a historical number-props shape through the new allowlist and still restores (:3796-3804 revalidation path)', async () => {
+      // This is the precise path §1.3 warns the allowlist can break ("reject existing published
+      // templates at their next save AND their history at restore") — publish-time acceptance
+      // (above) does not, by itself, prove the SAME shape survives restoreTemplateVersion's
+      // independent re-validation of a STORED (pre-Lock-8) snapshot.
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const graph = buildRuntimeGraph()
+      const historicalSchema = {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', props: { min: 0, precision: 2 } },
+          {
+            id: 'items', type: 'detail', label: '明细',
+            columns: [
+              { id: 'quantity', type: 'number', label: '数量', props: { min: 1 } },
+              { id: 'unit_price', type: 'number', label: '单价', props: { min: 0 } },
+              {
+                id: 'subtotal', type: 'number', label: '小计',
+                props: { min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } },
+              },
+            ],
+          },
+        ],
+      }
+      const templateRow = {
+        id: 'tpl-restore', key: 'restore-tpl', name: 'Restore', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+        active_version_id: 'ver-current', latest_version_id: 'ver-current',
+        created_at: new Date('2026-07-01T00:00:00.000Z'), updated_at: new Date('2026-07-01T00:00:00.000Z'),
+      }
+      const historicalVersionRow = {
+        id: 'ver-historical', template_id: 'tpl-restore', version: 1, status: 'draft',
+        form_schema: historicalSchema,
+        approval_graph: graph,
+        created_at: new Date('2026-07-01T00:00:00.000Z'), updated_at: new Date('2026-07-01T00:00:00.000Z'),
+      }
+      const restoredVersionRow = {
+        id: 'ver-restored', template_id: 'tpl-restore', version: 2, status: 'draft',
+        form_schema: historicalSchema,
+        approval_graph: graph,
+        restored_from_version_id: 'ver-historical',
+        created_at: new Date('2026-08-17T00:00:00.000Z'), updated_at: new Date('2026-08-17T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions') && s.includes('WHERE id = $1 AND template_id = $2')) {
+          return { rows: [historicalVersionRow], rowCount: 1 }
+        }
+        if (s.startsWith('SELECT COALESCE(MAX(version), 0)')) {
+          return { rows: [{ max_version: '1' }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [restoredVersionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{ ...templateRow, latest_version_id: 'ver-restored' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await service.restoreTemplateVersion('tpl-restore', 'ver-historical', {
+        expectedLatestVersionId: 'ver-current',
+      } as never)
+      const restoredFields = (result.formSchema as { fields: Array<Record<string, unknown>> }).fields
+      expect(restoredFields.find((f) => f.id === 'amount')?.props).toEqual({ min: 0, precision: 2 })
+      const detail = restoredFields.find((f) => f.id === 'items') as { columns: Array<{ id: string; props?: unknown }> }
+      expect(detail.columns.find((c) => c.id === 'subtotal')?.props).toEqual({
+        min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' },
+      })
+    })
+    // NOTE: `cloneTemplate` (:4408-4430) re-validates through the SAME `assertFormSchema` →
+    // `normalizeFormField` call as both `createTemplate` (tested above) and `restoreTemplateVersion`
+    // (tested here) — not a third, independently-implemented gate — so it is not separately
+    // black-box tested in this file; deferred, not silently assumed equivalent.
+  })
+
   describe('approval condition formula contract (FC-1)', () => {
     const formulaFormSchema = {
       fields: [
@@ -1392,7 +2139,7 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('UPDATE approval_templates')) {
           return { rows: [{ id: 'tpl-formula', key: 'formula-template', name: 'Formula Template', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: 'ver-formula', created_at: new Date('2026-06-25T00:00:00.000Z'), updated_at: new Date('2026-06-25T00:00:00.000Z') }], rowCount: 1 }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
 
       const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1454,6 +2201,112 @@ describe('ApprovalProductService', () => {
             : node),
         },
       } as never)).rejects.toThrow(/unknown field reference/)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects a literal-only formula branch before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-static',
+        name: 'Formula Static',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '1 == 1' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_STATIC',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects a field-dependent formula proven true by the field bounds', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-bound-tautology',
+        name: 'Formula Bound Tautology',
+        formSchema: {
+          fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true, props: { min: 0 } }],
+        },
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} >= -1' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an identity formula branch before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-identity-tautology',
+        name: 'Formula Identity Tautology',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} == {amount}' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        details: { branchIndex: 0 },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an arithmetic identity formula before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'formula-arithmetic-capture',
+        name: 'Formula Arithmetic Capture',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} - {amount} == 0' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+        details: { branchIndex: 0 },
+      })
       expect(pgState.pool.connect).not.toHaveBeenCalled()
     })
   })
@@ -1550,7 +2403,7 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -1558,6 +2411,7 @@ describe('ApprovalProductService', () => {
     const result = await service.createTemplate(request as never)
 
     const approvalNode = result.approvalGraph.nodes.find((node) => node.key === 'approval_1')
+    expect(result.formSchema.fields.find((field) => field.id === 'reviewer')?.props).toBeUndefined()
     expect(approvalNode?.config).toEqual({
       assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
       approvalMode: 'single',
@@ -1799,7 +2653,7 @@ describe('ApprovalProductService', () => {
             rowCount: 1,
           }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -1809,7 +2663,7 @@ describe('ApprovalProductService', () => {
       await expect(service.createTemplate(
         fieldPermRequest([{ fieldId: 'secret', access: 'invisible' }]) as never,
       )).rejects.toMatchObject({
-        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].access must be editable, readonly, or hidden',
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].access must be editable, readonly, hidden, or required',
         statusCode: 400,
         code: 'VALIDATION_ERROR',
       })
@@ -1882,6 +2736,414 @@ describe('ApprovalProductService', () => {
       const result = await service.createTemplate(fieldPermRequest([]) as never)
       const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
       expect((node?.config as Record<string, unknown>).fieldPermissions).toBeUndefined()
+    })
+  })
+
+  describe('Lock-7B node-level required field tier (必填, docs/development/approval-lock7b-required-at-node-20260820.md)', () => {
+    // start -> handler_1 (fieldPermissions under test) -> approval_1 (form_field_user driver on
+    // `pick`, fieldPermissions under test for G-6) -> end. `note`/`doc`/`link` are the OD-L7B-9
+    // unwritable types; `pick` doubles as the OD-L7B-4 routing-driver field.
+    function requiredTierRequest(
+      handlerFieldPermissions: unknown,
+      approvalFieldPermissions?: unknown,
+    ) {
+      return {
+        key: 'l7b-tpl',
+        name: 'Lock-7B Template',
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: 'Amount' },
+            { id: 'secret', type: 'text', label: 'Secret' },
+            { id: 'pick', type: 'user', label: 'Pick', required: true },
+            { id: 'note', type: 'explanation', label: 'Note', props: { text: 'note text' } },
+            { id: 'doc', type: 'attachment', label: 'Doc' },
+            { id: 'link', type: 'record-link', label: 'Link', props: { baseId: 'b1', sheetId: 's1' } },
+          ],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'handler_1',
+              type: 'handler',
+              config: { assigneeSources: [{ kind: 'static_user', userIds: ['h-1'] }], fieldPermissions: handlerFieldPermissions },
+            },
+            {
+              key: 'approval_1',
+              type: 'approval',
+              config: {
+                assigneeSources: [{ kind: 'form_field_user', fieldId: 'pick' }],
+                approvalMode: 'single',
+                emptyAssigneePolicy: 'error',
+                ...(approvalFieldPermissions !== undefined ? { fieldPermissions: approvalFieldPermissions } : {}),
+              },
+            },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'handler_1' },
+            { key: 'e2', source: 'handler_1', target: 'approval_1' },
+            { key: 'e3', source: 'approval_1', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    function mockL7bTemplateInsert() {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-l7b',
+              key: String(params?.[0]),
+              name: String(params?.[1]),
+              description: null,
+              category: null,
+              visibility_scope: JSON.parse(String(params?.[4])),
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: null,
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return {
+            rows: [{
+              id: 'ver-l7b',
+              template_id: 'tpl-l7b',
+              version: 1,
+              status: 'draft',
+              form_schema: JSON.parse(String(params?.[1])),
+              approval_graph: JSON.parse(String(params?.[2])),
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-l7b',
+              key: 'l7b-tpl',
+              name: 'Lock-7B Template',
+              description: null,
+              category: null,
+              visibility_scope: { type: 'all', ids: [] },
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: 'ver-l7b',
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    // ── G-2 (publish admission) ─────────────────────────────────────────────────────────────────
+    it('G-2: `required` is admitted as a valid access value on a handler node and round-trips byte-stably', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'handler_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // ── G-1 (必填 × hidden unrepresentable) ──────────────────────────────────────────────────────
+    it('G-1: `required` + `hidden` for the SAME fieldId at ONE node is unrepresentable — rejected by the dedup guard, exact message', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([
+          { fieldId: 'secret', access: 'required' },
+          { fieldId: 'secret', access: 'hidden' },
+        ]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[1].fieldId is duplicated',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-1 positive control: `required` on one field + `hidden` on a DIFFERENT field at the same node both publish', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([
+        { fieldId: 'secret', access: 'required' },
+        { fieldId: 'amount', access: 'hidden' },
+      ]) as never)
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'handler_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toEqual([
+        { fieldId: 'secret', access: 'required' },
+        { fieldId: 'amount', access: 'hidden' },
+      ])
+    })
+
+    // ── G-6 (approval-node rejection, OD-L7B-3) ─────────────────────────────────────────────────
+    it('G-6: publish REJECTS `required` on an approval node — values-free 400, exact code + metadata', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([], [{ fieldId: 'secret', access: 'required' }]) as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_NODE_TYPE',
+        details: { nodeKey: 'approval_1', nodeType: 'approval', fieldId: 'secret' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-6 positive control: `readonly` on that SAME approval node still publishes; `required` on a HANDLER node in the same graph publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const readonlyResult = await service.createTemplate(requiredTierRequest([], [{ fieldId: 'secret', access: 'readonly' }]) as never)
+      expect((readonlyResult.approvalGraph.nodes.find((n) => n.key === 'approval_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'readonly' }])
+
+      mockL7bTemplateInsert()
+      const handlerResult = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((handlerResult.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // ── G-7 (routing-driver rejection via the SHARED helper, OD-L7B-4) ─────────────────────────
+    it('G-7: publish REJECTS `required` on a routing-driver field (form_field_user source) — values-free 400, exact code', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([{ fieldId: 'pick', access: 'required' }]) as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'pick' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 positive control: a NON-driver field marked `required` on the same node publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    it('Ordering pin (§1.2 item 2 / P3-1): a driver field marked `required` ALWAYS yields the driver-specific code, never pin 1\'s generic writable-driver message', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const error = await service.createTemplate(
+        requiredTierRequest([{ fieldId: 'pick', access: 'required' }]) as never,
+      ).catch((e) => e)
+      expect(error).toMatchObject({ code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED' })
+      // Pin 1's generic message names "editable" or "required" as an inline noun; the driver-specific
+      // rejection instead names OD-L7B-4 — asserting the ABSENCE of pin 1's marker text on this exact
+      // input is the load-bearing half of the ordering pin (both codes could plausibly fire; only one
+      // does, and it is the specific one).
+      expect(String(error.message)).toContain('OD-L7B-4')
+      expect(String(error.message)).not.toContain('OD-L7-8')
+    })
+
+    // Prior requalification finding R3 (P3): G-7 was asserted for only ONE of the three driver kinds
+    // `collectRoutingDriverFieldIds` recognises (`form_field_user` above) — a `ConditionRule.fieldId`
+    // and a condition-formula operand are the other two, and neither had its OWN test. The prior
+    // round's mitigating evidence (neutering the SHARED `form_field_user` arm reds both this file's
+    // tests and the sibling Lock-7 real-DB pin-1 tests) proves there is only ONE derivation, but does
+    // not itself exercise the other two arms — these two tests do.
+    function requiredTierConditionDriverRequest(driverKind: 'rule' | 'formula') {
+      return {
+        key: 'l7b-cond-tpl',
+        name: 'Lock-7B Condition Driver Template',
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: 'Amount' },
+            { id: 'secret', type: 'text', label: 'Secret' },
+          ],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'handler_1',
+              type: 'handler',
+              config: {
+                assigneeSources: [{ kind: 'static_user', userIds: ['h-1'] }],
+                fieldPermissions: [{ fieldId: 'amount', access: 'required' }],
+              },
+            },
+            {
+              key: 'route',
+              type: 'condition',
+              config: {
+                branches: [
+                  driverKind === 'rule'
+                    ? { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gt', value: 100 }] }
+                    : { edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} > 100' } },
+                ],
+                defaultEdgeKey: 'edge-low',
+              },
+            },
+            { key: 'high', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['a-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'low', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['a-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 's2h', source: 'start', target: 'handler_1' },
+            { key: 'h2r', source: 'handler_1', target: 'route' },
+            { key: 'edge-high', source: 'route', target: 'high' },
+            { key: 'edge-low', source: 'route', target: 'low' },
+            { key: 'h2e', source: 'high', target: 'end' },
+            { key: 'l2e', source: 'low', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    it('G-7 (R3 fix, driver kind 2/3): publish REJECTS `required` on a field referenced by a condition branch\'s ConditionRule.fieldId', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierConditionDriverRequest('rule') as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 (R3 fix, driver kind 3/3): publish REJECTS `required` on a field referenced ONLY by a condition-formula operand', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierConditionDriverRequest('formula') as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 (R3 fix) positive control: the SAME two fixtures publish when a DIFFERENT, non-driver field (`secret`) is `required` instead of the driver `amount`', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const ruleFixture = requiredTierConditionDriverRequest('rule')
+      // `amount` stays unlisted (absent ≡ editable, OD-L7-9) — Lock-7 pin 1 / OD-L7-8(a) separately
+      // forbids an EXPLICIT writable fieldPermissions entry on any routing driver at any node
+      // (privilege-escalation guard, unrelated to G-7/OD-L7B-4), so this positive control marks the
+      // OTHER field required rather than flipping the driver's own entry to `editable`.
+      ;(ruleFixture.approvalGraph.nodes[1]!.config as { fieldPermissions: Array<{ fieldId: string; access: string }> }).fieldPermissions = [
+        { fieldId: 'secret', access: 'required' },
+      ]
+      const result = await service.createTemplate(ruleFixture as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // Prior requalification finding R3 (P3): G-6 requires the driver rejection to fire "at every
+    // entry point that reaches the normalizer" — `validateNodeFieldPermissionsAgainstFormSchema` has
+    // five call sites (restore/create/update/publish/clone) and only `createTemplate` had a test.
+    // `publishTemplate` earns its OWN test rather than being deferred like `cloneTemplate` below: it
+    // is the one entry point that calls the shared validator with `STORED_GRAPH_CONTEXT`, not
+    // `REQUEST_VALIDATION_CONTEXT` — a materially different argument, not the "same call, same args"
+    // shape the deferral for update/clone rests on — and it is the entry point where a stored graph
+    // that predates this lock (or was crafted directly) is re-admitted to production.
+    it('G-6/G-7 (R3 fix): publish REJECTS a STORED graph carrying `required` on a routing-driver field (re-validated at publish, not just at create)', async () => {
+      const fixture = requiredTierConditionDriverRequest('rule')
+      const templateRow = {
+        id: 'tpl-g6-pub', key: 'g6-pub', name: 'G6 Publish', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-g6-pub',
+        created_at: new Date('2026-08-20T00:00:00.000Z'), updated_at: new Date('2026-08-20T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-g6-pub', template_id: 'tpl-g6-pub', version: 1, status: 'draft',
+        form_schema: fixture.formSchema,
+        approval_graph: fixture.approvalGraph,
+        created_at: new Date('2026-08-20T00:00:00.000Z'), updated_at: new Date('2026-08-20T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.includes('FROM approval_templates') && s.includes('FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.publishTemplate('tpl-g6-pub', {
+        policy: { allowRevoke: true },
+        actorUserId: 'admin-1',
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+    })
+
+    // R3 disposition, publish's siblings (restore/update/clone): NOT independently tested here.
+    // `updateTemplate` and `cloneTemplate` call the exact SAME `validateNodeFieldPermissionsAgainstFormSchema`
+    // with the exact same `REQUEST_VALIDATION_CONTEXT` `createTemplate` already exercises above — not
+    // a second, independently-implemented gate, the same reasoning this file's own pre-existing NOTE
+    // (search "not a third, independently-implemented gate" above) already applies to `cloneTemplate`
+    // for the record-link gate. `restoreTemplateVersion` also calls it with `REQUEST_VALIDATION_CONTEXT`
+    // over a HISTORICAL stored graph, same shape again. This is a real, disclosed LIMIT, not a closed
+    // gap: none of these three tests would catch a future refactor that deletes the
+    // `validateNodeFieldPermissionsAgainstFormSchema` CALL from one specific entry point while leaving
+    // the function itself intact — the shared-function argument proves the CHECK'S LOGIC cannot drift
+    // between entry points, it does not prove every entry point still WIRES the check at all. Closing
+    // that residual would need an entry-point-wiring census (grep-based, of the kind this repo's own
+    // doctrine treats with suspicion — feedback_source_text_assertions_are_not_behaviour) or four more
+    // full DB-mocked behavioural tests; deferred as a P3, not silently narrowed to "covered".
+
+    // ── G-8 (unwritable-type rejection, OD-L7B-9) ───────────────────────────────────────────────
+    for (const [fieldId, fieldType] of [['note', 'explanation'], ['doc', 'attachment'], ['link', 'record-link']] as const) {
+      it(`G-8: publish REJECTS \`required\` on a ${fieldType} field — values-free 400, exact code + metadata`, async () => {
+        const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+        const service = new ApprovalProductService()
+        await expect(service.createTemplate(
+          requiredTierRequest([{ fieldId, access: 'required' }]) as never,
+        )).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_TYPE',
+          details: { nodeKey: 'handler_1', fieldId, fieldType },
+        })
+        expect(pgState.pool.connect).not.toHaveBeenCalled()
+      })
+    }
+
+    it('G-8 positive control: a `text` field marked `required` on the same node publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
     })
   })
 
@@ -2000,7 +3262,7 @@ describe('ApprovalProductService', () => {
             rowCount: 1,
           }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -2076,6 +3338,1263 @@ describe('ApprovalProductService', () => {
       )
       const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
       expect((node?.config as Record<string, unknown>).timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+    })
+  })
+
+  describe('empty condition-branch rules gate (author / publish validation)', () => {
+    // A rules-mode branch with `rules: []` evaluates as `[].every(...)` === TRUE at runtime — it
+    // would silently capture ALL traffic (first-match-wins) and dead-code the default edge. The
+    // gate raises its own code at create / update / publish (like validateNodeTimeoutConfigs),
+    // NEVER inside normalizeApprovalGraph's stored-graph path (plain reads must not brick).
+    // Negative control for the formula exemption: the FC-1 describe above proves createTemplate
+    // ACCEPTS formula branches carrying `rules: []` — dropping the exemption REDs those tests.
+    function emptyBranchGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'route',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'edge-high', rules: [] }], defaultEdgeKey: 'edge-low' },
+          },
+          { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+          { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-route', source: 'start', target: 'route' },
+          { key: 'edge-high', source: 'route', target: 'high' },
+          { key: 'edge-low', source: 'route', target: 'low' },
+          { key: 'edge-high-end', source: 'high', target: 'end' },
+          { key: 'edge-low-end', source: 'low', target: 'end' },
+        ],
+      }
+    }
+
+    it('rejects a rules-mode branch with EMPTY rules at createTemplate, before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate({
+        key: 'empty-branch-tpl',
+        name: 'Empty Branch Template',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: emptyBranchGraph(),
+      } as never)).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an already-STORED empty-rules branch at PUBLISH (a legacy draft can never reach a published definition)', async () => {
+      const template = {
+        id: 'tpl-empty-branch', key: 'empty-branch', name: 'Empty Branch', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-eb', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-eb', template_id: 'tpl-empty-branch', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: emptyBranchGraph(),
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-empty-branch', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+    })
+  })
+
+  describe('parallel dynamic-assignee conflict publish gate (F2)', () => {
+    // Provably-identical DYNAMIC sources across parallel branches resolve to the same user on
+    // EVERY request, so fan-out raises the typed 409 APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT
+    // 100% of the time — publish now rejects the same shape with the same code (status 400).
+    // Different kinds / different parameters must NOT be flagged (they may be legal; the runtime
+    // guard owns org-shape-dependent collisions), and the publish policy's mergeAdjacentApprover
+    // exemption mirrors allowParallelDuplicateAssignees for statics.
+    function parallelDynamicGraph(sourceA: unknown, sourceB: unknown) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          { key: 'branch_a', type: 'approval', config: { assigneeSources: [sourceA], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [sourceB], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-fork', source: 'start', target: 'fork' },
+          { key: 'edge-fork-a', source: 'fork', target: 'branch_a' },
+          { key: 'edge-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'edge-a-join', source: 'branch_a', target: 'join' },
+          { key: 'edge-b-join', source: 'branch_b', target: 'join' },
+          { key: 'edge-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    function mockParallelPublish(graph: unknown) {
+      const template = {
+        id: 'tpl-par', key: 'par', name: 'Parallel', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-par', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-par', template_id: 'tpl-par', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+          return { rows: [{ id: 'pub-par', template_id: 'tpl-par', template_version_id: 'ver-par', runtime_graph: JSON.parse(String(params?.[2])), is_active: true, published_at: new Date() }], rowCount: 1 }
+        }
+        if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+        if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    it('rejects requester×requester branches at publish with the runtime conflict code (the old untouched-starter shape)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT' })
+    })
+
+    it('rejects same-parameter dynamic sources (manager_at_level 2 × manager_at_level 2)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'manager_at_level', level: 2 }, { kind: 'manager_at_level', level: 2 }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT' })
+    })
+
+    it('publishes DIFFERENT dynamic kinds / DIFFERENT parameters clean (no false positive)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'direct_manager' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+
+      mockParallelPublish(parallelDynamicGraph({ kind: 'manager_at_level', level: 1 }, { kind: 'manager_at_level', level: 2 }))
+      const second = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(second.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('exempts a publish policy carrying autoApproval.mergeAdjacentApprover (mirrors allowParallelDuplicateAssignees)', async () => {
+      mockParallelPublish(parallelDynamicGraph({ kind: 'requester' }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true, autoApproval: { mergeAdjacentApprover: true } } } as never,
+      )
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    // ── Owner P2 (review #4433): a CONDITION nested inside a parallel branch must not hide its
+    // alternative paths from the publish gate. The old walk followed each node's FIRST outgoing
+    // edge only, so a conflict behind a condition's default (or any non-first) edge published
+    // green and then 409'd every matching request at runtime. The fixed walk enumerates ALL
+    // condition paths up to the join and intersects the per-branch source SETS across branches.
+    // FE mirror goldens: apps/web/tests/approval-template-authoring-parallel-edit.test.ts
+    // ('condition paths inside a parallel branch (owner P2)') — keep in lockstep. ──
+
+    // Owner's constructed case: branch A = condition (rules path → <highPathSource>, DEFAULT path →
+    // requester — rules edge declared FIRST so the old walk never reached the requester),
+    // branch B = <branchBSource>.
+    function conditionDefaultPathGraph(branchBSource: unknown, highPathSource: unknown = { kind: 'dept_head' }) {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [highPathSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [branchBSource], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edge FIRST, default edge SECOND — first-edge-only traversal missed approval_low.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    it('GOLDEN (owner case): condition DEFAULT path resolves to requester, branch B is requester → publish rejects naming requester', async () => {
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('publishes clean when every condition path yields a DIFFERENT source than branch B (negative control)', async () => {
+      // Paths yield dept_head / requester; branch B is direct_manager — nothing provably identical.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'direct_manager' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('rejects a conflict hidden behind the RULES edge when the default edge is declared first', async () => {
+      // Default edge (→ approval_low, requester) declared FIRST; the dept_head conflict sits behind
+      // the RULES edge, which a first-edge-only walk would never enter. Branch B = dept_head.
+      const graph = conditionDefaultPathGraph({ kind: 'dept_head' })
+      const condEdgeKeys = new Set(['e-cond-high', 'e-cond-low'])
+      const [highEdge, lowEdge] = graph.edges.filter((edge) => condEdgeKeys.has(edge.key))
+      graph.edges = graph.edges.map((edge) => (edge.key === 'e-cond-high' ? lowEdge : edge.key === 'e-cond-low' ? highEdge : edge))
+      mockParallelPublish(graph)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'dept_head' },
+      })
+    })
+
+    it('rejects a conflict reachable only through a DEEP condition chain (condition → condition, default → default)', async () => {
+      const deepChain = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c1-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 10000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c1-c2' },
+          },
+          {
+            key: 'cond_2',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'e-c2-mid', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }], defaultEdgeKey: 'e-c2-low' },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_mid', type: 'approval', config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'approval_low', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edges declared first at BOTH levels — the conflicting requester sits two default
+          // hops deep (cond_1 default → cond_2 default → approval_low).
+          { key: 'e-c1-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-c1-c2', source: 'cond_1', target: 'cond_2' },
+          { key: 'e-c2-mid', source: 'cond_2', target: 'approval_mid' },
+          { key: 'e-c2-low', source: 'cond_2', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-mid-join', source: 'approval_mid', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      mockParallelPublish(deepChain)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester', conflictingNodeKeys: ['approval_low', 'branch_b'] },
+      })
+    })
+
+    it('ignores a stray outgoing edge that runtime condition routing can never select', async () => {
+      const graph = conditionDefaultPathGraph({ kind: 'direct_manager' })
+      graph.nodes.splice(-2, 0, {
+        key: 'approval_stray',
+        type: 'approval',
+        config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+      })
+      graph.edges.splice(-1, 0,
+        { key: 'e-cond-stray', source: 'cond_1', target: 'approval_stray' },
+        { key: 'e-stray-join', source: 'approval_stray', target: 'join' },
+      )
+      mockParallelPublish(graph)
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true } } as never,
+      )
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+
+    it('without a default, scans the first-outgoing fallback for dynamic conflicts', async () => {
+      const graph = conditionDefaultPathGraph({ kind: 'requester' })
+      const condition = graph.nodes.find((node) => node.key === 'cond_1')!
+      condition.config = {
+        branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+      }
+      const highIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-high')
+      const lowIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-low')
+      ;[graph.edges[highIndex], graph.edges[lowIndex]] = [graph.edges[lowIndex], graph.edges[highIndex]]
+      mockParallelPublish(graph)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().publishTemplate(
+        'tpl-par',
+        { policy: { allowRevoke: true } } as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        details: { nodeKey: 'fork', source: 'requester' },
+      })
+    })
+
+    it('does NOT reject the same source on two ALTERNATIVE paths of ONE branch alone (within-branch union, not a conflict)', async () => {
+      // Both cond_1 paths resolve to requester but branch B is a STATIC role — alternative paths of
+      // one branch never run simultaneously, so publish must stay green.
+      mockParallelPublish(conditionDefaultPathGraph({ kind: 'static_role', roleIds: ['legal'] }, { kind: 'requester' }))
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
+      expect(result.publishedDefinitionId).toBe('pub-par')
+    })
+  })
+
+  describe('parallel branch all-path join reachability (author / publish)', () => {
+    // The strict write gate proves every runtime-possible path through a parallel
+    // branch reaches the configured join. Stored reads keep the historical
+    // first-edge compatibility path so a validator tightening cannot brick them.
+    // The prior first-outgoing-edge-only walk accepted templates where a condition's
+    // FIRST rules edge joined while a non-first / default edge hit end (or dead-ended /
+    // nested-parallel / cycled); create/update/publish went green, then a request that
+    // selected the alternate edge failed before insert with
+    // "Parallel branch terminated at an end node before reaching join".
+    //
+    // Mutation proof: reverting collectBranchAssignees to first-edge-only
+    // (`outgoing.get(current)?.[0]` only, no config-declared condition fan-out) REDs the
+    // exact GOLDEN below (and the symmetric non-first-rules failure). Convergent-DAG +
+    // all-paths-join positives stay green either way; nested-parallel/cycle-on-non-first
+    // negatives also RED under first-edge-only (they sit behind the non-first arm).
+    // Complexity mutation: drop DONE memoization (path-local rewalk only) hangs the
+    // layered-diamond acceptance (2^24 shared-tail recomputations) while the single-
+    // diamond convergent control still passes.
+    // Condition-successor mutation: walking ALL graph outgoing edges (instead of
+    // config.branches[].edgeKey + defaultEdgeKey, with firstTarget only when default is
+    // absent) REDs the stray-outgoing positive and may false-green foreign-owned edgeKeys.
+
+    function mockCreateInsert(templateKey: string) {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-join-reach',
+              key: String(params?.[0]),
+              name: String(params?.[1]),
+              description: null,
+              category: null,
+              visibility_scope: JSON.parse(String(params?.[4])),
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: null,
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return {
+            rows: [{
+              id: 'ver-join-reach',
+              template_id: 'tpl-join-reach',
+              version: 1,
+              status: 'draft',
+              form_schema: JSON.parse(String(params?.[1])),
+              approval_graph: JSON.parse(String(params?.[2])),
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-join-reach',
+              key: templateKey,
+              name: 'Join Reach Template',
+              description: null,
+              category: null,
+              visibility_scope: { type: 'all', ids: [] },
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: 'ver-join-reach',
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    function mockPublish(graph: unknown) {
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+          return { rows: [{ id: 'pub-join-reach', template_id: 'tpl-join-reach', template_version_id: 'ver-join-reach', runtime_graph: JSON.parse(String(params?.[2])), is_active: true, published_at: new Date() }], rowCount: 1 }
+        }
+        if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+        if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    /**
+     * GOLDEN shape: parallel branch A starts at a condition whose FIRST (rules) edge
+     * reaches join via approval_high, but whose SECOND (default) edge reaches `end`
+     * without joining. Branch B is a plain approval → join. First-edge-only walks
+     * never see the default arm and accept the template.
+     */
+    function goldenDefaultEndsBeforeJoinGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-low'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          // Rules edge FIRST (joins), default edge SECOND (hits end) — first-edge-only is false-green.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-end', source: 'approval_low', target: 'end' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    const goldenReject = {
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'approvalGraph parallel branch must reach join before end (at end)',
+    }
+
+    it('GOLDEN: first condition edge joins, default edge reaches end → createTemplate rejects before DB', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate({
+        key: 'join-reach-golden',
+        name: 'Join Reach Golden',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: goldenDefaultEndsBeforeJoinGraph(),
+      } as never)).rejects.toMatchObject(goldenReject)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('GOLDEN: same shape → updateTemplate rejects before DB', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.updateTemplate('tpl-join-reach', {
+        approvalGraph: goldenDefaultEndsBeforeJoinGraph(),
+      } as never)).rejects.toMatchObject(goldenReject)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('GOLDEN: same readable historical shape → publishTemplate rejects at the strict write gate', async () => {
+      mockPublish(goldenDefaultEndsBeforeJoinGraph())
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-join-reach', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branch must reach join before end (at end)',
+      })
+    })
+
+    it('GOLDEN: clone rejects a readable historical graph before creating a new draft version', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return { rows: [template], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return { rows: [version], rowCount: 1 }
+        }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().cloneTemplate('tpl-join-reach')).rejects.toMatchObject(goldenReject)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('compatibility GOLDEN: ordinary reads still return a historical first-edge-valid graph', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().getTemplate('tpl-join-reach')
+      expect(result?.approvalGraph).toEqual(graph)
+    })
+
+    it('form-only update revalidates the copied historical graph before creating a new version', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const template = {
+        id: 'tpl-join-reach', key: 'join-reach', name: 'Join Reach', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-join-reach', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-join-reach', template_id: 'tpl-join-reach', version: 1, status: 'draft',
+        form_schema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE template_id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('SELECT COALESCE(MAX(version), 0)::text')) return { rows: [{ max_version: '1' }], rowCount: 1 }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{ ...version, id: 'ver-join-reach-2', version: 2, form_schema: JSON.parse(String(params?.[2])) }], rowCount: 1 }
+        }
+        if (statement.startsWith('UPDATE approval_templates SET latest_version_id')) {
+          return { rows: [{ ...template, latest_version_id: 'ver-join-reach-2' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().updateTemplate('tpl-join-reach', {
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+      } as never)).rejects.toMatchObject(goldenReject)
+    })
+
+    it('no-default runtime fallback follows the first outgoing edge as well as declared rule edges', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      const condition = graph.nodes.find((node) => node.key === 'cond_1')!
+      condition.config = {
+        branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+      }
+      const highIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-high')
+      const lowIndex = graph.edges.findIndex((edge) => edge.key === 'e-cond-low')
+      ;[graph.edges[highIndex], graph.edges[lowIndex]] = [graph.edges[lowIndex], graph.edges[highIndex]]
+      // First outgoing is now the undeclared low edge -> end; the declared high
+      // edge joins. Omitting the firstTarget fallback would false-accept.
+      mockCreateInsert('join-reach-no-default')
+      await expect(new (await import('../../src/services/ApprovalProductService')).ApprovalProductService().createTemplate({
+        key: 'join-reach-no-default',
+        name: 'Join Reach No Default',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject(goldenReject)
+    })
+
+    it('symmetric: non-first RULES edge reaches end (default joins) → create rejects', async () => {
+      // Two rules edges: first joins, second ends — default also joins. First-edge-only green;
+      // all-path must still reject the non-first rules arm.
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [
+                { edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 10000 }], conjunction: 'and' },
+                { edgeKey: 'e-cond-mid', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' },
+              ],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_mid', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-mid'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-low'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-mid', source: 'cond_1', target: 'approval_mid' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-mid-end', source: 'approval_mid', target: 'end' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'join-reach-rules-end',
+        name: 'Join Reach Rules End',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject(goldenReject)
+    })
+
+    it('positive control: every condition alternative reaches join → create accepts', async () => {
+      const graph = goldenDefaultEndsBeforeJoinGraph()
+      // Fix the default arm: low → join instead of end.
+      graph.edges = graph.edges.map((edge) => (
+        edge.key === 'e-low-end' ? { ...edge, key: 'e-low-join', target: 'join' } : edge
+      ))
+      mockCreateInsert('join-reach-ok')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-ok',
+        name: 'Join Reach OK',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)
+      expect(result.id).toBe('tpl-join-reach')
+      expect(result.approvalGraph.nodes.some((n) => n.key === 'fork' && n.type === 'parallel')).toBe(true)
+    })
+
+    it('positive control: convergent DAG (two condition arms rejoin a shared pre-join node) is NOT a cycle', async () => {
+      // cond → high → shared → join
+      //     ↘ low  ↗
+      // A global-visited cycle detector would false-positive when the second arm re-enters `shared`.
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-low'] } },
+          { key: 'shared', type: 'cc', config: { targetType: 'user', targetIds: ['watcher-1'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-shared', source: 'approval_high', target: 'shared' },
+          { key: 'e-low-shared', source: 'approval_low', target: 'shared' },
+          { key: 'e-shared-join', source: 'shared', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      mockCreateInsert('join-reach-dag')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-dag',
+        name: 'Join Reach DAG',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)
+      expect(result.id).toBe('tpl-join-reach')
+    })
+
+    it('positive control: layered convergent diamond DAG accepts in O(V+E) (memoized; pure path rewalk is exponential)', async () => {
+      // Complexity proof (deterministic, no wall-clock):
+      //   N stacked diamonds inside branch A:
+      //     cond_i ──► left_i  ──► merge_i ──► cond_{i+1} (or join)
+      //           └──► right_i ──┘
+      //   Path count = 2^N. A pure path-local DFS that rewalks shared tails on every
+      //   reconvergence evaluates the final merge 2^N times. With N=24 that is >16M
+      //   full tail recomputations and hangs the suite; the tri-color DONE memo evaluates
+      //   each node once (O(V+E) ≈ 3N + const), so createTemplate completes. N=24 is large
+      //   enough that non-memoized rewalk is practically impossible in the test budget,
+      //   without relying on a flaky timing assertion.
+      // Mutation: drop doneMemo short-circuit (keep path-local visiting only) → this test
+      // hangs / times out while the single-diamond convergent control still passes.
+      const LAYERS = 24
+      const nodes: Array<Record<string, unknown>> = [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'fork', type: 'parallel', config: { branches: ['e-fork-diamonds', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+        { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+        { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ]
+      const edges: Array<{ key: string; source: string; target: string }> = [
+        { key: 'e-start-fork', source: 'start', target: 'fork' },
+        { key: 'e-fork-diamonds', source: 'fork', target: 'cond_0' },
+        { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+        { key: 'e-b-join', source: 'branch_b', target: 'join' },
+        { key: 'e-join-end', source: 'join', target: 'end' },
+      ]
+      for (let i = 0; i < LAYERS; i += 1) {
+        const condKey = `cond_${i}`
+        const leftKey = `left_${i}`
+        const rightKey = `right_${i}`
+        const mergeKey = `merge_${i}`
+        const nextKey = i + 1 < LAYERS ? `cond_${i + 1}` : 'join'
+        nodes.push(
+          {
+            key: condKey,
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: `e-${condKey}-left`, rules: [{ fieldId: 'amount', operator: 'gte', value: i }], conjunction: 'and' }],
+              defaultEdgeKey: `e-${condKey}-right`,
+            },
+          },
+          // Distinct static assignees per arm so a memoized UNION still sees every arm once;
+          // first-edge-only would miss all right_* ids, and path rewalk would re-collect them 2^i times.
+          { key: leftKey, type: 'approval', config: { assigneeType: 'user', assigneeIds: [`user-L${i}`] } },
+          { key: rightKey, type: 'approval', config: { assigneeType: 'user', assigneeIds: [`user-R${i}`] } },
+          { key: mergeKey, type: 'cc', config: { targetType: 'user', targetIds: [`watcher-${i}`] } },
+        )
+        edges.push(
+          { key: `e-${condKey}-left`, source: condKey, target: leftKey },
+          { key: `e-${condKey}-right`, source: condKey, target: rightKey },
+          { key: `e-${leftKey}-merge`, source: leftKey, target: mergeKey },
+          { key: `e-${rightKey}-merge`, source: rightKey, target: mergeKey },
+          { key: `e-${mergeKey}-next`, source: mergeKey, target: nextKey },
+        )
+      }
+      mockCreateInsert('join-reach-layered')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-layered',
+        name: 'Join Reach Layered',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: { nodes, edges },
+      } as never)
+      expect(result.id).toBe('tpl-join-reach')
+      // Sanity: graph size is linear in LAYERS (memoized walk bound), not exponential.
+      expect(result.approvalGraph.nodes.length).toBe(5 + LAYERS * 4)
+    })
+
+    it('positive control: a deep valid condition chain does not overflow the JavaScript call stack', async () => {
+      const DEPTH = 4_000
+      const nodes: Array<Record<string, unknown>> = [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'fork', type: 'parallel', config: { branches: ['e-fork-deep', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+        { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+        { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ]
+      const edges: Array<{ key: string; source: string; target: string }> = [
+        { key: 'e-start-fork', source: 'start', target: 'fork' },
+        { key: 'e-fork-deep', source: 'fork', target: 'cond-deep-0' },
+        { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+        { key: 'e-b-join', source: 'branch_b', target: 'join' },
+        { key: 'e-join-end', source: 'join', target: 'end' },
+      ]
+      for (let index = 0; index < DEPTH; index += 1) {
+        const key = `cond-deep-${index}`
+        const edgeKey = `e-cond-deep-${index}`
+        const target = index + 1 < DEPTH ? `cond-deep-${index + 1}` : 'join'
+        nodes.push({
+          key,
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey, rules: [{ fieldId: 'amount', operator: 'gte', value: index }], conjunction: 'and' }],
+          },
+        })
+        edges.push({ key: edgeKey, source: key, target })
+      }
+
+      mockCreateInsert('join-reach-deep')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-deep',
+        name: 'Join Reach Deep',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: { nodes, edges },
+      } as never)
+      expect(result.approvalGraph.nodes).toHaveLength(DEPTH + 5)
+    })
+
+    it('positive: stray outgoing edge NOT referenced by condition config must not fail a valid branch', async () => {
+      // Discriminator vs "walk every graph outgoing edge": config rules+default both join,
+      // but a stray edge from cond_1 → end sits in the edges array (not in branches /
+      // defaultEdgeKey). Runtime never selects it (resolveConditionTarget only uses
+      // declared edgeKeys + default / firstTarget), so authoring must stay green. Walking
+      // all outgoing would false-fail with "must reach join before end".
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-low'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          // Stray: same source as the condition, but NOT in config — must be ignored.
+          { key: 'e-cond-stray-end', source: 'cond_1', target: 'end' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      mockCreateInsert('join-reach-stray')
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'join-reach-stray',
+        name: 'Join Reach Stray',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)
+      expect(result.id).toBe('tpl-join-reach')
+    })
+
+    it('negative: condition branch/default edgeKey owned by another node is rejected', async () => {
+      // resolveConditionTarget → targetForEdge looks up by key globally, so a defaultEdgeKey
+      // whose edge is sourced from branch_b would still return a target at runtime. Authoring
+      // must reject the malformed ownership rather than treat it as a legal condition route.
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              // Foreign-owned: this edge's source is branch_b, not cond_1.
+              defaultEdgeKey: 'e-b-join',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'join-reach-foreign-edge',
+        name: 'Join Reach Foreign Edge',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branch condition cond_1 references invalid edge e-b-join',
+      })
+    })
+
+    it('negative: nested parallel on a NON-first condition path is rejected', async () => {
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-nested',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          // Nested parallel sits only on the default arm (second outgoing edge).
+          {
+            key: 'nested_fork',
+            type: 'parallel',
+            config: { branches: ['e-nested-x', 'e-nested-y'], joinMode: 'all', joinNodeKey: 'join' },
+          },
+          { key: 'nested_x', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-x'] } },
+          { key: 'nested_y', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-y'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-nested', source: 'cond_1', target: 'nested_fork' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-nested-x', source: 'nested_fork', target: 'nested_x' },
+          { key: 'e-nested-y', source: 'nested_fork', target: 'nested_y' },
+          { key: 'e-nx-join', source: 'nested_x', target: 'join' },
+          { key: 'e-ny-join', source: 'nested_y', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'join-reach-nested',
+        name: 'Join Reach Nested',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branch cannot contain nested parallel node nested_fork',
+      })
+    })
+
+    it('negative: cycle on a NON-first condition path is rejected', async () => {
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-cycle',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'cycle_a', type: 'cc', config: { targetType: 'user', targetIds: ['watcher-a'] } },
+          { key: 'cycle_b', type: 'cc', config: { targetType: 'user', targetIds: ['watcher-b'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-cycle', source: 'cond_1', target: 'cycle_a' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-a-b', source: 'cycle_a', target: 'cycle_b' },
+          { key: 'e-b-a', source: 'cycle_b', target: 'cycle_a' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'join-reach-cycle',
+        name: 'Join Reach Cycle',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branch contains a cycle near cycle_a',
+      })
+    })
+
+    it('strengthens static duplicate-assignee collection across ALL condition paths', async () => {
+      // Branch A: rules arm → user-high (unique); default arm → user-shared.
+      // Branch B: user-shared. First-edge-only only saw user-high and accepted the overlap.
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-cond', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().createTemplate({
+        key: 'join-reach-dup',
+        name: 'Join Reach Dup',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: graph,
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: "approvalGraph parallel node fork has duplicate approver 'user-shared' across branches",
+      })
+    })
+  })
+
+  // Fix-round P2-2 (gate P3A-F4B-20260819, Lock-4 §3 F4-B): `validateEmptyAssigneeFallbackConfigs`
+  // (B-s10) is called from all five authoring entry points (create/update/publish/restore/clone), but
+  // only `createTemplate` had a dedicated regression test — the gate's mutation ledger neutered each
+  // of the other four call sites INDIVIDUALLY and the 1141-test sweep stayed green every time. This
+  // block pins the remaining four, GOLDEN-style, mirroring the "parallel branch all-path join
+  // reachability" describe block above (restoreTemplateVersion mirrors the OD-L8-7 gate C-2 pattern
+  // near the top of this file). `createTemplate` itself is already covered by
+  // approval-p3a-f4b-designated-fallback-normalize.test.ts's B-s10 tests, so it is not duplicated here.
+  describe('P3-A F4-B fix-round P2-2: validateEmptyAssigneeFallbackConfigs pinned at the remaining four authoring chokes', () => {
+    // A stored 'designated' node with NO emptyAssigneeFallback — readable per the B-s10 boundary test
+    // in the normalize file (a historical row that predates the rule, or was written through a
+    // bypass) — must still 400 at every authoring choke that re-validates it, never silently pass.
+    function f4bDanglingGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: ['mgr-1'], emptyAssigneePolicy: 'designated' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+        ],
+        policy: { allowRevoke: true },
+      }
+    }
+
+    const f4bReject = {
+      statusCode: 400,
+      code: 'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED',
+    }
+
+    it('restoreTemplateVersion re-validates a historical designated-with-no-fallback graph and rejects', async () => {
+      const graph = f4bDanglingGraph()
+      const templateRow = {
+        id: 'tpl-f4b-restore', key: 'f4b-restore', name: 'F4-B Restore', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+        active_version_id: 'ver-current', latest_version_id: 'ver-current',
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      const historicalVersionRow = {
+        id: 'ver-historical', template_id: 'tpl-f4b-restore', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [templateRow], rowCount: 1 }
+        if (s.includes('FROM approval_template_versions') && s.includes('WHERE id = $1 AND template_id = $2')) {
+          return { rows: [historicalVersionRow], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().restoreTemplateVersion('tpl-f4b-restore', 'ver-historical', {
+        expectedLatestVersionId: 'ver-current',
+      } as never)).rejects.toMatchObject(f4bReject)
+    })
+
+    it('updateTemplate (form-only edit) re-validates the copied historical graph and rejects', async () => {
+      const graph = f4bDanglingGraph()
+      const templateRow = {
+        id: 'tpl-f4b-update', key: 'f4b-update', name: 'F4-B Update', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-update',
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-f4b-update', template_id: 'tpl-f4b-update', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [templateRow], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE template_id = $1')) return { rows: [versionRow], rowCount: 1 }
+        if (s.startsWith('SELECT COALESCE(MAX(version), 0)::text')) return { rows: [{ max_version: '1' }], rowCount: 1 }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().updateTemplate('tpl-f4b-update', {
+        formSchema: { fields: [] },
+      } as never)).rejects.toMatchObject(f4bReject)
+    })
+
+    it('publishTemplate rejects the stored designated-with-no-fallback graph at the strict write gate', async () => {
+      const graph = f4bDanglingGraph()
+      const template = {
+        id: 'tpl-f4b-publish', key: 'f4b-publish', name: 'F4-B Publish', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-publish', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-f4b-publish', template_id: 'tpl-f4b-publish', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (s.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-f4b-publish', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject(f4bReject)
+    })
+
+    it('cloneTemplate rejects the stored designated-with-no-fallback graph before creating a new draft version', async () => {
+      const graph = f4bDanglingGraph()
+      const template = {
+        id: 'tpl-f4b-clone', key: 'f4b-clone', name: 'F4-B Clone', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-clone', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-f4b-clone', template_id: 'tpl-f4b-clone', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1')) return { rows: [template], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (s.startsWith('SELECT runtime_graph FROM approval_published_definitions')) return { rows: [] }
+        if (s.startsWith('SELECT * FROM approval_published_definitions')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled pool query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().cloneTemplate('tpl-f4b-clone')).rejects.toMatchObject(f4bReject)
     })
   })
 
@@ -2196,6 +4715,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -2221,6 +4747,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
 
@@ -2238,7 +4771,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -2323,6 +4856,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -2356,7 +4896,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -2379,6 +4919,79 @@ describe('ApprovalProductService', () => {
       normalize(sql as string).startsWith('INSERT INTO approval_instances'))
     expect(insertInstance?.[1]?.[11]).toBe('ver-2')
     expect(insertInstance?.[1]?.[12]).toBe('pub-2')
+  })
+
+  it('rechecks DB approvals:write for templates with no record-link fields', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    mockPublishedTemplatePool(runtimeGraph)
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+      // Both the visibility actor and the unconditional final write gate see no DB write grant.
+      if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+        return { rows: [], rowCount: 0 }
+      }
+      const common = commonApprovalClientMockResult(statement)
+      if (common) return common
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    await expect(new ApprovalProductService().createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1' },
+    )).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(String(sql)))
+    expect(statements.some((sql) => (
+      sql.startsWith('SELECT id FROM approval_templates WHERE') && sql.endsWith('FOR SHARE')
+    ))).toBe(true)
+    expect(statements.some((sql) => sql.startsWith('INSERT INTO approval_instances'))).toBe(false)
+  })
+
+  it('redacts stored record-link ids when getApproval omits a viewer', async () => {
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            form_snapshot: { linked: { recordId: 'secret-record-id' } },
+            template_version_id: 'ver-record-link',
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            form_schema: {
+              fields: [{
+                id: 'linked',
+                type: 'record-link',
+                label: 'Linked',
+                props: { baseId: 'base-1', sheetId: 'sheet-1' },
+              }],
+            },
+          }],
+          rowCount: 1,
+        }
+      }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const approval = await new ApprovalProductService().getApproval('apr-1')
+    expect(approval?.formSnapshot).toEqual({ linked: { inaccessible: true } })
   })
 
   // B3-08 (模板治理 — 停用/启用 + 用量): archiveTemplate/unarchiveTemplate is the only way to REACH
@@ -2407,6 +5020,13 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2')) {
           return { rows: [versionRow], rowCount: 1 }
+        }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
         }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return { rows: [], rowCount: 0 }
@@ -2502,6 +5122,13 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
           return { rows: [versionRow], rowCount: 1 }
         }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return {
             rows: [{
@@ -2526,7 +5153,7 @@ describe('ApprovalProductService', () => {
         if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
         if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
         if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
       })
       // createApproval's final step re-reads the freshly-inserted instance via getApproval — stub
       // it out (as the existing "creates new approvals..." test above does) since exercising THAT
@@ -2576,6 +5203,13 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
           return { rows: [versionRow], rowCount: 1 }
+        }
+        // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+        // effective node operations, which reads the SAME published-definition row through a
+        // narrower projection. Answered from the same fixture — this suite asserts metrics and
+        // publish gates, not the carrier (that is the real-DB lane's job).
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
         }
         if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
           return { rows: [], rowCount: 0 }
@@ -2667,6 +5301,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: [{ id: 'ver-2', template_id: 'tpl-1', version: 2, status: 'published', form_schema: { fields: [] }, approval_graph: graph, created_at: new Date(), updated_at: new Date() }], rowCount: 1 }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return { rows: [{ id: 'pub-2', template_id: 'tpl-1', template_version_id: 'ver-2', runtime_graph: graph, is_active: true, published_at: new Date() }], rowCount: 1 }
       }
@@ -2682,7 +5323,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
   }
 
@@ -2949,6 +5590,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -2975,7 +5623,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
       if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -2991,10 +5639,12 @@ describe('ApprovalProductService', () => {
     )
 
     // Scanner saw manager_at_level -> createApproval asked the resolver for the chain.
+    // Lock-1 §K4 added a SEPARATE opt-in (includeDeptHeadChain) to this SAME options object —
+    // false here since the graph carries no continuous_dept_heads source.
     expect(orgRelationsState.resolveApprovalRequesterOrgRelations).toHaveBeenCalledWith(
       'requester-1',
       expect.anything(),
-      { includeManagerChain: true },
+      { includeManagerChain: true, includeDeptHeadChain: false },
     )
 
     // And the chain is baked into the PERSISTED requester snapshot (INSERT param $5 / index 4),
@@ -3048,6 +5698,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -3081,7 +5738,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3180,6 +5837,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -3213,7 +5877,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3297,6 +5961,13 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: [{
@@ -3330,7 +6001,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3515,7 +6186,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3591,6 +6262,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
         return { rows: versionRow ? [versionRow] : [], rowCount: versionRow ? 1 : 0 }
       }
+      // Lock-5 §2.3 / gate A-2 (finding P2-R2): `getApproval` now also resolves the actor's
+      // effective node operations, which reads the SAME published-definition row through a
+      // narrower projection. Answered from the same fixture — this suite asserts metrics and
+      // publish gates, not the carrier (that is the real-DB lane's job).
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [] }
+      }
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return {
           rows: publishedDefinitionRow ? [publishedDefinitionRow] : [],
@@ -3599,6 +6277,9 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
         return { rows: [{ request_no: 'AP-101010' }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE')) {
+        return { rows: [{ id: 'approver-42' }], rowCount: 1 }
       }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
@@ -3695,7 +6376,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3787,7 +6468,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_instances')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -3964,7 +6645,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4118,7 +6799,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4244,7 +6925,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4371,7 +7052,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4482,7 +7163,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4609,7 +7290,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4733,7 +7414,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -4885,7 +7566,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_records')) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5035,7 +7716,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5127,7 +7808,7 @@ describe('ApprovalProductService', () => {
         return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
       }
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5194,7 +7875,7 @@ describe('ApprovalProductService', () => {
         }
         if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
         if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
     }
 
@@ -5285,7 +7966,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
         return { rows: [], rowCount: 1 }
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5412,7 +8093,7 @@ describe('ApprovalProductService', () => {
           template.active_version_id = 'ver-2'
           return { rows: [], rowCount: 1 }
         }
-        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
       })
       return client
     }
@@ -5484,7 +8165,7 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('INSERT INTO approval_published_definitions')) {
         throw new Error('insert failed')
       }
-      { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -5526,6 +8207,32 @@ describe('ApprovalProductService', () => {
       visibilityScope: { type: 'all', ids: [] },
       formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
       approvalGraph: graph,
+    })
+
+    it('rejects an empty parallel branch that connects the fork directly to its join', async () => {
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['empty', 'review'], joinMode: 'any', joinNodeKey: 'end' } },
+          { key: 'reviewer', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['reviewer-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'start-fork', source: 'start', target: 'fork' },
+          { key: 'empty', source: 'fork', target: 'end' },
+          { key: 'review', source: 'fork', target: 'reviewer' },
+          { key: 'review-end', source: 'reviewer', target: 'end' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      const rejection = createTemplate(baseRequest(graph))
+      await expect(rejection).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        statusCode: 400,
+      })
+      await expect(rejection).rejects.not.toMatchObject({
+        message: expect.stringMatching(/fork|empty|end/),
+      })
     })
 
     it('rejects a threshold node whose N exceeds the distinct static approver count', async () => {
@@ -5599,6 +8306,30 @@ describe('ApprovalProductService', () => {
       })
     })
 
+    it('rejects a sequential node nested inside a parallel region (linear-only in v1)', async () => {
+      const parallelGraph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinNodeKey: 'join', joinMode: 'all' } },
+          { key: 'branch_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-a1', 'p-a2'], approvalMode: 'sequential' } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-b1'] } },
+          { key: 'join', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-fork', source: 'start', target: 'fork' },
+          { key: 'edge-fork-a', source: 'fork', target: 'branch_a' },
+          { key: 'edge-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'edge-a-join', source: 'branch_a', target: 'join' },
+          { key: 'edge-b-join', source: 'branch_b', target: 'join' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      await expect(createTemplate(baseRequest(parallelGraph))).rejects.toMatchObject({
+        code: 'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+        statusCode: 400,
+      })
+    })
+
     it('accepts a valid linear threshold (2-of-3) node and round-trips approvalThreshold', async () => {
       pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
         const s = normalize(sql)
@@ -5630,5 +8361,357 @@ describe('ApprovalProductService', () => {
       const persistedGraph = JSON.parse(String(insertVersionCall?.[1]?.[2]))
       expect(persistedGraph.nodes[1].config.approvalThreshold).toBe(2)
     })
+  })
+
+  // ===========================================================================================
+  // Lock-11 §10 W-1/W-2 org derivation (deriveApprovalInstanceOrgId, arm (a)) — Class B mocked-pool
+  // coverage. Real-DB acceptance (G-L11-0/1/2/3/10 + refusal-precedence) lives in the standalone
+  // integration suite; this describe block is the mocked-pool positive/negative pair the
+  // `commonApprovalClientMockResult` docblock calls for, plus the precedence ordering check that
+  // does not need a real DB.
+  // ===========================================================================================
+  describe('Lock-11 org derivation (deriveApprovalInstanceOrgId, mocked pool)', () => {
+    const orgGraph = buildRuntimeGraph()
+
+    function mountOrgDerivationSql(orgRows: Array<{ org_id: string }>) {
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'tpl-1', key: 'travel', name: 'Travel', description: null, category: null,
+              visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+              active_version_id: 'ver-1', latest_version_id: 'ver-1', created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'ver-1', template_id: 'tpl-1', version: 1, status: 'published',
+              form_schema: { fields: [] }, approval_graph: orgGraph, created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return {
+            rows: [{
+              id: 'pub-1', template_id: 'tpl-1', template_version_id: 'ver-1',
+              runtime_graph: orgGraph, is_active: true, published_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+          return { rows: [{ request_no: 'AP-200001' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+          return { rows: [], rowCount: 0 }
+        }
+        // Overrides the shared default in commonApprovalClientMockResult (which always answers
+        // exactly one row) so this describe's tests control cardinality (0 / 1 / 2) directly.
+        if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+          return { rows: orgRows, rowCount: orgRows.length }
+        }
+        if (statement.startsWith('INSERT INTO approval_instances')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (statement.startsWith('INSERT INTO approval_assignments')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (statement.startsWith('INSERT INTO approval_records')) {
+          return { rows: [], rowCount: 1 }
+        }
+        {
+          const epochResult = commonApprovalClientMockResult(statement)
+          if (epochResult) return epochResult
+        }
+        throw new Error(`Unhandled client query: ${statement} params=${JSON.stringify(params)}`)
+      })
+    }
+
+    it('exactly one active membership stamps org_id as the LAST INSERT param (positive control, G-L11-1 mocked half)', async () => {
+      mountOrgDerivationSql([{ org_id: 'org-single' }])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .resolves.toBeTruthy()
+
+      const insertCall = pgState.client.query.mock.calls.find(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))
+      expect(insertCall).toBeDefined()
+      const insertSql = normalize(insertCall![0] as string)
+      const insertParams = insertCall![1] as unknown[]
+      // Column list gained org_id LAST (24 -> 25 columns); $17 is appended, not interleaved —
+      // every pre-existing $1..$16 placeholder keeps its original position.
+      expect(insertSql).toMatch(/created_at, updated_at, org_id\)/)
+      expect(insertSql).toMatch(/now\(\), now\(\), \$17\)/)
+      expect(insertParams[16]).toBe('org-single')
+    })
+
+    it('zero active memberships → 422 APPROVAL_ORG_UNRESOLVED, values-free (no org id / count / user id on the error), no INSERT (G-L11-1 neg-2 mocked half)', async () => {
+      mountOrgDerivationSql([])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_ORG_UNRESOLVED', details: undefined })
+
+      expect(pgState.client.query.mock.calls.some(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))).toBe(false)
+      // Fail-loud rollback (§3, `:7690-7692` per the spec) — the txn is rolled back, never committed.
+      expect(pgState.client.query.mock.calls.some(([sql]) => normalize(sql as string) === 'COMMIT')).toBe(false)
+    })
+
+    it('two-or-more active memberships → 422 APPROVAL_ORG_UNRESOLVED, values-free, no INSERT (G-L11-1 neg-1 mocked half)', async () => {
+      mountOrgDerivationSql([{ org_id: 'org-a' }, { org_id: 'org-b' }])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_ORG_UNRESOLVED', details: undefined })
+
+      expect(pgState.client.query.mock.calls.some(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))).toBe(false)
+    })
+
+    it('refusal precedence: a requester failing BOTH approvals:write and org derivation gets 403, not 422 — the derivation slot sits AFTER the write-authorization boundary', async () => {
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'tpl-1', key: 'travel', name: 'Travel', description: null, category: null,
+              visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+              active_version_id: 'ver-1', latest_version_id: 'ver-1', created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'ver-1', template_id: 'tpl-1', version: 1, status: 'published',
+              form_schema: { fields: [] }, approval_graph: orgGraph, created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return {
+            rows: [{
+              id: 'pub-1', template_id: 'tpl-1', template_version_id: 'ver-1',
+              runtime_graph: orgGraph, is_active: true, published_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+          return { rows: [{ request_no: 'AP-200002' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+          return { rows: [], rowCount: 0 }
+        }
+        // DB-only actor authority at the final write boundary (userHasApprovalsWriteOnQuery):
+        // not admin, no legacy permissions column, no DB permission codes → 403 FORBIDDEN.
+        if (statement.startsWith('SELECT role, department, is_admin, is_active FROM users WHERE id = $1')) {
+          return { rows: [{ role: 'user', department: null, is_admin: false, is_active: true }], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT permissions FROM users WHERE id = $1')) {
+          return { rows: [{ permissions: [] }], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR SHARE')) {
+          return { rows: [{ id: 'requester-1' }], rowCount: 1 }
+        }
+        if (
+          statement === 'SAVEPOINT record_link_actor_groups'
+          || statement === 'RELEASE SAVEPOINT record_link_actor_groups'
+        ) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
+          return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
+        }
+        // If this test ever reached the derivation, zero rows would ALSO 422 — the point of the
+        // test is that it must never get there; a mutation that deletes the 403 throw (or
+        // reorders the derivation before it) turns this into a false pass at 422 instead of 403.
+        if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled client query: ${statement}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
+    })
+  })
+
+  /**
+   * Lock §3 C-2 step ④'s replay key. These four assertions are the ones the integration
+   * double-backed cases structurally CANNOT make: a test double never normalizes its input, so the
+   * raw-`roundId` defect (`approval_rounds.id` is `text`, minted `apr_<uuid>`; the boundary's
+   * `uuidOrNull` refuses it with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500) was green in four of
+   * them until the end-to-end case ran the real boundary.
+   */
+  describe('deriveCancelRoundW4OperationIdV1 (lock §3 C-2 step ④ replay key)', () => {
+    it('derives a UUIDv5 from a round id, deterministically and distinctly, and refuses an empty one', async () => {
+      const { deriveCancelRoundW4OperationIdV1 } = await import('../../src/core/attendance-cancellation-execution-port')
+      const roundId = 'apr_2f1f2ad0-9f3d-4b3c-8e6a-1b6b6a2a7c11'
+
+      // UUID-shaped, version 5, RFC 4122 variant — what the boundary's `uuidOrNull` accepts and
+      // what `approval_rounds.id` is NOT.
+      const derived = deriveCancelRoundW4OperationIdV1(roundId)
+      expect(derived).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(derived).not.toBe(roundId)
+
+      // Deterministic: a retry of the SAME round after a rolled-back attempt replays under the
+      // same W4 operation rather than minting a second one.
+      expect(deriveCancelRoundW4OperationIdV1(roundId)).toBe(derived)
+
+      // Distinct: two rounds must never share a replay key, or the second would replay the first's
+      // response and report a cancellation it never performed.
+      expect(deriveCancelRoundW4OperationIdV1(`${roundId}x`)).not.toBe(derived)
+
+      // Fail closed rather than hand every empty identity one shared key.
+      expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+
+      // ── GOLDEN VALUE. The three assertions above are self-consistency: they hold for ANY
+      // derivation, including one whose namespace, name-bytes framing or hash changed. This one
+      // pins the ACTUAL key. It matters because the key is durable state: a round that already
+      // cancelled real business rows must replay under the same W4 operation, so a silent change
+      // here would make every already-redeemed round mint a second operation. The port module
+      // calls the namespace 「frozen from here on」 — this is the test that makes that sentence
+      // more than an asserted invariant.
+      expect(derived).toBe('46c05da2-ae5a-53c4-ac85-61190e0571ff')
+    })
+  })
+})
+
+// Gate round1 20260920 NIT-1: `business_refused.code` is accepted by
+// `takeBusinessRefusal` (`attendance/w4c3b-request-operation-boundary.ts`) with only a
+// `typeof string && length > 0` check — no charset constraint, because a charset regex
+// would silently drop a legitimate code and `AttendanceRequestOperationBusinessRefusalV1
+// .code` has no charset property to check against. That is safe ONLY because today's
+// codomain is a CLOSED, single-element set. This pins the census as data, not as an
+// argument: it fails on a second constructor written in the same literal-inline shape
+// (see `docs/development/approval-cancel-round-phase2-verification-20260918.md` for this
+// slice's verification record), scanned anywhere under `plugins/` or
+// `packages/core-backend/src/`. This file is collected by core-backend's default vitest
+// run — the required `test (20.x)` job's "Run core-backend tests" step
+// (`plugin-tests.yml:842-844`, `pnpm --filter @metasheet/core-backend test`); a second
+// producer written in the matched shape reds that required check.
+//
+// The pattern below deliberately requires a QUOTED code literal immediately after
+// `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
+// (`w4c3b-request-operation-boundary.ts:616`, `{ kind: 'business_refused' as const,
+// code: result.code, ... }`) also spells `kind: 'business_refused'` but forwards an
+// IDENTIFIER (`result.code`), never mints a literal, and must NOT count as a second
+// producer — it is the boundary the report names, not a duplicate mint site.
+describe('business_refused production-constructor census (gate round1 NIT-1)', () => {
+  const path = require('path') as typeof import('path')
+  const fs = require('fs') as typeof import('fs')
+
+  // Resolved off this file's own location, never `process.cwd()` — this suite's worktree
+  // symlinks `node_modules` in from elsewhere, so a naive walk must explicitly refuse to
+  // follow it rather than relying on cwd happening to be the repo root.
+  const repoRoot = path.resolve(__dirname, '../../../..')
+  const SCAN_ROOTS = [
+    path.join(repoRoot, 'plugins'),
+    path.join(repoRoot, 'packages', 'core-backend', 'src'),
+  ]
+  const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', 'coverage', 'tests', '__tests__'])
+  const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+  // Requires a QUOTED literal for `code:` right after `kind: 'business_refused'` (an
+  // optional `as const` tolerated in between) — an identifier (`code: result.code`) does
+  // NOT match, so a pass-through/validator that only forwards an already-minted code is
+  // correctly excluded. `s` (dotall) lets the two fields span a line break.
+  const CONSTRUCTOR_PATTERN = /kind:\s*['"]business_refused['"](?:\s*as\s*const)?\s*,\s*code:\s*(['"])((?:(?!\1).)*)\1/gs
+
+  function walk(dir: string, out: string[]): void {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (SKIP_DIR_NAMES.has(entry.name)) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue // node_modules is symlinked in this worktree
+      if (entry.isDirectory()) {
+        walk(full, out)
+      } else if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        out.push(full)
+      }
+    }
+  }
+
+  it('has exactly one production constructor of `business_refused` that MINTS a literal ' +
+    'code, and that literal is the sole known value — a second constructor MUST re-open ' +
+    'the close-reason projection domain-closure review, not pass silently', () => {
+    const files: string[] = []
+    for (const root of SCAN_ROOTS) walk(root, files)
+    expect(files.length).toBeGreaterThan(0) // sanity: the walk actually found source files
+    // Per-root sanity, not just the total: if EITHER root silently resolved to nothing (the
+    // `walk` try/catch swallows a missing/unreadable directory), the sole real producer could
+    // vanish along with it and this test would go red on a bare `0`, indistinguishable from
+    // "the census broke" rather than "a root disappeared". Each root must contribute >=1 file.
+    for (const root of SCAN_ROOTS) {
+      const inRoot = files.filter((f) => f.startsWith(root + path.sep))
+      expect(inRoot.length, `scan root contributed no files (missing/unreadable?): ${root}`)
+        .toBeGreaterThan(0)
+    }
+
+    const hits: Array<{ file: string; code: string }> = []
+    for (const file of files) {
+      const content = fs.readFileSync(file, 'utf8')
+      let match: RegExpExecArray | null
+      CONSTRUCTOR_PATTERN.lastIndex = 0
+      while ((match = CONSTRUCTOR_PATTERN.exec(content))) {
+        hits.push({ file, code: match[2] })
+      }
+    }
+
+    expect(hits, JSON.stringify(hits, null, 2)).toHaveLength(1)
+    expect(hits[0].code).toBe('ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
   })
 })

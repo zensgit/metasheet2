@@ -1,0 +1,150 @@
+name: Sealed-export S2 SQL Server producer feasibility (evidence only)
+
+# EVIDENCE ONLY. This workflow uses ephemeral first-party SQL Server
+# containers. It does not register a product action/profile, connect a customer
+# source, create an upload session or generation, deploy a package, enable a
+# flag, or authorize S3+.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'plugins/plugin-integration-core/lib/sealed-export/**'
+      - 'plugins/plugin-integration-core/__tests__/sealed-export-*.test.cjs'
+      - 'scripts/ops/run-sealed-export-s2-sqlserver-evidence.cjs'
+      - 'scripts/ops/verify-sealed-export-s2-sqlserver-evidence.cjs'
+      - 'plugins/plugin-integration-core/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/sealed-export-s2-sqlserver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sqlserver-producer:
+    name: Sealed-export S2 SQL Server ${{ matrix.mssql }} producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ['2019', '2022']
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Spike!Probe2026'
+          SA_PASSWORD: 'Spike!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_PASSWORD: 'Spike!Probe2026'
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run hermetic producer and evidence verifier tests
+        run: pnpm --filter plugin-integration-core test:sealed-export-s2-producer
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter plugin-integration-core exec node -e "
+              const sql = require('mssql');
+              new sql.ConnectionPool({server:'127.0.0.1',port:1433,user:'sa',password:'Spike!Probe2026',database:'master',options:{encrypt:true,trustServerCertificate:true},connectionTimeout:3000})
+                .connect().then(p => p.close()).then(() => process.exit(0)).catch(() => process.exit(1));
+            "; then
+              echo "SQL Server ready on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: Run sealed-export S2 real-engine producer evidence
+        env:
+          S2_MSSQL_DECLARED_MAJOR_VERSION: ${{ matrix.mssql }}
+          S2_EVIDENCE_DIR: ${{ github.workspace }}/sealed-export-s2-evidence-${{ matrix.mssql }}
+        run: pnpm --filter plugin-integration-core evidence:sealed-export-s2-sqlserver
+
+      - name: Upload values-free sealed-export S2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-export-s2-producer-evidence-${{ matrix.mssql }}
+          path: sealed-export-s2-evidence-${{ matrix.mssql }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+  gate-check:
+    name: Sealed-export S2 gate-check (evidence only, no certification)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [sqlserver-producer]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download sealed-export S2 evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sealed-export-s2-producer-evidence-*
+          path: sealed-export-s2-evidence-combined
+          merge-multiple: true
+
+      - name: Ensure evidence directory exists
+        run: mkdir -p sealed-export-s2-evidence-combined
+
+      - name: Verify exact values-free S2 evidence set
+        env:
+          S2_EVIDENCE_DIR: ${{ github.workspace }}/sealed-export-s2-evidence-combined
+        run: pnpm --filter plugin-integration-core verify:sealed-export-s2-sqlserver-evidence

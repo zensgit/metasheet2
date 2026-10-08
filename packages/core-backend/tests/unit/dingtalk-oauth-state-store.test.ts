@@ -241,6 +241,56 @@ describe('DingTalk OAuth state store', () => {
     })
   })
 
+  it('round-trips an activate intent once with both target and administrator bound', async () => {
+    vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
+
+    const state = await generateState({
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+
+    await expect(validateState(state)).resolves.toEqual({
+      valid: true,
+      redirectPath: '/admin/users',
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    await expect(validateState(state)).resolves.toEqual({
+      valid: false,
+      error: 'Invalid or unknown state parameter',
+    })
+  })
+
+  it('rejects incomplete activate state generation', async () => {
+    await expect(generateState({
+      intent: 'activate',
+      activateUserId: 'pending-user',
+    })).rejects.toThrow('requires target and administrator')
+  })
+
+  it('fails closed on a persisted unknown intent', async () => {
+    vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
+    const state = await generateState()
+    const key = `metasheet:auth:dingtalk:state:${state}`
+    const stored = redisMockState.kv.get(key)
+    expect(stored).toBeDefined()
+    redisMockState.kv.set(key, {
+      value: JSON.stringify({
+        expiresAt: Date.now() + 60_000,
+        intent: 'future-unsafe-intent',
+      }),
+      expiresAt: stored?.expiresAt ?? null,
+    })
+
+    await expect(validateState(state)).resolves.toEqual({
+      valid: false,
+      error: 'Invalid or unknown state parameter',
+    })
+  })
+
   it('returns expired when a Redis-backed state exceeds its logical TTL', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-31T00:00:00.000Z'))
@@ -424,30 +474,77 @@ describe('DingTalk OAuth state store', () => {
       unionId: 'union-id-1',
       nick: 'Ding User',
     })
-    vi.mocked(query)
-      .mockResolvedValueOnce({ rows: [] } as any)
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'user-new',
-          email: 'dingtalk_open-id-1@placeholder.local',
-          name: 'Ding User',
-          role: 'user',
-          is_active: true,
-        }],
-      } as any)
-      .mockResolvedValueOnce({ rows: [] } as any)
+    vi.mocked(query).mockResolvedValueOnce({ rows: [] } as any)
 
+    let insertedUserParams: unknown[] | null = null
     vi.mocked(transaction).mockImplementation(async (callback: (client: { query: typeof query }) => Promise<unknown>) => {
-      const clientQuery = vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
+      const aliasOwners = new Map<string, string>()
+      const clientQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
+        const statement = String(sql)
+        if (/INSERT INTO user_login_aliases/i.test(statement)) {
+          aliasOwners.set(String(params[2] ?? ''), String(params[0] ?? ''))
+          return { rows: [] }
+        }
+        if (/SELECT user_id FROM user_login_aliases/i.test(statement)) {
+          const ownerId = aliasOwners.get(String(params[0] ?? ''))
+          return { rows: ownerId ? [{ user_id: ownerId }] : [] }
+        }
+        if (/INSERT INTO users/i.test(statement)) {
+          insertedUserParams = params
+          return {
+            rows: [{
+              id: 'user-new',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              name: 'Ding User',
+              role: 'user',
+              is_active: true,
+              activation_status: 'activated',
+            }],
+          }
+        }
+        if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
+          return {
+            rows: [{
+              id: String(params[0]),
+              name: 'Ding User',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              username: null,
+              mobile: null,
+              activation_status: 'activated',
+              is_active: true,
+              access_generation: 0,
+            }],
+          }
+        }
+        if (/INSERT INTO users/i.test(statement)) {
+          return {
+            rows: [{
+              id: 'user-new',
+              email: 'dingtalk_open-id-1@placeholder.local',
+              name: 'Ding User',
+              role: 'user',
+              is_active: true,
+              activation_status: 'activated',
+            }],
+          }
+        }
+        if (/INSERT INTO user_external_auth_grants/i.test(statement)) {
+          return { rows: [{ local_user_id: String(params[1]) }] }
+        }
+        if (/INSERT INTO user_external_identities/i.test(statement)) {
+          return { rows: [{ id: 'identity-new' }] }
+        }
+        if (/UPDATE users[\s\S]*access_generation/i.test(statement)) {
+          return { rows: [{ access_generation: 1 }] }
+        }
+        return { rows: [] }
+      })
       return callback({ query: clientQuery as unknown as typeof query })
     })
 
     const result = await exchangeCodeForUser('auth-code')
 
     expect(result.localUserId).toBe('user-new')
-    expect(vi.mocked(query).mock.calls[1]?.[0]).toContain('password_hash')
-    expect(vi.mocked(query).mock.calls[1]?.[1]?.[3]).toMatch(/^\$2[aby]\$/)
+    expect(insertedUserParams?.[4]).toMatch(/^\$2[aby]\$/)
   })
 })

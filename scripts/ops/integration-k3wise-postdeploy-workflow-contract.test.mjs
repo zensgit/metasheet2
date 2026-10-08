@@ -108,6 +108,10 @@ test('manual K3 WISE postdeploy smoke workflow keeps dispatch and auth contract 
 
 test('deploy workflow keeps K3 WISE smoke evidence wired into deploy summary and artifacts', () => {
   const raw = readFileSync(deployWorkflowPath, 'utf8')
+  const smokeStepStart = raw.indexOf('- name: K3 WISE postdeploy smoke\n')
+  const smokeStepEnd = raw.indexOf('\n      - name:', smokeStepStart + 1)
+  assert.ok(smokeStepStart >= 0 && smokeStepEnd > smokeStepStart, 'deploy smoke step must be extractable')
+  const smokeStep = raw.slice(smokeStepStart, smokeStepEnd)
 
   assertContains(raw, 'deploy:', 'docker-build deploy job')
   assertContains(raw, '- name: Resolve K3 WISE smoke token', 'deploy token resolver step')
@@ -138,11 +142,13 @@ test('deploy workflow keeps K3 WISE smoke evidence wired into deploy summary and
   assertContains(raw, "METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}", 'deploy smoke step')
   assertContains(raw, "METASHEET_FRONTEND_BASE_URL: ${{ vars.METASHEET_FRONTEND_BASE_URL || vars.PUBLIC_APP_URL || vars.METASHEET_BASE_URL || '' }}", 'deploy smoke step')
   assertContains(raw, "K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}", 'deploy smoke step')
+  assertContains(smokeStep, "K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS: ${{ vars.K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS || '30000' }}", 'deploy smoke step')
   assertContains(raw, 'smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"', 'deploy smoke step')
   assertContains(raw, 'node scripts/ops/integration-k3wise-postdeploy-smoke.mjs', 'deploy smoke step')
   assertContains(raw, '--base-url "$METASHEET_BASE_URL"', 'deploy smoke step')
   assertContains(raw, 'args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")', 'deploy smoke step')
   assertContains(raw, '--out-dir "$smoke_out_dir"', 'deploy smoke step')
+  assertContains(smokeStep, '--timeout-ms "$K3_WISE_DEPLOY_SMOKE_TIMEOUT_MS"', 'deploy smoke step')
   assertContains(raw, 'require_auth="${K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH:-false}"', 'deploy smoke step')
   assertContains(raw, 'case "${require_auth}" in', 'deploy smoke step')
   assertContains(raw, 'true|TRUE|True|1|yes|YES|Yes)', 'deploy smoke step')
@@ -183,6 +189,19 @@ test('deploy workflow checks deploy host disk before sync archive extraction', (
   const raw = readFileSync(deployWorkflowPath, 'utf8')
 
   assertContains(raw, '- name: Sync deploy host files', 'deploy host sync step')
+  assertContains(raw, 'id: sync_deploy', 'deploy host sync result step id')
+  assertContains(raw, 'set +e\n          (\n          set -euo pipefail', 'deploy host sync failure capture wrapper')
+  assertContains(raw, ')\n          sync_rc=$?', 'deploy host sync failure capture assignment')
+  assertContains(raw, 'echo "sync_rc=$sync_rc" >> "$GITHUB_OUTPUT"', 'deploy host sync result output')
+  assertContains(raw, 'exit "$sync_rc"', 'deploy host sync preserves failure outcome')
+  assertContains(raw, "if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}", 'remote deploy sync gate')
+  assertContains(raw, 'steps.sync_deploy.outputs.sync_rc', 'deploy final sync gate')
+  assertContains(raw, 'Sync deploy host files failed: rc=$sync_rc', 'deploy final sync failure message')
+  assertContains(raw, 'Host sync exit code: \\`${SYNC_RC:-missing}\\`', 'deploy summary sync result')
+  assert.ok(
+    raw.indexOf('Sync deploy host files failed: rc=$sync_rc') < raw.indexOf('deploy_rc missing; failing deploy job.'),
+    'deploy final gate must report a failed host sync before checking the skipped remote deploy output',
+  )
   assertContains(raw, "DEPLOY_SYNC_MIN_FREE_KB: ${{ vars.DEPLOY_SYNC_MIN_FREE_KB || '1048576' }}", 'deploy host sync disk gate env')
   assertContains(raw, 'DEPLOY_SYNC_MIN_FREE_KB="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"', 'deploy host sync disk gate default')
   assertContains(raw, 'DEPLOY_SYNC_MIN_FREE_KB=\'${DEPLOY_SYNC_MIN_FREE_KB}\' bash -s', 'deploy host sync remote env')

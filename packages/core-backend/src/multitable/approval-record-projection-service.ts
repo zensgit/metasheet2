@@ -53,6 +53,17 @@ const logger = new Logger('ApprovalRecordProjection')
  *  re-exported here for existing importers. */
 export { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
+/**
+ * Per-column projection data-key derivation, namespaced by the row's own sheet id. Single source of
+ * truth lives in the side-effect-free `approval-projection-constants` (permission-service.ts /
+ * sheet-capabilities.ts read it back via `approvalProjectionParticipantPredicateSql` so a
+ * reader can never drift onto a bare column key the writer below never stores under — the T36-1
+ * review P1 defect that constant's own doc comment describes); re-exported here so existing
+ * importers of this module (the writer itself, `approval-record-projection.test.ts`) are unaffected.
+ */
+export { deriveProjectionFieldId } from './approval-projection-constants'
+import { deriveProjectionFieldId } from './approval-projection-constants'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
 
@@ -102,10 +113,6 @@ const PROJECTION_COLUMNS: readonly ProjectionColumn[] = [
 
 export function deriveProjectionSheetId(templateId: string): string {
   return `sht_apr_proj_${templateId}`
-}
-
-export function deriveProjectionFieldId(sheetId: string, columnKey: string): string {
-  return `${sheetId}__${columnKey}`
 }
 
 export function deriveProjectionRecordId(instanceId: string): string {
@@ -164,26 +171,46 @@ function toIsoOrEmpty(value: Date | null): string {
  */
 export class ApprovalRecordProjectionService {
   private readonly subscriptionIds: string[] = []
+  private readonly completionInFlight = new Set<Promise<void>>()
 
   /** Subscribe the terminal projection trigger to the completion bus (best-effort per event). */
   subscribe(eventBus: EventBus): void {
-    for (const eventType of APPROVAL_COMPLETION_EVENT_TYPES) {
-      const id = eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
-        const instanceId = payload?.approval?.instanceId
-        if (typeof instanceId !== 'string' || instanceId.length === 0) return
-        this.reconcile(instanceId).catch((error) => {
-          logger.warn(
-            `terminal projection for ${instanceId} failed: ${error instanceof Error ? error.message : String(error)}`,
+    try {
+      for (const eventType of APPROVAL_COMPLETION_EVENT_TYPES) {
+        const id = eventBus.subscribe<ApprovalCompletionEventV1>(eventType, (payload) => {
+          const instanceId = payload?.approval?.instanceId
+          if (typeof instanceId !== 'string' || instanceId.length === 0) return
+          const task = this.reconcile(instanceId).then(
+            () => undefined,
+            (error) => {
+              logger.warn(
+                `terminal projection for ${instanceId} failed: ${error instanceof Error ? error.message : String(error)}`,
+              )
+            },
+          )
+          this.completionInFlight.add(task)
+          void task.then(
+            () => this.completionInFlight.delete(task),
+            () => this.completionInFlight.delete(task),
           )
         })
-      })
-      this.subscriptionIds.push(id)
+        this.subscriptionIds.push(id)
+      }
+    } catch (error) {
+      this.unsubscribe(eventBus)
+      throw error
     }
     logger.info('ApprovalRecordProjectionService subscribed to approval completion bus')
   }
 
   unsubscribe(eventBus: EventBus): void {
     for (const id of this.subscriptionIds.splice(0)) eventBus.unsubscribe(id)
+  }
+
+  async drainCompletionHandlers(): Promise<void> {
+    while (this.completionInFlight.size > 0) {
+      await Promise.allSettled([...this.completionInFlight])
+    }
   }
 
   /**
@@ -207,6 +234,14 @@ export class ApprovalRecordProjectionService {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      // W0-1 L4-cov-services: the PROJECTION writer class joins the canonical per-sheet fence (flag-gated
+      // no-op when `MULTITABLE_ENABLE_WRITER_FENCE` is off). Projection sheets are system sheets
+      // (`system_kind='approval_projection'`) and thus never a recovery target today, so the durable-block
+      // check should never fire — this is the uniform all-writer discipline (v3.7 §2 all-writer matrix), and
+      // it future-proofs against any later widening of recovery scope. LOCK ORDER: canonical fence FIRST,
+      // then the per-instance projection lock — no other code path takes the projection lock, so no path can
+      // hold projection-then-canonical, and the order cannot deadlock against fenced writers.
+      await fenceWriterEntry((sql, params) => client.query(sql, params), sheetId)
       // Serialize every reconcile for THIS instance (auto-approve create-hook↔event, sweep↔terminal).
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`approval-projection:${instanceId}`])
 

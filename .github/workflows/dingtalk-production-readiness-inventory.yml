@@ -1,0 +1,181 @@
+name: DingTalk Production Readiness Inventory
+
+# Manual-only, READ-ONLY production inventory for DingTalk readiness.
+# Values-free artifacts only (booleans / counts / enum reasons / deployed SHA).
+# Never writes env/DB, never flips lifecycle flags, never sends DingTalk traffic,
+# never auto-selects a user or integration.
+#
+# Host identity is pinned via DEPLOY_KNOWN_HOSTS (raw or base64 known_hosts).
+# SSH uses StrictHostKeyChecking=yes + UserKnownHostsFile + GlobalKnownHostsFile=/dev/null.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: dingtalk-production-readiness-inventory
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate embedded inventory script
+        run: |
+          set -euo pipefail
+          bash -n scripts/ops/dingtalk-production-readiness-inventory-remote.sh
+          node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          echo "inventory script + contract OK"
+
+      - name: Prepare SSH host identity
+        env:
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+      - name: Sync inventory script to deploy host
+        id: sync
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
+          runner_dir="/tmp/dingtalk-prod-inventory-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          tar -czf - \
+            scripts/ops/dingtalk-production-readiness-inventory-remote.sh \
+          | ssh $ssh_opts \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
+
+      - name: Run remote read-only inventory
+        id: remote
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -i $HOME/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "DEPLOY_COMPOSE_FILE=$DEPLOY_COMPOSE_FILE"; do
+            value="${pair#*=}"
+            if [[ ! "$value" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
+              echo "refusing unsafe characters in ${pair%%=*}: '$value'" >&2
+              exit 2
+            fi
+          done
+          remote_output_dir="/tmp/dingtalk-prod-inventory-out-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="dingtalk-production-readiness-inventory-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          mkdir -p output/dingtalk-production-readiness-inventory
+
+          remote_script="set -euo pipefail
+          export DEPLOY_PATH='${DEPLOY_PATH}'
+          export DEPLOY_COMPOSE_FILE='${DEPLOY_COMPOSE_FILE}'
+          export OUTPUT_DIR='${remote_output_dir}'
+          export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
+          rm -rf '${remote_output_dir}'
+          mkdir -p '${remote_output_dir}'
+          bash '${RUNNER_DIR}/dingtalk-production-readiness-inventory-remote.sh'"
+          escaped_script="$(printf '%s' "$remote_script" | sed "s/'/'\\\\''/g")"
+
+          set +e
+          ssh_log="$RUNNER_TEMP/dingtalk-production-readiness-inventory-ssh.log"
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "bash -o pipefail -c '${escaped_script}'" 2>&1 \
+            | tee "$ssh_log"
+          rc=${PIPESTATUS[0]}
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/dingtalk-production-readiness-inventory/ 2>&1 \
+            | tee -a "$ssh_log"
+          scp_rc=${PIPESTATUS[0]}
+          # Cleanup removes ONLY per-run dirs. NEVER touch persistent env/overrides.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${RUNNER_DIR}'" \
+            >> "$ssh_log" 2>&1
+          set -e
+
+          if [[ "$rc" == "0" && "$scp_rc" != "0" ]]; then
+            rc="$scp_rc"
+          fi
+          echo "remote_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Build step summary
+        if: always()
+        env:
+          REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
+        run: |
+          set -euo pipefail
+          INV_JSON="output/dingtalk-production-readiness-inventory/inventory.json"
+          INV_TXT="output/dingtalk-production-readiness-inventory/inventory.txt"
+          {
+            echo "# DingTalk Production Readiness Inventory"
+            echo
+            echo "- remote_rc: \`${REMOTE_RC:-missing}\`"
+            echo "- mode: **read-only** (manual workflow_dispatch only)"
+            echo "- lifecycle flags: must report exact OFF (never flipped by this lane)"
+            echo
+            if [[ -f "$INV_TXT" ]]; then
+              echo "## Inventory (values-free)"
+              echo
+              echo '```'
+              cat "$INV_TXT"
+              echo '```'
+            elif [[ -f "$INV_JSON" ]]; then
+              echo "## Inventory JSON"
+              echo
+              echo '```json'
+              cat "$INV_JSON"
+              echo '```'
+            else
+              echo "No inventory artifact collected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload values-free inventory artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dingtalk-production-readiness-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/dingtalk-production-readiness-inventory/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if remote inventory failed
+        if: always()
+        env:
+          REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
+        run: |
+          set -euo pipefail
+          if [[ "${REMOTE_RC:-1}" != "0" ]]; then
+            echo "remote inventory failed: rc=${REMOTE_RC:-missing}" >&2
+            exit 1
+          fi
+          if [[ ! -f output/dingtalk-production-readiness-inventory/inventory.json ]]; then
+            echo "inventory.json missing from artifacts" >&2
+            exit 1
+          fi

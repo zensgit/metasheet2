@@ -67,24 +67,56 @@ const STRANGER = `user_b1g2_stranger_${TS}` // locks REC_LOCKED — not the toke
 const REC_LOCKED = `rec_b1g2_locked_${TS}`
 const REC_RULEDENY = `rec_b1g2_ruledeny_${TS}`
 const REC_ROWDENY = `rec_b1g2_rowdeny_${TS}`
+const REQUEST_LOCKED = `req_b1g2_locked_${TS}`
+const REQUEST_RULEDENY = `req_b1g2_ruledeny_${TS}`
+const REQUEST_ROWDENY = `req_b1g2_rowdeny_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let tokWrite = '', tokWriteId = '' // records:write, creator = WRITER
 
+interface AuditRow {
+  operation: string
+  outcome: string
+  status_code: number | null
+}
+
 const auditRows = async (
   tokenId: string,
-): Promise<Array<{ operation: string; outcome: string; status_code: number | null }>> => {
+  requestId: string,
+): Promise<AuditRow[]> => {
   const r = await q(
-    'SELECT operation, outcome, status_code FROM oapi_write_audit WHERE token_id = $1 ORDER BY id',
-    [tokenId],
+    `SELECT operation, outcome, status_code
+       FROM oapi_write_audit
+      WHERE token_id = $1 AND request_id = $2
+      ORDER BY id`,
+    [tokenId, requestId],
   )
-  return r.rows as Array<{ operation: string; outcome: string; status_code: number | null }>
+  return r.rows as AuditRow[]
 }
-const patchViaToken = (recordId: string, data: Record<string, unknown>) =>
+const waitForAuditRows = async (
+  tokenId: string,
+  requestId: string,
+  ready: (rows: AuditRow[]) => boolean,
+): Promise<AuditRow[]> => {
+  const deadline = Date.now() + 2_000
+  let rows: AuditRow[] = []
+  do {
+    rows = await auditRows(tokenId, requestId)
+    if (ready(rows)) return rows
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  } while (Date.now() < deadline)
+  return rows
+}
+const patchViaToken = (
+  recordId: string,
+  data: Record<string, unknown>,
+  requestId: string,
+) =>
   request(app)
     .patch(`/api/multitable/records/${recordId}`)
     .set('Authorization', `Bearer ${tokWrite}`)
+    .set('X-Request-ID', requestId)
     .send({ sheetId: SHEET_ID, data })
 const storedRecord = async (recordId: string): Promise<{ data: Record<string, unknown>; version: number }> => {
   const r = await q('SELECT data, version FROM meta_records WHERE id = $1', [recordId])
@@ -160,40 +192,63 @@ describeIfDatabase('B1-G2 permission golden — OAPI token write re-gates M2/M3/
   })
 
   test('G2-1 (M3 gate): records:write token PATCH on a LOCKED record → 403, zero side effects, a denied audit row', async () => {
-    const res = await patchViaToken(REC_LOCKED, { [STATUS]: 'sneaky-token-edit' })
+    const res = await patchViaToken(
+      REC_LOCKED,
+      { [STATUS]: 'sneaky-token-edit' },
+      REQUEST_LOCKED,
+    )
     expect(res.status).toBe(403)
 
     const stored = await storedRecord(REC_LOCKED)
     expect(stored.data[STATUS]).toBe('before-lock') // unchanged
     expect(stored.version).toBe(1) // no version bump
 
-    await new Promise((r) => setTimeout(r, 75)) // let the res.on('finish') audit listener flush
-    const rows = await auditRows(tokWriteId)
+    const rows = await waitForAuditRows(
+      tokWriteId,
+      REQUEST_LOCKED,
+      (pending) => pending.some((row) => row.outcome === 'denied' && row.status_code === 403),
+    )
     expect(rows.some((r) => r.outcome === 'denied' && r.status_code === 403)).toBe(true)
     expect(rows.some((r) => r.outcome === 'committed' && r.operation === 'update')).toBe(false)
   })
 
   test('G2-2 (M4 documented non-gate): records:write token PATCH on a conditional-rule-denied (deny_read) record still SUCCEEDS — parity with interactive (deny_read has no write-side effect)', async () => {
-    const res = await patchViaToken(REC_RULEDENY, { [STATUS]: 'patched-by-token' })
+    const res = await patchViaToken(
+      REC_RULEDENY,
+      { [STATUS]: 'patched-by-token' },
+      REQUEST_RULEDENY,
+    )
     expect(res.status).toBe(200)
 
     const stored = await storedRecord(REC_RULEDENY)
     expect(stored.data[STATUS]).toBe('patched-by-token') // write went through
     expect(stored.version).toBe(2)
 
-    await new Promise((r) => setTimeout(r, 75))
-    expect((await auditRows(tokWriteId)).some((r) => r.outcome === 'committed' && r.operation === 'update')).toBe(true)
+    const rows = await waitForAuditRows(
+      tokWriteId,
+      REQUEST_RULEDENY,
+      (pending) => pending.some((row) => row.outcome === 'committed' && row.operation === 'update'),
+    )
+    expect(rows.some((r) => r.outcome === 'committed' && r.operation === 'update')).toBe(true)
   })
 
   test('G2-3 (M2 documented non-gate): records:write token PATCH on a row-denied (record_permissions=none, scoped to the creator) record still SUCCEEDS — parity with interactive (row-level read-deny has no write-side effect)', async () => {
-    const res = await patchViaToken(REC_ROWDENY, { [STATUS]: 'patched-despite-rowdeny' })
+    const res = await patchViaToken(
+      REC_ROWDENY,
+      { [STATUS]: 'patched-despite-rowdeny' },
+      REQUEST_ROWDENY,
+    )
     expect(res.status).toBe(200)
 
     const stored = await storedRecord(REC_ROWDENY)
     expect(stored.data[STATUS]).toBe('patched-despite-rowdeny')
     expect(stored.version).toBe(2)
 
-    await new Promise((r) => setTimeout(r, 75))
-    expect((await auditRows(tokWriteId)).some((r) => r.outcome === 'committed' && r.operation === 'update')).toBe(true)
+    const rows = await waitForAuditRows(
+      tokWriteId,
+      REQUEST_ROWDENY,
+      (pending) => pending.some((row) => row.outcome === 'committed' && row.operation === 'update'),
+    )
+    expect(rows.some((r) => r.outcome === 'committed' && r.operation === 'update')).toBe(true)
   })
 })

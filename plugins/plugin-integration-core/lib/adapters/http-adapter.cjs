@@ -6,6 +6,24 @@
 // Config-driven HTTP source/target adapter for M1. It uses injected `fetch`
 // in tests and Node's global fetch in runtime. Credentials must be provided by
 // the caller as decrypted values; this adapter never reads credential storage.
+//
+// W-1(c) OUTBOUND WRITE IS DEFAULT-DENY (owner ruling 2026-08-29). Every outbound
+// WRITE this module can emit is refused unless the deployment names the target in
+// the server-side file `INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS`. READ, LIST,
+// SCHEMA and HEALTH legs are untouched: a GET/HEAD/OPTIONS with no body never
+// reaches the gate. See lib/outbound-http-write-gate.cjs for the ban-vs-gate
+// distinction — this is an AUTHORIZATION GATE, NOT the permanent K3 ban (G-4/E4).
+//
+// TWO ENFORCEMENT POINTS LIVE IN THIS FILE, and they are independent:
+//   1a. `upsert` — first statement, before request normalization, before the object
+//       config is read, before any path is built.
+//   1b. `requestJson` — the TRANSPORT. A request that carries a BODY, or uses a
+//       method outside GET/HEAD/OPTIONS, is a write whatever named operation
+//       produced it. This is what covers `testConnection`, whose `method` and
+//       `path` come straight off an authenticated request body
+//       (http-routes.cjs `externalSystemsTest` -> `adapter.testConnection(requestBody(req))`)
+//       and which was therefore a request-steerable outbound verb before this gate.
+// If 1a is removed by a future edit, 1b must still guarantee zero outbound writes.
 // ---------------------------------------------------------------------------
 
 const {
@@ -18,6 +36,12 @@ const {
   normalizeUpsertRequest,
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
+const {
+  OUTBOUND_HTTP_WRITE_OPERATION_REQUEST,
+  OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
+  assertOutboundHttpWriteAuthorized,
+  isWriteMethod,
+} = require('../outbound-http-write-gate.cjs')
 
 class HttpAdapterError extends Error {
   constructor(message, details = {}) {
@@ -217,7 +241,40 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
     throw new AdapterValidationError('HTTP adapter requires fetch implementation', { field: 'fetchImpl' })
   }
 
-  async function requestJson(path, { method = 'GET', query, headers, body } = {}) {
+  // The refusal this adapter throws for a gated write. `HttpAdapterError` is used rather than a new
+  // class so the refusal rides the mapping every existing caller already has (`testConnection`'s own
+  // catch reads `error.details.code`; `http-routes.cjs` `testConnectionErrorResult` reads
+  // `error.code`), and BOTH are populated with the SAME fixed token. `status` rides `details` because
+  // that is where `HttpAdapterError` reads it from.
+  function buildOutboundWriteRefusal(status, code, message, details) {
+    const error = new HttpAdapterError(message, { ...details, status })
+    error.code = code
+    return error
+  }
+
+  // W-1(c) ENFORCEMENT POINT 1b — THE TRANSPORT.
+  //
+  // Structural, not name-based: a request is a WRITE when it carries a body OR uses a method outside
+  // GET/HEAD/OPTIONS. Deliberately independent of `upsert`'s own gate, so removing that one does not
+  // open the socket. The `writeOperation` a caller declares is the entry point the allowlist matches
+  // on — `upsert` declares `upsert`; anything else (today only `testConnection`) falls through to
+  // `request`, which an allowlist entry must name EXPLICITLY. An entry written with the default
+  // `operations` therefore authorizes the batch-write path and NOT a request-steered verb.
+  function assertOutboundWriteAllowed({ method, body, object, writeOperation }) {
+    if (body === undefined && !isWriteMethod(method)) return
+    assertOutboundHttpWriteAuthorized(buildOutboundWriteRefusal, {
+      systemId: normalizedSystem.id,
+      systemName: normalizedSystem.name,
+      kind: normalizedSystem.kind,
+      object: object === undefined ? null : object,
+      operation: writeOperation || OUTBOUND_HTTP_WRITE_OPERATION_REQUEST,
+    })
+  }
+
+  async function requestJson(path, { method = 'GET', query, headers, body, object, writeOperation } = {}) {
+    // FIRST, before the path is normalized, before a URL exists, before a timer is armed: an
+    // unauthorized write must not even produce a diagnostic that says which endpoint it wanted.
+    assertOutboundWriteAllowed({ method, body, object, writeOperation })
     const normalizedPath = assertRelativePath(path, 'path')
     const diagnosticPath = pathForDiagnostics(normalizedPath)
     const url = buildUrl(baseUrl, normalizedPath, query)
@@ -333,6 +390,7 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
       const { data } = await requestJson(objectConfig.schemaPath, {
         method: objectConfig.schemaMethod || 'GET',
         headers: objectConfig.headers,
+        object,
       })
       const fields = getPath(data, objectConfig.schemaFieldsPath || 'fields')
       return {
@@ -362,6 +420,7 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
       method: objectConfig.method || objectConfig.readMethod || 'GET',
       query,
       headers: objectConfig.headers,
+      object: request.object,
     })
     const locatedRecords = objectConfig.recordsPath ? getPath(data, objectConfig.recordsPath) : data
     const records = Array.isArray(locatedRecords) ? locatedRecords : []
@@ -379,6 +438,20 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
   }
 
   async function upsert(input = {}) {
+    // W-1(c) ENFORCEMENT POINT 1a — THE NAMED WRITE OPERATION.
+    //
+    // FIRST STATEMENT, on purpose. It runs before `normalizeUpsertRequest`, before the object config
+    // is resolved and before any path is built, so an unauthorized target cannot be probed for which
+    // objects exist, which paths are configured or how many records a request would have carried.
+    // The object is read straight off the RAW input rather than the normalized request for the same
+    // reason; an unresolvable object simply fails to match any enumerating entry, which is closed.
+    assertOutboundHttpWriteAuthorized(buildOutboundWriteRefusal, {
+      systemId: normalizedSystem.id,
+      systemName: normalizedSystem.name,
+      kind: normalizedSystem.kind,
+      object: input && typeof input === 'object' ? input.object : null,
+      operation: OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
+    })
     const request = normalizeUpsertRequest(input)
     const objectConfig = getObjectConfig(request.object)
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
@@ -394,6 +467,8 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
       method: objectConfig.upsertMethod || 'POST',
       headers: objectConfig.headers,
       body,
+      object: request.object,
+      writeOperation: OUTBOUND_HTTP_WRITE_OPERATION_UPSERT,
     })
     const results = objectConfig.resultsPath ? getPath(data, objectConfig.resultsPath) : getPath(data, 'results')
     const errors = objectConfig.errorsPath ? getPath(data, objectConfig.errorsPath) : getPath(data, 'errors')

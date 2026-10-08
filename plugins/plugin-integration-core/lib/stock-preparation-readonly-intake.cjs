@@ -14,6 +14,22 @@ const INTAKE_STATUSES = Object.freeze({
   EMPTY: 'empty',
 })
 
+// THE INTAKE'S OWN PROJECTION VOCABULARY — read-side only, and named rather than typed inline.
+//
+// These three describe what THIS READ saw. They are deliberately NOT members of the MVP select
+// vocabularies, and no committer writes them: `upsertStockPreparationProject` stamps its own
+// PROJECT_STATUS_ACTIVE, `planBomSnapshotSyncRun` stamps SNAPSHOT_STATUS_DRAFT, and the intake's run
+// record is never persisted (the PLM persist bridge reads only its runId). Pinned as constants so the
+// option-catalog sweep sees a named value rather than a bare literal at a select field id — the sweep
+// treats a bare literal there as a probable outage, which is exactly what `materialStatus`'s was.
+//
+// `materialStatus` is the ONE intake value that genuinely reaches a select column — `upsertErpMaterials`
+// grounds this row object straight into erp_material_master — so it does NOT stay a raw projection:
+// stock-preparation-erp-material-sync-persist.cjs canonicalizes it onto the seeded vocabulary at the
+// persist boundary and refuses anything its closed mapping does not know.
+const INTAKE_IMPORTED_STATUS = 'imported'
+const INTAKE_RUN_TYPE = 'readonly_intake'
+
 const ROW_ERROR_TYPES = Object.freeze({
   MISSING_PROJECT_KEY: 'missing_project_key',
   MISSING_BOM_PATH_KEY: 'missing_bom_path_key',
@@ -151,7 +167,7 @@ function normalizeProjects(input, rowErrors) {
       sourceProjectNo,
       projectName: firstValue(row, ['projectName', 'name', 'FileName', 'FProjectName']),
       sourceSystem,
-      projectStatus: firstValue(row, ['projectStatus', 'status']) || 'imported',
+      projectStatus: firstValue(row, ['projectStatus', 'status']) || INTAKE_IMPORTED_STATUS,
       lastSyncRunId: input.runId,
       lastSyncedAt: input.startedAt,
       owner: firstValue(row, ['owner', 'createdBy']),
@@ -193,12 +209,24 @@ function normalizeBomLine(input, projectIndex, row, index, rowErrors) {
     projectId,
     parentDrawingNo: firstValue(row, ['parentDrawingNo', 'parentCode', 'parentFileCode', 'parentFNumber']),
     parentVersion: firstValue(row, ['parentVersion', 'parentRev', 'parentRevision']),
+    // The seven fields a 备料 pull must carry (owner spec). This intake path and the expansion
+    // mapper are the TWO ways a row becomes a snapshot line, and the mapper's header pins the rule
+    // that routing a row through either must yield one value — so the alias ladders mirror
+    // stock-preparation-expansion-snapshot-mapper.cjs toSnapshotLine field for field.
+    parentName: firstValue(row, ['parentName', 'parentComponentName']),
     childDrawingNo: firstValue(row, ['childDrawingNo', 'childCode', 'childFileCode', 'childFNumber', 'componentCode']),
     childVersion: firstValue(row, ['childVersion', 'childRev', 'childRevision', 'sourceVersion']),
+    childName: firstValue(row, ['childName', 'componentName', 'name']),
+    material: firstValue(row, ['material']),
+    spec: firstValue(row, ['spec', 'specification']),
     bomLevel: firstNumber(row, ['bomLevel', 'level', 'depth']),
     pathKey,
     designQty: firstNumber(row, ['designQty', 'quantity', 'qty', 'rawQuantity', 'totalQuantity']),
     designUnit: firstValue(row, ['designUnit', 'unit', 'unitName']),
+    // 总数量 kept as its own field. `designQty`'s ladder DELIBERATELY still falls back to
+    // totalQuantity (unchanged, so no existing row's designQty moves): a row carrying only the
+    // rollup keeps populating both, exactly as the mapper's DESIGN_QTY_KEYS does.
+    totalQuantity: firstNumber(row, ['totalQuantity']),
     lineStatus: firstValue(row, ['lineStatus', 'status']) || (row.missingChildBom === true ? 'missing_child_bom' : 'imported'),
     sourceFingerprint: firstValue(row, ['sourceFingerprint']) || stableFingerprint(stableJson(row)),
   }
@@ -249,7 +277,7 @@ function normalizeErpMaterial(input, row, index, rowErrors) {
     inventoryUnit: firstValue(row, ['inventoryUnit', 'FInventoryUnit', 'stockUnitName']),
     issueUnit: firstValue(row, ['issueUnit', 'FIssueUnit', 'unitName']),
     unitGroup: firstValue(row, ['unitGroup', 'FUnitGroup', 'unitGroupName']),
-    materialStatus: firstValue(row, ['materialStatus', 'status']) || 'imported',
+    materialStatus: firstValue(row, ['materialStatus', 'status']) || INTAKE_IMPORTED_STATUS,
     lastSyncedAt: input.startedAt,
   }
 }
@@ -298,7 +326,7 @@ function buildValuesFreeEvidence(input, output) {
 function buildRunRecord(input, output, evidence) {
   return {
     runId: input.runId,
-    runType: 'readonly_intake',
+    runType: INTAKE_RUN_TYPE,
     status: output.rowErrors.length ? INTAKE_STATUSES.PARTIAL : (evidence.result.projectRows || evidence.result.bomSnapshotLines || evidence.result.erpMaterialRows ? INTAKE_STATUSES.READY : INTAKE_STATUSES.EMPTY),
     startedAt: input.startedAt,
     finishedAt: input.startedAt,
@@ -332,6 +360,8 @@ function normalizeStockPreparationReadonlyIntake(input = {}) {
 
 module.exports = {
   INTAKE_STATUSES,
+  INTAKE_IMPORTED_STATUS,
+  INTAKE_RUN_TYPE,
   ROW_ERROR_TYPES,
   StockPreparationReadonlyIntakeError,
   normalizeStockPreparationReadonlyIntake,

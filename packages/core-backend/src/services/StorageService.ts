@@ -18,6 +18,7 @@ import type {
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+import { readLocalRecoveryAttachment, reserveLocalRecoveryAttachment, retireLocalRecoveryAttachment } from './recovery-attachment-local-ownership'
 
 /**
  * F3 files-storage-integrity design-lock (2026-07-10), G1/G2: derive a display-only safe basename from
@@ -51,9 +52,34 @@ export function resolveWithinBase(basePath: string, key: string): string {
 
 /**
  * 存储提供者接口
+ *
+ * EXPORTED (B3-07 #4195 §0-bis): the approval-attachment pipeline's production storage prerequisite is
+ * "an object-store provider behind THIS interface" — which was impossible while the interface was
+ * module-private. Exporting it is the named prerequisite, not a new capability: no implementation
+ * changes, and the only in-repo implementation remains `LocalStorageProvider` below.
  */
-interface StorageProvider {
+export type ContentAddressedAttachmentSource = {
+  bytes: Buffer
+  immutableVersion: string
+  contentSha256: string
+  sizeBytes: number
+}
+
+export interface StorageProvider {
+  reserveRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<void>
+  readRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource>
+  uploadContentAddressed?(file: Buffer, options: UploadOptions): Promise<StorageFile>
+  readContentAddressed?(storageKey: string): Promise<ContentAddressedAttachmentSource>
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
+  /** B3-07 §7: write a physical object AT a caller-chosen deterministic storage key — the symmetric
+   * write-side counterpart to `downloadByKey`/`deleteByKey`, completing the by-key triple. Unlike
+   * `upload` (which server-generates `<uuid>/<safeBasename>` and lets the client's display filename
+   * survive as the last path segment), the caller owns the whole key, so a caller that derives its key
+   * from validated server-side data alone — as the approval pipeline's `deriveStorageKey` does — can
+   * guarantee no client string ever reaches the physical path, and can pin every object under its own
+   * scope prefix. Containment is re-asserted by the implementation. Exclusive-create: writing an
+   * already-existing key MUST reject rather than silently overwrite. */
+  uploadByKey(storageKey: string, content: Buffer, contentType?: string): Promise<void>
   download(fileId: string): Promise<Buffer>
   /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the
    * in-memory disk-scan index entirely (no warmup window, no id-drift). */
@@ -221,6 +247,57 @@ class LocalStorageProvider implements StorageProvider {
       return storageFile
     } catch (error) {
       this.logger.error(`Failed to upload file ${displayName}`, error as Error)
+      throw error
+    }
+  }
+
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    const bytes = Buffer.from(file)
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+    // The identity is fixed before exclusive-create, never discovered from mutable bytes during archive capture.
+    return this.upload(bytes, { ...options, filename: `sha256-${digest}` })
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return reserveLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+  }
+
+  async readRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource> {
+    const bytes = await readLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (digest !== storageKey.slice(-64)) throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+    return { bytes, immutableVersion: `sha256:${digest}`, contentSha256: digest, sizeBytes: bytes.length }
+  }
+
+  /** Internal cleanup port; not exposed by StorageService or the plugin capability interface. */
+  async retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    return retireLocalRecoveryAttachment(this.basePath, storageKey, ownershipKey)
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    const match = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(storageKey)
+    if (!match) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    let bytes: Buffer
+    try { bytes = await fs.readFile(resolveWithinBase(this.basePath, storageKey)) } catch {
+      throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE')
+    }
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== match[1]) {
+      throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+    }
+    return { bytes, immutableVersion: `sha256:${match[1]}`, contentSha256: match[1]!, sizeBytes: bytes.length }
+  }
+
+  // B3-07 §7: key-addressed write. Containment (G2) is asserted exactly as `downloadByKey`/`deleteByKey`
+  // do, and the write is exclusive-create (`wx`) so a key collision is a hard error, never a silent
+  // overwrite of another object. No index bookkeeping: by-key objects are located by their DB-recorded
+  // key on every read/delete, which is the only cross-process-reliable addressing (see the interface note).
+  async uploadByKey(storageKey: string, content: Buffer, _contentType?: string): Promise<void> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      await fs.mkdir(path.dirname(fullPath), { recursive: true })
+      await fs.writeFile(fullPath, content, { flag: 'wx' })
+    } catch (error) {
+      this.logger.error(`Failed to upload file by key ${storageKey}`, error as Error)
       throw error
     }
   }
@@ -471,6 +548,15 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     }
   }
 
+  /** Trusted launcher capability only; deliberately absent from service/plugin instances. */
+  static resolveLocalRecoveryCleanup(service: StorageServiceImpl): Readonly<{
+    retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void>
+  }> | undefined {
+    const provider = service.provider
+    if (!(provider instanceof LocalStorageProvider)) return undefined
+    return Object.freeze({ retireRecoveryAttachment: provider.retireRecoveryAttachment.bind(provider) })
+  }
+
   async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
     try {
       // 检查文件大小（如果是 Buffer）
@@ -488,6 +574,29 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     }
   }
 
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    if (file.length > this.uploadLimit) throw new Error('ATTACHMENT_SOURCE_SIZE_LIMIT')
+    if (!this.provider.uploadContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    const result = await this.provider.uploadContentAddressed(file, options)
+    this.emit('file:uploaded', result)
+    return result
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    return this.provider.readContentAddressed(storageKey)
+  }
+
+  async reserveRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> {
+    if (!this.provider.reserveRecoveryAttachment) throw new Error('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    return this.provider.reserveRecoveryAttachment(storageKey, ownershipKey)
+  }
+
+  async readRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readRecoveryAttachment) throw new Error('RECOVERY_ATTACHMENT_STORAGE_OWNERSHIP_REFUSED')
+    return this.provider.readRecoveryAttachment(storageKey, ownershipKey)
+  }
+
   async download(fileId: string): Promise<Buffer> {
     try {
       const result = await this.provider.download(fileId)
@@ -496,6 +605,22 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     } catch (error) {
       this.logger.error(`Failed to download file: ${fileId}`, error as Error)
       this.emit('file:error', { operation: 'download', fileId, error })
+      throw error
+    }
+  }
+
+  // B3-07 §7: key-addressed write (the write-side counterpart of `downloadByKey`). Size-limited like
+  // `upload`, so a by-key caller cannot bypass the service's upload cap.
+  async uploadByKey(storageKey: string, content: Buffer, contentType?: string): Promise<void> {
+    if (content.length > this.uploadLimit) {
+      throw new Error(`File size exceeds limit of ${this.uploadLimit} bytes`)
+    }
+    try {
+      await this.provider.uploadByKey(storageKey, content, contentType)
+      this.emit('file:uploaded', { fileId: storageKey, size: content.length })
+    } catch (error) {
+      this.logger.error(`Failed to upload file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'upload', fileId: storageKey, error })
       throw error
     }
   }

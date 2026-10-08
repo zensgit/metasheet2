@@ -73,6 +73,8 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { MetaSheetServer } from '../../src/index'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
+import { pruneSealedHistoryOperations } from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -117,6 +119,7 @@ type CoreApiShape = {
         sheetId: string
         recordId: string
         changes: Record<string, unknown>
+        expectedVersion?: number
       }) => Promise<{ id: string; sheetId: string; version: number; data: Record<string, unknown> }>
     }
   }
@@ -184,6 +187,19 @@ async function cutoffAfter(recordId: string, version: number): Promise<string> {
   return String((res.rows[0] as { as_of: string }).as_of)
 }
 
+/** Real sealed operation id for a fenced writer revision — exact-anchor authority for recovery previews. */
+async function sealedOperationId(recordId: string, version: number): Promise<string> {
+  const r = await q(
+    `SELECT operation_id::text AS op FROM meta_record_revisions
+      WHERE record_id = $1 AND version = $2 AND operation_id IS NOT NULL
+      ORDER BY seq DESC LIMIT 1`,
+    [recordId, version],
+  )
+  const op = (r.rows[0] as { op: string } | undefined)?.op
+  expect(op).toBeTruthy()
+  return op!
+}
+
 /** Genuine Postgres-level failure injection (never a JS-level mock/stub). */
 async function injectTrigger(
   name: string,
@@ -249,6 +265,10 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     await makeSheet(SHEET_FAIL_PATCH, 'D1C2 Fail Patch')
     await makeSheet(SHEET_RACE, 'D1C2 Race')
     await makeSheet(SHEET_AUTONUM, 'D1C2 AutoNumber') // docket #51
+    // Covering checkpoint on the autonum sheet (only sheet used for recovery-preview cross-check).
+    await poolManager.get().transaction(async ({ query }) => {
+      await activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET_AUTONUM })
+    })
 
     await makeField(FLD_TITLE, SHEET_MAIN, 'Title', 'string', {}, 1)
     await makeField(FLD_NOTES, SHEET_MAIN, 'Notes', 'string', {}, 2) // 2nd field on SHEET_MAIN — G4 merge-trap golden
@@ -275,16 +295,28 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     // internal `precheckSheetHistoryIntegrity` function) — same auth-stub pattern as
     // `multitable-reset-pit-realdb.test.ts` / `multitable-history-incomplete-precheck-realdb.test.ts`.
     // 'multitable:share' → canManageSheetAccess, the D2 gate revert-preview's route enforces.
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      "INSERT INTO users (id, password_hash, permissions) VALUES ($1,'x',$2::jsonb) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE",
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
+    // Fence on so plugin createRecord mints sealed operation endpoints usable as recovery anchors.
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
   })
 
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {}) // docket #51
     for (const sheet of [SHEET_MAIN, SHEET_LINK, SHEET_LINK_TARGET, SHEET_FAIL_CREATE, SHEET_FAIL_PATCH, SHEET_RACE, SHEET_AUTONUM]) {
+      await pruneSealedHistoryOperations(sheet).catch(() => {})
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [sheet]).catch(() => {})
+      await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q(
         'DELETE FROM meta_record_revisions WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)',
         [sheet],
@@ -513,6 +545,51 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       expect(await revisionsOf(ghost)).toHaveLength(0)
     })
 
+    test('CAS golden: a concurrent version bump between inspect and UPDATE rejects with a typed values-free conflict and writes no revision', async () => {
+      const created = await sdk.createRecord({ sheetId: SHEET_RACE, data: { [FLD_RACE_TITLE]: 'cas-v1' } })
+      const rawPool = poolManager.get().getInternalPool()
+      const holder = await rawPool.connect()
+      let patchRejection: unknown
+      try {
+        await holder.query('BEGIN')
+        await holder.query(
+          'UPDATE meta_records SET version = version + 1 WHERE id = $1 AND sheet_id = $2',
+          [created.id, SHEET_RACE],
+        )
+        const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+
+        const patchPromise = sdk.patchRecord({
+          sheetId: SHEET_RACE,
+          recordId: created.id,
+          expectedVersion: created.version,
+          changes: { [FLD_RACE_TITLE]: 'stale-writer-must-not-land' },
+        }).then(
+          () => undefined,
+          (error: unknown) => {
+            patchRejection = error
+            return undefined
+          },
+        )
+
+        await waitUntilBlockedOnRecordLock(holderPid, '%UPDATE meta_records%')
+        await holder.query('COMMIT')
+        await patchPromise
+      } finally {
+        await holder.query('ROLLBACK').catch(() => {})
+        holder.release()
+      }
+
+      expect(patchRejection).toMatchObject({
+        code: 'VERSION_CONFLICT',
+        message: 'Record version conflict',
+      })
+      expect(await recordRow(created.id)).toMatchObject({
+        version: 2,
+        data: { [FLD_RACE_TITLE]: 'cas-v1' },
+      })
+      expect(await revisionsOf(created.id)).toHaveLength(1)
+    }, 15000)
+
     // ── THE P1 FIX GOLDEN ────────────────────────────────────────────────────────────────────────────
     // GENUINE two-connection lock race (never a sleep heuristic): Connection A (this test's "holder")
     // opens its own dedicated raw client, BEGINs, and DELETEs the record — an uncommitted, row-locking
@@ -628,10 +705,11 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       // excludes 'autoNumber' from the user-authored-field projection entirely (line 70:
       // `Set(['formula', 'rollup', 'lookup', 'autoNumber'])`), so the projection's per-field loop
       // (history-integrity-precheck.ts's `for (const fid of userFieldIds)`) never even inspects this key.
-      const asOf = await cutoffAfter(created.id, 1) // strictly after this create — nothing to revert to "now"
-      const pv = await request(app).post(`/api/multitable/sheets/${SHEET_AUTONUM}/revert-preview`).send({ asOf })
+      // Exact-anchor at the sealed create operation — live == state at that endpoint → zero-op preview.
+      const anchorOperationId = await sealedOperationId(created.id, 1)
+      const pv = await request(app).post(`/api/multitable/sheets/${SHEET_AUTONUM}/revert-preview`).send({ anchorOperationId })
       expect(pv.status).toBe(200) // NOT 409 content_mismatch — the exclusion holds even though the values match here
-      expect(pv.body?.data?.summary?.visibleRevertCount).toBe(0) // live == the T-state at `asOf` — nothing to revert
+      expect(pv.body?.data?.summary?.visibleRevertCount).toBe(0) // live == state at the sealed create endpoint — nothing to revert
     })
   })
 })

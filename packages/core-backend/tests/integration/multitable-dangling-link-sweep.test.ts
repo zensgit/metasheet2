@@ -9,8 +9,8 @@
  *        `base_id` differs (null-aware, IS DISTINCT FROM) from the link field's own sheet `base_id`.
  *        Covers the parseLinkFieldConfig aliases (foreignDatasheetId / foreignSheetId / datasheetId)
  *        in the SAME precedence as the wall.
- *   (ii) dangling meta_links — `meta_links.foreign_record_id` with no matching `meta_records` row
- *        (foreign_record_id has NO FK, so a deleted foreign record leaves a dangling edge).
+ *   (ii) dangling meta_links — `meta_links.foreign_record_id` with no matching `meta_records` row.
+ *        The NOT VALID target FK protects new writes while deliberately preserving historical ghosts.
  *
  * VALUES-FREE (ids/counts only, no cell data) and READ-ONLY (no writes). This test seeds a small fixture
  * via the pool, runs the actual script via execFile (real psql path), and asserts the enumerated ids/

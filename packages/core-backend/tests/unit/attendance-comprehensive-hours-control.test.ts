@@ -297,7 +297,7 @@ describe('attendance comprehensive working-hours control helpers', () => {
   it('previews actual comprehensive hours from attendance summary without planned producers', async () => {
     const db = createPreviewDb((sql) => {
       if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }]
-      if (sql.includes('FROM attendance_records')) {
+      if (sql.includes('FROM attendance_current_records')) {
         return [{
           total_days: 3,
           total_minutes: 620,
@@ -347,6 +347,7 @@ describe('attendance comprehensive working-hours control helpers', () => {
         status: 'warning',
       }),
     ])
+    expect(db.queries.some(({ sql }) => sql.includes('FROM attendance_current_records'))).toBe(true)
     expect(db.queries.map(({ sql }) => sql).join('\n')).not.toContain('attendance_shift_assignments')
   })
 
@@ -643,7 +644,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
         const s = String(sql)
         queries.push({ sql: s, params })
         if (/FROM system_configs/i.test(s)) return [{ value: JSON.stringify(settings) }]
-        if (/FROM attendance_records/i.test(s) && /AS total_minutes/i.test(s)) return [summaryRow]
+        if (/FROM attendance_current_records/i.test(s) && /AS total_minutes/i.test(s)) return [summaryRow]
         if (/FROM attendance_requests/i.test(s)) return []
         if (/FROM users u/i.test(s)) return [{ user_name: 'U One', username: 'u1', meta: null }]
         if (/FROM attendance_leave_types/i.test(s)) return []
@@ -708,7 +709,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
     const r1 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
     expect(r1.created).toBe(1)
     const stored = mt.createRecord.mock.calls[0][0].data
-    mt.queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-1', version: 1, data: stored }])
 
     helpers.resetAttendanceSettingsCacheForTests()
     const r2 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
@@ -725,7 +726,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
 
   it('re-syncs a pre-PR6 row whose fingerprint predates the comprehensive-hours columns', async () => {
     const mt = createMultitableContext()
-    mt.queryRecords.mockResolvedValue([{ id: 'rec-old', data: { source_fingerprint: 'stale-old-fp', field_fingerprint: 'stale-old-ff' } }])
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-old', version: 1, data: { source_fingerprint: 'stale-old-fp', field_fingerprint: 'stale-old-ff' } }])
     const result = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
     expect(result.patched).toBe(1)
     expect(mt.patchRecord).toHaveBeenCalledTimes(1)
@@ -738,6 +739,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
     await helpers.syncAttendanceReportPeriodSummary(mt.context, db, orgId, logger, { userId, period: naturalMonth })
     expect(db.queries.filter((q) => /\b(INSERT|UPDATE|DELETE)\b/i.test(q.sql))).toEqual([])
     expect(db.queries.some((q) => /attendance_report_period_summaries|\bmeta_/i.test(q.sql))).toBe(false)
+    expect(db.queries.some((q) => /FROM attendance_current_records/i.test(q.sql))).toBe(true)
     // The only snapshot writes are through the records API.
     expect(mt.createRecord).toHaveBeenCalledTimes(1)
   })
@@ -945,7 +947,7 @@ describe('comprehensive-hours payroll_cycle cap-mapping (§7 precise template-wi
       async query(sql: string) {
         const s = String(sql)
         if (/FROM system_configs/i.test(s)) return [{ value: JSON.stringify(settings) }]
-        if (/FROM attendance_records/i.test(s) && /AS total_minutes/i.test(s)) return [{ total_days: 22, total_minutes: 13000, total_late_minutes: 0, total_early_leave_minutes: 0, normal_days: 22, late_days: 0, early_leave_days: 0, late_early_days: 0, partial_days: 0, absent_days: 0, adjusted_days: 0, off_days: 9 }]
+        if (/FROM attendance_current_records/i.test(s) && /AS total_minutes/i.test(s)) return [{ total_days: 22, total_minutes: 13000, total_late_minutes: 0, total_early_leave_minutes: 0, normal_days: 22, late_days: 0, early_leave_days: 0, late_early_days: 0, partial_days: 0, absent_days: 0, adjusted_days: 0, off_days: 9 }]
         if (/FROM attendance_requests/i.test(s)) return []
         if (/FROM users u/i.test(s)) return [{ user_name: 'U One', username: 'u1', meta: null }]
         if (/FROM attendance_leave_types/i.test(s)) return []
@@ -959,7 +961,7 @@ describe('comprehensive-hours payroll_cycle cap-mapping (§7 precise template-wi
     const stored = createRecord.mock.calls[0][0].data
     expect(stored.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
     expect(stored.comprehensive_hours_cap_minutes).toBe(10560)
-    queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+    queryRecords.mockResolvedValue([{ id: 'rec-1', version: 1, data: stored }])
 
     helpers.resetAttendanceSettingsCacheForTests()
     const r2 = await helpers.syncAttendanceReportPeriodSummary(context, syncDb(monthCap(9000)), orgId, logger, { userId, period })

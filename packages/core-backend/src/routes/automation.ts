@@ -10,21 +10,31 @@
  *   POST /api/multitable/sheets/:sheetId/automations/:ruleId/test
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/logs
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/stats
+ *   POST /api/multitable/sheets/:sheetId/automations/fwb/confirm
  *
  * Response shapes (match apps/web/src/multitable/api/client.ts):
  *   test  → AutomationExecution (flat object)
  *   logs  → { executions: AutomationExecution[] }
  *   stats → AutomationStats (flat object)
+ *   fwb/confirm → { confirmationHash, templateId, sourceTemplateVersionId, targetSheetId, targetBaseId }
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import type { AutomationService } from '../multitable/automation-service'
+import {
+  AutomationTestRunRejectedError,
+  type AutomationService,
+  type AutomationTestRunSampleRecord,
+} from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
+// The 403 body and the two liveness-404 bodies are a CLIENT CONTRACT (clients switch on
+// `error.code`), so they come from one shared module instead of being hand-copied per route. See
+// multitable/sheet-refusals.ts for the drift those copies used to invite.
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import { poolManager } from '../integration/db/connection-pool'
 import {
   INBOUND_WEBHOOK_BODY_LIMIT,
@@ -36,6 +46,31 @@ import {
   resolveExecutionNameMaps,
   type ExecutionNameMaps,
 } from '../multitable/automation-execution-names'
+import {
+  deriveFwbConfirmationHash,
+  hasUnavailableFwbNumberMapping,
+  isFwbTargetFieldTypeCompatible,
+  isFwbWritebackEnabled,
+  normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
+} from '../multitable/approval-fwb-activation'
+import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
+import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+
+/**
+ * DB 未就绪(缺表 42P01 / 缺列 42703)= transient → 503,而不是 500。
+ *
+ * 这里必须先看 SQLSTATE:PG 的报错散文受 `lc_messages` 影响,222 测试机是中文,
+ * `does not exist` 正则永远匹配不到「关系 "x" 不存在」。SQLSTATE 与语言无关。
+ * 判定只影响 503/500 的选择,两条路都不放行任何能力 —— 权限解析失败依旧 fail-closed。
+ */
+function isDbNotReadySqlState(err: unknown): boolean {
+  return isUndefinedTableError(err) || isUndefinedColumnError(err)
+}
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -136,6 +171,83 @@ function toRunView(
   }
 }
 
+/**
+ * #5779 — rule-scoped execution view for the per-rule `/logs` read.
+ *
+ * The route used to serialize the persisted row verbatim, which carries `triggerEvent` (the values of
+ * the record that fired the rule) and `ruleSnapshot` (the rule as configured at run time, action
+ * config included). Those two blobs are a governance/diagnosis surface: the cross-sheet runs API
+ * keeps them behind `requireAdminRole()` AND only emits them on its DETAIL view
+ * (`toRunView(..., { includeSnapshot: true })`). A per-rule log panel has no use for them.
+ *
+ * Why `redactAutomationExecutionForResponse` + two deletes, and NOT `toRunView(e, { includeSnapshot:
+ * false })`: `toRunView` is the A2 runs-API projection — it re-states `status` in the C1
+ * WorkflowJobStatus vocabulary and rewrites `steps` into WorkflowJob views. The rule log panel
+ * (apps/web/src/multitable/components/MetaAutomationLogViewer.vue) filters on the LEGACY
+ * success/failed/skipped values and renders `step.actionType` / `step.durationMs` / `step.output`,
+ * none of which survive that projection. This keeps the pinned flat `AutomationExecution` shape
+ * (and the secret-shape scrubbing the /test route already applies) and drops only the two blobs.
+ */
+function toRuleScopedExecutionView(execution: AutomationExecution): AutomationExecution {
+  // redactAutomationExecutionForResponse returns a NEW object, so these deletes never mutate
+  // the caller's row (and never the persisted one).
+  const view = redactAutomationExecutionForResponse(execution)
+  delete view.triggerEvent
+  delete view.ruleSnapshot
+  return view
+}
+
+/**
+ * Fail-CLOSED refusal for a permission/rule resolution that threw.
+ *
+ * Never echo the raw error message (it can carry DB host/port/user). SQLSTATE is checked FIRST:
+ * PG prose is `lc_messages`-dependent (222 runs a Chinese locale, where `does not exist` never
+ * matches), and only the 503-vs-500 choice depends on it — neither branch admits the caller.
+ */
+function sendFailClosedResolutionError(
+  res: Response,
+  err: unknown,
+  nonTransientCode: string,
+  nonTransientMessage: string,
+) {
+  const raw = err instanceof Error ? err.message : ''
+  const transient = isDbNotReadySqlState(err)
+    || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+  return res.status(transient ? 503 : 500).json({
+    ok: false,
+    error: {
+      code: transient ? 'DB_NOT_READY' : nonTransientCode,
+      message: transient ? 'Service temporarily unavailable' : nonTransientMessage,
+    },
+  })
+}
+
+/**
+ * Transient-DB classification for a failure thrown out of `svc.testRun` ONLY.
+ *
+ * Unlike the permission/sample-record reads above, testRun runs the simulated planner and real
+ * executors, whose own error prose routinely says "unavailable" / "not ready" / "does not exist"
+ * about a target, view or field. Matching English message text here would relabel those as
+ * 503 DB_NOT_READY. So the 503 decision uses only language-independent codes: SQLSTATE
+ * (42P01/42703, connection-exception class 08, 53300 too_many_connections, 57P01-57P03 shutdown/
+ * cannot-connect) and Node socket codes. The single message test is node-pg's own fixed driver
+ * string, anchored at the start, which planner prose does not produce.
+ */
+const TEST_RUN_TRANSIENT_NODE_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'])
+const TEST_RUN_TRANSIENT_SQLSTATES = new Set(['53300', '57P01', '57P02', '57P03'])
+
+function isTestRunTransientDbError(err: unknown): boolean {
+  if (isDbNotReadySqlState(err)) return true
+  if (!err || typeof err !== 'object') return false
+  const code = (err as { code?: unknown }).code
+  if (typeof code === 'string') {
+    if (TEST_RUN_TRANSIENT_NODE_CODES.has(code)) return true
+    if (TEST_RUN_TRANSIENT_SQLSTATES.has(code)) return true
+    if (/^08[0-9A-Z]{3}$/.test(code)) return true
+  }
+  return err instanceof Error && /^Connection terminated/.test(err.message)
+}
+
 function shouldUsePersistedJobs(
   execution: AutomationExecution,
   jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
@@ -220,6 +332,109 @@ export function createAutomationRoutes(
     return svc
   }
 
+  /**
+   * #5779 — authorization for the rule-addressed READS (`/logs`, `/stats`).
+   *
+   * THE GAP THIS CLOSES: both routes were registered with a single handler and NO middleware, and the
+   * handler read only `:ruleId` — the `:sheetId` segment was decorative. The log service filters on
+   * `rule_id` alone and `multitable_automation_executions` has no tenant column, so the only layer in
+   * front of them was the global session JWT gate (index.ts), which AUTHENTICATES but does not
+   * AUTHORIZE: any logged-in caller — including one holding NO automation authority anywhere — could
+   * read any rule's execution history, raw `triggerEvent` / `ruleSnapshot` blobs included.
+   *
+   * WHAT IS CLOSED, EXACTLY — deliberately stated narrowly:
+   *   - a caller with no automation capability at all is refused (403, nothing read), and
+   *   - a rule that does not belong to the PATH sheet is refused (404), so `:sheetId` is load-bearing.
+   *
+   * WHAT IS **NOT** CLOSED (residual, and not this route's to close): `canManageAutomation` is a
+   * GLOBAL capability tier — multitable/access.ts `deriveCapabilities()` derives it from the caller's
+   * own permission codes (`workflow:all|write|create|execute`, and via `hasPermission()` also
+   * `workflow:*` / `*:*`) or an admin role. `resolveSheetCapabilities()` narrows that tier by the
+   * caller's per-sheet grants ONLY IF the caller holds grant rows on that sheet:
+   * permission-service.ts `applySheetPermissionScope` returns early on `!scope.hasAssignments`, and
+   * the narrowing line (`canManageAutomation && scope.canWrite`) is reached only below that early
+   * return. So a workflow-capable principal with NO relationship to the sheet keeps the full tier and
+   * reads that rule's history from a sheetId + ruleId pair alone — exactly as that same principal can
+   * already list / PATCH / DELETE the sheet's rules through the sibling routes in
+   * routes/univer-meta.ts, which run this identical composition. Do NOT read the cross-sheet 404
+   * below as tenant isolation: it binds rule -> path-sheet, and nothing more.
+   *
+   * Its inverted corollary, stated plainly rather than left to be discovered: holding a READ-ONLY
+   * share on the sheet makes the caller hold grant rows, which takes the `scope.canWrite` branch and
+   * REFUSES them (403) — strictly less access than the same caller with no relationship at all. Both
+   * halves are the platform composition shared by every automation surface, not something introduced
+   * here, and neither is this route's to change unilaterally: narrowing the no-grant case would 403
+   * every operator on a deployment that keeps no per-sheet grant rows (222 grants through roles), and
+   * widening the read-only case would be a relaxation. Both are pinned as "RESIDUAL SCOPE" tests in
+   * tests/unit/automation-rule-log-read-authz.test.ts so neither can be mistaken for a guarantee.
+   *
+   * BEHAVIOUR CHANGE, disclosed: step 5 also refuses a DELETED rule's history (no rule row -> 404),
+   * which this endpoint used to serve out of the orphaned execution rows. The post-mortem path is
+   * `GET /api/multitable/automation-executions?ruleId=…` (platform-admin only, below); the FE only
+   * ever opens this panel from a live rule card.
+   *
+   * The gate below is the one the sibling rule-scoped reads already run
+   * (`routes/univer-meta.ts` → `/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries`),
+   * in the SAME order:
+   *   1. resolve capabilities for the PATH sheet (fail-CLOSED if the resolution throws)
+   *   2. `canManageAutomation` — run history is part of the rule-authoring surface
+   *   3. sheet liveness — a soft-deleted/absent sheet is a coded 404, not a 403
+   *   4. service readiness (the pre-existing 503, unchanged)
+   *   5. `rule.sheet_id === :sheetId` — step 2 only proves the capability TIER, and
+   *      `getRule(ruleId)` is not sheet-bound, so a rule owned by another sheet must still 404.
+   *
+   * Returns null when it has already answered the request.
+   */
+  async function authorizeRuleScopedRead(
+    req: Request,
+    res: Response,
+  ): Promise<{ svc: AutomationService; sheetId: string; ruleId: string } | null> {
+    // TRIMMED: `/sheets/%20/automations/<id>/logs` decodes to a truthy single space, which would
+    // otherwise skip this 400 and be answered by the liveness lookup as 'Sheet not found' — two
+    // refusals for one malformed request. Matches the `.trim()` on the /fwb/confirm sibling below.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
+    if (!sheetId || !ruleId) {
+      res.status(400).json({ error: 'sheetId and ruleId are required' })
+      return null
+    }
+
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        sendForbidden(res)
+        return null
+      }
+      if (sheetLiveness !== 'live') {
+        sendSheetNotLive(res, sheetLiveness)
+        return null
+      }
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
+      return null
+    }
+
+    const svc = getService(res)
+    if (!svc) return null
+
+    let rule: Awaited<ReturnType<AutomationService['getRule']>>
+    try {
+      rule = await svc.getRule(ruleId)
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'RULE_LOOKUP_FAILED', 'Failed to resolve the automation rule')
+      return null
+    }
+    // Values-free and identical for "no such rule" and "rule belongs to another sheet": the refusal
+    // must not become an oracle for rule ids or for the owning sheet.
+    if (!rule || rule.sheet_id !== sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      return null
+    }
+
+    return { svc, sheetId, ruleId }
+  }
+
   // ── T1-2 inbound webhook trigger ───────────────────────────────────────
 
   router.post(
@@ -240,35 +455,49 @@ export function createAutomationRoutes(
     },
   )
 
-  // ── Test run ────────────────────────────────────────────────────────────
+  // ── FWB confirmation (server-owned hash; Q6 gate 3) ─────────────────────
+  //
+  // The ordinary-user mapping editor asks the server to derive confirmationHash over the
+  // canonicalized {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings}
+  // subject. The client MUST NOT invent a hash — save re-derives and rejects any mismatch.
+  // Create mode targets the rule's own sheet. Update mode derives its target only from a top-level
+  // record-link field in the selected approval template; client-supplied base/sheet ids are ignored.
 
-  router.post('/sheets/:sheetId/automations/:ruleId/test', async (req: Request, res: Response) => {
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!sheetId || !ruleId) {
-      return res.status(400).json({ error: 'sheetId and ruleId are required' })
+  router.post('/sheets/:sheetId/automations/fwb/confirm', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'SHEET_ID_REQUIRED', message: 'sheetId is required' } })
     }
 
-    // G8 (retry/test-run governance lock §6): the test route REALLY executes the rule (fires
-    // writes/notifications/webhooks). Until now it had no backend capability gate at all — only the
-    // FE hides the button behind `canManageAutomation`. Enforce that same per-sheet capability on
-    // the backend so a caller who cannot manage automation on this sheet cannot trigger a real run.
-    // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
-    // canManageAutomation). Standalone security fix; no flag, no behaviour change for a privileged
-    // caller (the FE test button already only renders for canManageAutomation holders).
+    if (!isFwbWritebackEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: { code: 'FWB_WRITEBACK_DISABLED', message: 'Approval form writeback is not enabled' },
+      })
+    }
+
+    let authoringUserId = ''
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageAutomation) {
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation || !capabilities.canManageSheetAccess) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
+      authoringUserId = access.userId
+      if (!authoringUserId) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // #5803 follow-up: authority first (no liveness oracle), then liveness — a soft-deleted rule
+      // sheet must not mint a confirmation hash nor write the confirmation audit row.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
+      }
     } catch (err) {
-      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through
-      // to an ungated testRun. Review P3: never echo the raw error message (it can carry DB
-      // host/port/user) — surface a generic, values-free message. A connection / not-ready error
-      // is a transient 503; anything else is a 500. Either way the real run never fired.
       const raw = err instanceof Error ? err.message : ''
-      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
+      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
+      const transient = isDbNotReadySqlState(err)
+        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
       return res.status(transient ? 503 : 500).json({
         ok: false,
         error: {
@@ -278,66 +507,436 @@ export function createAutomationRoutes(
       })
     }
 
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const templateId = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+    const sourceTemplateVersionId = typeof body.sourceTemplateVersionId === 'string'
+      ? body.sourceTemplateVersionId.trim()
+      : ''
+    if (!templateId || !sourceTemplateVersionId) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'FWB_CONFIRM_SUBJECT_REQUIRED',
+          message: 'templateId and sourceTemplateVersionId are required',
+        },
+      })
+    }
+
+    const normalized = normalizeFwbMappings(body.mappings)
+    if (normalized.ok === false) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_MAPPING_INVALID', message: `mapping config invalid: ${normalized.issue}` },
+      })
+    }
+    const confirmedMappings = normalized.mappings
+    if (hasUnavailableFwbNumberMapping(confirmedMappings)) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'FWB_EXACT_NUMBER_UNAVAILABLE',
+          message: 'exact_number_mapping_unavailable',
+        },
+      })
+    }
+    const modeResult = parseFwbWriteMode(body.mode)
+    if (!modeResult.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_MODE_INVALID', message: 'mapping config invalid: unknown_mode' },
+      })
+    }
+    const mode = modeResult.mode
+    const linkFieldResult = mode === 'update'
+      ? normalizeFwbUpdateRecordLinkFieldId(body.recordLinkFieldId)
+      : null
+    if (linkFieldResult?.ok === false) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'FWB_RECORD_LINK_REQUIRED', message: `mapping config invalid: ${linkFieldResult.issue}` },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const canReadSource = await canReadApprovalTemplateForAutomation(
+        pool.query.bind(pool),
+        templateId,
+        authoringUserId,
+      )
+      if (!canReadSource) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_UNAVAILABLE', message: 'Approval template is unavailable' },
+        })
+      }
+      const versionResult = await pool.query(
+        `SELECT t.active_version_id, v.form_schema
+           FROM approval_templates t
+           JOIN approval_template_versions v ON v.id = t.active_version_id
+          WHERE t.id = $1`,
+        [templateId],
+      )
+      const versionRow = versionResult.rows[0] as {
+        active_version_id?: unknown
+        form_schema?: unknown
+      } | undefined
+      const activeVersionId = typeof versionRow?.active_version_id === 'string'
+        ? versionRow.active_version_id
+        : ''
+      if (!activeVersionId || activeVersionId !== sourceTemplateVersionId) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_VERSION_STALE', message: 'The active approval template version changed' },
+        })
+      }
+      const rawSchema = typeof versionRow?.form_schema === 'string'
+        ? (() => { try { return JSON.parse(versionRow.form_schema as string) as unknown } catch { return null } })()
+        : versionRow?.form_schema
+      const schema = rawSchema && typeof rawSchema === 'object' && !Array.isArray(rawSchema)
+        ? rawSchema as { fields?: unknown }
+        : null
+      const sourceFieldIds = new Set(
+        (Array.isArray(schema?.fields) ? schema.fields : [])
+          .map((field) => field && typeof field === 'object' && !Array.isArray(field)
+            ? (field as { id?: unknown }).id
+            : null)
+          .filter((id): id is string => typeof id === 'string' && /[!-~]/.test(id)),
+      )
+      if (confirmedMappings.some((mapping) => !sourceFieldIds.has(mapping.formFieldId))) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'FWB_SOURCE_SCHEMA_STALE', message: 'The approval form schema changed' },
+        })
+      }
+
+      let targetSheetId = sheetId
+      let recordLinkFieldId: string | undefined
+      let derivedTarget: { baseId: string; sheetId: string } | null = null
+      if (mode === 'update') {
+        recordLinkFieldId = linkFieldResult?.ok ? linkFieldResult.recordLinkFieldId : undefined
+        derivedTarget = recordLinkFieldId
+          ? resolveRecordLinkTargetFromSchema(rawSchema, recordLinkFieldId)
+          : null
+        if (!derivedTarget) {
+          return res.status(404).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+          })
+        }
+        targetSheetId = derivedTarget.sheetId
+      }
+
+      const targetSheetResult = await pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [targetSheetId])
+      const targetBaseId = (targetSheetResult.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (
+        typeof targetBaseId !== 'string'
+        || !targetBaseId
+        || (derivedTarget && targetBaseId !== derivedTarget.baseId)
+      ) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+        })
+      }
+
+      if (targetSheetId !== sheetId) {
+        const targetAccess = await resolveSheetCapabilities(req, pool.query.bind(pool), targetSheetId)
+        if (!targetAccess.capabilities.canManageSheetAccess) {
+          return res.status(403).json({
+            ok: false,
+            error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+          })
+        }
+        // The `SELECT base_id FROM meta_sheets` above does not filter deleted_at, so a soft-deleted
+        // update target would otherwise be confirmed. Answered with the route's existing values-free
+        // "target unavailable" body (the PATH sheet is live; SHEET_DELETED would name the wrong one).
+        if (targetAccess.sheetLiveness !== 'live') {
+          return res.status(404).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+          })
+        }
+      }
+
+      const fieldResult = await pool.query(
+        'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [targetSheetId, confirmedMappings.map((mapping) => mapping.targetFieldId)],
+      )
+
+      const targetFields = new Map<string, { type: string; property: unknown }>()
+      for (const row of fieldResult.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
+        if (typeof row.id === 'string' && typeof row.type === 'string') {
+          targetFields.set(row.id, { type: row.type, property: row.property })
+        }
+      }
+      for (const mapping of confirmedMappings) {
+        const field = targetFields.get(mapping.targetFieldId)
+        if (!field || !isFwbTargetFieldTypeCompatible(field.type, mapping.targetType)) {
+          return res.status(409).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_SCHEMA_STALE', message: 'The target sheet schema changed' },
+          })
+        }
+        if (mapping.targetType === 'select') {
+          const property = typeof field.property === 'string'
+            ? (() => { try { return JSON.parse(field.property) as Record<string, unknown> } catch { return {} } })()
+            : (field.property && typeof field.property === 'object'
+                ? field.property as Record<string, unknown>
+                : {})
+          const options = Array.isArray(property.options) ? property.options : []
+          const allowed = new Set(
+            options
+              .map((option) => option && typeof option === 'object'
+                ? (option as { value?: unknown }).value
+                : undefined)
+              .filter((value): value is string => typeof value === 'string'),
+          )
+          if ((mapping.selectOptions ?? []).some((option) => !allowed.has(option))) {
+            return res.status(409).json({
+              ok: false,
+              error: { code: 'FWB_TARGET_SCHEMA_STALE', message: 'The target sheet schema changed' },
+            })
+          }
+        }
+      }
+
+      const confirmationHash = deriveFwbConfirmationHash({
+        templateId,
+        sourceTemplateVersionId,
+        targetBaseId,
+        targetSheetId,
+        mappings: confirmedMappings,
+        ...(mode === 'update' ? { mode: 'update' as const, recordLinkFieldId } : {}),
+      })
+
+      const auditMetadata = {
+        templateId,
+        sourceTemplateVersionId,
+        targetBaseId,
+        targetSheetId,
+        ...(mode === 'update' ? { mode: 'update', recordLinkFieldId } : {}),
+        formFieldIds: confirmedMappings.map((mapping) => mapping.formFieldId),
+        targetFieldIds: confirmedMappings.map((mapping) => mapping.targetFieldId),
+        confirmationHash,
+      }
+      await pool.query(
+        `INSERT INTO operation_audit_logs
+           (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+         VALUES ($1, 'user', 'automation.fwb_confirm', 'automation_fwb_confirmation', $2, $3::jsonb, $3::jsonb)`,
+        [authoringUserId, sheetId, JSON.stringify(auditMetadata)],
+      )
+
+      // Values-free response: identifiers + server hash only (Q6: 审计只记标识不记值).
+      return res.json({
+        confirmationHash,
+        templateId,
+        sourceTemplateVersionId,
+        targetSheetId,
+        targetBaseId,
+      })
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : ''
+      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
+      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
+      const transient = isDbNotReadySqlState(err)
+        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: {
+          code: transient ? 'DB_NOT_READY' : 'FWB_CONFIRM_FAILED',
+          message: transient ? 'Service temporarily unavailable' : 'Failed to derive confirmation hash',
+        },
+      })
+    }
+  })
+
+  // ── Test run ────────────────────────────────────────────────────────────
+
+  router.post('/sheets/:sheetId/automations/:ruleId/test', async (req: Request, res: Response) => {
+    // TRIMMED like authorizeRuleScopedRead: a whitespace-only segment is a malformed request (400),
+    // not a sheet the liveness lookup below would answer as 'Sheet not found'.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ error: 'sheetId and ruleId are required' })
+    }
+
+    // G8 (retry/test-run governance lock §6): test-run requires the same per-sheet
+    // canManageAutomation capability as rule authoring. The default run is simulate and dispatches
+    // no business side effect; real_fire remains capability-gated too.
+    // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
+    // canManageAutomation). The FE test button already only renders for canManageAutomation holders;
+    // the route additionally makes the safe simulation default authoritative server-side.
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return sendForbidden(res)
+      }
+      // #5803 follow-up: capability FIRST, then liveness — same order as authorizeRuleScopedRead, so
+      // an unauthorized caller gets the same 403 for a live and a soft-deleted sheet (no liveness
+      // oracle). A soft-deleted sheet refuses BOTH modes here, before the sample-record read and
+      // before testRun: simulate would otherwise plan against a dead sheet, and real_fire must not
+      // rely on the sample-record read happening to join meta_sheets.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
+      }
+    } catch (err) {
+      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through to
+      // an ungated testRun. Same responder as the rule-scoped reads: SQLSTATE先判 (42P01/42703 在
+      // 中文 locale 下散文匹配不到) -> 值无关的 503/500,绝不回显原始报错。ONE copy, so the
+      // fail-closed sites in this file cannot drift apart. Either way the real run never fired.
+      return sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
+    }
+
     const svc = getService(res)
     if (!svc) return undefined
 
+    const body = req.body && typeof req.body === 'object'
+      ? req.body as Record<string, unknown>
+      : {}
+    const rawMode = body.mode
+    if (rawMode !== undefined && rawMode !== 'simulate' && rawMode !== 'real_fire') {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_MODE', message: 'mode must be simulate or real_fire' },
+      })
+    }
+    if (rawMode === 'real_fire' && body.confirmSideEffects !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'CONFIRM_SIDE_EFFECTS_REQUIRED', message: 'confirmSideEffects must be true for a real-fire test run' },
+      })
+    }
+    if (rawMode === 'real_fire' && body.recordId === undefined) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED', message: 'A sample record is required for a real-fire test run' },
+      })
+    }
+
+    const rawRecordId = body.recordId
+    if (
+      rawRecordId !== undefined
+      && (typeof rawRecordId !== 'string' || rawRecordId.trim().length === 0 || rawRecordId.trim().length > 256)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'INVALID_TEST_RUN_RECORD_ID', message: 'recordId must be a non-empty string of at most 256 characters' },
+      })
+    }
+
+    let sampleRecord: AutomationTestRunSampleRecord | undefined
+    if (typeof rawRecordId === 'string') {
+      try {
+        const pool = poolManager.get()
+        const loaded = await loadReadableAutomationSampleRecord(
+          req,
+          pool.query.bind(pool),
+          sheetId,
+          rawRecordId.trim(),
+        )
+        if ('status' in loaded) return res.status(loaded.status).json(loaded.body)
+        sampleRecord = loaded.sampleRecord
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : ''
+        // 同上:SQLSTATE 先判,中文 locale 下英文正则匹配不到缺表/缺列。
+        const transient = isDbNotReadySqlState(err)
+          || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+        return res.status(transient ? 503 : 500).json({
+          ok: false,
+          error: {
+            code: transient ? 'DB_NOT_READY' : 'SAMPLE_RECORD_READ_FAILED',
+            message: transient ? 'Service temporarily unavailable' : 'Failed to read sample record',
+          },
+        })
+      }
+    }
+
     try {
-      const execution = await svc.testRun(ruleId, sheetId)
-      // The in-memory execution carries the live rule (credentials) in ruleSnapshot + raw
-      // action output in steps; record()'s at-persist redaction returns new objects and does
-      // NOT mutate it. Serialize the PERSISTED (redacted) row; if it didn't land, fall back to
-      // a response-level redaction (NEVER the raw execution). Flat AutomationExecution shape is
-      // preserved either way (client does parseJson<AutomationExecution>(res)).
-      // safeGet: a log-read failure must not 500 a completed test run → redacted fallback.
-      const persisted = await safeGetPersistedExecution(svc, execution.id)
-      return res.json(persisted ?? redactAutomationExecutionForResponse(execution))
+      const actorId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+      const execution = await svc.testRun(ruleId, sheetId, {
+        mode: rawMode === 'real_fire' ? 'real_fire' : 'simulate',
+        ...(sampleRecord ? { sampleRecord } : {}),
+        ...(rawMode === 'real_fire'
+          ? {
+            actorId,
+            testRunOperationId: typeof body.testRunOperationId === 'string'
+              ? body.testRunOperationId
+              : undefined,
+            confirmSideEffects: true,
+          }
+          : {}),
+      })
+      // Simulation persistence is values-free and intentionally omits rule/record values. The
+      // authorized caller still receives the response-level secret-redacted execution so future
+      // sample-record previews can describe the planned action without widening the audit row.
+      const response = redactAutomationExecutionForResponse(execution)
+      return res.json({ ...response, dryRun: rawMode !== 'real_fire' })
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Test run failed'
-      const code = message.includes('not found') ? 404 : 500
-      return res.status(code).json({ error: message })
+      // Typed rejections carry a fixed, values-free message chosen by the service, and pass through
+      // with their status and code. That includes the rule gate (no rule / rule of another sheet /
+      // disabled rule → one 404 TEST_RUN_RULE_NOT_FOUND, not an oracle for rule ids or the owning
+      // sheet) and the service's own liveness refusal (404 SHEET_DELETED, the same body as the check
+      // above) for a sheet deleted after that check. Refusals are recognised by TYPE, never by text.
+      if (err instanceof AutomationTestRunRejectedError) {
+        return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
+      // Anything else is values-free for BOTH modes: the thrown message may carry the rule id or a
+      // raw DB error (host/user/SQL), so it is only CLASSIFIED here, never echoed. Code-only
+      // DB-not-ready → 503 (no English prose matching — planner/executor errors say
+      // "unavailable"/"does not exist" about targets), else 500. Same fixed bodies as elsewhere.
+      // A plain Error — even one that reads like the rule gate — is a 500 here.
+      const transient = isTestRunTransientDbError(err)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: transient
+          ? { code: 'DB_NOT_READY', message: 'Service temporarily unavailable' }
+          : { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      })
     }
   })
 
   // ── Execution logs ──────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/logs', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: capability → liveness → readiness → rule-owns-this-sheet. Nothing is read before it passes.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200)
       const executions = await svc.logs.getByRule(ruleId, limit)
-      // Client does parseJson<{ executions: AutomationExecution[] }>(res)
-      return res.json({ executions })
+      // Client does parseJson<{ executions: AutomationExecution[] }>(res) — shape pinned; each row is
+      // the rule-scoped view (no ruleSnapshot / triggerEvent), never the raw persisted row.
+      return res.json({ executions: executions.map(toRuleScopedExecutionView) })
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load logs'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE, like the gate three screens up: a pg/kysely failure carries host, port, role and
+      // SQL text in `err.message`, and this handler used to hand that to the browser verbatim. The
+      // operator keeps the detail server-side.
+      console.error('[automation] rule log read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'LOG_READ_FAILED', 'Failed to load execution logs')
     }
   })
 
   // ── Execution stats ─────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/stats', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: same gate as /logs — aggregate counts for a rule are still that rule's history.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const stats = await svc.logs.getStats(ruleId)
       // Flat shape — client does parseJson<AutomationStats>(res)
       return res.json(stats)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load stats'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE — same reason as /logs above.
+      console.error('[automation] rule stats read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'STATS_READ_FAILED', 'Failed to load execution stats')
     }
   })
 
@@ -359,8 +958,12 @@ export function createAutomationRoutes(
     }
     // A future-state C1 filter (queued/suspended/rejected/errored) is legal but no stored
     // row can match it yet — return empty rather than 400, so A6 adds no contract churn.
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page (AutomationExecutionsView) never loads /context, so the list
+    // carries the instance business timezone itself — a zone id, instance-wide, not actor or run data — and the
+    // run times show the same wall clock as the in-sheet log viewer.
+    const businessTimezone = resolveMultitableBusinessTimezone()
     if (statusFilter.kind === 'empty') {
-      return res.json({ executions: [] })
+      return res.json({ executions: [], businessTimezone })
     }
 
     try {
@@ -383,6 +986,7 @@ export function createAutomationRoutes(
           ...toRunView(e, { includeSnapshot: false }),
           ...executionDisplayNames(e.ruleId, e.sheetId, nameMaps),
         })),
+        businessTimezone,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load runs'

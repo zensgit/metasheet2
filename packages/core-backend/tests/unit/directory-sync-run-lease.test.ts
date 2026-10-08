@@ -31,6 +31,7 @@ import {
   DIRECTORY_SYNC_LEASE_STALE_MINUTES,
   DirectorySyncInProgressError,
   DirectorySyncLeaseLostError,
+  DirectorySyncRunReplayError,
   previewDirectorySyncIntegration,
   reclaimStaleDirectorySyncRuns,
   syncDirectoryIntegration,
@@ -88,11 +89,12 @@ type LoggedCall = { text: string; params: unknown[] | undefined }
  * loop in the apply body is a no-op, which is exactly the point: these tests pin the
  * lease machinery, not the apply.
  */
-function installFullRunMocks(options: { completionRows?: Array<{ id: string }> } = {}) {
+function installFullRunMocks(options: { completionRows?: Array<{ id: string }>; runId?: string } = {}) {
   const bareCalls: LoggedCall[] = []
   const beats: LoggedCall[] = []
   const txCalls: LoggedCall[] = []
-  const completionRows = options.completionRows ?? [{ id: RUN_ID }]
+  const runId = options.runId ?? RUN_ID
+  const completionRows = options.completionRows ?? [{ id: runId }]
 
   pgMocks.query.mockImplementation(async (sql: unknown, params?: unknown[]) => {
     const text = String(sql)
@@ -101,9 +103,9 @@ function installFullRunMocks(options: { completionRows?: Array<{ id: string }> }
       beats.push({ text, params })
       return { rows: [] }
     }
-    if (text.includes('INSERT INTO directory_sync_runs')) return { rows: [runRow()] }
+    if (text.includes('INSERT INTO directory_sync_runs')) return { rows: [runRow({ id: runId })] }
     if (text.includes('FROM directory_integrations')) return { rows: [INTEGRATION_ROW] }
-    if (text.includes('FROM directory_sync_runs')) return { rows: [runRow({ status: 'completed' })] }
+    if (text.includes('FROM directory_sync_runs')) return { rows: [runRow({ id: runId, status: 'completed' })] }
     return { rows: [] }
   })
 
@@ -160,6 +162,9 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     pgMocks.query
       // getIntegrationRow
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // T2 freeze gate (migrated schema present, no active frozen transfer)
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] }) // to_regclass
+      .mockResolvedValueOnce({ rows: [] }) // active frozen-transfer SELECT
       // reclaimStaleDirectorySyncRuns → nothing stale
       .mockResolvedValueOnce({ rows: [] })
       // claimDirectorySyncRun → another run holds the lease
@@ -178,6 +183,8 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
   it('carries the active run id so the caller can observe the run in flight', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockRejectedValueOnce(uniqueViolation())
       .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
@@ -188,26 +195,102 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     expect((error as DirectorySyncInProgressError).statusCode).toBe(409)
   })
 
+  it('claims the exact caller-reserved UUID before the provider pull', async () => {
+    const requestedRunId = '11111111-1111-4111-8111-111111111111'
+    const onRunStarted = vi.fn()
+    const { bareCalls } = installFullRunMocks({ runId: requestedRunId })
+
+    const result = await syncDirectoryIntegration('dir-1', 'admin-1', 'manual', {
+      requestedRunId,
+      onRunStarted,
+    })
+
+    const claim = bareCalls.find((call) => call.text.includes('INSERT INTO directory_sync_runs'))
+    expect(claim?.text).toContain('COALESCE($4::uuid, gen_random_uuid())')
+    expect(claim?.params).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
+    expect(onRunStarted).toHaveBeenCalledOnce()
+    expect(onRunStarted).toHaveBeenCalledWith(requestedRunId)
+    expect(result.run.id).toBe(requestedRunId)
+  })
+
+  it('treats a repeated reserved UUID as observation and never pulls DingTalk twice', async () => {
+    const requestedRunId = '22222222-2222-4222-8222-222222222222'
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(uniqueViolation())
+      .mockResolvedValueOnce({ rows: [{ id: requestedRunId }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const error = await syncDirectoryIntegration('dir-1', 'admin-1', 'manual', {
+      requestedRunId,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(DirectorySyncRunReplayError)
+    expect((error as DirectorySyncRunReplayError).runId).toBe(requestedRunId)
+    expect(pgMocks.query.mock.calls[4]?.[1]).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
+    expect(String(pgMocks.query.mock.calls[5]?.[0])).toContain('WHERE id = $1')
+    expect(pgMocks.query.mock.calls[5]?.[1]).toEqual([requestedRunId, 'dir-1'])
+    expect(String(pgMocks.query.mock.calls[6]?.[0])).toContain("status = 'running'")
+    expect(dingtalkMocks.fetchDingTalkAppAccessToken).not.toHaveBeenCalled()
+    expect(dingtalkMocks.listDingTalkDepartments).not.toHaveBeenCalled()
+  })
+
+  it('does not let replay of an old run hide a different live run', async () => {
+    const requestedRunId = '33333333-3333-4333-8333-333333333333'
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(uniqueViolation())
+      .mockResolvedValueOnce({ rows: [{ id: requestedRunId }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'different-live-run' }] })
+
+    const error = await syncDirectoryIntegration('dir-1', 'admin-1', 'manual', {
+      requestedRunId,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(DirectorySyncInProgressError)
+    expect((error as DirectorySyncInProgressError).activeRunId).toBe('different-live-run')
+    expect(dingtalkMocks.fetchDingTalkAppAccessToken).not.toHaveBeenCalled()
+  })
+
   it('reclaims the lease before claiming it, so a crashed run cannot wedge an integration', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // T2 freeze gate: migrated schema present, no active freeze — both queries must
+      // precede reclaim, which must precede claim (indexes below pin that order).
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'stale-run' }] }) // reclaim
       .mockRejectedValueOnce(uniqueViolation())
       .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toBeInstanceOf(DirectorySyncInProgressError)
 
-    const reclaimCall = pgMocks.query.mock.calls[1]
+    // Freeze-gate SQL shapes: to_regclass then active frozen-transfer SELECT.
+    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('provider_org_transfers')")
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain('FROM provider_org_transfers')
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain('freeze_source_sync')
+
+    const reclaimCall = pgMocks.query.mock.calls[3]
     expect(String(reclaimCall[0])).toContain('UPDATE directory_sync_runs')
     expect(String(reclaimCall[0])).toContain("status = 'running'")
-    // Reclaim strictly precedes the claim.
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('INSERT INTO directory_sync_runs')
+    // Reclaim strictly precedes the claim (and freeze-gate strictly precedes reclaim).
+    expect(String(pgMocks.query.mock.calls[4][0])).toContain('INSERT INTO directory_sync_runs')
   })
 
   it('propagates a non-unique-violation insert error unchanged', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      // Same migrated-schema freeze gate as the lease-conflict path above so this rejection
+      // still lands on claim/INSERT rather than the freeze SELECT or reclaim.
+      .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // reclaim
       .mockRejectedValueOnce(new Error('connection reset'))
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toThrow('connection reset')

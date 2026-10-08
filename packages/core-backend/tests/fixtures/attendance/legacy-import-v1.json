@@ -1,0 +1,1176 @@
+{
+  "async": {
+    "completedPublicJob": {
+      "batchId": "batch:default:legacy-import-v1-async",
+      "chunkConfig": {
+        "itemsChunkSize": 300,
+        "recordsChunkSize": 200
+      },
+      "createdAt": "<db-timestamp>",
+      "createdBy": "legacy-golden-admin",
+      "elapsedMs": 0,
+      "engine": "standard",
+      "error": null,
+      "failedRows": 1,
+      "finishedAt": "<db-timestamp>",
+      "id": "job:default:legacy-import-v1-async",
+      "idempotencyKey": "legacy-import-v1-async",
+      "itemsInsertStrategy": "unnest",
+      "kind": "commit",
+      "orgId": "default",
+      "preview": null,
+      "processedRows": 1,
+      "progress": 1,
+      "progressPercent": 50,
+      "recordUpsertStrategy": "unnest",
+      "skippedCount": 1,
+      "skippedRows": [
+        {
+          "userId": "44444444-4444-4444-8444-444444444444",
+          "warnings": [
+            "Duplicate row in payload (same userId + workDate)"
+          ],
+          "workDate": "2026-07-31"
+        }
+      ],
+      "startedAt": "<db-timestamp>",
+      "status": "completed",
+      "throughputRowsPerSec": 0,
+      "total": 2,
+      "updatedAt": "<db-timestamp>"
+    },
+    "earlyReplay": {
+      "body": {
+        "data": {
+          "idempotent": true,
+          "job": {
+            "batchId": "batch:default:legacy-import-v1-async",
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "createdAt": "<db-timestamp>",
+            "createdBy": "legacy-golden-admin",
+            "elapsedMs": 0,
+            "engine": "standard",
+            "error": null,
+            "failedRows": 2,
+            "finishedAt": null,
+            "id": "job:default:legacy-import-v1-async",
+            "idempotencyKey": "legacy-import-v1-async",
+            "itemsInsertStrategy": "unnest",
+            "kind": "commit",
+            "orgId": "default",
+            "preview": null,
+            "processedRows": 0,
+            "progress": 0,
+            "progressPercent": 0,
+            "recordUpsertStrategy": "unnest",
+            "skippedCount": 0,
+            "skippedRows": [],
+            "startedAt": null,
+            "status": "queued",
+            "throughputRowsPerSec": 0,
+            "total": 2,
+            "updatedAt": "<db-timestamp>"
+          }
+        },
+        "ok": true
+      },
+      "status": 200
+    },
+    "firstExecution": {
+      "body": {
+        "data": {
+          "job": {
+            "batchId": "batch:default:legacy-import-v1-async",
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "createdAt": "<db-timestamp>",
+            "createdBy": "legacy-golden-admin",
+            "elapsedMs": 0,
+            "engine": "standard",
+            "error": null,
+            "failedRows": 2,
+            "finishedAt": null,
+            "id": "job:default:legacy-import-v1-async",
+            "idempotencyKey": "legacy-import-v1-async",
+            "itemsInsertStrategy": "unnest",
+            "kind": "commit",
+            "orgId": "default",
+            "preview": null,
+            "processedRows": 0,
+            "progress": 0,
+            "progressPercent": 0,
+            "recordUpsertStrategy": "unnest",
+            "skippedCount": 0,
+            "skippedRows": [],
+            "startedAt": null,
+            "status": "queued",
+            "throughputRowsPerSec": 0,
+            "total": 2,
+            "updatedAt": "<db-timestamp>"
+          }
+        },
+        "ok": true
+      },
+      "status": 200
+    },
+    "lockedRace": [
+      {
+        "body": {
+          "data": {
+            "job": {
+              "batchId": "batch:default:legacy-import-v1-async-race",
+              "chunkConfig": {
+                "itemsChunkSize": 300,
+                "recordsChunkSize": 200
+              },
+              "createdAt": "<db-timestamp>",
+              "createdBy": "legacy-golden-admin",
+              "elapsedMs": 0,
+              "engine": "standard",
+              "error": null,
+              "failedRows": 1,
+              "finishedAt": null,
+              "id": "job:default:legacy-import-v1-async-race",
+              "idempotencyKey": "legacy-import-v1-async-race",
+              "itemsInsertStrategy": "unnest",
+              "kind": "commit",
+              "orgId": "default",
+              "preview": null,
+              "processedRows": 0,
+              "progress": 0,
+              "progressPercent": 0,
+              "recordUpsertStrategy": "unnest",
+              "skippedCount": 0,
+              "skippedRows": [],
+              "startedAt": null,
+              "status": "queued",
+              "throughputRowsPerSec": 0,
+              "total": 1,
+              "updatedAt": "<db-timestamp>"
+            }
+          },
+          "ok": true
+        },
+        "status": 200
+      },
+      {
+        "body": {
+          "data": {
+            "idempotent": true,
+            "job": {
+              "batchId": "batch:default:legacy-import-v1-async-race",
+              "chunkConfig": {
+                "itemsChunkSize": 300,
+                "recordsChunkSize": 200
+              },
+              "createdAt": "<db-timestamp>",
+              "createdBy": "legacy-golden-admin",
+              "elapsedMs": 0,
+              "engine": "standard",
+              "error": null,
+              "failedRows": 1,
+              "finishedAt": null,
+              "id": "job:default:legacy-import-v1-async-race",
+              "idempotencyKey": "legacy-import-v1-async-race",
+              "itemsInsertStrategy": "unnest",
+              "kind": "commit",
+              "orgId": "default",
+              "preview": null,
+              "processedRows": 0,
+              "progress": 0,
+              "progressPercent": 0,
+              "recordUpsertStrategy": "unnest",
+              "skippedCount": 0,
+              "skippedRows": [],
+              "startedAt": null,
+              "status": "queued",
+              "throughputRowsPerSec": 0,
+              "total": 1,
+              "updatedAt": "<db-timestamp>"
+            }
+          },
+          "ok": true
+        },
+        "status": 200
+      }
+    ]
+  },
+  "database": {
+    "batches": [
+      {
+        "created_by": "legacy-golden-admin",
+        "id": "batch:default:legacy-import-v1-async-race",
+        "idempotency_key": "legacy-import-v1-async-race",
+        "mapping": [],
+        "meta": {
+          "async": true,
+          "chunkConfig": {
+            "itemsChunkSize": 300,
+            "recordsChunkSize": 200
+          },
+          "engine": "standard",
+          "groupCreated": 0,
+          "idempotencyKey": "legacy-import-v1-async-race",
+          "itemsInsertStrategy": "unnest",
+          "mappingProfileId": null,
+          "recordUpsertStrategy": "unnest"
+        },
+        "org_id": "default",
+        "row_count": 1,
+        "rule_set_id": null,
+        "source": null,
+        "status": "committed"
+      },
+      {
+        "created_by": "legacy-golden-admin",
+        "id": "batch:default:legacy-import-v1-sync",
+        "idempotency_key": "legacy-import-v1-sync",
+        "mapping": [],
+        "meta": {
+          "chunkConfig": {
+            "itemsChunkSize": 300,
+            "recordsChunkSize": 200
+          },
+          "compatibility": "kept",
+          "engine": "standard",
+          "fixture": "legacy-import-v1",
+          "groupCreated": 1,
+          "groupMembersAdded": 2,
+          "groupSync": {
+            "autoAssignMembers": true,
+            "autoCreate": true,
+            "ruleSetId": null,
+            "timezone": "UTC"
+          },
+          "idempotencyKey": "legacy-import-v1-sync",
+          "itemsInsertStrategy": "unnest",
+          "mappingProfileId": null,
+          "recordUpsertStrategy": "unnest",
+          "skippedCount": 2,
+          "skippedRows": [
+            {
+              "userId": "33333333-3333-4333-8333-333333333333",
+              "warnings": [
+                "Duplicate row in payload (same userId + workDate)"
+              ],
+              "workDate": "2026-07-29"
+            },
+            {
+              "userId": null,
+              "warnings": [
+                "Unresolved user identifier (empNo); configure userMap or include userId"
+              ],
+              "workDate": "2026-07-29"
+            }
+          ]
+        },
+        "org_id": "default",
+        "row_count": 4,
+        "rule_set_id": null,
+        "source": "manual",
+        "status": "committed"
+      },
+      {
+        "created_by": "legacy-golden-admin",
+        "id": "batch:default:legacy-import-v1-sync-race",
+        "idempotency_key": "legacy-import-v1-sync-race",
+        "mapping": [],
+        "meta": {
+          "chunkConfig": {
+            "itemsChunkSize": 300,
+            "recordsChunkSize": 200
+          },
+          "engine": "standard",
+          "groupCreated": 0,
+          "idempotencyKey": "legacy-import-v1-sync-race",
+          "itemsInsertStrategy": "unnest",
+          "mappingProfileId": null,
+          "recordUpsertStrategy": "unnest"
+        },
+        "org_id": "default",
+        "row_count": 1,
+        "rule_set_id": null,
+        "source": null,
+        "status": "committed"
+      },
+      {
+        "created_by": "legacy-golden-admin",
+        "id": "batch:default:legacy-import-v1-async",
+        "idempotency_key": "legacy-import-v1-async",
+        "mapping": [],
+        "meta": {
+          "async": true,
+          "chunkConfig": {
+            "itemsChunkSize": 300,
+            "recordsChunkSize": 200
+          },
+          "engine": "standard",
+          "groupCreated": 0,
+          "idempotencyKey": "legacy-import-v1-async",
+          "itemsInsertStrategy": "unnest",
+          "mappingProfileId": null,
+          "recordUpsertStrategy": "unnest",
+          "skippedCount": 1,
+          "skippedRows": [
+            {
+              "userId": "44444444-4444-4444-8444-444444444444",
+              "warnings": [
+                "Duplicate row in payload (same userId + workDate)"
+              ],
+              "workDate": "2026-07-31"
+            }
+          ]
+        },
+        "org_id": "default",
+        "row_count": 2,
+        "rule_set_id": null,
+        "source": null,
+        "status": "committed"
+      },
+      {
+        "created_by": "legacy-golden-admin",
+        "id": "batch:default:legacy-import-v1-upload",
+        "idempotency_key": "legacy-import-v1-upload",
+        "mapping": [
+          {
+            "dataType": "date",
+            "sourceField": "日期",
+            "targetField": "workDate"
+          },
+          {
+            "dataType": "string",
+            "sourceField": "工号",
+            "targetField": "empNo"
+          },
+          {
+            "dataType": "string",
+            "sourceField": "考勤组",
+            "targetField": "attendance_group"
+          },
+          {
+            "dataType": "time",
+            "sourceField": "上班1打卡时间",
+            "targetField": "firstInAt"
+          },
+          {
+            "dataType": "time",
+            "sourceField": "下班1打卡时间",
+            "targetField": "lastOutAt"
+          },
+          {
+            "dataType": "string",
+            "sourceField": "考勤结果",
+            "targetField": "status"
+          }
+        ],
+        "meta": {
+          "chunkConfig": {
+            "itemsChunkSize": 300,
+            "recordsChunkSize": 200
+          },
+          "engine": "standard",
+          "groupCreated": 1,
+          "groupMembersAdded": 1,
+          "groupSync": {
+            "autoAssignMembers": true,
+            "autoCreate": true,
+            "ruleSetId": null,
+            "timezone": "UTC"
+          },
+          "idempotencyKey": "legacy-import-v1-upload",
+          "itemsInsertStrategy": "unnest",
+          "mappingProfileId": null,
+          "recordUpsertStrategy": "unnest"
+        },
+        "org_id": "default",
+        "row_count": 1,
+        "rule_set_id": null,
+        "source": null,
+        "status": "committed"
+      }
+    ],
+    "groups": [
+      {
+        "code": null,
+        "description": null,
+        "id": "group:default:legacy golden team",
+        "name": "Legacy Golden Team",
+        "org_id": "default",
+        "rule_set_id": null,
+        "timezone": "UTC"
+      },
+      {
+        "code": null,
+        "description": null,
+        "id": "group:default:legacy upload team",
+        "name": "Legacy Upload Team",
+        "org_id": "default",
+        "rule_set_id": null,
+        "timezone": "UTC"
+      }
+    ],
+    "items": [
+      {
+        "batch_id": "batch:default:legacy-import-v1-async-race",
+        "id": "item:batch:default:legacy-import-v1-async-race:0",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 50,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 540
+          },
+          "policy": null
+        },
+        "record_id": "record:default:55555555-5555-4555-8555-555555555555:2026-07-30",
+        "user_id": "55555555-5555-4555-8555-555555555555",
+        "work_date": "2026-07-30"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-sync",
+        "id": "item:batch:default:legacy-import-v1-sync:0",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 550
+          },
+          "policy": null
+        },
+        "record_id": "record:default:33333333-3333-4333-8333-333333333333:2026-07-29",
+        "user_id": "33333333-3333-4333-8333-333333333333",
+        "work_date": "2026-07-29"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-sync",
+        "id": "item:batch:default:legacy-import-v1-sync:1",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 540
+          },
+          "policy": null
+        },
+        "record_id": "11111111-1111-4111-8111-111111111111",
+        "user_id": "22222222-2222-4222-8222-222222222222",
+        "work_date": "2026-07-28"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-sync",
+        "id": "item:batch:default:legacy-import-v1-sync:2",
+        "org_id": "default",
+        "preview_snapshot": {
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "invalid",
+            "workMinutes": 0
+          },
+          "row": {
+            "fields": {
+              "attendance_group": "Legacy Golden Team",
+              "empNo": "UNMAPPED-RAW",
+              "firstInAt": "2026-07-29T09:15:00.000Z"
+            },
+            "userId": null,
+            "workDate": "2026-07-29"
+          },
+          "skip": {
+            "reason": "validation"
+          },
+          "warnings": [
+            "Unresolved user identifier (empNo); configure userMap or include userId"
+          ]
+        },
+        "record_id": null,
+        "user_id": null,
+        "work_date": "2026-07-29"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-sync",
+        "id": "item:batch:default:legacy-import-v1-sync:3",
+        "org_id": "default",
+        "preview_snapshot": {
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "invalid",
+            "workMinutes": 0
+          },
+          "row": {
+            "fields": {
+              "attendance_group": "Legacy Golden Team",
+              "empNo": "N001",
+              "firstInAt": "2026-07-29T09:05:00.000Z",
+              "lastOutAt": "2026-07-29T18:10:00.000Z",
+              "status": "normal"
+            },
+            "userId": null,
+            "workDate": "2026-07-29"
+          },
+          "skip": {
+            "reason": "duplicate"
+          },
+          "warnings": [
+            "Duplicate row in payload (same userId + workDate)"
+          ]
+        },
+        "record_id": null,
+        "user_id": "33333333-3333-4333-8333-333333333333",
+        "work_date": "2026-07-29"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-sync-race",
+        "id": "item:batch:default:legacy-import-v1-sync-race:0",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 540
+          },
+          "policy": null
+        },
+        "record_id": "record:default:66666666-6666-4666-8666-666666666666:2026-07-30",
+        "user_id": "66666666-6666-4666-8666-666666666666",
+        "work_date": "2026-07-30"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-async",
+        "id": "item:batch:default:legacy-import-v1-async:0",
+        "org_id": "default",
+        "preview_snapshot": {
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "invalid",
+            "workMinutes": 0
+          },
+          "row": {
+            "fields": {
+              "firstInAt": "2026-07-31T09:05:00.000Z",
+              "lastOutAt": "2026-07-31T18:05:00.000Z",
+              "status": "normal"
+            },
+            "userId": "44444444-4444-4444-8444-444444444444",
+            "workDate": "2026-07-31"
+          },
+          "skip": {
+            "reason": "duplicate"
+          },
+          "warnings": [
+            "Duplicate row in payload (same userId + workDate)"
+          ]
+        },
+        "record_id": null,
+        "user_id": "44444444-4444-4444-8444-444444444444",
+        "work_date": "2026-07-31"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-async",
+        "id": "item:batch:default:legacy-import-v1-async:1",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 540
+          },
+          "policy": null
+        },
+        "record_id": "record:default:44444444-4444-4444-8444-444444444444:2026-07-31",
+        "user_id": "44444444-4444-4444-8444-444444444444",
+        "work_date": "2026-07-31"
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-upload",
+        "id": "item:batch:default:legacy-import-v1-upload:0",
+        "org_id": "default",
+        "preview_snapshot": {
+          "engine": null,
+          "metrics": {
+            "earlyLeaveMinutes": 0,
+            "lateMinutes": 0,
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0,
+            "status": "normal",
+            "workMinutes": 540
+          },
+          "policy": null
+        },
+        "record_id": "record:default:77777777-7777-4777-8777-777777777777:2026-08-01",
+        "user_id": "77777777-7777-4777-8777-777777777777",
+        "work_date": "2026-08-01"
+      }
+    ],
+    "jobs": [
+      {
+        "batch_id": "batch:default:legacy-import-v1-async-race",
+        "created_by": "legacy-golden-admin",
+        "error": null,
+        "id": "job:default:legacy-import-v1-async-race",
+        "idempotency_key": "legacy-import-v1-async-race",
+        "org_id": "default",
+        "payload": {
+          "__importEngine": "standard",
+          "__jobType": "commit",
+          "idempotencyKey": "legacy-import-v1-async-race",
+          "itemsInsertStrategy": "unnest",
+          "recordUpsertStrategy": "unnest",
+          "summary": {
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "elapsedMs": 0,
+            "failedRows": 0,
+            "processedRows": 1
+          }
+        },
+        "progress": 1,
+        "status": "completed",
+        "total": 1
+      },
+      {
+        "batch_id": "batch:default:legacy-import-v1-async",
+        "created_by": "legacy-golden-admin",
+        "error": null,
+        "id": "job:default:legacy-import-v1-async",
+        "idempotency_key": "legacy-import-v1-async",
+        "org_id": "default",
+        "payload": {
+          "__importEngine": "standard",
+          "__jobType": "commit",
+          "idempotencyKey": "legacy-import-v1-async",
+          "itemsInsertStrategy": "unnest",
+          "recordUpsertStrategy": "unnest",
+          "summary": {
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "elapsedMs": 0,
+            "failedRows": 1,
+            "processedRows": 1,
+            "skippedCount": 1,
+            "skippedRows": [
+              {
+                "userId": "44444444-4444-4444-8444-444444444444",
+                "warnings": [
+                  "Duplicate row in payload (same userId + workDate)"
+                ],
+                "workDate": "2026-07-31"
+              }
+            ]
+          }
+        },
+        "progress": 1,
+        "status": "completed",
+        "total": 2
+      }
+    ],
+    "members": [
+      {
+        "group_id": "group:default:legacy golden team",
+        "id": "member:default:legacy golden team:22222222-2222-4222-8222-222222222222",
+        "org_id": "default",
+        "user_id": "22222222-2222-4222-8222-222222222222"
+      },
+      {
+        "group_id": "group:default:legacy golden team",
+        "id": "member:default:legacy golden team:33333333-3333-4333-8333-333333333333",
+        "org_id": "default",
+        "user_id": "33333333-3333-4333-8333-333333333333"
+      },
+      {
+        "group_id": "group:default:legacy upload team",
+        "id": "member:default:legacy upload team:77777777-7777-4777-8777-777777777777",
+        "org_id": "default",
+        "user_id": "77777777-7777-4777-8777-777777777777"
+      }
+    ],
+    "records": [
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-07-28 17:00:00+08",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_workday": true,
+        "last_out_at": "2026-07-29 02:00:00+08",
+        "late_minutes": 0,
+        "meta": {
+          "absence_late_count": 0,
+          "keep": "legacy",
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "profile": {
+            "attendanceGroup": "Legacy Golden Team",
+            "department": "Legacy",
+            "empNo": "M001"
+          },
+          "seeded": true,
+          "severe_late_count": 0,
+          "severe_late_minutes": 0,
+          "source": {
+            "mappingProfileId": null,
+            "source": "manual"
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": null,
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "22222222-2222-4222-8222-222222222222",
+        "work_date": "2026-07-28",
+        "work_minutes": 540
+      },
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-07-29 16:55:00+08",
+        "id": "record:default:33333333-3333-4333-8333-333333333333:2026-07-29",
+        "is_workday": true,
+        "last_out_at": "2026-07-30 02:05:00+08",
+        "late_minutes": 0,
+        "meta": {
+          "absence_late_count": 0,
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "profile": {
+            "attendanceGroup": "Legacy Golden Team",
+            "department": "New",
+            "empNo": "N001"
+          },
+          "severe_late_count": 0,
+          "severe_late_minutes": 0,
+          "source": {
+            "mappingProfileId": null,
+            "source": "manual"
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": "batch:default:legacy-import-v1-sync",
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "33333333-3333-4333-8333-333333333333",
+        "work_date": "2026-07-29",
+        "work_minutes": 550
+      },
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-07-31 17:00:00+08",
+        "id": "record:default:44444444-4444-4444-8444-444444444444:2026-07-31",
+        "is_workday": true,
+        "last_out_at": "2026-08-01 02:00:00+08",
+        "late_minutes": 0,
+        "meta": {
+          "absence_late_count": 0,
+          "clockIn2": null,
+          "clockIn3": null,
+          "clockOut2": null,
+          "clockOut3": null,
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "punchResultIn1": null,
+          "punchResultIn2": null,
+          "punchResultIn3": null,
+          "punchResultOut1": null,
+          "punchResultOut2": null,
+          "punchResultOut3": null,
+          "severe_late_count": 0,
+          "severe_late_minutes": 0,
+          "source": {
+            "mappingProfileId": null,
+            "source": null
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": "batch:default:legacy-import-v1-async",
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "44444444-4444-4444-8444-444444444444",
+        "work_date": "2026-07-31",
+        "work_minutes": 540
+      },
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-07-30 18:00:00+08",
+        "id": "record:default:55555555-5555-4555-8555-555555555555:2026-07-30",
+        "is_workday": true,
+        "last_out_at": "2026-07-31 03:00:00+08",
+        "late_minutes": 50,
+        "meta": {
+          "absence_late_count": 0,
+          "clockIn2": null,
+          "clockIn3": null,
+          "clockOut2": null,
+          "clockOut3": null,
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "punchResultIn1": null,
+          "punchResultIn2": null,
+          "punchResultIn3": null,
+          "punchResultOut1": null,
+          "punchResultOut2": null,
+          "punchResultOut3": null,
+          "severe_late_count": 1,
+          "severe_late_minutes": 50,
+          "source": {
+            "mappingProfileId": null,
+            "source": null
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": "batch:default:legacy-import-v1-async-race",
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "55555555-5555-4555-8555-555555555555",
+        "work_date": "2026-07-30",
+        "work_minutes": 540
+      },
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-07-30 17:00:00+08",
+        "id": "record:default:66666666-6666-4666-8666-666666666666:2026-07-30",
+        "is_workday": true,
+        "last_out_at": "2026-07-31 02:00:00+08",
+        "late_minutes": 0,
+        "meta": {
+          "absence_late_count": 0,
+          "clockIn2": null,
+          "clockIn3": null,
+          "clockOut2": null,
+          "clockOut3": null,
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "punchResultIn1": null,
+          "punchResultIn2": null,
+          "punchResultIn3": null,
+          "punchResultOut1": null,
+          "punchResultOut2": null,
+          "punchResultOut3": null,
+          "severe_late_count": 0,
+          "severe_late_minutes": 0,
+          "source": {
+            "mappingProfileId": null,
+            "source": null
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": "batch:default:legacy-import-v1-sync-race",
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "66666666-6666-4666-8666-666666666666",
+        "work_date": "2026-07-30",
+        "work_minutes": 540
+      },
+      {
+        "early_leave_minutes": 0,
+        "first_in_at": "2026-08-01 17:00:00+08",
+        "id": "record:default:77777777-7777-4777-8777-777777777777:2026-08-01",
+        "is_workday": false,
+        "last_out_at": "2026-08-02 02:00:00+08",
+        "late_minutes": 0,
+        "meta": {
+          "absence_late_count": 0,
+          "clockIn2": null,
+          "clockIn3": null,
+          "clockOut2": null,
+          "clockOut3": null,
+          "metrics": {
+            "leaveMinutes": 0,
+            "overtimeMinutes": 0
+          },
+          "profile": {
+            "attendanceGroup": "Legacy Upload Team",
+            "empNo": "U001"
+          },
+          "punchResultIn1": null,
+          "punchResultIn2": null,
+          "punchResultIn3": null,
+          "punchResultOut1": null,
+          "punchResultOut2": null,
+          "punchResultOut3": null,
+          "severe_late_count": 0,
+          "severe_late_minutes": 0,
+          "source": {
+            "mappingProfileId": null,
+            "source": null
+          }
+        },
+        "org_id": "default",
+        "source_batch_id": "batch:default:legacy-import-v1-upload",
+        "status": "normal",
+        "timezone": "UTC",
+        "user_id": "77777777-7777-4777-8777-777777777777",
+        "work_date": "2026-08-01",
+        "work_minutes": 540
+      }
+    ]
+  },
+  "fixedClock": "2026-07-30T12:00:00.000Z",
+  "fixtureName": "legacy-import-v1",
+  "governingSha": "1055e543a3680be9f37462de23483bf61ad4610c",
+  "schemaVersion": 1,
+  "sync": {
+    "directEarlyReplay": {
+      "body": {
+        "data": {
+          "batchId": "batch:default:legacy-import-v1-sync",
+          "csvWarnings": [],
+          "elapsedMs": 0,
+          "engine": "standard",
+          "failedRows": 2,
+          "groupWarnings": [],
+          "idempotent": true,
+          "imported": 2,
+          "items": [],
+          "meta": {
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "compatibility": "kept",
+            "engine": "standard",
+            "fixture": "legacy-import-v1",
+            "groupCreated": 1,
+            "groupMembersAdded": 2,
+            "groupSync": {
+              "autoAssignMembers": true,
+              "autoCreate": true,
+              "ruleSetId": null,
+              "timezone": "UTC"
+            },
+            "idempotencyKey": "legacy-import-v1-sync",
+            "itemsInsertStrategy": "unnest",
+            "mappingProfileId": null,
+            "recordUpsertStrategy": "unnest",
+            "skippedCount": 2,
+            "skippedRows": [
+              {
+                "userId": "33333333-3333-4333-8333-333333333333",
+                "warnings": [
+                  "Duplicate row in payload (same userId + workDate)"
+                ],
+                "workDate": "2026-07-29"
+              },
+              {
+                "userId": null,
+                "warnings": [
+                  "Unresolved user identifier (empNo); configure userMap or include userId"
+                ],
+                "workDate": "2026-07-29"
+              }
+            ]
+          },
+          "processedRows": 2,
+          "recordUpsertStrategy": "unnest",
+          "skipped": []
+        },
+        "ok": true
+      },
+      "status": 200
+    },
+    "firstExecution": {
+      "body": {
+        "data": {
+          "batchId": "batch:default:legacy-import-v1-sync",
+          "csvWarnings": [],
+          "elapsedMs": 0,
+          "engine": "standard",
+          "failedRows": 2,
+          "groupWarnings": [],
+          "imported": 2,
+          "items": [
+            {
+              "engine": null,
+              "id": "11111111-1111-4111-8111-111111111111",
+              "userId": "22222222-2222-4222-8222-222222222222",
+              "workDate": "2026-07-28"
+            }
+          ],
+          "itemsTruncated": true,
+          "meta": {
+            "chunkConfig": {
+              "itemsChunkSize": 300,
+              "recordsChunkSize": 200
+            },
+            "compatibility": "kept",
+            "engine": "standard",
+            "fixture": "legacy-import-v1",
+            "groupCreated": 1,
+            "groupMembersAdded": 2,
+            "groupSync": {
+              "autoAssignMembers": true,
+              "autoCreate": true,
+              "ruleSetId": null,
+              "timezone": "UTC"
+            },
+            "idempotencyKey": "legacy-import-v1-sync",
+            "itemsInsertStrategy": "unnest",
+            "mappingProfileId": null,
+            "recordUpsertStrategy": "unnest",
+            "skippedCount": 2,
+            "skippedRows": [
+              {
+                "userId": "33333333-3333-4333-8333-333333333333",
+                "warnings": [
+                  "Duplicate row in payload (same userId + workDate)"
+                ],
+                "workDate": "2026-07-29"
+              },
+              {
+                "userId": null,
+                "warnings": [
+                  "Unresolved user identifier (empNo); configure userMap or include userId"
+                ],
+                "workDate": "2026-07-29"
+              }
+            ]
+          },
+          "processedRows": 2,
+          "recordUpsertStrategy": "unnest",
+          "skipped": [
+            {
+              "userId": "33333333-3333-4333-8333-333333333333",
+              "warnings": [
+                "Duplicate row in payload (same userId + workDate)"
+              ],
+              "workDate": "2026-07-29"
+            },
+            {
+              "userId": null,
+              "warnings": [
+                "Unresolved user identifier (empNo); configure userMap or include userId"
+              ],
+              "workDate": "2026-07-29"
+            }
+          ]
+        },
+        "ok": true,
+        "success": true
+      },
+      "status": 200
+    },
+    "lockedRace": [
+      {
+        "body": {
+          "data": {
+            "batchId": "batch:default:legacy-import-v1-sync-race",
+            "csvWarnings": [],
+            "elapsedMs": 0,
+            "engine": "standard",
+            "failedRows": 0,
+            "groupWarnings": [],
+            "imported": 1,
+            "items": [],
+            "itemsTruncated": false,
+            "meta": {
+              "chunkConfig": {
+                "itemsChunkSize": 300,
+                "recordsChunkSize": 200
+              },
+              "engine": "standard",
+              "groupCreated": 0,
+              "idempotencyKey": "legacy-import-v1-sync-race",
+              "itemsInsertStrategy": "unnest",
+              "mappingProfileId": null,
+              "recordUpsertStrategy": "unnest"
+            },
+            "processedRows": 1,
+            "recordUpsertStrategy": "unnest",
+            "skipped": []
+          },
+          "ok": true,
+          "success": true
+        },
+        "status": 200
+      },
+      {
+        "body": {
+          "data": {
+            "batchId": "batch:default:legacy-import-v1-sync-race",
+            "csvWarnings": [],
+            "elapsedMs": 0,
+            "engine": "standard",
+            "failedRows": 0,
+            "groupWarnings": [],
+            "idempotent": true,
+            "imported": 1,
+            "items": [],
+            "meta": {
+              "chunkConfig": {
+                "itemsChunkSize": 300,
+                "recordsChunkSize": 200
+              },
+              "engine": "standard",
+              "groupCreated": 0,
+              "idempotencyKey": "legacy-import-v1-sync-race",
+              "itemsInsertStrategy": "unnest",
+              "mappingProfileId": null,
+              "recordUpsertStrategy": "unnest"
+            },
+            "processedRows": 1,
+            "recordUpsertStrategy": "unnest",
+            "skipped": []
+          },
+          "ok": true
+        },
+        "status": 200
+      }
+    ]
+  },
+  "uploadCleanup": {
+    "csvPresent": false,
+    "fileId": "upload-file:default:legacy-import-v1-upload",
+    "intent": {
+      "expectedOwnerOrgId": "default",
+      "kind": "uploaded_import_file"
+    },
+    "metaPresent": false
+  },
+  "uuidSource": "sha256(legacy-import-v1:<ordinal>)",
+  "zeroUnexpectedW4Rows": true
+}

@@ -9,6 +9,7 @@
     stripe
     highlight-current-row
     :row-key="showSelection ? resolveRowKey : undefined"
+    :row-class-name="rowClassName"
     @row-click="$emit('row-click', $event)"
     @selection-change="$emit('selection-change', $event)"
   >
@@ -18,8 +19,8 @@
       width="44"
       :selectable="selectable"
     />
-    <el-table-column prop="requestNo" label="审批编号" width="180" />
-    <el-table-column label="标题" min-width="200">
+    <el-table-column prop="requestNo" :label="t.colRequestNo" width="180" />
+    <el-table-column :label="t.colTitle" min-width="200">
       <!-- B2-01: key-field summary — a muted second line under the title so common items are
            decidable without opening (see useApprovalListFieldSummary.ts, owned by the parent
            view and passed down here as a resolved `summaryLineFor(row)` function since its
@@ -43,38 +44,38 @@
         </div>
       </template>
     </el-table-column>
-    <el-table-column label="发起人" width="120">
+    <el-table-column :label="t.colRequester" width="120">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
         {{ row.requester?.name ?? '-' }}
       </template>
     </el-table-column>
-    <el-table-column label="状态" width="100">
+    <el-table-column :label="t.colStatus" width="100">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
-        <StatusTag domain="approvalInstance" :status="row.status" />
+        <StatusTag v-bind="closeReasons.tagProps(row)" />
       </template>
     </el-table-column>
-    <el-table-column label="发起时间" width="180">
+    <el-table-column :label="t.colCreatedAt" width="180">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
         {{ formatDate(row.createdAt) }}
       </template>
     </el-table-column>
     <!-- B1-03 (part 2): 已等待 aging — glanceable severity (>3d warn / >7d urgent), pending-tab
          only. The 第 X/Y 步 sub-line only renders when both numbers are present. -->
-    <el-table-column v-if="showWaitColumn" label="已等待" width="140">
+    <el-table-column v-if="showWaitColumn" :label="t.colWaiting" width="140">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
-        <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt) }}</span>
+        <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt, isZh) }}</span>
         <div
           v-if="row.currentStep != null && row.totalSteps != null"
           class="approval-center__wait-progress"
         >
-          第 {{ row.currentStep }}/{{ row.totalSteps }} 步
+          {{ stepProgressText(row.currentStep, row.totalSteps) }}
         </div>
       </template>
     </el-table-column>
     <!-- Per-tab action column content differs materially (pending: inline approve/reject;
          mine: 已等待 hint + 催办; cc/completed: none) so the parent supplies it via slot rather
          than four boolean props; omitting the slot omits the column entirely (cc/completed). -->
-    <el-table-column v-if="$slots.actions" label="操作" :width="actionsWidth" fixed="right">
+    <el-table-column v-if="$slots.actions" :label="t.colActions" :width="actionsWidth" fixed="right">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
         <slot name="actions" :row="row" />
       </template>
@@ -86,9 +87,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { UnifiedApprovalDTO } from '../../types/approval'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { useLocale } from '../../composables/useLocale'
+import { CENTER_TABLE_EN, CENTER_TABLE_ZH } from './approvalCenterLabels'
+import { useCancelRoundCloseReasons } from '../../approvals/useCancelRoundCloseReasons'
 import StatusTag from '../../components/status/StatusTag.vue'
 
 // UF-5 (ui-foundation-design-lock-20260706.md §6): the shared table body behind ApprovalCenterView's
@@ -103,7 +107,14 @@ import StatusTag from '../../components/status/StatusTag.vue'
 //     column at all on those two tabs)
 // Presentation-only: every data-testid, handler, and event lives in the parent's slot content /
 // prop wiring, unchanged.
-withDefaults(
+// O-8 / F8-1: table chrome follows the shell locale (same singleton the parent view reads).
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? CENTER_TABLE_ZH : CENTER_TABLE_EN))
+function stepProgressText(current: number | null | undefined, total: number | null | undefined): string {
+  return isZh.value ? `第 ${current}/${total} 步` : `Step ${current}/${total}`
+}
+
+const props = withDefaults(
   defineProps<{
     rows: UnifiedApprovalDTO[]
     loading: boolean
@@ -124,6 +135,12 @@ withDefaults(
      * tab, since `isRead` is only ever populated there.
      */
     showUnreadDot?: boolean
+    /**
+     * UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail
+     * pane's currently-selected row id. `undefined`/`null` (every caller before UI-7, and every
+     * caller on narrower widths/mobile) renders no marker class at all — purely additive.
+     */
+    selectedRowId?: string | null
   }>(),
   {
     showSelection: false,
@@ -131,6 +148,7 @@ withDefaults(
     showWaitColumn: false,
     actionsWidth: 150,
     showUnreadDot: false,
+    selectedRowId: null,
   },
 )
 
@@ -141,15 +159,30 @@ defineEmits<{
 
 const tableRef = ref<{ clearSelection: () => void } | null>(null)
 
+// 撤销锁 P-2: a cancel-round row renders through the `cancelRound` domain (approvals/cancelRound.ts);
+// every other row keeps the `approvalInstance` domain exactly as before. A rejected cancel-round row
+// needs the close-reason criterion the list DTO does not carry — see useCancelRoundCloseReasons.ts.
+const closeReasons = useCancelRoundCloseReasons()
+watch(() => props.rows, (rows) => closeReasons.ensure(rows), { immediate: true })
+
 // Only ever bound when `showSelection` is true (the other three tabs never had a `row-key`
 // attribute on their `<el-table>` at all).
 function resolveRowKey(row: UnifiedApprovalDTO): string {
   return row.id
 }
 
+// UI-7: additive selected-row marker (blue border), keyed off `selectedRowId` — returns '' (no
+// class) whenever the prop is unset, so this is inert for every pre-UI-7 caller and every
+// narrower-than-wide-desktop / mobile render (ApprovalCenterView only ever passes a non-null id
+// once the master-detail pane is actually open).
+function rowClassName({ row }: { row: UnifiedApprovalDTO; rowIndex: number }): string {
+  return props.selectedRowId && row.id === props.selectedRowId ? 'approval-center-row--selected' : ''
+}
+
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  // O-8 / F8-1: same date locale rule as ApprovalDetailView's formatDate.
+  return new Date(dateStr).toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 // B1-03: 已等待 aging severity class — shared by the 已等待 column above.
@@ -216,5 +249,15 @@ defineExpose({
   margin-top: 2px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): master-detail pane selection —
+   a left blue border on the row currently loaded into the detail pane (Feishu-style selected
+   card), scoped via `:deep` since `row-class-name` applies the class to el-table's own internal
+   `<tr>`, outside this component's template. Inert unless `selectedRowId` is passed (see
+   `rowClassName` above). */
+:deep(.approval-center-row--selected) {
+  box-shadow: inset 3px 0 0 var(--ms-color-primary);
+  background-color: var(--el-color-primary-light-9);
 }
 </style>

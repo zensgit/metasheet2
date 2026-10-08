@@ -5,6 +5,10 @@
 // and cleanup. It restores attendance settings and deletes rows bearing the
 // unique synthetic user/group/shift prefix.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import { randomUUID } from 'crypto'
 import pg from 'pg'
 
@@ -264,7 +268,20 @@ async function cleanup() {
     const restoreRes = await api('/api/attendance/settings', { method: 'PUT', body: originalSettings }).catch(() => null)
     restoreStatus = restoreRes?.status ?? null
   }
-  await q('DELETE FROM attendance_records WHERE org_id = $1 AND user_id LIKE $2', [ORG_ID, `${USER_PREFIX}%`])
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-0000000000b5',
+    ticket: 'STAGING-M5',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIdPrefix: USER_PREFIX }, { retireRecord: opsRetirementExecutor })
   await q('DELETE FROM attendance_events WHERE org_id = $1 AND user_id LIKE $2', [ORG_ID, `${USER_PREFIX}%`])
   await q(
     `DELETE FROM attendance_shift_assignments

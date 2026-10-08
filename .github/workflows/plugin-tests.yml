@@ -75,6 +75,17 @@ jobs:
         run: |
           pnpm run verify:integration-k3wise:poc
 
+      # REVIEW P2-1: the rehearsal harness asserts the two guards the owner's HOLD points 3 and 4
+      # depend on (the mock's session gate, and the call logger the workflow's Submit/Audit
+      # absence-check reads). It shipped in ZERO workflows, so those guards' only behavioural
+      # evidence was ungated — a coverage regression, not a coverage gap. Gated here alongside
+      # its sibling mock-server test.
+      - name: Run K3 WISE rehearsal harness contract tests
+        run: |
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
       - name: Run on-prem package apply and archive contract tests
         run: |
           node --test \
@@ -88,6 +99,12 @@ jobs:
       - name: Run DingTalk closeout env-contract test (DT-CLOSE-02)
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
+          node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
+          node --test scripts/ops/directory-grant-table-ci-wiring.test.mjs
+          node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
+          node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
+          node --test scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs
+          node --test scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs
 
       - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
         run: |
@@ -97,42 +114,36 @@ jobs:
         run: |
           node --test scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs
 
+      - name: Run DingTalk OAuth-stability ARG_MAX payload-handoff test (DT-CLOSE-01C)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
+
       - name: Run DingTalk OAuth-stability summary + workflow contract tests (DT-CLOSE-01B)
         run: |
           node --test \
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
-  stock-prep-powershell51:
-    name: stock-prep PowerShell 5.1 acceptance
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-
-      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
-      # different native-stderr semantics and cannot stand in for the target shell contract.
-      - name: Run target-shell smoke capture regression
-        shell: powershell
-        run: |
-          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   test:
-    runs-on: ubuntu-latest
+    # Runner routing pilot (same shape as PR #4449 for web-tests). Set the repository variable
+    # MS2_PLUGIN_RUNNER to a self-hosted runner label to move this job off GitHub-hosted runners;
+    # unset it for instant fallback to ubuntu-latest. This job is the repository's biggest Actions
+    # consumer (~56 runner-minutes per run on the 20.x leg; ~62% of a busy day's minutes), which
+    # started to bill when the repository went private on 2026-10-07. Default behaviour is
+    # unchanged while the variable is unset.
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        # Node 18 reached end-of-life on 2025-04-30 and everything this repo ships runs on Node 20
+        # (Dockerfile.backend / Dockerfile.frontend are node:20-slim; the on-prem runbooks require
+        # Node 20). The 18.x leg cost ~27 runner-minutes per run and was never a required check;
+        # `test (20.x)` is. It stays a one-entry matrix on purpose: the produced check name must
+        # remain exactly `test (20.x)` (branch protection names it), and a plain job would be
+        # reported as `test`. Dropped 2026-10-07 when the repository went private and Actions
+        # minutes started to bill.
+        node-version: [20.x]
 
     steps:
       - name: Checkout repository
@@ -148,7 +159,175 @@ jobs:
       # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
-        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
+
+      # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
+      # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
+      - name: W0 exact-anchor L6/L7 CI wiring contract
+        run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
+
+      # Time Machine D2a CI two-point wiring contract: the archive-catalog proof must remain
+      # excluded from no-DB collection and named exactly once by the multitable real-DB step.
+      # This pre-install half is dependency-free; the real Vitest sentinel runs after install.
+      - name: Time Machine D2a archive-catalog CI wiring contract
+        run: node --test scripts/ops/multitable-d2-archive-ci-wiring.test.mjs
+
+      # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
+      # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
+      - name: Production maintenance SSH host-identity contract (required lane)
+        id: production-maintenance-ssh-host-identity-contract
+        if: matrix.node-version == '20.x'
+        run: node --test scripts/ops/attendance-remote-docker-gc-workflow-contract.test.mjs
+
+      # DingTalk production-readiness inventory (manual-only, values-free, read-only) + OAuth
+      # stability SSH host-identity hardening. Wired into required test (20.x) so host-key
+      # pinning and values-free/read-only rails cannot regress behind a green PR.
+      - name: DingTalk production-readiness inventory contract (required lane)
+        id: dingtalk-production-readiness-inventory-contract
+        if: matrix.node-version == '20.x'
+        run: |
+          node --test scripts/ops/dingtalk-production-readiness-inventory-contract.test.mjs
+          node --test scripts/ops/dingtalk-interactive-card-stream-staging-uat-contract.test.mjs
+          node --test scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
+
+      # REVIEW NIT-2 (exact-head round): these two suites already ran in `k3wise-offline-poc`, but
+      # that job's check is "K3 WISE offline PoC", which is NOT one of main's required contexts --
+      # so a red there did not block a merge. The suites carry the ONLY mechanical guard on the
+      # rehearsal driver's step predicates, including the one that discriminates the owner's
+      # reported P1. A guard that cannot block is documentation, not a gate.
+      #
+      # Invoked here as well, in the REQUIRED `test` job (test (20.x) is a required context), so
+      # the guard actually gates. The duplicate run costs ~1s and is deliberate: leaving the
+      # original in place keeps the offline-PoC job self-contained.
+      - name: K3 WISE rehearsal driver contract (required lane)
+        run: |
+          node --test \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
+            scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
+
+      # #4802 — SEVEN K3/stock-prep-line `scripts/ops` suites executed by NOTHING. A repo-wide sweep
+      # (not just this workflow's own list) found these seven `*.test.mjs` files referenced by no
+      # workflow, no package.json script, and no shell script. The single non-docs hit,
+      # scripts/ops/multitable-onprem-package-verify.sh:532, is a `search_fixed_string` assertion
+      # that a COMMAND STRING appears in a document — it does not execute the suite.
+      #
+      # All seven pass. Inert, not broken — which is worse, because the directory listing reads like
+      # coverage. The one that makes this urgent is
+      # `multitable-onprem-package-verify-k3-helper-contract.test.mjs`: it guards the CONTENT
+      # CONTRACT of the on-prem deployment package (the thing the physical-machine window installs).
+      # Measured on #4802: dropping `packages/mssql-readonly-utils` — the shared helper package the
+      # K3 SQL Server executor seam resolves against — from
+      # `multitable-onprem-package-build.sh`'s payload list and then re-pinning the provenance
+      # manifest as usual REDS that suite and NOTHING ELSE (161 chained suites RED = 0). i.e. an
+      # on-prem package missing that helper shipped GREEN through every executed check.
+      #
+      # Wired into the REQUIRED `test (20.x)` context, not `k3wise-offline-poc` (whose check name
+      # "K3 WISE offline PoC" is not one of main's required contexts, so a red there does not block
+      # a merge — the owner's standard: "写进 workflow 但未进入 required context 不算完成").
+      #
+      # `if: matrix.node-version == '20.x'` is deliberate and is itself byte-pinned by the contract
+      # (see below): 20.x IS the required leg, and flipping this string to '18.x' is mutation class
+      # #1 in scripts/ops/ci-realdb-step-contract.mjs's header — the step disappears from the
+      # required leg while every membership assertion stays green.
+      #
+      # All seven are pure node:test over node: builtins + sibling .mjs modules (the SSH-fallback
+      # legs shim a fake `ssh` onto PATH), so this runs before the pnpm install, like the steps
+      # above it. This step's `id`, its `if`, the absence of `continue-on-error`, and the presence
+      # of ALL SEVEN paths as whole-file args of a real `node --test` invocation are pinned by
+      # scripts/ops/integration-guard-required-wiring-contract.test.mjs (Pin 18), which runs in this
+      # same required context and in `integration-guard`.
+      - name: Run K3-line ops suites (required lane, #4802)
+        id: k3-line-ops-suites
+        if: matrix.node-version == '20.x'
+        run: |
+          node --test \
+            scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \
+            scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \
+            scripts/ops/integration-k3wise-signoff-gate.test.mjs \
+            scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \
+            scripts/ops/resolve-k3wise-smoke-token.test.mjs
+
+      # Same promotion, same reason (adversarial review of #4646, P3): the D3 deprovision-ledger
+      # CI-wiring contract is the ONLY mechanical guard proving the ledger real-DB suites stay in
+      # the required run-list and excluded from the no-DB job. Its original home is the
+      # k3wise-offline-poc job, whose check cannot block a merge — invoked here as well so it
+      # actually gates. Duplicate run costs <1s; the original stays for job self-containment.
+      - name: Directory deprovision ledger CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-deprovision-ledger-ci-wiring.test.mjs
+
+      # Same promotion (post-merge review of #4846, P2): the activation-source-lock wiring
+      # contract's original home is the k3wise-offline-poc job, whose check cannot block a merge,
+      # so de-listing the suite + repinning would pass all 9 required checks while the real-DB
+      # golden silently stops running. Invoked here in the required test lane so it actually gates.
+      - name: Directory activation source-lock CI-wiring contract (required lane)
+        run: node --test scripts/ops/directory-activation-source-lock-ci-wiring.test.mjs
+
+      # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
+      # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
+      # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes
+      # .github/workflows/integration-guard.yml's produced `integration-guard` check safe to later mark
+      # as a required context:
+      #   - YAML-shape: on.pull_request has NO paths: filter, on.merge_group exists, the job is present
+      #     under the exact expected name with no matrix suffix, the job/classifier/real-branch/
+      #     terminal-assertion steps carry none of `if` (job-level)/`needs`/`continue-on-error`, the
+      #     classifier step invokes the extracted script (not inline bash), and the terminal safety-net
+      #     step exists with `if: always()` wired to the three branch steps' outcomes;
+      #   - behavioural: scripts/ops/integration-guard-classify.mjs's classify() is driven directly with
+      #     synthetic plugin-only/web-only/both/neither file lists (including a deeply-nested plugin
+      #     path, closing a glob-semantics regression class), and scripts/ops/integration-guard-assert-
+      #     branch.mjs's assertBranch() is driven directly with the full relevant/outcome state matrix
+      #     (including `relevant: 'unknown'`) — these do not depend on GitHub Actions actually running.
+      # Deliberately NOT a copy of the integration suite itself — that stays in integration-guard.yml
+      # only (owner ruling: two copies would drift apart). See scripts/ops/integration-guard-required-
+      # wiring-contract.test.mjs for the full rationale and an explicit note on what each layer can and
+      # cannot prove.
+      #
+      # #4614 P1 (owner review, 2026-07-26): before this step carried `id: integration-guard-contract`,
+      # this was the contract's ONLY executable caller, and neither this workflow's own path nor the
+      # contract test's own path was in integration-guard.yml's guarded-path roster — so deleting this
+      # one step made this job silently stop running the contract WHILE integration-guard.yml classified
+      # the change as out-of-scope and no-op'd green: both gates green, contract fully disconnected.
+      # Closed by a two-point wiring: integration-guard.yml now ALSO runs this same contract file
+      # unconditionally from its own job (id: contract-self-check), and the contract itself pins THIS
+      # step's presence (by this exact `id:`) in reverse — deleting either call site now reds the
+      # OTHER caller's copy of the contract on its own specific pin. See integration-guard.yml's header
+      # for the full account.
+      #
+      # #4614 P1 (sixth review round, 2026-07-26) — SUBTEST-COUNT FLOOR. `node --test` treats a child
+      # process that exits 0 as a PASSING FILE. The contract statically imports four extracted modules
+      # (integration-guard-assert-branch/-classify/-guarded-paths/-resolve-diff.mjs) at the top of the
+      # file, so a single `process.exit(0)` inserted at the top of ANY of the four aborts the test file
+      # during import evaluation, before a single subtest body runs — and the whole contract collapses
+      # to `tests 1 / pass 1 / fail 0`, exit 0. Nothing pinned the expected subtest count, so BOTH
+      # callers of this contract reported that collapse as green. The floor below is that missing pin:
+      # a run that reports fewer than MIN_CONTRACT_TESTS subtests fails the step. Keep this block
+      # BYTE-IDENTICAL to the `contract-self-check` step in .github/workflows/integration-guard.yml —
+      # the contract exact-pins BOTH copies against the same literal (not against each other, so
+      # mutating both copies identically does not stay green).
+      - name: Integration Guard required-wiring contract
+        id: integration-guard-contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN_CONTRACT_TESTS=62
+          if ! contract_out="$(node --test scripts/ops/integration-guard-required-wiring-contract.test.mjs 2>&1)"; then
+            printf '%s\n' "$contract_out"
+            echo "integration-guard contract: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$contract_out"
+          contract_tests="$(printf '%s\n' "$contract_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$contract_tests" ]; then
+            echo "integration-guard contract: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$contract_tests" -lt "$MIN_CONTRACT_TESTS" ]; then
+            echo "integration-guard contract: only $contract_tests subtests ran, expected at least $MIN_CONTRACT_TESTS — an import-time abort in one of the extracted .mjs modules collapses this contract into a passing 1-subtest file" >&2
+            exit 1
+          fi
+          echo "integration-guard contract: $contract_tests subtests ran (floor $MIN_CONTRACT_TESTS)."
 
       # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must
       # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
@@ -174,11 +353,282 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
+      # Approval form grouping design lock v2.13 phase 2 slice A-3 — CI two-point wiring contract
+      # (no DB): the backfill-batch DDL schema suite (design-gate changesRequired #4 FK proof)
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the atgbbl_link_fk CASCADE proof.
+      - name: A3 backfill-schema CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs
+
+      # Same slice, W7 preview unit — the read-only `previewApprovalTemplateGroupBackfill` suite
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the "preview never writes" proof.
+      - name: A3 backfill-preview CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs
+
+      # Same slice, W8 execute unit — the write `executeApprovalTemplateGroupBackfill` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the changesRequired #2/#3 idempotency and
+      # cross-verification proofs.
+      - name: A3 backfill-execute CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs
+
+      # Same slice, W9 rollback unit — the `rollbackApprovalTemplateGroupBackfillBatch` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the §4.2 token-match / §4.3
+      # created_new+remaining=0 archive-precision proofs.
+      - name: A3 backfill-rollback CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs
+
+      # Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5) — the read-only
+      # `listApprovalTemplateGroupBackfillBatches` suite must stay wired into BOTH
+      # vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step). Dropping either
+      # point silently disables the ordering/pagination/org-scoping/rolledBackAt-round-trip proofs
+      # — the only reachability path to a rollback-able batchId once execute's own response is gone.
+      - name: A3 backfill-batches-list CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
+
+      # Same slice, batch DDL `down()` data-retention guard (candidate, not yet ratified) — round-2
+      # implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): this suite
+      # existed since round 1 but was deliberately deferred out of both vitest.config.ts (exclude)
+      # and this real-DB step while round 1's own hard constraint required plugin-tests.yml/s6a to
+      # stay byte-identical that round. Wired here (with the allowlist exemption's removal and the
+      # s6a re-pin, same commit). Dropping either point silently disables the fail-closed/strictness/
+      # 42P01-regression proofs.
+      - name: A3 backfill-down-guard CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+
+      # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
+      # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      - name: B5-a routing-policy CI wiring contract
+        run: node --test scripts/ops/b5a-routing-policy-ci-wiring.test.mjs
+
+      # E-learning V0.1 L0-F3A: content/assessment schema gate two-point wiring (no DB).
+      # The real-Postgres suite must stay excluded from the no-DB job AND named as a
+      # whole-file arg of the 20.x step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning V0.1 content/assessment CI wiring contract
+        run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
+
+      # E-learning L0 jobs claim-lease CI two-point wiring (no DB): the real-Postgres
+      # suite must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L0 jobs CI wiring contract
+        run: node --test scripts/ops/elearning-jobs-ci-wiring.test.mjs
+
+      # E-learning L2 batch assignment CI two-point wiring: focused units stay
+      # in the no-DB canary and both real-Postgres suites run post-migrate.
+      - name: E-learning L2 batch assignment CI wiring contract
+        run: node --test scripts/ops/elearning-batch-assignment-ci-wiring.test.mjs
+
+      # E-learning L2 B1 assignment lifecycle CI two-point wiring: focused
+      # units stay in the no-DB canary and the real-Postgres suite runs
+      # post-migrate.
+      - name: E-learning L2 assignment lifecycle CI wiring contract
+        run: node --test scripts/ops/elearning-assignment-lifecycle-ci-wiring.test.mjs
+
+      # E-learning L2 training-plan CI two-point wiring: focused units stay in
+      # the no-DB canary and the real-Postgres suite runs post-migrate.
+      - name: E-learning L2 training-plan CI wiring contract
+        run: node --test scripts/ops/elearning-training-plan-ci-wiring.test.mjs
+
+      # E-learning L2 atomic plan-assignment CI two-point wiring: focused units
+      # stay in the no-DB canary; the PostgreSQL suite runs after migrations.
+      - name: E-learning L2 plan-assignment CI wiring contract
+        run: node --test scripts/ops/elearning-training-plan-assignment-ci-wiring.test.mjs
+
+      # E-learning L2 delegated administration CI wiring: focused ACL/scope
+      # units stay in the no-DB canary; the PostgreSQL suite runs post-migrate.
+      - name: E-learning L2 admin-scope ACL CI wiring contract
+        run: node --test scripts/ops/elearning-admin-access-ci-wiring.test.mjs
+
+      # E-learning L2 durable notification-intent CI wiring: the internal unit
+      # stays in the no-DB canary and the ledger/FK/concurrency suite runs only
+      # after migrations on real PostgreSQL. This slice sends no notification.
+      - name: E-learning L2 notification-delivery CI wiring contract
+        run: node --test scripts/ops/elearning-notification-delivery-ci-wiring.test.mjs
+
+      # E-learning L2 notification claim-lease worker CI wiring (no DB): the
+      # plugin kernel stays in the package chain and the real-Postgres suite
+      # must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L2 notification-worker CI wiring contract
+        run: node --test scripts/ops/elearning-notification-worker-ci-wiring.test.mjs
+
+      # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
+      # excluded) and named as a whole-file arg of the unit canary; real-DB
+      # suites stay in the post-migrate 20.x steps; frontend specs stay in
+      # elearning-web-guard.yml and run-required-web-tests.sh.
+      - name: E-learning V0.1 media CI wiring contract
+        run: node --test scripts/ops/elearning-media-ci-wiring.test.mjs
+
+      # E-learning V0.1 auth/tenant/RBAC gate wiring (no DB): dedicated config +
+      # setup + whole-file real JWT suite must stay pinned on the 20.x post-migrate
+      # step. Dropping the contract, swapping to a name filter, or folding the
+      # suite into vitest.integration.config.ts silently disables the proof.
+      - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
+        run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
+
+      # Tasks auth gate wiring (no DB): dedicated config + setup + whole-file
+      # gate must stay pinned on the 20.x post-migrate step. Runs before
+      # install so dropping the step fails the required check without a build.
+      - name: Tasks auth CI wiring contract
+        run: node --test scripts/ops/tasks-auth-ci-wiring.test.mjs
+
+      # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
+      # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      - name: B5-b routing-resolver CI wiring contract
+        run: node --test scripts/ops/b5b-routing-resolver-ci-wiring.test.mjs
+
+      # B5-b P1 fail-close CI two-point wiring contract (no DB).
+      - name: B5-b fail-close CI wiring contract
+        run: node --test scripts/ops/b5b-failclose-ci-wiring.test.mjs
+
+      # B5-c CI two-point wiring contract (no DB).
+      - name: B5-c routing-routes CI wiring contract
+        run: node --test scripts/ops/b5c-routing-routes-ci-wiring.test.mjs
+
+      # B6 CI two-point wiring contract (no DB).
+      - name: B6 equivalence CI wiring contract
+        run: node --test scripts/ops/b6-equivalence-ci-wiring.test.mjs
+
+      # B7 CI two-point wiring contract (no DB).
+      - name: B7 reconciliation CI wiring contract
+        run: node --test scripts/ops/b7-reconciliation-ci-wiring.test.mjs
+
+      # B7 owner-round CI two-point wiring contract (no DB): admin routes + Q6 sync-hook suites.
+      - name: B7 round-2 CI wiring contract
+        run: node --test scripts/ops/b7-round2-ci-wiring.test.mjs
+
+      # T1 CI two-point wiring contract (no DB): the provider-org-transfer suite must stay wired
+      # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      # Dropping either point silently disables the transfer state-machine + FK-backstop proof.
+      - name: T1 org-transfer CI wiring contract
+        run: node --test scripts/ops/t1-org-transfer-ci-wiring.test.mjs
+
+      # T2 CI two-point wiring contract (no DB): the source-freeze suite must stay wired into
+      # BOTH vitest.config.ts (exclude) AND plugin-tests.yml (approval real-DB step). Dropping
+      # either point silently disables the §12.2 freeze proof.
+      - name: T2 source-freeze CI wiring contract
+        run: node --test scripts/ops/t2-source-freeze-ci-wiring.test.mjs
+
+      # T2-Gate CI contracts (no DB): (1) collision-mechanism suite two-point wiring —
+      # exact quoted path inside test.exclude + whole-file arg inside the named
+      # "Run approval real-DB integration" step (DATABASE_URL + vitest.integration.config.ts);
+      # (2) values-free runbook contract — closed booleans only (duplicate_key_detected /
+      # expected_constraint_detected), never raw error_message / err-head; provenance
+      # (SHA, date/actor, internal integration ids) is allowed.
+      # Dropping either contract silently disables the §3.4 mechanism/evidence gate.
+      - name: T2-Gate collision-mechanism CI wiring contract
+        run: node --test scripts/ops/t2gate-collision-mechanism-ci-wiring.test.mjs scripts/ops/t2gate-runbook-values-free-contract.test.mjs
+
+      # P4 Option C is DATABASE_URL-gated. Pin both its no-DB exclusion and required real-DB
+      # whole-file invocation so the one-shot repair proof cannot become skip-green.
+      - name: Stock-preparation P4 repair CI wiring contract
+        run: node --test scripts/ops/stock-preparation-p4-repair-ci-wiring.test.mjs
+
+      # Approval data-closure real-DB suites use the same two-point contract: excluded from the
+      # default no-DB collection and invoked as whole files in a required real-DB step.
+      - name: Approval data-closure CI wiring contract
+        run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
+      # Approval form grouping (design lock v2.13) CI two-point wiring contract: all four
+      # approval-template-groups real-DB suites (phase-1 lifecycle/serialization, phase-3
+      # sections/reorder) must stay wired into BOTH vitest.config.ts (exclude) AND the approval
+      # real-DB step here (whole-file, on the required 20.x leg). Step-id-anchored (never by
+      # title), so a name-prefix decoy cannot stand in for the real step.
+      - name: Approval template-groups CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs
+
+      # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
+      # only ever exercises the verify script against a NORMAL package — it never proves the
+      # loopback-config negative case. Without an automated caller, deleting the loopback
+      # regex or its main-flow call site in scripts/ops/multitable-onprem-package-verify.sh
+      # still left every PR required check green. This step is that automated caller: pure
+      # bash, no DB, no pnpm install needed, so it runs early in the no-DB block. Gated to the
+      # 20.x leg only so it lands inside the required `test (20.x)` context (18.x is not
+      # required) rather than doubling the run for no reason — a failure here reds a required
+      # check on any PR touching the verify script.
+      - name: Multitable on-prem loopback-verify CI wiring contract (#4604)
+        if: matrix.node-version == '20.x'
+        run: bash scripts/ops/multitable-onprem-package-verify-loopback.test.sh
+
+      # Corp-scope Phase B cannot migrate until staging proves its only managed
+      # backend and the only container publishing 18900 are the exact Phase A
+      # image. Both matrix legs execute the behavior suite; branch protection
+      # currently requires test (20.x); the matrix has no other leg since 2026-10-07.
+      # Run the wiring guard in this same job. The wiring and behavior suites
+      # assert each other's invocation, so removing either step turns the
+      # required Node 20 context red.
+      - name: DingTalk staging worker-drain CI wiring contract
+        run: node --test scripts/ops/dingtalk-worker-drain-ci-wiring.test.mjs
+
+      - name: DingTalk staging immutable worker-drain gate
+        run: node --test scripts/ops/dingtalk-staging-deploy-identity.test.mjs
+
+      # #4612 gate4 round 4 (P3-4): the seven W4C-2 real-DB attendance suites (including this
+      # PR's own primary evidence file) had no source-level two-point wiring guard of their own.
+      # #4612 gate4 round 5 correction: this is NOT "every other real-DB family already had one" —
+      # multitable (216 multitable-* files across this workflow's three real-DB steps' file lists)
+      # has no suite-level *-ci-wiring.test.mjs guard of its own: none of the 17 guard files in
+      # scripts/ops/ is multitable-owned, and only 2 of the 216 files are incidentally named by a
+      # DIFFERENT family's guard (approval-data-closure-ci-wiring.test.mjs, which lists two
+      # multitable fixtures its own suites share DML with). The accurate scope, counted directly
+      # from the three real-DB steps' de-duplicated 365-file union: the 16 PRE-EXISTING guards
+      # together name 23 of them (approval, PB4-*, T1/T2, B4-B7, stock-preparation P4); attendance's
+      # 7 W4C-2 files were not among those 23 (#4612 gate-confirm P3-1: an earlier draft of this
+      # comment miscounted this as "30", which double-counts this PR's own 7 as if a pre-existing
+      # guard already named them). This 17th guard adds those 7, bringing the ALL-17-guards total to
+      # 30 (23 + 7); the other 335 — multitable's 216 included — remain outside every guard's
+      # (all 17) file list. This closes attendance's own gap, not "the last" gap.
+      # Pins the attendance step's stable id + literal DATABASE_URL + vitest.integration.config.ts
+      # invocation. OBS-1 (2026-08-07) converted the per-file assertions from a hardcoded FILES
+      # allowlist (33 entries at conversion time) to a DERIVED completeness check. An allowlist
+      # cannot notice a file it was never told about — the two W4C-3b suites that conversion wires
+      # (request-snapshots, central-approval) executed NOWHERE while the 33-entry guard was green.
+      # The corpus is every attendance-prefixed SUITE under tests/integration, found recursively,
+      # where "is a suite" is the union of "matches an include glob of a vitest config in the
+      # package" and "calls a vitest suite API" — no suffix or directory depth is hardcoded, after
+      # a .spec.ts probe and a subdirectory probe were both collected and skip-greened by the no-DB
+      # job while sitting in no corpus (2026-08-08). Every member must be excluded from the no-DB
+      # job's vitest.config.ts AND carried EXACTLY ONCE by a provably-executed real-DB invocation,
+      # and must exist on disk. NEITHER is REFUSED: the exit that let a suite submit a "positive
+      # proof" of DB-independence is DELETED (4828, 2026-08-09). Placed BEFORE the install: a break reds
+      # this required check in seconds. That is also why the corpus is derived statically rather
+      # than from vitest's own collection, which does not exist yet at this point in the job.
+      - name: Attendance W4C-2 CI wiring contract
+        run: node --test scripts/ops/attendance-w4c2-ci-wiring.test.mjs
+
+      # #4556 W4C-3c P15/P16: node:test behavior contracts are not discovered
+      # by Vitest. Keep cleanup classification, authenticated ops-retirement,
+      # immutable-row guards, and residue failure in the required test matrix.
+      - name: Attendance W4C-3c tooling cleanup contracts
+        id: attendance-w4c3c-tooling-contracts
+        run: |
+          node --test \
+            scripts/ops/staging-attendance-tooling-teardown.test.mjs \
+            scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
+
       # The production monitor invokes the same state helper covered here.
-      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # Keep this in the required `test` matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
+
+      # DT-CLOSE-01C: the ARG_MAX / E2BIG payload-handoff regression of the scheduled
+      # "DingTalk OAuth Stability Recording (Lite)" workflow (rc=126). This drives the real
+      # dingtalk-oauth-stability-check.sh against a PATH-shimmed ssh whose /metrics/prom response is
+      # larger than the machine's own `getconf ARG_MAX`, and includes a red-under-revert mutation.
+      # It lives in the REQUIRED `test` job — on BOTH matrix legs — so a revert to the env-var
+      # handoff cannot land green; the K3 WISE offline PoC job keeps running it next to its five
+      # sibling OAuth-stability suites. Hermetic: no DB, no network, no docker; ~5s wall clock.
+      # `bash --version` is echoed because the rc==126 assertion is gated on bash >= 4 (bash 3.2
+      # collapses every `set -e` abort to 1); printing the interpreter makes it observable in the
+      # step log that the pin actually executed here rather than being silently skipped.
+      - name: DingTalk OAuth-stability ARG_MAX payload-handoff regression (DT-CLOSE-01C)
+        run: |
+          bash --version | head -1
+          getconf ARG_MAX
+          node --test scripts/ops/dingtalk-oauth-stability-argmax-payload.test.mjs
 
       # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
       # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
@@ -190,6 +640,12 @@ jobs:
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
+          # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
+          # job, now in .github/workflows/stock-prep-powershell51.yml.
+          ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -228,6 +684,177 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
+      - name: Time Machine D2 archive real-DB fail-not-skip behavior
+        run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
+
+      # E-learning V0.1 L0-F2: whole-package plugin test (scripts.test && chain).
+      # Do not replace with a name filter, continue-on-error, or skip.
+      - name: Run plugin-elearning package tests
+        run: |
+          pnpm --filter plugin-elearning test
+
+      - name: Run attendance calculation-group W1 contract
+        run: |
+          node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs
+
+      - name: Run attendance legacy membership audit contract
+        run: |
+          node --test scripts/ops/attendance-legacy-membership-overlap-audit-contract.test.mjs
+
+      # W4C-5 operator transition tooling — pure module (no DB): manifest validator, plan digest,
+      # apply orchestration sequencing (idempotency-first, then digest match, then the boundary
+      # call). Uses `tsx --test` rather than plain `node --test` because the module is
+      # TypeScript — this is the first `tsx --test` invocation in this workflow (every other
+      # `.test.ts` suite in scripts/ops runs its own logic through a plain `node --test`
+      # `.test.mjs` file that spawns the tsx CLI as a child process, per
+      # attendance-legacy-membership-overlap-audit-contract.test.mjs's shape). `if:
+      # matrix.node-version == '20.x'` (same pin as the "Run K3-line ops suites" step above,
+      # same reason: 20.x is the required leg; this is unproven on 18.x and narrows nothing that
+      # was ever proven there). An EXACT SUBTEST COUNT (stronger than the former floor; same shape as "Integration Guard
+      # required-wiring contract" below, same reason: `node --test` — and `tsx --test`, which
+      # delegates to the identical runner — treats a child process that exits 0 as a PASSING
+      # FILE, so a collection-time abort before any subtest body runs would silently collapse
+      # this into a green zero-test file) refuses both missing and silently deleted test cases.
+      #
+      # The real-PostgreSQL half (zero-write proof, full legacy -> shadow cycle, idempotent
+      # re-apply, and the refusal matrix) is
+      # tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts, wired into the
+      # "Run attendance integration tests" step below and excluded from this job's default
+      # vitest.config.ts run.
+      - name: Run W4C-5 operator transition tooling unit tests
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_LIB_TESTS=68
+          if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
+            printf '%s\n' "$lib_out"
+            echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$lib_out"
+          lib_tests="$(printf '%s\n' "$lib_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$lib_tests" ]; then
+            echo "W4C-5 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$lib_tests" -ne "$EXPECTED_LIB_TESTS" ]; then
+            echo "W4C-5 tooling unit tests: $lib_tests subtests ran, expected exactly $EXPECTED_LIB_TESTS" >&2
+            exit 1
+          fi
+          echo "W4C-5 tooling unit tests: exactly $lib_tests subtests ran."
+
+      # #4556 W7-3: the context-source operator tooling's pure lib (manifest shape + the five
+      # literal-pinned environment attestations, injected-clock freshness, the pair-dependent
+      # manifest key sets, the exact confirmation token, the ten-field apply args and the
+      # ABSENCE of any force/ready/skip/override flag, the plan digest's per-field sensitivity
+      # sweep, and the idempotency-before-digest ordering with its priorState conjunct).
+      #
+      # Same shape and same reasons as the W4C-5 step immediately above: `tsx --test` because
+      # the module is TypeScript; `if: matrix.node-version == '20.x'` because 20.x is the
+      # required leg and this is unproven on 18.x; and an EXACT subtest count because
+      # `node --test` treats a child that exits 0 as a PASSING FILE, so a collection-time abort
+      # before any subtest body runs would silently report a green zero-test file.
+      #
+      # The real-PostgreSQL half of W7-3 is
+      # tests/integration/attendance-w7-3-context-source-transition.db.test.ts, wired into the
+      # "Run attendance integration tests" step below.
+      - name: Run W7-3 context-source operator tooling unit tests
+        if: matrix.node-version == '20.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_W7_LIB_TESTS=25
+          if ! w7_out="$(pnpm exec tsx --test scripts/ops/attendance-w7-context-source-transition-lib.test.ts 2>&1)"; then
+            printf '%s\n' "$w7_out"
+            echo "W7-3 tooling unit tests: tsx --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$w7_out"
+          w7_tests="$(printf '%s\n' "$w7_out" | grep -Eo 'tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$w7_tests" ]; then
+            echo "W7-3 tooling unit tests: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$w7_tests" -ne "$EXPECTED_W7_LIB_TESTS" ]; then
+            echo "W7-3 tooling unit tests: $w7_tests subtests ran, expected exactly $EXPECTED_W7_LIB_TESTS" >&2
+            exit 1
+          fi
+          echo "W7-3 tooling unit tests: exactly $w7_tests subtests ran."
+
+      # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
+      # EXCLUDE constraint on purpose and proves the runtime integrity guard is
+      # independently load-bearing. Keep whole-file execution explicit.
+      - name: Run attendance calculation-group timeline and legacy audit units
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-calculation-group-membership-timeline-integrity.test.ts \
+            tests/unit/attendance-legacy-membership-overlap-audit.test.ts \
+            --reporter=dot
+
+      # #4556 W2: shared work-date resolver unit matrix (overlap precedence, attribution tail,
+      # free_time/unscheduled/explicit-import hard stop, overtimeAttributionV1 freeze/legacy,
+      # six-adapter parity). Explicit whole-file gate so it cannot drift out of the default suite.
+      - name: Run attendance work-date resolver W2 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-work-date-resolver-w2.test.ts \
+            tests/unit/attendance-live-punch-work-date.test.ts \
+            --reporter=dot
+
+      # #4556 W3: canonical shift segment service unit matrix (segment validation,
+      # envelope derivation, dual-read synthesis, capability flag, assignability
+      # guard, historical-label redaction). Explicit whole-file gate so it cannot
+      # drift out of the default suite.
+      - name: Run attendance shift segments W3 unit
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-shift-segments-service.test.ts \
+            --reporter=dot
+
+      # #4556 W4C-4 §12.7/§12.9: immutable detail/trace, auth-order and
+      # comparator mutation legs plus generated OpenAPI/SDK parity. Whole-file
+      # names are explicit so a path-filter or default-suite exclusion cannot
+      # turn this contract into skip-shaped green.
+      - name: Run attendance W4C-4 calculation detail and diff contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/attendance-w4c4-calculation-detail.test.ts \
+            tests/unit/attendance-w4c4-calculation-detail-routes.test.ts \
+            --reporter=dot
+          pnpm --filter @metasheet/openapi build
+          pnpm --filter @metasheet/openapi validate
+          pnpm --filter @metasheet/openapi generate:sdk
+          git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts
+          node --test scripts/ops/attendance-w4c4-openapi-contract.test.mjs
+
+      # #4556 W4C-0 Stage D / W4C-4 §12.7: source/effect/result mechanical bypass guard plus
+      # generated calculation/segment current-history SELECT inventory. A
+      # node:test (.test.mjs) file — invisible to both `pnpm --filter core-backend test` and
+      # vitest.config.ts's exclude list — so it must be named explicitly here or it silently
+      # never runs. Scans the exact-head worktree for new/renamed/unclassified attendance DML
+      # against the pinned e0defbe26 debt baseline and its curated P01-P28/X01-X05 entries, and
+      # re-proves the pinned baseline artifact is byte-reproducible from that ref.
+      - name: Run attendance W4C-0 Stage D §8.4 and W4C-4 §12.7 inventory collectors
+        run: |
+          # The byte-reproducibility leg re-generates the baseline manifest FROM the pinned
+          # commit itself (git ls-tree against e0defbe26…). actions/checkout is a shallow
+          # clone, so that commit object is absent — fetch exactly that one commit first.
+          # Deliberately NOT a conditional skip: a skip here would let the reproducibility
+          # leg silently never run in CI (skip-shaped-green).
+          git fetch --no-tags --depth=1 origin e0defbe26d7f2e1747e74aa908ca710422812bf7 || \
+            git fetch --no-tags origin e0defbe26d7f2e1747e74aa908ca710422812bf7
+          node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+
+      # #4556 combined-soak: the window-runner pipeline contract (guard/classifier
+      # executable legs + mutation legs). A node:test .test.mjs like the collector above —
+      # invisible to every workspace test chain, so it must be named explicitly here or it
+      # runs ONLY as the workflow_dispatch preflight and never gates a PR (the #4933 gate
+      # demonstrated two mutation escapes merging ungated exactly this way).
+      - name: Run attendance window-runner pipeline contract
+        run: |
+          node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+
       - name: Run linting
         if: matrix.node-version == '20.x'
         run: |
@@ -235,12 +862,65 @@ jobs:
 
       - name: Run type checking
         if: matrix.node-version == '20.x'
+        env:
+          # GitHub-hosted runners for a PRIVATE repository are 2 vCPU / 8 GB (public ones were
+          # 4 / 16), so Node's default heap dropped to ~2 GB and `vue-tsc -b` on apps/web began to
+          # OOM here on 2026-10-07, the day the repository went private. 4 GB covers the three
+          # vue-tsc runs of `pnpm type-check`; apps/web's `build` script sets its own heap, which
+          # also fixes the seven other workflows that build the web app.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           pnpm type-check
 
       - name: Run core-backend tests
         run: |
           pnpm --filter @metasheet/core-backend test
+
+      # scripts/ops/__tests__/*.test.mjs — a plain SHELL GLOB, not individually-named files like the
+      # steps above. Every OTHER `node --test scripts/ops/<name>.test.mjs` step in this job exists
+      # because that file is invisible to `pnpm --filter core-backend test` AND to every workspace
+      # test chain — landed, never wired to any workflow, silently dark until an adversarial pass
+      # found it (see the comments on the collector/pipeline steps above). Naming this one directory
+      # by glob instead closes that gap STRUCTURALLY for everything under it from here on: a future
+      # `scripts/ops/__tests__/*.test.mjs` file is collected the moment it lands, with no workflow
+      # edit and no `package.json` script to fight over across concurrent PRs (the O(n²) conflict
+      # source named in this repo's own plugin-test-chain-pin friction notes). The directory holds
+      # only `.test.mjs`/`.tests.ps1` today; `node --test` ignores the `.ps1` files it is not asked
+      # for, so this only ever runs the `.mjs` suites the glob matches.
+      #
+      # An EXACT subtest count, same reasoning and same shape as the W7-3 step above: `node --test`
+      # treats a child that exits 0 as a PASSING FILE, so a collection-time abort (a syntax error, a
+      # glob that silently matched zero files because the directory was emptied/renamed) before any
+      # subtest body runs would report a green ZERO-test step. `--test-reporter=tap` is used
+      # specifically for a STABLE, uncoloured `# tests N` summary line to parse — the default "spec"
+      # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
+      # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
+      # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (31) +
+      # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
+      # (6) = 48. Get each file's own count locally with
+      # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
+      - name: Run scripts/ops/__tests__ node:test suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_OPS_TESTS_COUNT=48
+          if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
+            printf '%s\n' "$ops_out"
+            echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$ops_out"
+          ops_tests="$(printf '%s\n' "$ops_out" | grep -Eo '^# tests [0-9]+$' | tail -n 1 | grep -Eo '[0-9]+$' || true)"
+          if [ -z "$ops_tests" ]; then
+            echo "scripts/ops/__tests__ suites: no '# tests <N>' TAP summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$ops_tests" -ne "$EXPECTED_OPS_TESTS_COUNT" ]; then
+            echo "scripts/ops/__tests__ suites: $ops_tests subtests ran, expected exactly $EXPECTED_OPS_TESTS_COUNT" >&2
+            exit 1
+          fi
+          echo "scripts/ops/__tests__ suites: exactly $ops_tests subtests ran."
 
       - name: Run rich-text longText XSS write-sanitizer canaries
         # Security-critical: the write-path sanitizer is the authoritative XSS defense
@@ -261,6 +941,143 @@ jobs:
             tests/unit/filesAcl.test.ts \
             --reporter=dot
 
+      - name: Run B3-07 approval-attachment unit canaries
+        # The approval-attachment pipeline's no-DB units (route contracts, storage containment + the
+        # shared-substrate object-store adapter, boot/O3 storage resolution, fail-closed scanner seam,
+        # validation allowlist, GC drain, reconciler) are repeated as explicit canaries here so their
+        # ownership remains visible and robust if broader default discovery changes. Wired as WHOLE
+        # FILE runs (a name filter matching zero tests exits green and hides regressions).
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/approval-attachment-routes.test.ts \
+            tests/unit/approval-attachment-storage.test.ts \
+            tests/unit/approval-attachment-s3.test.ts \
+            tests/unit/approval-attachment-scan.test.ts \
+            tests/unit/approval-attachment-runtime.test.ts \
+            tests/unit/approval-attachment-validation.test.ts \
+            tests/unit/approval-attachment-gc-drain.test.ts \
+            tests/unit/approval-attachment-reconciler.test.ts \
+            --reporter=dot
+
+      - name: Run elearning V0.1 unit canaries
+        id: elearning-v01-unit-canaries
+        # V0.1-L3 units: flags/plugin runtime, content/watch/assignment/exam/publish,
+        # assessment authoring/manual-grading schema, media ingest/playback,
+        # pilot routes/runtime, migration contracts.
+        # Whole-file args so a name filter matching zero tests cannot skip-green.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/elearning-assignment-lifecycle-routes.test.ts \
+            tests/unit/elearning-assignment-lifecycle.test.ts \
+            tests/unit/elearning-assignment-reminder.test.ts \
+            tests/unit/elearning-admin-access-routes.test.ts \
+            tests/unit/elearning-admin-access.test.ts \
+            tests/unit/elearning-admin-operations.test.ts \
+            tests/unit/elearning-analytics-export-routes.test.ts \
+            tests/unit/elearning-analytics-export.test.ts \
+            tests/unit/elearning-analytics-routes.test.ts \
+            tests/unit/elearning-analytics-runtime.test.ts \
+            tests/unit/elearning-analytics-suppression.test.ts \
+            tests/unit/elearning-assessment-admin-routes.test.ts \
+            tests/unit/elearning-assessment-import.test.ts \
+            tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-notification-dispatch.test.ts \
+            tests/unit/elearning-notification-dingtalk.test.ts \
+            tests/unit/elearning-notification-events.test.ts \
+            tests/unit/elearning-open-completion-policy.test.ts \
+            tests/unit/elearning-open-completion-postgres.test.ts \
+            tests/unit/elearning-reminder-port-scoping.test.ts \
+            tests/unit/elearning-batch-assignment-routes.test.ts \
+            tests/unit/elearning-batch-assignment-runtime.test.ts \
+            tests/unit/elearning-batch-assignment.test.ts \
+            tests/unit/elearning-category-tree-policy.test.ts \
+            tests/unit/elearning-certificate-policy.test.ts \
+            tests/unit/elearning-certificate-routes.test.ts \
+            tests/unit/elearning-certificate-runtime.test.ts \
+            tests/unit/elearning-certificate-surface.test.ts \
+            tests/unit/elearning-content-course-publish.test.ts \
+            tests/unit/elearning-content-revision-policy.test.ts \
+            tests/unit/elearning-content-revision-postgres.test.ts \
+            tests/unit/elearning-content-routes.test.ts \
+            tests/unit/elearning-content-runtime-migration-contract.test.ts \
+            tests/unit/elearning-course-enrollment.test.ts \
+            tests/unit/elearning-course-lifecycle-policy.test.ts \
+            tests/unit/elearning-course-progress-policy.test.ts \
+            tests/unit/elearning-course-publish-readiness-policy.test.ts \
+            tests/unit/elearning-course-publish.test.ts \
+            tests/unit/elearning-course-stats-policy.test.ts \
+            tests/unit/elearning-course-version-items-policy.test.ts \
+            tests/unit/elearning-credit-adjustment-postgres.test.ts \
+            tests/unit/elearning-credit-adjustment.test.ts \
+            tests/unit/elearning-credit-ledger.test.ts \
+            tests/unit/elearning-credit-policy.test.ts \
+            tests/unit/elearning-credit-postgres.test.ts \
+            tests/unit/elearning-credit-routes.test.ts \
+            tests/unit/elearning-credit-runtime.test.ts \
+            tests/unit/elearning-credit-surface.test.ts \
+            tests/unit/elearning-department-stats-policy.test.ts \
+            tests/unit/elearning-department-stats.test.ts \
+            tests/unit/elearning-direct-assignment.test.ts \
+            tests/unit/elearning-document-completion-policy.test.ts \
+            tests/unit/elearning-document-media-authority.test.ts \
+            tests/unit/elearning-document-progress.test.ts \
+            tests/unit/elearning-document-session.test.ts \
+            tests/unit/elearning-enrollment-routes.test.ts \
+            tests/unit/elearning-exam-review.test.ts \
+            tests/unit/elearning-exam.test.ts \
+            tests/unit/elearning-flags.test.ts \
+            tests/unit/elearning-learner-courses.test.ts \
+            tests/unit/elearning-learning-profile.test.ts \
+            tests/unit/elearning-manual-grading-migration-contract.test.ts \
+            tests/unit/elearning-manual-grading-read-routes.test.ts \
+            tests/unit/elearning-manual-grading-read.test.ts \
+            tests/unit/elearning-manual-grading-routes.test.ts \
+            tests/unit/elearning-manual-grading.test.ts \
+            tests/unit/elearning-media-ingest.test.ts \
+            tests/unit/elearning-media-playback-routes.test.ts \
+            tests/unit/elearning-media-playback-runtime.test.ts \
+            tests/unit/elearning-media-playback.test.ts \
+            tests/unit/elearning-media-probe.test.ts \
+            tests/unit/elearning-media-quota.test.ts \
+            tests/unit/elearning-media-reconciler.test.ts \
+            tests/unit/elearning-media-routes.test.ts \
+            tests/unit/elearning-media-runtime.test.ts \
+            tests/unit/elearning-media-s3.test.ts \
+            tests/unit/elearning-media-storage.test.ts \
+            tests/unit/elearning-media-validation.test.ts \
+            tests/unit/elearning-pilot-routes.test.ts \
+            tests/unit/elearning-pilot-runtime.test.ts \
+            tests/unit/elearning-app-installation.test.ts \
+            tests/unit/elearning-plugin-runtime.test.ts \
+            tests/unit/elearning-portal-migration-contract.test.ts \
+            tests/unit/elearning-portal-routes.test.ts \
+            tests/unit/elearning-portal-settings.test.ts \
+            tests/unit/elearning-profile-routes.test.ts \
+            tests/unit/elearning-question-practice-routes.test.ts \
+            tests/unit/elearning-question-practice-runtime.test.ts \
+            tests/unit/elearning-question-practice.test.ts \
+            tests/unit/elearning-stats-daily-job-producer.test.ts \
+            tests/unit/elearning-stats-daily-projection.test.ts \
+            tests/unit/elearning-stats-daily-read.test.ts \
+            tests/unit/elearning-title-policy.test.ts \
+            tests/unit/elearning-title-surface.test.ts \
+            tests/unit/elearning-training-plan-routes.test.ts \
+            tests/unit/elearning-training-plan.test.ts \
+            tests/unit/elearning-training-plan-assignment-routes.test.ts \
+            tests/unit/elearning-training-plan-assignment.test.ts \
+            tests/unit/elearning-training-plan-revocation.test.ts \
+            tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-migration-contract.test.ts \
+            tests/unit/elearning-watch-challenge-policy.test.ts \
+            tests/unit/elearning-watch-challenge-postgres.test.ts \
+            tests/unit/elearning-watch-challenge-routes.test.ts \
+            tests/unit/elearning-watch-challenge-schedule.test.ts \
+            tests/unit/elearning-watch-progress.test.ts \
+            --reporter=dot
+          pnpm --dir packages/openapi/dist-sdk exec vitest run \
+            tests/elearning-paths.test.ts \
+            --watch=false
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -269,6 +1086,18 @@ jobs:
       - name: Create test database
         run: |
           createdb -U postgres metasheet_test || true
+
+      - name: Run private-db backend drain proof
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/timemachine-private-db-backend-drain.db.test.ts \
+            --reporter=verbose
+
+      - name: Run isolated manual checkpoint acceptance
+        run: |
+          TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
 
       - name: Run DB migrations
         env:
@@ -313,6 +1142,154 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
+      # DATABASE_URL is required (bash :? and each suite throws).
+      - name: Run elearning V0.1 content/assessment schema gate
+        id: elearning-v01-content-assessment-schema-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 content/assessment schema gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
+            tests/integration/elearning-exam-attempt-item-migration.db.test.ts \
+            tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
+            tests/integration/elearning-watch-progress-service.db.test.ts \
+            tests/integration/elearning-watch-challenge.db.test.ts \
+            tests/integration/elearning-direct-assignment.db.test.ts \
+            tests/integration/elearning-course-publish.db.test.ts \
+            tests/integration/elearning-content-runtime.db.test.ts \
+            tests/integration/elearning-course-enrollment.db.test.ts \
+            tests/integration/elearning-online-training-loop.db.test.ts \
+            tests/integration/elearning-credit-ledger-authority.db.test.ts \
+            tests/integration/elearning-credit-rules-wallet.db.test.ts \
+            tests/integration/elearning-credit-adjustment.db.test.ts \
+            tests/integration/elearning-title-runtime.db.test.ts \
+            tests/integration/elearning-certificate-runtime.db.test.ts \
+            tests/integration/elearning-learning-profile.db.test.ts \
+            tests/integration/elearning-portal-settings.db.test.ts \
+            tests/integration/elearning-stats-daily-projection.db.test.ts \
+            tests/integration/elearning-analytics-export.db.test.ts \
+            tests/integration/elearning-app-installation.db.test.ts \
+            tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
+            tests/integration/elearning-exam-service.db.test.ts \
+            tests/integration/elearning-learner-courses.db.test.ts \
+            tests/integration/elearning-scope-access.db.test.ts \
+            tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts \
+            tests/integration/elearning-batch-assignment.db.test.ts \
+            tests/integration/elearning-assignment-lifecycle.db.test.ts \
+            tests/integration/elearning-media-playback.db.test.ts \
+            tests/integration/elearning-role-templates.db.test.ts \
+            tests/integration/elearning-jobs.db.test.ts \
+            tests/integration/elearning-training-plan.db.test.ts \
+            tests/integration/elearning-training-plan-assignment.db.test.ts \
+            tests/integration/elearning-admin-access.db.test.ts \
+            tests/integration/elearning-notification-delivery.db.test.ts \
+            tests/integration/elearning-notification-worker.db.test.ts \
+            tests/integration/elearning-assessment-catalog.db.test.ts \
+            tests/integration/elearning-paper-exam.db.test.ts \
+            tests/integration/elearning-question-practice.db.test.ts \
+            tests/integration/elearning-manual-grading-schema.db.test.ts \
+            tests/integration/elearning-manual-grading-service.db.test.ts \
+            tests/integration/elearning-manual-grading-read.db.test.ts \
+            --reporter=verbose
+
+      # E-learning V0.1 M1 media quota reservation against real Postgres.
+      # DATABASE_URL is required (bash :? and the suite throws).
+      - name: Run elearning V0.1 media quota real-DB gate
+        id: elearning-v01-media-quota-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 media quota real-DB gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-media-quota.db.test.ts \
+            tests/integration/elearning-media-reconciler.db.test.ts \
+            --reporter=verbose
+
+      # E-learning V0.1 ratified gate 1: real JWT + user_orgs + DB RBAC on the
+      # production pilot runtime. Dedicated config/setup sets RBAC_BYPASS=false
+      # and RBAC_TOKEN_TRUST=false BEFORE importing auth/RBAC/runtime. Do not
+      # fold this into vitest.integration.config.ts (that setup caches trust).
+      # Whole-file + DATABASE_URL :? so a missing DB cannot skip-green.
+      - name: Run elearning V0.1 auth/tenant/RBAC gate
+        id: elearning-v01-auth-tenant-rbac-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 auth/tenant/RBAC gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.elearning-pilot-auth.config.ts run \
+            tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
+            --reporter=verbose
+
+      # Tasks auth gate: trust-off harness, whole file, after migrate.
+      # Do not fold this into vitest.integration.config.ts (that setup caches trust).
+      - name: Run tasks auth gate
+        id: tasks-auth-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+          RBAC_OPTIONAL: ''
+          TASKS_ENABLED: 'true'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for tasks auth gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.tasks-auth.config.ts run \
+            tests/tasks-auth/tasks-auth-gate.ts \
+            --reporter=verbose
+
+      - name: Run sealed-export S3 private-ingestion real-DB proof
+        id: sealed-export-s3-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for sealed-export S3 real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts \
+            --reporter=verbose
+
+      - name: Run sealed-export S4 generation-kernel real-DB proof
+        id: sealed-export-s4-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for sealed-export S4 real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
+            --reporter=verbose
+
+      # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
+      # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
+      # participating transaction. Two-session races against a real PostgreSQL; the suite's own
+      # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
+      # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      - name: Run external-system delete x pointer-write lock protocol real-DB proof
+        id: external-system-delete-bind-lock-protocol-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
+            --reporter=verbose
+
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'
         env:
@@ -320,6 +1297,44 @@ jobs:
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
+
+      # #4783 owner review P1-1/P1-2: real-Postgres proof that (a) the timer poller's
+      # write gate leaves ZERO bpmn_timer_jobs rows when disabled (not just "the mock
+      # wasn't called") and a positive control that it still writes when enabled, and
+      # (b) the WAITING -> LOCKED claim is race-safe across two independent
+      # `BPMNWorkflowEngine` instances (the real `routes/workflow.ts` +
+      # `routes/workflow-designer.ts` topology) via a CONSTRUCTED concurrent claim, not
+      # sequential reasoning. Excluded from the no-DB default job (vitest.config.ts) so
+      # describeIfDatabase cannot skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN timer job write-and-claim safety
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN timer job write-and-claim safety}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-timer-job-write-and-claim-safety.db.test.ts \
+            --reporter=verbose
+
+      # #4783 owner review batch 2: batch 1's write gate (createTimerJob throwing before its
+      # own INSERT) was too late — startProcess() had already persisted the
+      # bpmn_process_instances (ACTIVE) + activity rows by the time that throw fired, leaving
+      # permanent ACTIVE residue with an OPEN incident (owner-reproduced at 243db11f1). This
+      # proves startProcess()'s entry gate leaves FOUR real zeros (process/activity/incident/
+      # timer rows) via the REAL HTTP surface (POST /api/workflow/deploy + POST
+      # /api/workflow/start/:key) against a real booted MetaSheetServer, plus a positive
+      # control that a timer-free process still starts normally with the poller off.
+      # Excluded from the no-DB default job (vitest.config.ts) so describeIfDatabase cannot
+      # skip-green it, and wired here as a WHOLE FILE.
+      - name: Run BPMN startProcess poller-disabled zero-residue
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for BPMN startProcess poller-disabled zero-residue}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts \
+            --reporter=verbose
 
       # Real-APP-ASSEMBLY guard. Route-level unit tests mount ONE router in isolation, so every path they
       # exercise belongs to that router — mount order and the SCOPE of middleware added inside a router are
@@ -357,7 +1372,8 @@ jobs:
             tests/integration/snapshot-protection.test.ts \
             --reporter=verbose
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + notification-center retention sweep (env-gated, batched, sheet-scoped survivors) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
+        id: multitable-real-db-integration
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -398,6 +1414,10 @@ jobs:
             tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
             tests/integration/multitable-patch-batchid-echo-realdb.test.ts \
+            tests/integration/stock-prep-substrate-p1a-realdb.test.ts \
+            tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
+            tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
+            tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \
@@ -454,6 +1474,32 @@ jobs:
             tests/integration/multitable-history-contiguity-realdb.test.ts \
             tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts \
             tests/integration/multitable-history-trust-checkpoint-realdb.test.ts \
+            tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
+            tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
+            tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
+            tests/integration/multitable-recovery-lease-backoff-realdb.test.ts \
+            tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts \
+            tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
+            tests/integration/recovery-conflict-classifier-realdb.test.ts \
+            tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
+            tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \
@@ -544,6 +1590,7 @@ jobs:
             tests/integration/multitable-date-reminder-trigger.test.ts \
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
+            tests/integration/multitable-webhook-durable-dedup.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
             tests/integration/multitable-ai-bulk-commit.test.ts \
@@ -556,6 +1603,7 @@ jobs:
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
+            tests/integration/data-source-reseal-load-failed-realdb.test.ts \
             tests/integration/multitable-personal-views-slice1-realdb.test.ts \
             tests/integration/multitable-personal-views-slice2-fieldorder-realdb.test.ts \
             tests/integration/multitable-personal-views-slice3-context-overlay-realdb.test.ts \
@@ -565,13 +1613,21 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-notification-retention-realdb.test.ts \
             tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
             tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
+            tests/integration/multitable-fwb-write-action-realdb.test.ts \
+            tests/integration/multitable-fwb-activation-realdb.test.ts \
+            tests/integration/multitable-fwb-update-activation-realdb.test.ts \
+            tests/integration/approval-attachment-gc-realdb.test.ts \
+            tests/integration/approval-attachment-bind-reconcile-realdb.test.ts \
+            tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
+            tests/integration/multitable-automation-durable-activation-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
@@ -581,20 +1637,45 @@ jobs:
             tests/integration/approval-record-projection.test.ts \
             tests/integration/stock-preparation-t3a-erp-autopersist-realdb.test.ts \
             tests/integration/stock-preparation-t3b-replay-hardening-realdb.test.ts \
+            tests/integration/stock-preparation-p4-repair-once-realdb.test.ts \
             tests/integration/stock-preparation-t3b-plm-autopersist-realdb.test.ts \
             tests/integration/multitable-l4-canonical-fence-realdb.test.ts \
             tests/integration/multitable-l4cov-univer-meta-writers-realdb.test.ts \
+            tests/integration/multitable-l4cov-services-fence-realdb.test.ts \
             tests/integration/multitable-l6a-sealed-operation-endpoint-realdb.test.ts \
+            tests/integration/b2a-operation-claim-078-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens + cancel-round Q-A census/creation/redemption/seat-guards/FK-migration/outlet-guards/node-timeout/seed-template-visibility/attendance-entry)
+        id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
         # default test job, so this is its real CI lane.
+        #
+        # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were
+        # promoted here from a standalone (non-required) `approval-realdb-cancel-round.yml` lane,
+        # which is DELETED in the same commit — per the #5095 precedent
+        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1). At the time
+        # this file was the s6a `pluginTestsWorkflow` provenance pin, so that commit recomputed it
+        # via `computePackageProvenancePinSet(repoRoot)`. Since
+        # docs/development/s6a-pins-scope-narrowing-design-20260930.md this file is no longer a
+        # provenance input (the pinned executor is .github/workflows/stock-prep-powershell51.yml),
+        # so run-list edits here need no pin recompute. Keeping both lanes would have run the same
+        # seven files twice per PR for no additional coverage.
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # Arms this step's embedded anti-skip-green sentinels (module-top-level
+          # `itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip`, e.g.
+          # approval-comments.db.test.ts:56, approval-instance-readability-s1.db.test.ts:50,
+          # approval-lock9-process-attachments-realdb.db.test.ts:35): second in-worker door —
+          # a DATABASE_URL that is set in this step's shell but falsy by the time it reaches
+          # the vitest worker goes RED instead of a silent skipped-green. A truthy-but-wrong
+          # DATABASE_URL reds either way, armed or not, from the suites' own connection
+          # failures — this arming does not specifically catch that case. The other files
+          # this step runs do not reference EXPECT_DB, so this is a no-op for them.
+          EXPECT_DB: '1'
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -603,7 +1684,11 @@ jobs:
             tests/integration/approval-p1c-field-permissions.api.test.ts \
             tests/integration/approval-wp-add-reduce-sign.api.test.ts \
             tests/integration/approval-direct-manager.api.test.ts \
+            tests/integration/approval-routing-policy-failclose.api.test.ts \
+            tests/integration/approval-routing-policy-equivalence.db.test.ts \
+            tests/integration/directory-binding-sync-hook.db.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
+            tests/integration/approval-template-authoring-uat.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
@@ -613,10 +1698,12 @@ jobs:
             tests/integration/approval-delegation-seam.db.test.ts \
             tests/integration/approval-delegation-api.db.test.ts \
             tests/integration/approval-detail-subform.db.test.ts \
+            tests/integration/approval-record-link.db.test.ts \
             tests/integration/approval-common-template-presets.api.test.ts \
             tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             tests/integration/approval-bridge-redaction-regression.test.ts \
+            tests/integration/approval-attachment-pipeline-realdb.test.ts \
             tests/integration/approval-metrics-people-teams.test.ts \
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \
@@ -631,9 +1718,22 @@ jobs:
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
+            tests/integration/directory-deprovision-grant-table.db.test.ts \
+            tests/integration/directory-deprovision-compensation.db.test.ts \
+            tests/integration/directory-activation-source-lock.db.test.ts \
+            tests/integration/login-alias-writers.db.test.ts \
+            tests/integration/auth-register-atomicity.db.test.ts \
+            tests/integration/directory-deprovision-ledger-schema.db.test.ts \
+            tests/integration/directory-deprovision-writer-ledger.db.test.ts \
+            tests/integration/directory-deprovision-race-supersede.db.test.ts \
+            tests/integration/directory-access-graph-mutex.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
+            tests/integration/directory-org-transfer-source-freeze.db.test.ts \
+            tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
+            tests/integration/invite-accept-concurrency-rollback.db.test.ts \
+            tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
             tests/integration/directory-local-provider-bootstrap.db.test.ts \
             tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
@@ -643,10 +1743,38 @@ jobs:
             tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-local-integration-reactivation.db.test.ts \
             tests/integration/directory-department-bindings.db.test.ts \
+            tests/integration/org-directory-routing-policy-schema.db.test.ts \
+            tests/integration/org-directory-routing-policy-resolver.db.test.ts \
+            tests/integration/org-directory-routing-policy-routes.db.test.ts \
+            tests/integration/directory-binding-reconciliation.db.test.ts \
+            tests/integration/directory-binding-admin-routes.db.test.ts \
+            tests/integration/provider-org-transfer-t1.api.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \
+            tests/integration/approval-instance-readability-s1.db.test.ts \
+            tests/integration/approval-comments.db.test.ts \
+            tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
+            tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+            tests/integration/approval-cancel-round-creation.db.test.ts \
+            tests/integration/approval-cancel-round-redemption.db.test.ts \
+            tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+            tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+            tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+            tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
+            tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
+            tests/integration/approval-cancel-round-attendance-entry.db.test.ts \
+            tests/integration/approval-template-groups-lifecycle.db.test.ts \
+            tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-sections.db.test.ts \
+            tests/integration/approval-template-groups-reorder.db.test.ts \
+            tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+            tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+            tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+            tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+            tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+            tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
@@ -671,27 +1799,46 @@ jobs:
       - name: Start core backend (background)
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          HOST: 127.0.0.1
           PORT: 8900
         run: |
           nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
-          sleep 5
-          echo "Server PID: $(cat server.pid)"
+          server_pid="$(cat server.pid)"
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8900/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              echo "Core backend exited before readiness"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "${ready}" -ne 1 ]; then
+            echo "Core backend readiness timed out"
+            cat server.log
+            exit 1
+          fi
+          echo "Server PID: ${server_pid}"
 
       - name: Run plugin smoke test
         env:
-          API_ORIGIN: http://localhost:8900
+          API_ORIGIN: http://127.0.0.1:8900
         run: |
           pnpm --filter @metasheet/core-backend smoke:plugins
 
       - name: Config snapshot (non-blocking)
         if: always()
         run: |
-          curl -sf http://localhost:8900/metrics/config || true
+          curl -sf http://127.0.0.1:8900/metrics/config || true
 
       - name: Admin KV list (non-blocking)
         if: always()
         env:
-          API_ORIGIN: http://localhost:8900
+          API_ORIGIN: http://127.0.0.1:8900
         run: |
           set +e
           curl -sf "${API_ORIGIN}/api/admin/plugin-kv?plugin=@metasheet/plugin-test-a" || true
@@ -707,20 +1854,108 @@ jobs:
           kill $(cat server.pid) || true
 
       - name: Build web app
-        # Skip on Node 18 - @vitejs/plugin-vue@6.x requires Node 20+ (crypto.hash API)
-        if: matrix.node-version != '18.x'
         run: |
           pnpm --filter @metasheet/web build
 
       - name: Run attendance integration tests
+        # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
+        # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
+        # title-prefix anchoring. Deliberately NO `if:` pin added here — this
+        # step already runs UNCONDITIONALLY on every matrix leg (only 20.x since 2026-10-07);
+        # copying the `if: matrix.node-version == '20.x'` pin from the
+        # approval/multitable siblings would NARROW coverage to one leg, a
+        # real behaviour change this round does not make. The wiring guard's
+        # own pin is loosened to match (see that file's comment).
+        id: attendance-real-db-integration
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for attendance integration}"
+          : "${ATTENDANCE_TEST_DATABASE_URL:?ATTENDANCE_TEST_DATABASE_URL is required for attendance integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-approval-action-authorization.db.test.ts \
+            tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \
+            tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \
+            tests/integration/attendance-approval-dept-head-s7-3.db.test.ts \
+            tests/integration/attendance-approval-manager-at-level-s7-4.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-admission.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-directory-sync.db.test.ts \
+            tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-lifecycle.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-sync-automatch.db.test.ts \
+            tests/integration/attendance-w4pre1b-user-orgs-backfill-migration.db.test.ts \
+            tests/integration/attendance-w4pre1b-directory-readiness-gate.db.test.ts \
+            tests/integration/attendance-w4pre1b-admin-users-explicit-org.db.test.ts \
+            tests/integration/attendance-w4pre1b-api-tokens-org-member-access.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-sweep-deprovision.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-org-scoped.db.test.ts \
+            tests/integration/attendance-w4pre1c-manual-review-pending.db.test.ts \
+            tests/integration/attendance-w4pre1c-departure-permission-negative.db.test.ts \
+            tests/integration/attendance-w4pre1d-departure-candidate-split.db.test.ts \
+            tests/integration/attendance-setup-readiness-w4-0.db.test.ts \
+            tests/integration/attendance-decision-trace-w5-0.db.test.ts \
+            tests/integration/attendance-calculation-group-membership-w1.db.test.ts \
+            tests/integration/attendance-legacy-membership-overlap-audit.db.test.ts \
+            tests/integration/attendance-work-date-resolver-w2.db.test.ts \
+            tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
+            tests/integration/attendance-w4c0-identity-golden-parity.db.test.ts \
+            tests/integration/attendance-w4c0-operation-registry.db.test.ts \
+            tests/integration/attendance-w4c0-db-gates-e1.db.test.ts \
+            tests/integration/attendance-w4c0-identity-gates-e2.db.test.ts \
+            tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts \
+            tests/integration/attendance-w4c2-timezone-write-guard.db.test.ts \
+            tests/integration/attendance-w4c2-outbox-dispatcher.db.test.ts \
+            tests/integration/attendance-w4c2-live-scheduled-boundary.db.test.ts \
+            tests/integration/attendance-w4c2-posture-matrix.db.test.ts \
+            tests/integration/attendance-w4c2-gate-matrix-e5.db.test.ts \
+            tests/integration/attendance-w4c2-authoritative-calculation-core.db.test.ts \
+            tests/integration/attendance-w4c2-d2-live-punch-authoritative.db.test.ts \
+            tests/integration/attendance-w4c2-d3-scheduled-authoritative.db.test.ts \
+            tests/integration/attendance-w4c2-p2-remediation.db.test.ts \
+            tests/integration/attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts \
+            tests/integration/attendance-w4c2-p12-migration-schema-gates.db.test.ts \
+            tests/integration/attendance-w4c2-p12-run-transactions.db.test.ts \
+            tests/integration/attendance-w4c2-p12-durable-lock-gates.db.test.ts \
+            tests/integration/attendance-w4c2-sweep-fairness.db.test.ts \
+            tests/integration/attendance-w4c2-sweep-call-through.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-legacy-plan-migration.db.test.ts \
+            tests/integration/attendance-w4c3a-canonical-import-kernel.db.test.ts \
+            tests/integration/attendance-w4c3a-durable-plan-enqueue.db.test.ts \
+            tests/integration/attendance-w4c3a-record-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-record-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-item-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-p08-child-process.db.test.ts \
+            tests/integration/attendance-w4c3a-group-preconditions.db.test.ts \
+            tests/integration/attendance-w4c3a-group-effects.db.test.ts \
+            tests/integration/attendance-w4c3a-auth-recovery.db.test.ts \
+            tests/integration/attendance-w4c3a-p06-sync-import.db.test.ts \
+            tests/integration/attendance-w4c3a-commit-token-ordering.db.test.ts \
+            tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts \
+            tests/integration/attendance-w4c3a-import-rollback.db.test.ts \
+            tests/integration/attendance-w4c3a-rollout-control.db.test.ts \
+            tests/integration/attendance-w4c5-rollout-transition-tool.db.test.ts \
+            tests/integration/attendance-gate-e-txn-ownership-batch1.db.test.ts \
+            tests/integration/attendance-w4c3b-request-operation-routes.db.test.ts \
+            tests/integration/attendance-w4c3b-approved-leave-cancellation.db.test.ts \
+            tests/integration/attendance-w4c3b-request-snapshots.db.test.ts \
+            tests/integration/attendance-w4c3b-central-approval.db.test.ts \
+            tests/integration/attendance-w4c3c-manual-recompute-retirement.db.test.ts \
+            tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts \
+            tests/integration/attendance-w4c4-calculation-detail.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-config-migration.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-config-consume.db.test.ts \
+            tests/integration/attendance-group-fixed-schedule-self-effectiveness.db.test.ts \
+            tests/integration/attendance-w6-group-effective-policy-fixture-matrix.db.test.ts \
+            tests/integration/attendance-w6-group-effective-policy.db.test.ts \
+            tests/integration/attendance-w6-group-effective-policy-membership-overlap.db.test.ts \
+            tests/integration/attendance-w7-1a-resolver.db.test.ts \
+            tests/integration/attendance-w7-3-context-source-transition.db.test.ts \
+            tests/integration/attendance-shift-flex-policy-migration.db.test.ts \
+            tests/integration/attendance-settlement-table-v1-5a.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
@@ -729,6 +1964,15 @@ jobs:
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts \
+            tests/integration/multitable-automation-approval-bridge-lease-migration.db.test.ts \
+            tests/integration/multitable-automation-approval-bridge-lease-realdb.test.ts \
+            tests/integration/multitable-automation-producer-emit-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family2-realdb.test.ts \
+            tests/integration/multitable-durable-startup-failclosed.db.test.ts \
+            tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts \
+            tests/integration/multitable-automation-producer-family5-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family4-realdb.test.ts \
+            tests/integration/multitable-automation-producer-family1-realdb.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \
@@ -739,6 +1983,21 @@ jobs:
             tests/integration/attendance-schedule-dispatch.test.ts \
             tests/integration/attendance-makeup-punch-policy.test.ts \
             tests/integration/attendance-result-edit.test.ts \
+            tests/integration/attendance-shift-segments-migration.db.test.ts \
+            tests/integration/attendance-shift-segments-writer-matrix.db.test.ts \
+            tests/integration/attendance-w7-1am-provenance-widening.db.test.ts \
+            tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts \
+            tests/integration/attendance-w7-1b-issuance-seam.db.test.ts \
+            tests/integration/attendance-w7-1b-cutover-e2e.db.test.ts \
+            tests/integration/attendance-w7-1b-od-w7-10-recompute.db.test.ts \
+            tests/integration/attendance-w7-1b-lock-census.db.test.ts \
+            tests/integration/attendance-w7-2-compare-window-status.db.test.ts \
+            tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts \
+            tests/integration/attendance-w7-4-read-side-labeling.db.test.ts \
+            tests/integration/attendance-soak-diff-families.db.test.ts \
+            tests/integration/attendance-punch-org-resolution.db.test.ts \
+            tests/integration/attendance-org-resolution-shadow.db.test.ts \
+            tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 
       - name: Upload test results

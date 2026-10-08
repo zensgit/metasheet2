@@ -66,6 +66,9 @@ vi.mock('../../src/types/validator', () => ({
 }))
 
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 describe('plm-workbench audit routes', () => {
   const app = express()
@@ -103,7 +106,8 @@ describe('plm-workbench audit routes', () => {
         ],
       })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs?page=1&pageSize=20&resourceType=plm-team-preset-batch&action=archive&q=bom')
 
     expect(response.status).toBe(200)
@@ -154,7 +158,8 @@ describe('plm-workbench audit routes', () => {
         ],
       })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs/summary?windowMinutes=120&limit=5')
 
     expect(response.status).toBe(200)
@@ -201,7 +206,8 @@ describe('plm-workbench audit routes', () => {
       ],
     })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs/export.csv?resourceType=plm-team-view-batch&action=delete&kind=documents&limit=10')
 
     expect(response.status).toBe(200)
@@ -250,7 +256,8 @@ describe('plm-workbench audit routes', () => {
         ],
       })
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs?page=1&pageSize=20&resourceType=plm-team-view-default&action=set-default&kind=workbench')
 
     expect(response.status).toBe(200)
@@ -290,7 +297,7 @@ describe('plm-workbench audit routes', () => {
       ],
     })
 
-    const exportResponse = await request(app)
+    const exportResponse = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs/export.csv?resourceType=plm-team-view-default&action=set-default&kind=workbench&limit=10')
 
     expect(exportResponse.status).toBe(200)
@@ -301,7 +308,8 @@ describe('plm-workbench audit routes', () => {
   it('returns direct string error envelopes for audit log failures', async () => {
     auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-list'))
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs?page=1&pageSize=20')
 
     expect(response.status).toBe(500)
@@ -314,7 +322,8 @@ describe('plm-workbench audit routes', () => {
   it('returns direct string error envelopes for audit summary failures', async () => {
     auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-summary'))
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs/summary?windowMinutes=120&limit=5')
 
     expect(response.status).toBe(500)
@@ -327,7 +336,8 @@ describe('plm-workbench audit routes', () => {
   it('returns direct string error envelopes for audit csv export failures', async () => {
     auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-export'))
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .get('/api/plm-workbench/audit-logs/export.csv?limit=10')
 
     expect(response.status).toBe(500)

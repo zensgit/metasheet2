@@ -44,13 +44,71 @@
 
           <label class="meta-automation__label">{{ l('manager.action') }}</label>
           <el-select v-model="draft.actionType" class="meta-automation__select" data-automation-field="actionType">
-            <el-option value="notify" data-value="notify" :label="automationActionTypeLabel('notify', isZh)" />
-            <el-option value="update_field" data-value="update_field" :label="automationActionTypeLabel('update_field', isZh)" />
+            <el-option value="send_notification" data-value="send_notification" :label="automationActionTypeLabel('send_notification', isZh)" />
+            <el-option value="update_record" data-value="update_record" :label="automationActionTypeLabel('update_record', isZh)" />
             <el-option value="send_dingtalk_group_message" data-value="send_dingtalk_group_message" :label="automationActionTypeLabel('send_dingtalk_group_message', isZh)" />
             <el-option value="send_dingtalk_person_message" data-value="send_dingtalk_person_message" :label="automationActionTypeLabel('send_dingtalk_person_message', isZh)" />
           </el-select>
 
-          <template v-if="draft.actionType === 'notify'">
+          <template v-if="draft.actionType === 'send_notification'">
+            <!-- F9: recipients FIRST — a notification without them is a rule that can never deliver. -->
+            <!--
+              Recipient picker: search sheet members by name/email and pick them. The draft keeps the
+              comma-joined user-id string (draft.notifyUserIds) so the persisted shape stays
+              actionConfig.userIds: string[]; unresolvable ids stay visible as raw chips with an
+              "unmatched" badge; the manual input below remains for users the search cannot reach.
+            -->
+            <label class="meta-automation__label">{{ l('actionConfig.recipients') }}</label>
+            <el-input
+              v-model="notifyRecipientSearch"
+              type="text"
+              :placeholder="l('actionConfig.recipientSearchPlaceholder')"
+              data-automation-field="notifyRecipientSearch"
+              @input="void loadNotifyRecipientSuggestions()"
+            />
+            <div v-if="notifyRecipientSearchLoading" class="meta-automation__hint">{{ l('actionConfig.recipientSearching') }}</div>
+            <div v-else-if="notifyRecipientSearchError" class="meta-automation__hint meta-automation__hint--error">{{ notifyRecipientSearchError }}</div>
+            <div v-else-if="availableNotifyRecipientSuggestions.length" class="meta-automation__recipient-list">
+              <button
+                v-for="candidate in availableNotifyRecipientSuggestions"
+                :key="candidate.subjectId"
+                class="meta-automation__recipient-option"
+                type="button"
+                :disabled="isInactivePersonRecipientCandidate(candidate)"
+                :data-automation-notify-suggestion="candidate.subjectId"
+                @click="addNotifyRecipient(candidate)"
+              >
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ l('actionConfig.recipientInactive') }}</span>
+              </button>
+            </div>
+            <div v-else-if="notifyRecipientSearch.trim()" class="meta-automation__hint">{{ l('actionConfig.recipientNoMatch') }}</div>
+            <div v-if="selectedNotifyRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
+              <button
+                v-for="recipient in selectedNotifyRecipients"
+                :key="recipient.id"
+                class="meta-automation__recipient-chip"
+                :class="{ 'meta-automation__recipient-chip--unresolved': recipient.unresolved }"
+                type="button"
+                :data-automation-notify-recipient="recipient.id"
+                :data-automation-notify-recipient-unresolved="recipient.unresolved ? 'true' : undefined"
+                @click="removeNotifyRecipient(recipient.id)"
+              >
+                <strong>{{ recipient.label }}</strong>
+                <span v-if="recipient.subtitle">{{ recipient.subtitle }}</span>
+                <span v-if="recipient.unresolved" class="meta-automation__recipient-badge">{{ l('actionConfig.recipientUnresolved') }}</span>
+                <em>{{ l('actionConfig.recipientRemove') }}</em>
+              </button>
+            </div>
+            <label class="meta-automation__label">{{ l('actionConfig.recipientIdsManual') }}</label>
+            <el-input
+              v-model="draft.notifyUserIds"
+              type="text"
+              :placeholder="l('actionConfig.recipientsPlaceholder')"
+              data-automation-field="notifyUserIds"
+              @blur="void resolveNotifyRecipientIds(parseUserIdsText(draft.notifyUserIds))"
+            />
             <label class="meta-automation__label">{{ l('actionConfig.message') }}</label>
             <el-input
               v-model="draft.notifyMessage"
@@ -60,7 +118,7 @@
             />
           </template>
 
-          <template v-if="draft.actionType === 'update_field'">
+          <template v-if="draft.actionType === 'update_record'">
             <label class="meta-automation__label">{{ l('manager.targetField') }}</label>
             <el-select v-model="draft.targetFieldId" class="meta-automation__select" :placeholder="l('trigger.selectField')" data-automation-field="targetFieldId">
               <el-option value="" data-value="" :label="l('trigger.selectField')" />
@@ -660,7 +718,10 @@
         >
           <div class="meta-automation__card-header">
             <strong class="meta-automation__card-name">{{ rule.name }}</strong>
+            <!-- #6155: keyed by toggleRenderEpoch so a failed toggle re-creates the control; otherwise the native
+                 input keeps the checked state the click gave it while `rule.enabled` (and the text) did not move. -->
             <el-checkbox
+              :key="`toggle-${toggleRenderEpoch}`"
               class="meta-automation__toggle"
               :model-value="rule.enabled"
               data-automation-toggle="true"
@@ -671,6 +732,14 @@
           </div>
           <div class="meta-automation__card-desc">
             {{ describeTrigger(rule) }} &rarr; {{ describeAction(rule) }}
+          </div>
+          <div
+            v-if="showsDeletedTriggerSkipNotice(rule)"
+            class="meta-automation__hint meta-automation__hint--warning"
+            role="note"
+            data-automation-deleted-trigger-notice="true"
+          >
+            {{ l('manager.deletedTriggerSkipNotice') }}
           </div>
           <div v-if="dingTalkCardLinks(rule).length" class="meta-automation__card-links">
             <div
@@ -867,11 +936,21 @@ import {
 } from '../utils/meta-automation-labels'
 import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
 import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
+import { storedRuleHasDeletedTriggerSelfMutation } from '../automationSaveBlockReasons'
 
 const props = defineProps<{
   visible: boolean
   sheetId: string
-  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
+  // `options` mirrors MetaField.options (types.ts): the backend-populated convenience shape for select
+  // fields. Pass-through here, but the rule editor READS it (#5742 resultWriteback outcome picker + its
+  // missing-option blocker), so leaving it off this declaration types the data away on the way through.
+  fields: Array<{
+    id: string
+    name: string
+    type: string
+    property?: Record<string, unknown>
+    options?: Array<{ value: string; color?: string }>
+  }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
@@ -901,6 +980,7 @@ interface DraftState {
   triggerType: AutomationTriggerType
   triggerFieldId: string
   actionType: AutomationActionType
+  notifyUserIds: string
   notifyMessage: string
   targetFieldId: string
   targetValue: string
@@ -926,7 +1006,8 @@ function emptyDraft(): DraftState {
     name: '',
     triggerType: 'record.created',
     triggerFieldId: '',
-    actionType: 'notify',
+    actionType: 'send_notification',
+    notifyUserIds: '',
     notifyMessage: '',
     targetFieldId: '',
     targetValue: '',
@@ -964,6 +1045,15 @@ type DingTalkPersonRecipientDirectoryEntry = {
 }
 
 const dingtalkPersonUserDirectory = ref<Record<string, DingTalkPersonRecipientDirectoryEntry>>({})
+// send_notification recipient picker (quick form). Names/emails come from the shared
+// dingtalkPersonUserDirectory (same candidate endpoint); ids looked up and not found are misses.
+const notifyRecipientSearch = ref('')
+const notifyRecipientSuggestions = ref<MetaSheetPermissionCandidate[]>([])
+const notifyRecipientSearchLoading = ref(false)
+const notifyRecipientSearchError = ref('')
+const notifyRecipientMisses = ref<Record<string, boolean>>({})
+const notifyRecipientResolveInFlight = new Set<string>()
+let notifyRecipientSuggestionLoadId = 0
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
@@ -1153,6 +1243,118 @@ function removeDingTalkPersonMemberGroup(groupId: string) {
   draft.value.dingtalkPersonMemberGroupIds = parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds)
     .filter((id) => id !== groupId)
     .join(', ')
+}
+
+// ---------------------------------------------------------------------------
+// send_notification recipient picker (quick form). Same data source as the DingTalk person
+// picker above (form-share candidates = the roster the backend save gate validates against),
+// filtered to users; only the user id is written into draft.notifyUserIds.
+// ---------------------------------------------------------------------------
+const selectedNotifyRecipients = computed(() =>
+  Array.from(new Set(parseUserIdsText(draft.value.notifyUserIds))).map((id) => {
+    const directoryEntry = dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
+    return {
+      id,
+      label: directoryEntry?.label ?? id,
+      subtitle: directoryEntry?.subtitle,
+      unresolved: !directoryEntry && notifyRecipientMisses.value[id] === true,
+    }
+  }),
+)
+
+const availableNotifyRecipientSuggestions = computed(() => {
+  const selected = new Set(parseUserIdsText(draft.value.notifyUserIds))
+  return notifyRecipientSuggestions.value.filter(
+    (candidate) => candidate.subjectType === 'user' && !selected.has(candidate.subjectId),
+  )
+})
+
+function resetNotifyRecipientPicker() {
+  notifyRecipientSearch.value = ''
+  notifyRecipientSuggestions.value = []
+  notifyRecipientSearchError.value = ''
+  notifyRecipientSearchLoading.value = false
+  notifyRecipientMisses.value = {}
+}
+
+async function loadNotifyRecipientSuggestions() {
+  const query = notifyRecipientSearch.value.trim()
+  if (!props.client || !showForm.value || draft.value.actionType !== 'send_notification' || !query) {
+    notifyRecipientSuggestions.value = []
+    notifyRecipientSearchError.value = ''
+    notifyRecipientSearchLoading.value = false
+    return
+  }
+
+  const requestId = ++notifyRecipientSuggestionLoadId
+  notifyRecipientSearchLoading.value = true
+  notifyRecipientSearchError.value = ''
+  try {
+    const response = await props.client.listFormShareCandidates(props.sheetId, { q: query, limit: 8 })
+    if (requestId !== notifyRecipientSuggestionLoadId) return
+    const users = response.items.filter((candidate) => candidate.subjectType === 'user')
+    rememberDingTalkPersonSuggestions(users)
+    notifyRecipientSuggestions.value = users
+  } catch (error) {
+    if (requestId !== notifyRecipientSuggestionLoadId) return
+    notifyRecipientSuggestions.value = []
+    notifyRecipientSearchError.value = error instanceof Error ? error.message : 'Failed to search users'
+  } finally {
+    if (requestId === notifyRecipientSuggestionLoadId) {
+      notifyRecipientSearchLoading.value = false
+    }
+  }
+}
+
+function addNotifyRecipient(candidate: MetaSheetPermissionCandidate) {
+  if (candidate.subjectType !== 'user') return
+  if (isInactivePersonRecipientCandidate(candidate)) return
+  const ids = new Set(parseUserIdsText(draft.value.notifyUserIds))
+  ids.add(candidate.subjectId)
+  draft.value.notifyUserIds = Array.from(ids).join(', ')
+  rememberDingTalkPersonSuggestions([candidate])
+  if (notifyRecipientMisses.value[candidate.subjectId]) {
+    const rest = { ...notifyRecipientMisses.value }
+    delete rest[candidate.subjectId]
+    notifyRecipientMisses.value = rest
+  }
+  notifyRecipientSearch.value = ''
+  notifyRecipientSuggestions.value = []
+  notifyRecipientSearchError.value = ''
+}
+
+function removeNotifyRecipient(userId: string) {
+  draft.value.notifyUserIds = parseUserIdsText(draft.value.notifyUserIds)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
+
+// Exact-id lookup (the candidate search matches id/email/name substrings): found → directory entry,
+// not found → miss ("unmatched" badge), lookup error → undecided (plain raw-id chip).
+async function resolveNotifyRecipientIds(ids: string[]) {
+  const client = props.client
+  if (!client) return
+  const pending = Array.from(new Set(ids)).filter((id) =>
+    !dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
+    && notifyRecipientMisses.value[id] === undefined
+    && !notifyRecipientResolveInFlight.has(id),
+  )
+  await Promise.all(pending.map(async (id) => {
+    notifyRecipientResolveInFlight.add(id)
+    try {
+      const response = await client.listFormShareCandidates(props.sheetId, { q: id, limit: 50 })
+      const matches = response.items.filter((item) => item.subjectType === 'user' && item.subjectId === id)
+      if (matches.length) {
+        rememberDingTalkPersonSuggestions(matches)
+      } else {
+        notifyRecipientMisses.value = { ...notifyRecipientMisses.value, [id]: true }
+      }
+    } catch {
+      // Lookup unavailable (no search permission, projection sheet, network): keep the raw id chip.
+    } finally {
+      notifyRecipientResolveInFlight.delete(id)
+    }
+  }))
 }
 
 function parseGroupDestinationIds(value: unknown): string[] {
@@ -1619,9 +1821,68 @@ async function onTestRule(ruleId: string) {
   } catch (err: unknown) {
     setRuleTestRunState(ruleId, {
       status: 'failed',
-      message: automationTestRunRequestFailed(readErrorMessage(err), isZh.value),
+      message: describeTestRunRequestError(err),
     })
   }
+}
+
+/**
+ * #5817 follow-up: every `error.code` the test-run route (`POST .../automations/:ruleId/test`,
+ * packages/core-backend/src/routes/automation.ts) and `AutomationService.testRun()` can answer with,
+ * mapped to localized copy. The server's messages are fixed English sentences (SHEET_DELETED even names
+ * a restore API with a literal `{sheetId}`), so a known code never shows them. This button only sends
+ * simulate today; the real-fire codes are mapped too because the route answers them to any caller.
+ * Kept equal to the server's codes by
+ * packages/core-backend/tests/unit/automation-test-run-error-codes-web-parity.test.ts.
+ */
+const TEST_RUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
+  FORBIDDEN: 'manager.testRunError.forbidden',
+  UNAUTHENTICATED: 'manager.testRunError.unauthenticated',
+  SHEET_DELETED: 'manager.testRunError.sheetDeleted',
+  // The sheet-liveness 404 and the sample-record 404 share this code.
+  NOT_FOUND: 'manager.testRunError.notFound',
+  TEST_RUN_RULE_NOT_FOUND: 'manager.testRunError.ruleNotFound',
+  DB_NOT_READY: 'manager.testRunError.serviceUnavailable',
+  PERMISSION_CHECK_FAILED: 'manager.testRunError.permissionCheckFailed',
+  INVALID_TEST_RUN_MODE: 'manager.testRunError.invalidMode',
+  CONFIRM_SIDE_EFFECTS_REQUIRED: 'manager.testRunError.confirmSideEffectsRequired',
+  TEST_RUN_SAMPLE_RECORD_REQUIRED: 'manager.testRunError.sampleRecordRequired',
+  INVALID_TEST_RUN_RECORD_ID: 'manager.testRunError.invalidRecordId',
+  SAMPLE_RECORD_READ_FAILED: 'manager.testRunError.sampleRecordReadFailed',
+  INVALID_SAMPLE_RECORD_DATA: 'manager.testRunError.sampleRecordDataInvalid',
+  INVALID_TEST_RUN_OPERATION_ID: 'manager.testRunError.invalidOperationId',
+  TEST_RUN_ACTION_UNSUPPORTED: 'manager.testRunError.actionUnsupported',
+  TEST_RUN_CLASS_A_PROTECTION_DISABLED: 'manager.testRunError.recordWriteProtectionDisabled',
+  TEST_RUN_CLASS_B_PROTECTION_DISABLED: 'manager.testRunError.outboundProtectionDisabled',
+  TEST_RUN_FAILED: 'manager.testRunError.failed',
+}
+
+/**
+ * Statuses a gateway / proxy answers when the backend is down or slow. Without a code (an nginx HTML page,
+ * an empty body) such a failure means the service is unavailable, not an unknown refusal.
+ */
+const TEST_RUN_GATEWAY_UNAVAILABLE_STATUSES: ReadonlySet<unknown> = new Set([502, 503, 504])
+
+/**
+ * An API refusal (the client's MultitableApiError) shows the label of its code; with no code, a 502/503/504
+ * shows the service-unavailable label; anything else (an unknown code, or no code on another status)
+ * shows the generic label — never the server's message and never the code. Anything else (a network
+ * failure, a non-API error) keeps showing its own message behind the localized prefix, as before.
+ */
+function describeTestRunRequestError(err: unknown): string {
+  if (err instanceof Error && err.name === 'MultitableApiError') {
+    const { code, status } = err as { code?: unknown; status?: unknown }
+    const key = typeof code === 'string' && Object.prototype.hasOwnProperty.call(TEST_RUN_ERROR_LABELS, code)
+      ? TEST_RUN_ERROR_LABELS[code]
+      : undefined
+    if (key) return automationTestRunRequestFailed(l(key), isZh.value)
+    const hasCode = typeof code === 'string' && code.trim() !== ''
+    if (!hasCode && TEST_RUN_GATEWAY_UNAVAILABLE_STATUSES.has(status)) {
+      return automationTestRunRequestFailed(l('manager.testRunError.serviceUnavailable'), isZh.value)
+    }
+    return l('manager.testRunError.generic')
+  }
+  return automationTestRunRequestFailed(readErrorMessage(err), isZh.value)
 }
 
 function setRuleTestRunState(ruleId: string, state: AutomationTestRunState) {
@@ -1736,8 +1997,12 @@ async function refreshRuleCardData(ruleId: string) {
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.triggerType === 'field.changed' && !draft.value.triggerFieldId) return false
-  if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
-  if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
+  // F9: recipients are REQUIRED here. Without them the saved rule is guaranteed to fail at run time
+  // (AUTOMATION_NO_RECIPIENTS_ERROR) — blocking the save is the same call the button route makes
+  // (NO_RECIPIENTS), not a silent fallback to the rule's creator.
+  if (draft.value.actionType === 'send_notification'
+    && (!parseUserIdsText(draft.value.notifyUserIds).length || !draft.value.notifyMessage.trim())) return false
+  if (draft.value.actionType === 'update_record' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
     const destinationFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
     if (!draft.value.dingtalkDestinationIds.length && !destinationFieldPaths.length) return false
@@ -1776,6 +2041,7 @@ function applyRecipe(recipe: AutomationRecipe) {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  resetNotifyRecipientPicker()
   showForm.value = true
 }
 
@@ -1785,19 +2051,34 @@ function openCreateForm() {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  resetNotifyRecipientPicker()
   showForm.value = true
 }
 
+// NOTE: currently unreferenced — the card's edit button opens the ADVANCED editor (openRuleEditor,
+// see the template). Kept in sync with DraftState (and with F9's canonical action types) so the quick
+// form stays coherent if it is ever wired back to a card.
 function openEditForm(rule: AutomationRule) {
   editingRuleId.value = rule.id
+  const legacyFolded: AutomationActionType = rule.actionType === 'notify'
+    ? 'send_notification'
+    : rule.actionType === 'update_field'
+      ? 'update_record'
+      : rule.actionType
+  const updatedFields = rule.actionConfig?.fields && typeof rule.actionConfig.fields === 'object' && !Array.isArray(rule.actionConfig.fields)
+    ? Object.entries(rule.actionConfig.fields as Record<string, unknown>)
+    : []
   draft.value = {
     name: rule.name,
     triggerType: rule.triggerType,
     triggerFieldId: (rule.triggerConfig?.fieldId as string) ?? '',
-    actionType: rule.actionType,
+    actionType: legacyFolded,
+    notifyUserIds: Array.isArray(rule.actionConfig?.userIds) ? (rule.actionConfig?.userIds as string[]).join(', ') : '',
     notifyMessage: (rule.actionConfig?.message as string) ?? '',
-    targetFieldId: (rule.actionConfig?.fieldId as string) ?? '',
-    targetValue: (rule.actionConfig?.value as string) ?? '',
+    targetFieldId: (rule.actionConfig?.fieldId as string) ?? (updatedFields.length === 1 ? updatedFields[0][0] : ''),
+    targetValue: rule.actionConfig?.value !== undefined
+      ? String(rule.actionConfig?.value ?? '')
+      : updatedFields.length === 1 ? String(updatedFields[0][1] ?? '') : '',
     dingtalkDestinationIds: parseGroupDestinationIds(rule.actionConfig?.destinationIds ?? rule.actionConfig?.destinationId),
     dingtalkDestinationPickerId: '',
     dingtalkDestinationFieldPath: Array.isArray(rule.actionConfig?.destinationIdFieldPaths)
@@ -1823,6 +2104,8 @@ function openEditForm(rule: AutomationRule) {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  resetNotifyRecipientPicker()
+  void resolveNotifyRecipientIds(parseUserIdsText(draft.value.notifyUserIds))
   showForm.value = true
 }
 
@@ -1833,6 +2116,7 @@ function cancelForm() {
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
   dingtalkPersonUserSearchError.value = ''
+  resetNotifyRecipientPicker()
 }
 
 function buildTriggerConfig(): Record<string, unknown> {
@@ -1843,11 +2127,14 @@ function buildTriggerConfig(): Record<string, unknown> {
 }
 
 function buildActionConfig(): Record<string, unknown> {
-  if (draft.value.actionType === 'notify') {
-    return { message: draft.value.notifyMessage }
+  // F9: the shapes below are the executor's real config shapes (SendNotificationConfig /
+  // UpdateRecordConfig) and are byte-identical to what the advanced editor emits, so a rule authored
+  // in either editor renders and runs the same in both.
+  if (draft.value.actionType === 'send_notification') {
+    return { userIds: parseUserIdsText(draft.value.notifyUserIds), message: draft.value.notifyMessage.trim() }
   }
-  if (draft.value.actionType === 'update_field') {
-    return { fieldId: draft.value.targetFieldId, value: draft.value.targetValue }
+  if (draft.value.actionType === 'update_record') {
+    return { fields: { [draft.value.targetFieldId]: draft.value.targetValue } }
   }
   if (draft.value.actionType === 'send_dingtalk_group_message') {
     const destinationIds = Array.from(new Set(draft.value.dingtalkDestinationIds.map((id) => id.trim()).filter(Boolean)))
@@ -1914,12 +2201,36 @@ async function onSave() {
   }
 }
 
+// #6155: bumped after a failed toggle so every rule's checkbox is re-created from `rule.enabled` (which the
+// composable has just re-read from the server). A click flips the native input before the request; when the
+// request fails the model value does not change, so nothing else would flip the input back.
+const toggleRenderEpoch = ref(0)
+
+// #6155: the rules whose switch-ON request is in flight — the notice below already applies to them.
+const pendingEnableRuleIds = ref(new Set<string>())
+
+/**
+ * #6155: a NON-blocking notice for a rule that is on (or being switched on) while its trigger is record.deleted
+ * and an update/delete/lock action of it is aimed at the trigger record — such an action changes no table record
+ * (a delete step ends as skipped, an update / lock step as success; other actions still run). The shape decision is the
+ * editor's own save-block detector (automationSaveBlockReasons.ts), applied to the rule as listed.
+ */
+function showsDeletedTriggerSkipNotice(rule: AutomationRule): boolean {
+  if (!rule.enabled && !pendingEnableRuleIds.value.has(rule.id)) return false
+  return storedRuleHasDeletedTriggerSelfMutation(rule)
+}
+
 async function onToggle(rule: AutomationRule) {
+  const enabling = !rule.enabled
+  if (enabling) pendingEnableRuleIds.value.add(rule.id)
   try {
-    await toggleRule(props.sheetId, rule.id, !rule.enabled)
+    await toggleRule(props.sheetId, rule.id, enabling)
     emit('updated')
   } catch {
-    // error ref is set by composable
+    // error ref is set by composable (the server's sentence); the rules were re-read from the server there
+    toggleRenderEpoch.value += 1
+  } finally {
+    if (enabling) pendingEnableRuleIds.value.delete(rule.id)
   }
 }
 
@@ -1990,7 +2301,14 @@ function describeActionType(actionType: AutomationActionType, actionConfig: Reco
       const fid = actionConfig?.fieldId as string | undefined
       return automationCardActionSummary(actionType, fid ? fieldNameById(fid) : '', isZh.value)
     }
-    case 'update_record':
+    case 'update_record': {
+      // F9: quick-form update_record writes exactly one field — keep naming it on the card (what the
+      // legacy update_field card showed). Multi-field configs fall back to the plain action label.
+      const fields = actionConfig?.fields && typeof actionConfig.fields === 'object' && !Array.isArray(actionConfig.fields)
+        ? Object.keys(actionConfig.fields as Record<string, unknown>)
+        : []
+      return automationCardActionSummary(actionType, fields.length === 1 ? fieldNameById(fields[0]) : '', isZh.value)
+    }
     case 'create_record':
     case 'send_webhook':
     case 'delete_record':
@@ -2250,6 +2568,14 @@ watch(
   font-size: 12px;
   color: var(--ms-text-3);
   font-style: normal;
+}
+
+.meta-automation__recipient-chip--unresolved {
+  border-color: var(--el-color-danger);
+}
+
+.meta-automation__recipient-chip .meta-automation__recipient-badge {
+  color: var(--el-color-danger-dark-2);
 }
 
 .meta-automation__form-actions {

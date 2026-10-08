@@ -3,11 +3,16 @@ import { createApp, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { useLocale } from '../src/composables/useLocale'
 import AttendanceExperienceView from '../src/views/attendance/AttendanceExperienceView.vue'
+import { apiFetch } from '../src/utils/api'
+
+vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     hasFeature: (feature: string) => feature === 'attendanceAdmin' || feature === 'workflow',
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    isFeatureOverrideAllowed: () => false,
+    setLocalFeatureOverride: vi.fn(),
   }),
 }))
 
@@ -55,6 +60,13 @@ async function waitForRouteTab(router: Router, expected: string | undefined, max
   }
 }
 
+async function waitForRoutePath(router: Router, expected: string, maxCycles = 30): Promise<void> {
+  for (let i = 0; i < maxCycles; i += 1) {
+    await flushUi(1)
+    if (router.currentRoute.value.fullPath === expected) return
+  }
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     candidate => candidate.textContent?.trim() === label
@@ -93,6 +105,11 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/attendance', component: AttendanceExperienceView },
+        {
+          path: '/attendance/admin/groups/:groupId/schedule',
+          name: 'attendance-admin-group-schedule',
+          component: AttendanceExperienceView,
+        },
       ],
     })
     await router.push('/attendance?tab=admin')
@@ -126,8 +143,10 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(router?.currentRoute.value.query.tab).toBe('admin')
 
     findButton(container!, '返回总览').click()
-    await waitForRouteTab(router!, undefined)
-    expect(router?.currentRoute.value.query.tab).toBeUndefined()
+    // Navigability audit fix 3: Overview is now an explicit, linkable `?tab=overview` destination
+    // instead of writing no `tab` param at all — see AttendanceExperienceView.vue's selectTab().
+    await waitForRouteTab(router!, 'overview')
+    expect(router?.currentRoute.value.query.tab).toBe('overview')
     expect(container?.querySelector('[data-testid="attendance-overview"]')).not.toBeNull()
 
     await router?.replace('/attendance?tab=workflow')
@@ -136,5 +155,23 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(container?.textContent).toContain('建议使用桌面端')
     expect(container?.textContent).toContain('流程设计仅支持桌面端')
     expect(container?.querySelector('[data-testid="attendance-workflow-designer"]')).toBeNull()
+  })
+
+  it('keeps a group route blocked on mobile and returns to the allowed group workspace', async () => {
+    vi.mocked(apiFetch).mockClear()
+    await router?.replace('/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule')
+    await flushUi(6)
+
+    expect(router?.currentRoute.value.path).toBe('/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule')
+    expect(container?.textContent).toContain('建议使用桌面端')
+    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
+    expect(apiFetch).not.toHaveBeenCalled()
+
+    findButton(container!, '返回总览').click()
+    await waitForRoutePath(router!, '/attendance')
+
+    expect(router?.currentRoute.value.fullPath).toBe('/attendance?tab=admin&section=attendance-admin-groups')
+    expect(container?.textContent).not.toContain('建议使用桌面端')
+    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).not.toBeNull()
   })
 })

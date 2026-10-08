@@ -14,7 +14,7 @@ import {
   estimateAiCostUsd,
   stripUrlUserinfo,
 } from '../../src/services/ai-provider-client'
-import { AI_MODEL_ALLOWLISTS, AI_PROVIDER_ALLOWLIST } from '../../src/services/ai-provider-readiness'
+import { AI_CLOUD_PROVIDER_ALLOWLIST, AI_LOCAL_PROVIDER, AI_MODEL_ALLOWLISTS } from '../../src/services/ai-provider-readiness'
 
 const KEY_SENTINEL = `sk-${'clientleak'.repeat(3)}`
 
@@ -105,12 +105,99 @@ describe('AiProviderClient usage normalization (§2.3 gap)', () => {
     expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY_SENTINEL}`)
   })
 
-  it('every allowlisted provider×model has a price entry (the table can never silently lag the allowlist)', () => {
-    for (const provider of AI_PROVIDER_ALLOWLIST) {
+  it('every allowlisted CLOUD provider×model has a price entry (the table can never silently lag the allowlist)', () => {
+    // Minimal update for the local lane: the price table is a CLOUD-spend
+    // account (估算 for quota USD), so the completeness census iterates the
+    // cloud allowlist. The local lane has no allowlist and, by definition, a
+    // fixed zero price — pinned by its own test below.
+    for (const provider of AI_CLOUD_PROVIDER_ALLOWLIST) {
       for (const model of AI_MODEL_ALLOWLISTS[provider]) {
         expect(AI_MODEL_PRICES_USD_PER_MTOKEN[`${provider}:${model}`], `${provider}:${model}`).toBeDefined()
       }
     }
+  })
+
+  it('RED (local call path): local-openai-compat completes against the LOCAL base URL, keyless, operator model, zero USD', async () => {
+    const fetchSpy = vi.fn(async () =>
+      jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'OUT-LOCAL' } }],
+        usage: { prompt_tokens: 9, completion_tokens: 4 },
+      }),
+    )
+    const client = new AiProviderClient({ fetchFn: fetchSpy as unknown as typeof fetch })
+    const result = await client.complete(
+      { prompt: 'hello' },
+      {
+        MULTITABLE_AI_ENABLED: '1',
+        MULTITABLE_AI_PROVIDER: AI_LOCAL_PROVIDER,
+        MULTITABLE_AI_BASE_URL: 'http://127.0.0.1:11434',
+        MULTITABLE_AI_MODEL: 'qwen2.5:14b-instruct',
+        MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+        // NO MULTITABLE_AI_API_KEY — keyless local server
+      },
+    )
+    expect(result.status).toBe('succeeded')
+    expect(result.text).toBe('OUT-LOCAL')
+    expect(result.usage).toEqual({ promptTokens: 9, completionTokens: 4 })
+    // Self-hosted spend is 0 USD by definition (tokens still metered).
+    expect(result.estimatedCostUsd).toBe(0)
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(String(url)).toBe('http://127.0.0.1:11434/v1/chat/completions')
+    // Keyless: NO authorization header at all (no `Bearer ` with an empty key).
+    expect(Object.keys(init.headers as Record<string, string>)).not.toContain('authorization')
+    expect(String(init.body)).toContain('"model":"qwen2.5:14b-instruct"')
+  })
+
+  it('RED (local call path): a key, when SET, is passed through as a bearer token', async () => {
+    const fetchSpy = vi.fn(async () =>
+      jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'OUT' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+    )
+    const client = new AiProviderClient({ fetchFn: fetchSpy as unknown as typeof fetch })
+    const result = await client.complete(
+      { prompt: 'hello' },
+      {
+        MULTITABLE_AI_ENABLED: '1',
+        MULTITABLE_AI_PROVIDER: AI_LOCAL_PROVIDER,
+        MULTITABLE_AI_BASE_URL: 'http://vllm.internal:8000',
+        MULTITABLE_AI_MODEL: 'Qwen/Qwen2.5-72B-Instruct',
+        MULTITABLE_AI_API_KEY: 'local-proxy-token',
+        MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+      },
+    )
+    expect(result.status).toBe('succeeded')
+    const [, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer local-proxy-token')
+  })
+
+  it('local preflight bypasses the CLOUD price table but never the readiness/locality/double-confirm gates', async () => {
+    const fetchSpy = vi.fn()
+    // priceTable {} would block any cloud model (pinned above) — local is priced 0, not looked up.
+    const client = new AiProviderClient({ fetchFn: fetchSpy as unknown as typeof fetch, priceTable: {} })
+    const localEnv = {
+      MULTITABLE_AI_ENABLED: '1',
+      MULTITABLE_AI_PROVIDER: AI_LOCAL_PROVIDER,
+      MULTITABLE_AI_BASE_URL: 'http://127.0.0.1:11434',
+      MULTITABLE_AI_MODEL: 'qwen2.5:14b',
+      MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: '1',
+    }
+    const pre = client.preflight(localEnv)
+    expect('caps' in pre).toBe(true)
+    if ('caps' in pre) {
+      expect(pre.provider).toBe(AI_LOCAL_PROVIDER)
+      expect(pre.model).toBe('qwen2.5:14b')
+      expect(pre.price).toEqual({ inputUsdPerMTok: 0, outputUsdPerMTok: 0 })
+    }
+    // PUBLIC host → readiness blocks → preflight blocks → complete() sends NOTHING.
+    const publicEnv = { ...localEnv, MULTITABLE_AI_BASE_URL: 'https://api.example.com' }
+    const result = await client.complete({ prompt: 'hello' }, publicEnv)
+    expect(result.status).toBe('blocked')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    // double-confirm still gates local too
+    const unconfirmed = client.preflight({ ...localEnv, MULTITABLE_AI_CONFIRM_LIVE_REQUESTS: undefined })
+    expect('message' in unconfirmed && unconfirmed.message).toContain('MULTITABLE_AI_CONFIRM_LIVE_REQUESTS')
   })
 
   it('estimateAiCostUsd computes per-MTok pricing', () => {

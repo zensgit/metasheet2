@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 /**
  * Delegation (委托) config CRUD — real-DB API. Exercises the admin-managed
@@ -27,6 +27,7 @@ async function canListen(): Promise<boolean> {
   })
 }
 async function tok(base: string, userId: string): Promise<string> {
+  await grantApprovalWriteForIntegrationActor(userId)
   const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
   return ((await res.json()) as { token: string }).token
 }

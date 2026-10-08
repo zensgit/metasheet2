@@ -1,14 +1,20 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import fs from 'fs/promises'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { createRequire } from 'module'
 import { Pool } from 'pg'
 import http from 'http'
+import * as bcrypt from 'bcryptjs'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
 
 const require = createRequire(import.meta.url)
 type AttendancePluginTestModule = {
@@ -116,8 +122,19 @@ function utcDateKeyOffset(days: number): string {
   return date.toISOString().slice(0, 10)
 }
 
+function addDaysToDateKeyForTest(dateKey: string, days: number): string {
+  const date = new Date(`${dateKey}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
 function dateOnlyForTest(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (value instanceof Date) {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
   return String(value ?? '').slice(0, 10)
 }
 
@@ -134,6 +151,15 @@ function createPluginDbForTest(pool: Pool) {
           const result = await client.query(sql, params as any[])
           return result.rows
         },
+        // #4556 Gate A / Option B: mirror the production plugin-context db adapter
+        // (`context.api.database.transaction` attaches `__rawClient: client`, src/index.ts).
+        // In-process writers that resolve the canonical segment-calculation posture port on
+        // their write trx (e.g. the auto-shift auto-write job) require this raw pg client seam;
+        // without it the port fails closed with `W4C3B_TRANSACTION_CLIENT_REQUIRED`. This fixture
+        // stood in for the production db before those writers were cut over to the port, so it
+        // never modelled `__rawClient`; add it so the mock stays faithful to the contract every
+        // production caller (`context.api.database`) already satisfies.
+        __rawClient: client,
       }
       try {
         await client.query('BEGIN')
@@ -189,12 +215,76 @@ const attendanceIntegrationDescribe = attendanceIntegrationDbUrl ? describe : de
 const attendanceIntegrationMissingDbMessage =
   'Attendance integration tests require ATTENDANCE_TEST_DATABASE_URL or DATABASE_URL; skipping instead of silently returning.'
 
+// Lock-11 §10 W-4 fixture delta (spec §11 "Class A"): a subject with zero active `user_orgs`
+// memberships now 422s (APPROVAL_ORG_UNRESOLVED) at the writer when creating an attendance
+// request/outdoor-punch/schedule-dispatch/shift-swap — this file's dev-token users write no
+// such row. `orgId` defaults to `'default'` (the getOrgId(req) fallback every fixture below
+// relies on when it never sends an explicit org selector). `ON CONFLICT ... DO UPDATE SET
+// is_active = TRUE` (not DO NOTHING): a suite that previously deactivated this same
+// (user, org) pair for some OTHER negative must not leave a stale inactive row here.
+async function seedAttendanceOrgMembershipForTest(pool: Pool, userId: string, orgId = 'default'): Promise<void> {
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [userId, orgId],
+  )
+}
+
 async function requireAttendanceTable(pool: Pool, tableName: string): Promise<void> {
   const tableCheck = await pool.query(`SELECT to_regclass($1) AS name`, [`public.${tableName}`])
   if (!tableCheck.rows[0]?.name) {
     throw new Error(
       `Attendance integration database is missing ${tableName}; run core-backend migrations before executing this suite.`
     )
+  }
+}
+
+async function ensurePublishedShiftCandidateForTest(
+  pool: Pool,
+  input: {
+    orgId?: string
+    userId: string
+    workDate: string
+    createdShiftIds: Set<string>
+  },
+): Promise<void> {
+  const orgId = input.orgId ?? 'default'
+  const existing = await pool.query(
+    `SELECT a.shift_id
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s
+         ON s.id = a.shift_id
+        AND s.org_id = a.org_id
+      WHERE a.org_id = $1
+        AND a.user_id = $2
+        AND a.start_date <= $3::date
+        AND COALESCE(a.end_date, a.start_date) >= $3::date
+        AND a.is_active = true
+        AND a.publish_status = 'published'
+      LIMIT 1`,
+    [orgId, input.userId, input.workDate],
+  )
+  if (existing.rowCount) return
+
+  const shiftId = randomUUID()
+  const assignmentId = randomUUID()
+  try {
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, working_days, is_overnight)
+       VALUES ($1, $2, $3, 'UTC', '09:00', '18:00', '[1,2,3,4,5]'::jsonb, false)`,
+      [shiftId, orgId, `w2-overtime-fixture-${input.userId}-${input.workDate}`],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active, publish_status)
+       VALUES ($1, $2, $3, $4, 0, $5::date, $5::date, true, 'published')`,
+      [assignmentId, orgId, input.userId, shiftId, input.workDate],
+    )
+    input.createdShiftIds.add(shiftId)
+  } catch (error) {
+    await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+    throw error
   }
 }
 
@@ -214,6 +304,28 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+async function waitForImportUploadCleanup(
+  paths: readonly string[],
+  { attempts = 80, intervalMs = 25 }: { attempts?: number; intervalMs?: number } = {},
+): Promise<void> {
+  let remainingCount = paths.length
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const present = await Promise.all(paths.map(async (filePath) => {
+      try {
+        await fs.stat(filePath)
+        return true
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'ENOENT') return false
+        throw error
+      }
+    }))
+    remainingCount = present.filter(Boolean).length
+    if (remainingCount === 0) return
+    await delay(intervalMs)
+  }
+  throw new Error(`ATTENDANCE_IMPORT_UPLOAD_CLEANUP_NOT_OBSERVED:${remainingCount}`)
 }
 
 async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
@@ -295,6 +407,55 @@ attendanceIntegrationDescribe(
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let importUploadDir: string | undefined
+  // Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row: this
+  // file has ~15 PUT /api/attendance/settings sites and is the FIRST attendance suite in
+  // plugin-tests.yml's shared step — any state it leaks poisons every later settings-sensitive
+  // suite (recorded W4 finding: shiftCompliance bleeding into attendance-schedule-dispatch).
+  // Snapshot once, restore the EXACT prior row after every test (see tests/utils/attendance-settings-row.ts).
+  let settingsRowPool: Pool | undefined
+  let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+  const seededImportIdentityIds = new Set<string>()
+  const sharedImportUserId = randomUUID()
+
+  async function ensureActiveImportIdentitiesForTest(
+    userIds: string | string[],
+    orgId = 'default',
+  ): Promise<void> {
+    if (!settingsRowPool) throw new Error('attendance integration identity fixture pool is unavailable')
+    for (const userId of [...new Set(Array.isArray(userIds) ? userIds : [userIds])]) {
+      await settingsRowPool.query(
+        `INSERT INTO users (
+           id, email, username, name, password_hash, role, permissions,
+           is_active, is_admin, activation_status, created_at, updated_at
+         ) VALUES (
+           $1, $2, $1, 'Attendance Import Test User', 'x', 'admin',
+           '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+           true, true, 'activated', now(), now()
+         )
+         ON CONFLICT (id) DO UPDATE
+           SET role = 'admin',
+               permissions = '["attendance:read","attendance:write","attendance:admin","attendance:import"]'::jsonb,
+               is_active = true,
+               is_admin = true,
+               activation_status = 'activated',
+               updated_at = now()`,
+        [userId, `${userId}@example.test`],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin')
+         ON CONFLICT (user_id, role_id) DO NOTHING`,
+        [userId],
+      )
+      await settingsRowPool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [userId, orgId],
+      )
+      seededImportIdentityIds.add(userId)
+    }
+  }
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -373,6 +534,10 @@ attendanceIntegrationDescribe(
       await pool.end()
     }
 
+    settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
+    await ensureActiveImportIdentitiesForTest(sharedImportUserId)
+
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
     const { MetaSheetServer } = await import('../../src/index')
@@ -400,7 +565,37 @@ attendanceIntegrationDescribe(
     getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.()
   })
 
+  afterEach(async () => {
+    // Exact-restore the settings row after EVERY test (including failed ones): a test that PUT
+    // settings and then failed before its own in-test restore must not leak state into the next
+    // test here — or into any later suite sharing this Postgres. The beforeEach cache reset above
+    // then makes the next test actually re-read the restored row instead of a primed cache.
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot)
+    }
+  })
+
   afterAll(async () => {
+    if (settingsRowPool) {
+      await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
+        `DELETE FROM users WHERE id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.end().catch(() => undefined)
+    }
     if (server && (server as any).stop) {
       await server.stop()
     }
@@ -412,9 +607,10 @@ attendanceIntegrationDescribe(
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
     const runSuffix = Date.now().toString(36)
-    const testUserId = `attendance-test-${runSuffix}`
+    const testUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(testUserId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -557,24 +753,6 @@ attendanceIntegrationDescribe(
       }
     }
 
-    if (overtimeRuleId) {
-      const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          workDate,
-          requestType: 'overtime',
-          overtimeRuleId,
-          minutes: 90,
-        }),
-      })
-
-      expect(overtimeRequestRes.status).toBe(201)
-    }
-
     const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
       method: 'POST',
       headers: {
@@ -612,6 +790,24 @@ attendanceIntegrationDescribe(
     expect(assignmentRes.status).toBe(201)
     const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(assignmentId).toBeTruthy()
+
+    if (overtimeRuleId) {
+      const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workDate,
+          requestType: 'overtime',
+          overtimeRuleId,
+          minutes: 90,
+        }),
+      })
+
+      expect(overtimeRequestRes.status).toBe(201)
+    }
 
     // Fixed far-future date, NOT `Date.now() + 7 days`. Holidays here live in the shared 'default' org and
     // are not cleaned up, so a near-term relative date can collide with another test's fixed workDate: on
@@ -1541,10 +1737,10 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         userMap: {
-          EMP001: 'attendance-test',
+          EMP001: sharedImportUserId,
         },
         csvText: [
           '日期,工号,未知列',
@@ -1581,7 +1777,7 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         mappingProfileId: 'dingtalk_csv_daily_summary',
         csvText: '日期,工号,姓名\n',
         mode: 'override',
@@ -1599,9 +1795,30 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-csv-standard-${runSuffix}`
+    const requesterId = randomUUID()
+    const routePool = new Pool({
+      connectionString: process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL,
+    })
+    await routePool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'no-login', true)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [requesterId, `${requesterId}@example.com`],
+    )
+    await routePool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       VALUES ($1, 'default', true)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+      [requesterId],
+    )
+    await routePool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')
+       ON CONFLICT DO NOTHING`,
+      [requesterId],
+    )
+    await routePool.end()
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1716,7 +1933,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-lookup-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1856,7 +2073,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-alias-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2117,7 +2334,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-validation-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2220,7 +2437,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-assignment-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2268,8 +2485,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {
@@ -2285,7 +2503,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-rotation-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2351,8 +2569,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {
@@ -2368,7 +2587,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-schedule-conflict-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2587,7 +2806,7 @@ attendanceIntegrationDescribe(
     const workDate = '2026-07-08'
     const saturdayDate = '2026-07-11'
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3046,10 +3265,10 @@ attendanceIntegrationDescribe(
     let rotationRuleId: string | undefined
 
     const adminTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const employeeTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
@@ -3318,7 +3537,7 @@ attendanceIntegrationDescribe(
     const rotationRuleIds: string[] = []
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3622,7 +3841,7 @@ attendanceIntegrationDescribe(
     const rotationRuleIds: string[] = []
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3874,9 +4093,11 @@ attendanceIntegrationDescribe(
     let originalSettings: Record<string, unknown> = {}
     const shiftIds: string[] = []
     let fixedGroupId: string | undefined
+    let failedFirstApplyGroupId: string | undefined
+    let failedFirstRebuildGroupId: string | undefined
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -4193,6 +4414,109 @@ attendanceIntegrationDescribe(
       const fixedBaseAssignmentId = fixedBaseRows.rows[0]?.id
       expect(fixedBaseAssignmentId).toBeTruthy()
       if (!fixedBaseAssignmentId) return
+      const fixedConfigRows = await pool.query(
+        `SELECT shift_id, start_date::text, end_date::text, revision
+           FROM attendance_group_fixed_schedule_configs
+          WHERE org_id = 'default' AND group_id = $1`,
+        [fixedGroupId],
+      )
+      expect(fixedConfigRows.rows).toEqual([expect.objectContaining({
+        shift_id: baseShiftId,
+        start_date: fixedDate,
+        end_date: fixedDate,
+        revision: 1,
+      })])
+
+      const failedGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `temp-shift-failed-first-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'fixed_shift',
+          description: 'first apply rollback proof',
+        }),
+      })
+      expect(failedGroupRes.status, JSON.stringify(failedGroupRes.body)).toBe(200)
+      failedFirstApplyGroupId = (failedGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(failedFirstApplyGroupId).toBeTruthy()
+      if (!failedFirstApplyGroupId) return
+      const failedMemberRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstApplyGroupId}/members`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ userIds: [fixedUserId] }),
+        },
+      )
+      expect(failedMemberRes.status, JSON.stringify(failedMemberRes.body)).toBe(200)
+      const failedFirstApplyRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstApplyGroupId}/fixed-schedule/apply`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ shiftId: replacementShiftId, startDate: fixedDate, endDate: fixedDate }),
+        },
+      )
+      expect(failedFirstApplyRes.status, JSON.stringify(failedFirstApplyRes.body)).toBe(409)
+      expect((failedFirstApplyRes.body as { error?: { code?: string } } | undefined)?.error?.code)
+        .toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
+      const failedFirstApplyResidue = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM attendance_group_fixed_schedule_configs WHERE org_id = 'default' AND group_id = $1) AS configs,
+           (SELECT COUNT(*)::int FROM attendance_shift_assignments
+             WHERE org_id = 'default'
+               AND producer_type = 'attendance_group_fixed_schedule'
+               AND producer_ref_id = $1) AS assignments`,
+        [failedFirstApplyGroupId],
+      )
+      expect(failedFirstApplyResidue.rows[0]).toEqual({ configs: 0, assignments: 0 })
+
+      const failedRebuildGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `temp-shift-failed-first-rebuild-${runSuffix}`,
+          timezone: 'UTC',
+          attendanceType: 'fixed_shift',
+          description: 'first rebuild rollback proof',
+        }),
+      })
+      expect(failedRebuildGroupRes.status, JSON.stringify(failedRebuildGroupRes.body)).toBe(200)
+      failedFirstRebuildGroupId = (failedRebuildGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(failedFirstRebuildGroupId).toBeTruthy()
+      if (!failedFirstRebuildGroupId) return
+      const failedRebuildMemberRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstRebuildGroupId}/members`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ userIds: [fixedUserId] }),
+        },
+      )
+      expect(failedRebuildMemberRes.status, JSON.stringify(failedRebuildMemberRes.body)).toBe(200)
+      const failedFirstRebuildRes = await requestJson(
+        `${baseUrl}/api/attendance/groups/${failedFirstRebuildGroupId}/fixed-schedule/rebuild`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ shiftId: replacementShiftId, startDate: fixedDate, endDate: fixedDate }),
+        },
+      )
+      expect(failedFirstRebuildRes.status, JSON.stringify(failedFirstRebuildRes.body)).toBe(409)
+      expect((failedFirstRebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code)
+        .toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
+      const failedFirstRebuildResidue = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM attendance_group_fixed_schedule_configs WHERE org_id = 'default' AND group_id = $1) AS configs,
+           (SELECT COUNT(*)::int FROM attendance_shift_assignments
+             WHERE org_id = 'default'
+               AND producer_type = 'attendance_group_fixed_schedule'
+               AND producer_ref_id = $1) AS assignments`,
+        [failedFirstRebuildGroupId],
+      )
+      expect(failedFirstRebuildResidue.rows[0]).toEqual({ configs: 0, assignments: 0 })
+
       const fixedTempDraftRes = await requestJson(`${baseUrl}/api/attendance/schedule-drafts/assignments`, {
         method: 'POST',
         headers,
@@ -4226,10 +4550,23 @@ attendanceIntegrationDescribe(
         replaces: { assignmentId: fixedBaseAssignmentId },
       })
 
+      const changedConfigRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/config`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+      })
+      expect(changedConfigRes.status, JSON.stringify(changedConfigRes.body)).toBe(200)
+      const changedConfigRevision = (changedConfigRes.body as { data?: { revision?: number } } | undefined)?.data?.revision
+      expect(changedConfigRevision).toBe(2)
       const staleApplyRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/apply`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+        body: JSON.stringify({
+          shiftId: baseShiftId,
+          startDate: staleTempDate,
+          endDate: staleTempDate,
+          expectedConfigRevision: changedConfigRevision,
+        }),
       })
       expect(staleApplyRes.status, JSON.stringify(staleApplyRes.body)).toBe(201)
       await pool.query(
@@ -4244,7 +4581,12 @@ attendanceIntegrationDescribe(
       const staleRebuildRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/fixed-schedule/rebuild`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ shiftId: baseShiftId, startDate: staleTempDate, endDate: staleTempDate }),
+        body: JSON.stringify({
+          shiftId: baseShiftId,
+          startDate: staleTempDate,
+          endDate: staleTempDate,
+          expectedConfigRevision: changedConfigRevision,
+        }),
       })
       expect(staleRebuildRes.status, JSON.stringify(staleRebuildRes.body)).toBe(409)
       expect((staleRebuildRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT')
@@ -4275,6 +4617,14 @@ attendanceIntegrationDescribe(
         await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [fixedGroupId]).catch(() => undefined)
         await pool.query('DELETE FROM attendance_groups WHERE id = $1', [fixedGroupId]).catch(() => undefined)
       }
+      if (failedFirstApplyGroupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [failedFirstApplyGroupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [failedFirstApplyGroupId]).catch(() => undefined)
+      }
+      if (failedFirstRebuildGroupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [failedFirstRebuildGroupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [failedFirstRebuildGroupId]).catch(() => undefined)
+      }
       if (shiftIds.length > 0) {
         await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [shiftIds]).catch(() => undefined)
       }
@@ -4288,7 +4638,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-shift-edit-window-admin-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -4504,8 +4854,8 @@ attendanceIntegrationDescribe(
          ON CONFLICT DO NOTHING`,
         [adminUserId, employeeUserId],
       )
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
-      const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken || !employeeToken) return
@@ -4596,7 +4946,7 @@ attendanceIntegrationDescribe(
       // Compliance enforcement is orthogonal to RBAC (it runs after the dispatch check, inside the
       // txn). Bypass RBAC so each save path reaches the guard without per-route permission plumbing.
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -4777,7 +5127,7 @@ attendanceIntegrationDescribe(
     let shiftId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -5581,6 +5931,155 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // Subject-org resolution: /me pins the org from the AUTHENTICATED token only (getAuthenticatedOrgId —
+  // req.user.orgId / req.user.workspaceId / the token-derived req.authenticatedTenantId), never from a
+  // request-supplied source. A ?orgId query param or an x-org-id header is silently ignored (not
+  // rejected) for resolution — proven discriminating here by seeding a DIFFERENT balance for the SAME
+  // user id under a second org, so a leak would read as the wrong number rather than merely "some data".
+  // Both halves of the resolution are covered: the token-claim branch (cases a/b/c) AND the literal
+  // 'default' fallback used when there is no claim (cases d/e/f) — a caller with no resolvable org claim
+  // must ALSO see ?orgId/x-org-id ignored, not just a caller whose claim happens to be present.
+  it('④/年假 /me — org is resolved from the authenticated token only; ?orgId and x-org-id cannot redirect it', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgA = `al-me-org-a-${runSuffix}`
+    const orgB = `al-me-org-b-${runSuffix}`
+    const meId = `al-me-orgsub-${runSuffix}`
+    const meNoClaimId = `al-me-orgsub-noclaim-${runSuffix}`
+    const mkLot = async (orgId: string, uid: string, amount: number, tag: string) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+       VALUES ($1,$2,'annual',$3,$3,'annual_accrual',$4,'active','2026-01-01') RETURNING id`,
+      [orgId, uid, amount, `me-org:${runSuffix}:${tag}`])).rows[0].id
+    const mkEvent = async (orgId: string, uid: string, balanceId: string, delta: number) => { await pool.query(
+      `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1,$2,$3,'grant',$4,'annual_accrual',$5)`, [orgId, uid, balanceId, delta, balanceId]) }
+    try {
+      // the same user id has DIFFERENT balances under org A and org B — a leak reads as the wrong number.
+      const lotA = await mkLot(orgA, meId, 2400, 'a'); await mkEvent(orgA, meId, lotA, 2400)
+      const lotB = await mkLot(orgB, meId, 9999, 'b'); await mkEvent(orgB, meId, lotB, 9999)
+      // (d/e/f) a token with no tenant claim, zero memberships, keeps today's 'default' fallback — including
+      // when a request-level org selector targets org B, so it must ALSO have a discriminating org-B lot.
+      const lotDefault = await mkLot('default', meNoClaimId, 1200, 'default'); await mkEvent('default', meNoClaimId, lotDefault, 1200)
+      const lotNoClaimB = await mkLot(orgB, meNoClaimId, 7777, 'noclaim-b'); await mkEvent(orgB, meNoClaimId, lotNoClaimB, 7777)
+
+      // token whose tenant claim IS org A
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&tenantId=${orgA}&roles=employee&perms=attendance:read`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) { await pool.end().catch(() => undefined); return }
+      const headers = { Authorization: `Bearer ${token}` }
+
+      // Each case below uses expect.soft: a mutation that breaks only some cases (e.g. only (b)/(c), or
+      // only (e)/(f)) must still show the OTHER cases green in the same run — a hard `expect` would abort
+      // the test at whichever case fails first and hide the verdict on the cases after it.
+
+      // (a) positive control: no org override -> 200, org A's 2400 (never B's 9999)
+      const a = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers })
+      expect.soft(a.status, `(a) status: ${JSON.stringify(a.body)}`).toBe(200)
+      const dataA = (a.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataA?.summary?.grantedMinutes, '(a) grantedMinutes').toBe(2400)
+      expect.soft(dataA?.summary?.grantedMinutes, '(a) grantedMinutes').not.toBe(9999)
+
+      // (b) ?orgId=B cannot redirect the read -> still A's 2400, B's 9999 is absent
+      const b = await requestJson(`${baseUrl}/api/attendance/leave-balances/me?orgId=${encodeURIComponent(orgB)}`, { headers })
+      expect.soft(b.status, `(b) status: ${JSON.stringify(b.body)}`).toBe(200)
+      const dataB = (b.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataB?.summary?.grantedMinutes, '(b) grantedMinutes').toBe(2400)
+      expect.soft(dataB?.summary?.grantedMinutes, '(b) grantedMinutes').not.toBe(9999)
+
+      // (c) x-org-id: B header cannot redirect the read either -> still A's 2400
+      const c = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { ...headers, 'x-org-id': orgB } })
+      expect.soft(c.status, `(c) status: ${JSON.stringify(c.body)}`).toBe(200)
+      const dataC = (c.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataC?.summary?.grantedMinutes, '(c) grantedMinutes').toBe(2400)
+      expect.soft(dataC?.summary?.grantedMinutes, '(c) grantedMinutes').not.toBe(9999)
+
+      // (d) a token with no tenant claim, zero memberships -> resolves to 'default', as today
+      const noClaimTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meNoClaimId}&roles=employee&perms=attendance:read`)
+      const noClaimToken = (noClaimTokenRes.body as { token?: string } | undefined)?.token
+      expect.soft(noClaimToken, '(d) dev-token minted').toBeTruthy()
+      const d = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { Authorization: `Bearer ${noClaimToken}` } })
+      expect.soft(d.status, `(d) status: ${JSON.stringify(d.body)}`).toBe(200)
+      const dataD = (d.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataD?.summary?.grantedMinutes, '(d) grantedMinutes').toBe(1200)
+      expect.soft(dataD?.summary?.grantedMinutes, '(d) grantedMinutes').not.toBe(7777)
+
+      // (e) same no-claim token, ?orgId=B -> the LITERAL 'default' fallback must ALSO ignore a
+      // request-supplied org selector, not just the token-claim branch -> still 1200, never B's 7777
+      const e = await requestJson(`${baseUrl}/api/attendance/leave-balances/me?orgId=${encodeURIComponent(orgB)}`, { headers: { Authorization: `Bearer ${noClaimToken}` } })
+      expect.soft(e.status, `(e) status: ${JSON.stringify(e.body)}`).toBe(200)
+      const dataE = (e.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataE?.summary?.grantedMinutes, '(e) grantedMinutes').toBe(1200)
+      expect.soft(dataE?.summary?.grantedMinutes, '(e) grantedMinutes').not.toBe(7777)
+
+      // (f) same no-claim token, x-org-id: B header -> still 1200, never B's 7777
+      const f = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { Authorization: `Bearer ${noClaimToken}`, 'x-org-id': orgB } })
+      expect.soft(f.status, `(f) status: ${JSON.stringify(f.body)}`).toBe(200)
+      const dataF = (f.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataF?.summary?.grantedMinutes, '(f) grantedMinutes').toBe(1200)
+      expect.soft(dataF?.summary?.grantedMinutes, '(f) grantedMinutes').not.toBe(7777)
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [[meId, meNoClaimId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [[meId, meNoClaimId]]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §2/§7, OD-W5-9=(a)): the L5a
+  // activeLots SELECT now projects `overtime_source` — purely additive (only the new key is
+  // asserted here; every OTHER key's presence/values are already covered by the L5a tests above,
+  // which stay green unmodified — proving this is a pure compatibility extension, not a behaviour
+  // change). A non-null value round-trips on BOTH hosts (admin + /me); a legacy NULL-source lot
+  // (pre-v1-1b, or any lot never tagged) stays honestly absent/null — never fabricated.
+  it('④/年假 L5a + /me — overtime_source projection (OD-W5-9): non-null value round-trips on both hosts; legacy NULL lot stays null', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const adminId = `al-w50-admin-${runSuffix}`
+    const meId = `al-w50-me-${runSuffix}`
+    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const meTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&roles=employee&perms=attendance:read`)
+    const meToken = (meTokenRes.body as { token?: string } | undefined)?.token
+    if (!adminToken || !meToken) { await pool.end().catch(() => undefined); return }
+    try {
+      const taggedLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default',$1,'comp_time',480,480,'overtime_conversion',$2,'active','2026-01-01','workday') RETURNING id`,
+        [meId, `w50:${runSuffix}:tagged`],
+      )).rows[0].id
+      const legacyLot = (await pool.query<{ id: string }>(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default',$1,'comp_time',240,240,'overtime_conversion',$2,'active','2026-01-01') RETURNING id`,
+        [meId, `w50:${runSuffix}:legacy`],
+      )).rows[0].id
+
+      const adminRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances?userId=${encodeURIComponent(meId)}&leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${adminToken}` } },
+      )
+      expect(adminRes.status, JSON.stringify(adminRes.body)).toBe(200)
+      const adminLots = (adminRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(adminLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+      expect(adminLots.find((l) => l.id === legacyLot)?.overtime_source ?? null).toBeNull()
+
+      const meRes = await requestJson(
+        `${baseUrl}/api/attendance/leave-balances/me?leaveTypeCode=comp_time`,
+        { headers: { Authorization: `Bearer ${meToken}` } },
+      )
+      expect(meRes.status, JSON.stringify(meRes.body)).toBe(200)
+      const meLots = (meRes.body as { data?: { activeLots?: Array<{ id: string; overtime_source: string | null }> } })?.data?.activeLots ?? []
+      expect(meLots.find((l) => l.id === taggedLot)?.overtime_source).toBe('workday')
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = $1`, [meId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('attendance rules /me — returns a token-subject rule summary, rejects overrides, and does not leak admin settings', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -5918,11 +6417,13 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -5941,6 +6442,7 @@ attendanceIntegrationDescribe(
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       const setFlag = (enabled: boolean) => putSettings({ compTimeFromOvertime: { enabled } })
       const createOvertime = async (workDate: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const res = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
         expect(res.status).toBe(201)
         const id = (res.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
@@ -6306,6 +6808,10 @@ attendanceIntegrationDescribe(
       if (createdRequestIds.length > 0) {
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6323,6 +6829,7 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     const holidayDate = '2036-10-01'
     const offDate = '2036-10-02'
     const crossDate = '2036-10-03'
@@ -6334,6 +6841,7 @@ attendanceIntegrationDescribe(
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6367,6 +6875,7 @@ attendanceIntegrationDescribe(
         body: JSON.stringify({ overtimeSegmentation: { enabled } }),
       })
       const createOvertime = async (workDate: string, body: Record<string, unknown> = {}) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
           method: 'POST',
           headers,
@@ -6477,6 +6986,10 @@ attendanceIntegrationDescribe(
       }
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6492,6 +7005,7 @@ attendanceIntegrationDescribe(
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     let originalSettings: Record<string, unknown> = {}
     let token: string | undefined
     const workDate = '2037-06-12' // June → no DST transition in any tz, so the local-midnight offset is stable
@@ -6522,6 +7036,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const ruleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `ns3-ot-${runSuffix}`, minMinutes: 0, roundingMinutes: 1 }) })
@@ -6532,6 +7047,8 @@ attendanceIntegrationDescribe(
         overtimeRuleId = ((listRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.name === `ns3-ot-${runSuffix}`)?.id
       }
       if (!overtimeRuleId) return
+
+      await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
 
       // learn the user's work timezone so the window crosses LOCAL midnight regardless of the org default.
       const calRes = await requestJson(`${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(userId)}`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6596,6 +7113,10 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [workDate, nextDate, farDate]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -6686,11 +7207,13 @@ attendanceIntegrationDescribe(
     let cycleId: string | undefined
     let overtimeRuleId: string | undefined
     let originalSettings: Record<string, unknown> = {}
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
@@ -6703,6 +7226,11 @@ attendanceIntegrationDescribe(
       expect([201, 409]).toContain(otRuleRes.status)
       overtimeRuleId = (otRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
       expect(overtimeRuleId).toBeTruthy()
+      await ensurePublishedShiftCandidateForTest(pool, {
+        userId,
+        workDate: '2026-09-10',
+        createdShiftIds,
+      })
       const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate: '2026-09-10', requestType: 'overtime', overtimeRuleId, minutes: 600 }) })
       expect(reqRes.status).toBe(201)
       const otId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
@@ -6747,6 +7275,10 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       await pool.end().catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
     }
@@ -6820,6 +7352,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(settingsRowPool!, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
@@ -6882,14 +7415,16 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     const holidayId = randomUUID()
     let overtimeRuleId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6926,6 +7461,11 @@ attendanceIntegrationDescribe(
       expect(saveSettingsRes.status).toBe(200)
 
       const createAndApprove = async (workDateInput: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, {
+          userId,
+          workDate: workDateInput,
+          createdShiftIds,
+        })
         const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
           method: 'POST',
           headers,
@@ -7005,6 +7545,10 @@ attendanceIntegrationDescribe(
       }
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -7038,7 +7582,7 @@ attendanceIntegrationDescribe(
       adminToken = await tokenFor(`attendance-v12b-admin-${runSuffix}`)
       if (!adminToken) return
       const tokens: Record<string, string> = {}
-      for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; tokens[k] = t }
+      for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; await seedAttendanceOrgMembershipForTest(pool, uid); tokens[k] = t }
       const ensureLeaveType = async (code: string) => {
         const res = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken!), body: JSON.stringify({ code, name: `${code} ${runSuffix}`, paid: false, requiresApproval: true }) })
         expect([201, 409]).toContain(res.status)
@@ -7125,6 +7669,7 @@ attendanceIntegrationDescribe(
       const tokenShort = await tokenFor(uShort)
       const tokenFifo = await tokenFor(uFifo)
       if (!tokenOk || !tokenShort || !tokenFifo) return
+      for (const uid of [uOk, uShort, uFifo]) await seedAttendanceOrgMembershipForTest(pool, uid)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       // comp_time leave type (explicit code='comp_time'); idempotent across reruns (409 -> look it up).
@@ -7247,6 +7792,7 @@ attendanceIntegrationDescribe(
       process.env.RBAC_BYPASS = 'true'
       adminTok = await tokenFor(`al-l3-admin-${runSuffix}`)
       if (!adminTok) return
+      for (const uid of allUsers) await seedAttendanceOrgMembershipForTest(pool, uid)
 
       // policy standardDayMinutes=480, deliberately DISTINCT from the leave type's defaultMinutesPerDay=600 below,
       // so a full (600-min) day deducts the 8h STANDARD day (480), proving the entitlement basis ≠ scheduled minutes.
@@ -7403,11 +7949,13 @@ attendanceIntegrationDescribe(
     let token: string | undefined
     let originalSettings: Record<string, unknown> = {}
     const createdRequestIds: string[] = []
+    const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
       originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
@@ -7422,6 +7970,7 @@ attendanceIntegrationDescribe(
       expect(overtimeRuleId).toBeTruthy()
       const setCompTime = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ compTimeFromOvertime: body }) })
       const approveOvertime = async (workDate: string, minutes: number) => {
+        await ensurePublishedShiftCandidateForTest(pool, { userId, workDate, createdShiftIds })
         const create = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, minutes }) })
         expect(create.status).toBe(201)
         const id = (create.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
@@ -7485,6 +8034,10 @@ attendanceIntegrationDescribe(
       if (createdRequestIds.length > 0) {
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (createdShiftIds.size > 0) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = ANY($1::uuid[])', [[...createdShiftIds]]).catch(() => undefined)
+      }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
@@ -7500,7 +8053,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-small-org-admin-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -7662,7 +8215,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(scopedUserId)}&roles=user&perms=attendance:read,attendance:write`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(scopedUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -7833,7 +8386,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-uuid-like-name-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -7967,7 +8520,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-shift-delete-rule-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8015,8 +8568,9 @@ attendanceIntegrationDescribe(
     })
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
-    expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
+    // W3 (#4556): typed delete blocker replaces the legacy generic CONFLICT.
+    expect(deleteBody?.error?.code).toBe('ATTENDANCE_SHIFT_DELETE_BLOCKED')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/referenced|preserved/i)
   })
 
   it('normalizes legacy name-based rotation rules when a referenced shift is renamed', async () => {
@@ -8025,7 +8579,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-rotation-rename-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8201,9 +8755,10 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const userId = `attendance-overnight-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8327,13 +8882,365 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('anchors live overnight check-in/out punches to one normal work_date D record (staging 22:00-06:00)', async () => {
+    if (!baseUrl) return
+
+    // Staging reproduction: Asia/Shanghai 22:00–06:00 on day D; check-in D 22:05 and
+    // check-out D+1 05:55 must both store work_date=D and yield one 470-minute normal row
+    // (calendar-date anchoring previously split them into two partial rows).
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-overnight-${runSuffix}`
+    const workDate = utcDateKeyOffset(-3)
+    const nextDate = addDaysToDateKeyForTest(workDate, 1)
+    const firstInAt = new Date(`${workDate}T22:05:00+08:00`).toISOString()
+    const lastOutAt = new Date(`${nextDate}T05:55:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let shiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Live overnight ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '22:00',
+          end_time: '06:00',
+          is_overnight: true,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) return
+
+      const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+      })
+      expect(assignmentRes.status).toBe(201)
+
+      const punchInRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: firstInAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overnight',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchInRes.status).toBe(200)
+
+      const punchOutRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_out',
+          occurredAt: lastOutAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overnight',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchOutRes.status).toBe(200)
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: workDate, event_type: 'check_in' },
+        { work_date: workDate, event_type: 'check_out' },
+      ])
+
+      const records = await pool.query(
+        `SELECT work_date::text, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status
+           FROM attendance_records
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY work_date`,
+        [userId, 'default']
+      )
+      expect(records.rows).toHaveLength(1)
+      expect(records.rows[0]?.work_date).toBe(workDate)
+      expect(records.rows[0]?.first_in_at?.toISOString()).toBe(firstInAt)
+      expect(records.rows[0]?.last_out_at?.toISOString()).toBe(lastOutAt)
+      expect(Number(records.rows[0]?.work_minutes)).toBe(470)
+      expect(Number(records.rows[0]?.late_minutes)).toBe(0)
+      expect(Number(records.rows[0]?.early_leave_minutes)).toBe(0)
+      expect(records.rows[0]?.status).toBe('normal')
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (shiftId) {
+        await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1 AND shift_id = $2', [userId, shiftId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      }
+      await pool.end()
+    }
+  })
+
+  it('keeps non-overnight live punches on the calendar work_date (no overnight re-anchor regression)', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-dayshift-${runSuffix}`
+    const workDate = utcDateKeyOffset(-3)
+    const firstInAt = new Date(`${workDate}T09:05:00+08:00`).toISOString()
+    const lastOutAt = new Date(`${workDate}T17:55:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let shiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Live day shift ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '09:00',
+          end_time: '18:00',
+          is_overnight: false,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) return
+
+      const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+      })
+      expect(assignmentRes.status).toBe(201)
+
+      for (const [eventType, occurredAt] of [
+        ['check_in', firstInAt],
+        ['check_out', lastOutAt],
+      ] as const) {
+        const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            eventType,
+            occurredAt,
+            timezone: 'Asia/Shanghai',
+            source: 'integration-live-dayshift',
+            location: { lat: 0, lng: 0 },
+          }),
+        })
+        expect(punchRes.status).toBe(200)
+      }
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: workDate, event_type: 'check_in' },
+        { work_date: workDate, event_type: 'check_out' },
+      ])
+
+      const records = await pool.query(
+        `SELECT work_date::text, first_in_at, last_out_at, work_minutes, status
+           FROM attendance_records
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY work_date`,
+        [userId, 'default']
+      )
+      expect(records.rows).toHaveLength(1)
+      expect(records.rows[0]?.work_date).toBe(workDate)
+      expect(records.rows[0]?.first_in_at?.toISOString()).toBe(firstInAt)
+      expect(records.rows[0]?.last_out_at?.toISOString()).toBe(lastOutAt)
+      expect(Number(records.rows[0]?.work_minutes)).toBe(530)
+      expect(records.rows[0]?.status).toBe('normal')
+    } finally {
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (shiftId) {
+        await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1 AND shift_id = $2', [userId, shiftId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [shiftId]).catch(() => undefined)
+      }
+      await pool.end()
+    }
+  })
+
+  it('prefers current-day matching shift when overnight previous window overlaps post-midnight', async () => {
+    if (!baseUrl) return
+
+    // D overnight 22:00–06:00 + D+1 morning 06:00–14:00: a punch at the exact
+    // shared boundary matches both windows. Current day must win.
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-live-overlap-${runSuffix}`
+    const overnightDate = utcDateKeyOffset(-3)
+    const morningDate = addDaysToDateKeyForTest(overnightDate, 1)
+    const overlapPunchAt = new Date(`${morningDate}T06:00:00+08:00`).toISOString()
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    let overnightShiftId: string | undefined
+    let morningShiftId: string | undefined
+    const pool = new Pool({ connectionString: attendanceIntegrationDbUrl })
+
+    try {
+      const overnightShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Overlap overnight ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '22:00',
+          end_time: '06:00',
+          is_overnight: true,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(overnightShiftRes.status).toBe(201)
+      overnightShiftId = (overnightShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(overnightShiftId).toBeTruthy()
+      if (!overnightShiftId) return
+
+      const morningShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: `Overlap morning ${runSuffix}`,
+          timezone: 'Asia/Shanghai',
+          start_time: '06:00',
+          end_time: '14:00',
+          is_overnight: false,
+          late_grace_minutes: 10,
+          early_grace_minutes: 10,
+          rounding_minutes: 5,
+          working_days: [0, 1, 2, 3, 4, 5, 6],
+        }),
+      })
+      expect(morningShiftRes.status).toBe(201)
+      morningShiftId = (morningShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(morningShiftId).toBeTruthy()
+      if (!morningShiftId) return
+
+      const overnightAssign = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId,
+          shiftId: overnightShiftId,
+          startDate: overnightDate,
+          endDate: overnightDate,
+          isActive: true,
+        }),
+      })
+      expect(overnightAssign.status).toBe(201)
+
+      const morningAssign = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId,
+          shiftId: morningShiftId,
+          startDate: morningDate,
+          endDate: morningDate,
+          isActive: true,
+        }),
+      })
+      expect(morningAssign.status).toBe(201)
+
+      const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: overlapPunchAt,
+          timezone: 'Asia/Shanghai',
+          source: 'integration-live-overlap',
+          location: { lat: 0, lng: 0 },
+        }),
+      })
+      expect(punchRes.status).toBe(200)
+
+      const events = await pool.query(
+        `SELECT work_date::text, event_type
+           FROM attendance_events
+          WHERE user_id = $1 AND org_id = $2
+          ORDER BY occurred_at`,
+        [userId, 'default']
+      )
+      expect(events.rows).toEqual([
+        { work_date: morningDate, event_type: 'check_in' },
+      ])
+    } finally {
+      await pool.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (overnightShiftId) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [overnightShiftId]).catch(() => undefined)
+      }
+      if (morningShiftId) {
+        await pool.query('DELETE FROM attendance_shifts WHERE id = $1', [morningShiftId]).catch(() => undefined)
+      }
+      await pool.end()
+    }
+  })
+
   it('accepts legacy snake_case payload aliases for attendance admin create routes and rejects malformed ids with 400', async () => {
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-snake-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8498,7 +9405,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-compat-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8557,7 +9464,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-compat-rot-pay-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8670,7 +9577,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-missing-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8969,7 +9876,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8992,11 +9899,216 @@ attendanceIntegrationDescribe(
     expect(Array.isArray(body.data?.items)).toBe(true)
   })
 
+  it('pins attendance records and calendar reads to the authenticated tenant and subject authority', async () => {
+    if (!baseUrl) return
+
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const suffix = randomUUID()
+    const orgA = `records-tenant-a-${suffix}`
+    const orgB = `records-tenant-b-${suffix}`
+    const selfId = `records-self-${suffix}`
+    const sameOrgOtherId = `records-other-${suffix}`
+    const foreignId = `records-foreign-${suffix}`
+    const unauthorizedId = `records-unauthorized-${suffix}`
+    const workDate = '2031-04-17'
+    const password = `Records-${suffix}`
+    const selfRecordId = randomUuidV4()
+    const sameOrgOtherRecordId = randomUuidV4()
+    const foreignRecordId = randomUuidV4()
+    const pool = new Pool({ connectionString: dbUrl })
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const verificationErrors: unknown[] = []
+
+    const tokenFor = async (userId: string, tenantId?: string, perms = 'attendance:read') => {
+      const query = new URLSearchParams({ userId, roles: 'user', perms })
+      if (tenantId) query.set('tenantId', tenantId)
+      const response = await requestJson(`${baseUrl}/api/auth/dev-token?${query.toString()}`)
+      const token = (response.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      return token || ''
+    }
+    const itemsOf = (response: HttpResponse): Array<Record<string, unknown>> =>
+      (response.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    const assertOnlyCanary = (response: HttpResponse, recordId: string, status: string) => {
+      expect(response.status, response.raw).toBe(200)
+      const items = itemsOf(response)
+      expect(items).toHaveLength(1)
+      expect(String(items[0]?.id ?? '')).toBe(recordId)
+      expect(String(items[0]?.status ?? '')).toBe(status)
+    }
+
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      const passwordHash = await bcrypt.hash(password, 4)
+      for (const [userId, orgId, email] of [
+        [selfId, orgA, `${selfId}@example.test`],
+        [sameOrgOtherId, orgA, `${sameOrgOtherId}@example.test`],
+        [foreignId, orgB, `${foreignId}@example.test`],
+        [unauthorizedId, orgA, `${unauthorizedId}@example.test`],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO users
+             (id, email, username, name, password_hash, role, permissions, is_active, is_admin,
+              activation_status, local_password_set, must_change_password, created_at, updated_at)
+           VALUES ($1, $2, $1, $1, $3, 'user', '[]'::jsonb, true, false,
+                   'activated', true, false, now(), now())`,
+          [userId, email, userId === selfId ? passwordHash : 'no-login'],
+        )
+        await pool.query(
+          `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+          [userId, orgId],
+        )
+        await pool.query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:read')
+           ON CONFLICT DO NOTHING`,
+          [userId],
+        )
+      }
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:approve') ON CONFLICT DO NOTHING`,
+        [selfId],
+      )
+      for (const [recordId, userId, orgId, status] of [
+        [selfRecordId, selfId, orgA, 'normal'],
+        [sameOrgOtherRecordId, sameOrgOtherId, orgA, 'adjusted'],
+        [foreignRecordId, foreignId, orgB, 'absent'],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO attendance_records
+             (id, user_id, org_id, work_date, timezone, work_minutes, late_minutes,
+              early_leave_minutes, status, is_workday, meta, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'UTC', 480, 0, 0, $5, true, '{}'::jsonb, now(), now())`,
+          [recordId, userId, orgId, workDate, status],
+        )
+      }
+
+      const login = await requestJson(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: `${selfId}@example.test`, password }),
+      })
+      expect(login.status, login.raw).toBe(200)
+      const realToken = (login.body as { token?: string; data?: { token?: string } } | undefined)?.token
+        ?? (login.body as { data?: { token?: string } } | undefined)?.data?.token
+      expect(realToken).toBeTruthy()
+      if (!realToken) return
+
+      const unauthorizedToken = await tokenFor(unauthorizedId, orgA)
+      const noTenantToken = await tokenFor(selfId)
+      const baseQuery = `from=${workDate}&to=${workDate}`
+      for (const route of ['records', 'calendar'] as const) {
+        const self = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { Authorization: `Bearer ${realToken}` },
+        })
+        assertOnlyCanary(self, selfRecordId, 'normal')
+
+        const sameOrgOther = await requestJson(
+          `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(sameOrgOtherId)}`,
+          { headers: { Authorization: `Bearer ${realToken}` } },
+        )
+        assertOnlyCanary(sameOrgOther, sameOrgOtherRecordId, 'adjusted')
+
+        const deniedOther = await requestJson(
+          `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(selfId)}`,
+          { headers: { Authorization: `Bearer ${unauthorizedToken}` } },
+        )
+        expect(deniedOther.status, deniedOther.raw).toBe(403)
+
+        const foreignUrl = `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(foreignId)}`
+        const foreignAttempts = [
+          requestJson(`${foreignUrl}&orgId=${encodeURIComponent(orgB)}`, { headers: { Authorization: `Bearer ${realToken}` } }),
+          requestJson(foreignUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${realToken}`,
+              'Content-Type': 'application/json',
+              'Content-Length': String(Buffer.byteLength(JSON.stringify({ orgId: orgB }))),
+            },
+            body: JSON.stringify({ orgId: orgB }),
+          }),
+          requestJson(foreignUrl, { headers: { Authorization: `Bearer ${realToken}`, 'x-org-id': orgB } }),
+          requestJson(foreignUrl, { headers: { Authorization: `Bearer ${realToken}`, 'x-tenant-id': orgB } }),
+          requestJson(`${foreignUrl}&orgId=${encodeURIComponent(orgA)}&orgId=${encodeURIComponent(orgB)}`, {
+            headers: { Authorization: `Bearer ${realToken}` },
+          }),
+          requestJson(foreignUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${realToken}`,
+              'Content-Type': 'application/json',
+              'Content-Length': String(Buffer.byteLength(JSON.stringify({ orgId: [orgA, orgB] }))),
+            },
+            body: JSON.stringify({ orgId: [orgA, orgB] }),
+          }),
+        ]
+        for (const attempt of await Promise.all(foreignAttempts)) {
+          expect(attempt.status, attempt.raw).toBe(403)
+          expect(itemsOf(attempt).some((item) => item.id === foreignRecordId)).toBe(false)
+        }
+
+        const missingTenant = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { Authorization: `Bearer ${noTenantToken}` },
+        })
+        expect(missingTenant.status, missingTenant.raw).toBe(403)
+
+        const spoofedIdentity = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { 'x-user-id': selfId, 'x-tenant-id': orgA },
+        })
+        expect(spoofedIdentity.status, spoofedIdentity.raw).toBe(401)
+      }
+    } catch (error) {
+      verificationErrors.push(error)
+    } finally {
+      const cleanupErrors = verificationErrors
+      const userIds = [selfId, sameOrgOtherId, foreignId, unauthorizedId]
+      for (const cleanup of [
+        () => pool.query('DELETE FROM attendance_records WHERE org_id = ANY($1::text[])', [[orgA, orgB]]),
+        () => pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds]),
+        () => pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]),
+        () => pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]),
+      ]) {
+        try {
+          await cleanup()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      try {
+        const residue = await pool.query(
+          `SELECT
+             (SELECT count(*)::int FROM attendance_records WHERE org_id = ANY($1::text[])) AS records,
+             (SELECT count(*)::int FROM user_permissions WHERE user_id = ANY($2::text[])) AS permissions,
+             (SELECT count(*)::int FROM user_orgs WHERE user_id = ANY($2::text[])) AS memberships,
+             (SELECT count(*)::int FROM users WHERE id = ANY($2::text[])) AS users`,
+          [[orgA, orgB], userIds],
+        )
+        const counts = residue.rows[0] as Record<string, number>
+        if (Object.values(counts).some((count) => Number(count) !== 0)) {
+          cleanupErrors.push(new Error(`attendance record tenant test residue: ${JSON.stringify(counts)}`))
+        }
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      try {
+        await pool.end()
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+    if (verificationErrors.length > 0) throw new AggregateError(verificationErrors, 'attendance record tenant test verification or cleanup failed')
+  })
+
   it('rejects invalid attendance calendar date ranges with 400', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-invalid-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-invalid-test&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9028,6 +10140,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
@@ -9228,7 +10341,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-group-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-group-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9286,7 +10399,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-tz-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-tz-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9602,7 +10715,7 @@ attendanceIntegrationDescribe(
     async function getAdminToken(userId: string): Promise<string | undefined> {
       if (!baseUrl) return undefined
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
       )
       return (tokenRes.body as { token?: string } | undefined)?.token
     }
@@ -10897,6 +12010,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
@@ -10975,6 +12089,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestReason = 'I need to correct the check-in time from the kiosk.'
@@ -11161,11 +12276,12 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-request-record-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const pickFutureWeekday = (): string => {
       const cursor = new Date('2029-03-01T00:00:00.000Z')
@@ -11296,7 +12412,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -11517,7 +12633,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -11590,7 +12706,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-read-by-id-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-read-by-id-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -11678,7 +12794,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -11699,7 +12815,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -11758,9 +12874,10 @@ attendanceIntegrationDescribe(
   it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-merge-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -11890,12 +13007,13 @@ attendanceIntegrationDescribe(
     const absenceObj = new Date(monday)
     absenceObj.setUTCDate(monday.getUTCDate() + 1)
     const absenceDate = absenceObj.toISOString().slice(0, 10)
-    const userId = `attendance-rt1-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -11954,18 +13072,19 @@ attendanceIntegrationDescribe(
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
     const runSuffix = Date.now().toString(36)
-    const orgId = `rt1a-org-${runSuffix}` // isolated org — never pollutes the shared default rule
+    const orgId = randomUUID() // isolated org — never pollutes the shared default rule
     const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
     const firstOfOctober = new Date(Date.UTC(year, 9, 1))
     const monday = new Date(firstOfOctober)
     while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
     const workDate = monday.toISOString().slice(0, 10)
-    const userId = `attendance-rt1a-${runSuffix}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId, orgId)
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -12017,12 +13136,13 @@ attendanceIntegrationDescribe(
     }
   })
 
-  it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
+  it('exposes persisted-timezone workday context for holiday overrides and shift schedules', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-workday-context-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -12118,9 +13238,9 @@ attendanceIntegrationDescribe(
           {
             workDate: sundayDate,
             fields: {
-              firstInAt: `${sundayDate}T09:00:00Z`,
+              firstInAt: `${sundayDate}T09:30:00Z`,
               lastOutAt: `${sundayDate}T18:00:00Z`,
-              status: 'normal',
+              status: 'late',
             },
           },
           {
@@ -12137,6 +13257,16 @@ attendanceIntegrationDescribe(
       }),
     })
     expect(importRes.status).toBe(200)
+
+    const updateShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ timezone: 'Asia/Shanghai' }),
+    })
+    expect(updateShiftRes.status).toBe(200)
 
     const recordsRes = await requestJson(
       `${baseUrl}/api/attendance/records?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
@@ -12159,6 +13289,7 @@ attendanceIntegrationDescribe(
       matchesStored: true,
       source: 'shift',
       sourceName: shiftName,
+      timezone: 'UTC',
       weekday: 0,
       workingDays: [0],
       holiday: null,
@@ -12172,6 +13303,7 @@ attendanceIntegrationDescribe(
       resolvedIsWorkday: false,
       matchesStored: true,
       source: 'rule',
+      timezone: 'UTC',
       weekday: 3,
       workingDays: [1, 2, 3, 4, 5],
       holiday: {
@@ -12180,14 +13312,28 @@ attendanceIntegrationDescribe(
       },
     })
     expect(typeof wednesdayRecord?.workday_context?.holiday?.name).toBe('string')
+
+    const anomaliesRes = await requestJson(
+      `${baseUrl}/api/attendance/anomalies?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(anomaliesRes.status).toBe(200)
+    const anomalyItems = (anomaliesRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const sundayAnomaly = anomalyItems.find((row) => String(row?.workDate ?? '').slice(0, 10) === sundayDate)
+    expect(sundayAnomaly?.workdayContext?.timezone).toBe('UTC')
   })
 
   it('keeps existing records after rolling back a later update batch', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-rollback-safe-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12277,7 +13423,7 @@ attendanceIntegrationDescribe(
       },
       body: '{}',
     })
-    expect(rollbackRes.status).toBe(200)
+    expect(rollbackRes.status, rollbackRes.raw).toBe(200)
 
     const afterRollbackRows = await listRecordRows()
     const rowAfterRollback = afterRollbackRows.find((row) => {
@@ -12292,9 +13438,10 @@ attendanceIntegrationDescribe(
   it('auto-switches to staging upsert strategy for bulk async imports when copy threshold is reached', async () => {
     if (!baseUrl) return
 
-    const userId = `attendance-staging-${Date.now().toString(36)}`
+    const userId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12313,12 +13460,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 365
+    const targetUserIds = Array.from({ length: 3 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest(targetUserIds)
     const rows = Array.from({ length: 1001 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const workDate = date.toISOString().slice(0, 10)
       return {
-        userId: `${userId}-bucket-${Math.floor(index / distinctWorkDates)}`,
+        userId: targetUserIds[Math.floor(index / distinctWorkDates)],
         workDate,
         fields: {
           firstInAt: `${workDate}T09:00:00Z`,
@@ -12403,7 +13552,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12437,7 +13586,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenB).toBeTruthy()
 
     const basePayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -12513,7 +13662,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12534,7 +13683,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -12559,7 +13708,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify(commitPayload),
     })
-    expect(commitRes.status).toBe(200)
+    expect(commitRes.status, commitRes.raw).toBe(200)
     const job = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
     const jobId = job?.id
     expect(typeof jobId).toBe('string')
@@ -12641,13 +13790,13 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
 
     const workDate = new Date().toISOString().slice(0, 10)
-    const duplicateUserId = `attendance-async-duplicate-${Date.now().toString(36)}`
+    const duplicateUserId = randomUUID()
     const idempotencyKey = `integration-async-duplicate-${Date.now().toString(36)}`
 
     const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
@@ -12664,13 +13813,14 @@ attendanceIntegrationDescribe(
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const distinctWorkDates = 250
-    const bulkUserSeed = Date.now().toString(36)
+    const bulkTargetUserIds = Array.from({ length: 4 }, () => randomUUID())
+    await ensureActiveImportIdentitiesForTest([...bulkTargetUserIds, duplicateUserId])
     const bulkRows = Array.from({ length: 1000 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + (index % distinctWorkDates))
       const rowWorkDate = date.toISOString().slice(0, 10)
       return {
-        userId: `attendance-async-bulk-${bulkUserSeed}-${Math.floor(index / distinctWorkDates)}`,
+        userId: bulkTargetUserIds[Math.floor(index / distinctWorkDates)],
         workDate: rowWorkDate,
         fields: {
           firstInAt: `${rowWorkDate}T09:00:00Z`,
@@ -12681,7 +13831,7 @@ attendanceIntegrationDescribe(
     })
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows: [
@@ -12823,7 +13973,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12845,7 +13995,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12883,7 +14033,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-rows-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       rows,
@@ -12944,7 +14094,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12963,8 +14113,10 @@ attendanceIntegrationDescribe(
 
     const workDate = new Date().toISOString().slice(0, 10)
     const totalEntries = 20_001
+    const entryTargetUserId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(entryTargetUserId)
     const entries = Array.from({ length: totalEntries }, (_, index) => ({
-      userId: 'attendance-large-entries',
+      userId: entryTargetUserId,
       workDate,
       field: `raw_field_${index}`,
       value: `${workDate}T09:00:00Z`,
@@ -12976,7 +14128,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-entries-large-${Date.now().toString(36)}`
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       entries,
@@ -13038,7 +14190,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13059,7 +14211,7 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
       previewLimit: 2,
@@ -13162,7 +14314,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13196,16 +14348,23 @@ attendanceIntegrationDescribe(
     )
   })
 
-  it('supports batch user resolve and returns missing ids for batch role operations', async () => {
+  it('requires explicit global scope and refuses partial batch role writes', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
 
-    const userSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1`, {
+    const unscopedSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(unscopedSearchRes.status).toBe(400)
+
+    const userSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1&scope=global`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -13225,6 +14384,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         userIds: [existingUserId, missingUserId],
+        scope: 'global',
       }),
     })
     expect(resolveRes.status).toBe(200)
@@ -13252,10 +14412,25 @@ attendanceIntegrationDescribe(
       body: JSON.stringify({
         userIds: [existingUserId, missingUserId],
         template: 'employee',
+        scope: 'global',
       }),
     })
-    expect(assignRes.status).toBe(200)
-    const assignData = (assignRes.body as {
+    expect(assignRes.status).toBe(404)
+
+    const assignExactRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [existingUserId],
+        template: 'employee',
+        scope: 'global',
+      }),
+    })
+    expect(assignExactRes.status).toBe(200)
+    const assignData = (assignExactRes.body as {
       data?: {
         requested?: number
         eligible?: number
@@ -13265,10 +14440,9 @@ attendanceIntegrationDescribe(
         unchangedUserIds?: string[]
       }
     } | undefined)?.data
-    expect(assignData?.requested).toBe(2)
+    expect(assignData?.requested).toBe(1)
     expect(assignData?.eligible).toBe(1)
-    expect(Array.isArray(assignData?.missingUserIds)).toBe(true)
-    expect(assignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect(assignData?.missingUserIds).toEqual([])
     expect((assignData?.updated ?? -1) >= 0).toBe(true)
     expect(Array.isArray(assignData?.affectedUserIds)).toBe(true)
     expect(Array.isArray(assignData?.unchangedUserIds)).toBe(true)
@@ -13281,8 +14455,9 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userIds: [existingUserId, missingUserId],
+        userIds: [existingUserId],
         template: 'employee',
+        scope: 'global',
       }),
     })
     expect(unassignRes.status).toBe(200)
@@ -13295,19 +14470,297 @@ attendanceIntegrationDescribe(
         unchangedUserIds?: string[]
       }
     } | undefined)?.data
-    expect(unassignData?.requested).toBe(2)
+    expect(unassignData?.requested).toBe(1)
     expect(unassignData?.eligible).toBe(1)
-    expect(unassignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect(unassignData?.missingUserIds).toEqual([])
     expect(Array.isArray(unassignData?.affectedUserIds)).toBe(true)
     expect(Array.isArray(unassignData?.unchangedUserIds)).toBe(true)
     expect((unassignData?.affectedUserIds?.length ?? 0) + (unassignData?.unchangedUserIds?.length ?? 0)).toBe(unassignData?.eligible)
+  })
+
+  it('keeps delegated reads attendance-scoped and global role writes platform-only', async () => {
+    if (!baseUrl || !settingsRowPool) return
+
+    const orgA = `attendance-scope-a-${randomUUID()}`
+    const orgB = `attendance-scope-b-${randomUUID()}`
+    const actorId = randomUUID()
+    const localUserId = randomUUID()
+    const foreignUserId = randomUUID()
+    const identities = [actorId, localUserId, foreignUserId]
+    identities.forEach((id) => seededImportIdentityIds.add(id))
+
+    await settingsRowPool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES
+         ($1, $4, $1, 'Delegated Attendance Admin', 'x', 'user', '["attendance:admin"]'::jsonb, true, false, 'activated', now(), now()),
+         ($2, $5, $2, 'Local Attendance User', 'x', 'admin', '["attendance:read","users:read"]'::jsonb, true, true, 'activated', now(), now()),
+         ($3, $6, $3, 'Foreign Attendance User', 'x', 'user', '[]'::jsonb, true, false, 'activated', now(), now())`,
+      [
+        actorId,
+        localUserId,
+        foreignUserId,
+        `${actorId}@scope.test`,
+        `${localUserId}@scope.test`,
+        `${foreignUserId}@scope.test`,
+      ],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES
+         ($1, $4, true),
+         ($2, $4, true),
+         ($2, $5, true),
+         ($3, $5, true)`,
+      [actorId, localUserId, foreignUserId, orgA, orgB],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+       VALUES ($1, 'attendance', true), ($2, 'attendance', true)`,
+      [actorId, localUserId],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_roles (user_id, role_id)
+       VALUES
+         ($1, 'attendance_admin'),
+         ($2, 'admin'),
+         ($2, 'attendance_employee')`,
+      [actorId, localUserId],
+    )
+
+    const delegatedTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&tenantId=${encodeURIComponent(orgA)}&roles=attendance_admin&perms=attendance:admin`,
+    )
+    const delegatedToken = (delegatedTokenRes.body as { token?: string } | undefined)?.token
+    expect(delegatedToken).toBeTruthy()
+    if (!delegatedToken) return
+    const delegatedHeaders = {
+      Authorization: `Bearer ${delegatedToken}`,
+      'Content-Type': 'application/json',
+    }
+
+    const localSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&pageSize=100&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(localSearch.status).toBe(200)
+    const localItems = (localSearch.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    expect(localItems.some((item) => item.id === localUserId)).toBe(true)
+    expect(localItems.some((item) => item.id === foreignUserId)).toBe(false)
+    const localSearchItem = localItems.find((item) => item.id === localUserId) ?? {}
+    expect(localSearchItem).not.toHaveProperty('role')
+    expect(localSearchItem).not.toHaveProperty('is_admin')
+    expect(localSearchItem).not.toHaveProperty('last_login_at')
+
+    const localAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(localAccess.status).toBe(200)
+    const localAccessData = (localAccess.body as {
+      data?: { user?: Record<string, unknown>; roles?: string[]; permissions?: string[]; isAdmin?: boolean }
+    } | undefined)?.data ?? {}
+    expect(localAccessData.roles).toEqual(['attendance_employee'])
+    expect(localAccessData.permissions?.every((code) => code.startsWith('attendance:'))).toBe(true)
+    expect(localAccessData.permissions).not.toContain('users:read')
+    expect(localAccessData).not.toHaveProperty('isAdmin')
+    expect(localAccessData.user).not.toHaveProperty('role')
+    expect(localAccessData.user).not.toHaveProperty('is_admin')
+    expect(localAccessData.user).not.toHaveProperty('last_login_at')
+
+    await settingsRowPool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [actorId, orgA],
+    )
+    const inactiveActorSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveActorSearch.status).toBe(403)
+    await settingsRowPool.query(
+      `UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`,
+      [actorId, orgA],
+    )
+
+    const foreignOrgSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&orgId=${encodeURIComponent(orgB)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(foreignOrgSearch.status).toBe(403)
+
+    const delegatedGlobalSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&scope=global`,
+      { headers: delegatedHeaders },
+    )
+    expect(delegatedGlobalSearch.status).toBe(403)
+
+    const scopedResolve = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/resolve`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId], orgId: orgA }),
+    })
+    expect(scopedResolve.status).toBe(200)
+    const scopedResolveData = (scopedResolve.body as {
+      data?: { items?: Array<{ id?: string }>; missingUserIds?: string[] }
+    } | undefined)?.data
+    expect(scopedResolveData?.items?.map((item) => item.id)).toEqual([localUserId])
+    expect(scopedResolveData?.missingUserIds).toEqual([foreignUserId])
+
+    const mixedAssign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId], template: 'admin', orgId: orgA }),
+    })
+    expect(mixedAssign.status).toBe(403)
+    expect(mixedAssign.body).toMatchObject({
+      ok: false,
+      error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' },
+    })
+    const afterMixed = await settingsRowPool.query(
+      `SELECT user_id FROM user_roles
+       WHERE user_id = ANY($1::text[]) AND role_id = 'attendance_admin'`,
+      [[localUserId, foreignUserId]],
+    )
+    expect(afterMixed.rows).toEqual([])
+
+    const foreignAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(foreignUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(foreignAccess.status).toBe(404)
+    const nonexistentAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(randomUUID())}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(nonexistentAccess.status).toBe(404)
+    expect(nonexistentAccess.body).toEqual(foreignAccess.body)
+
+    await settingsRowPool.query(`UPDATE users SET is_active = false WHERE id = $1`, [localUserId])
+    const inactiveAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveAccess.status).toBe(404)
+    expect(inactiveAccess.body).toEqual(foreignAccess.body)
+
+    const inactiveSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=${encodeURIComponent(localUserId)}&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveSearch.status).toBe(200)
+    expect((inactiveSearch.body as { data?: { items?: unknown[] } } | undefined)?.data?.items).toEqual([])
+
+    const hiddenUserId = randomUUID()
+    const inactiveResolve = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/resolve`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId, hiddenUserId], orgId: orgA }),
+    })
+    expect(inactiveResolve.status).toBe(200)
+    expect(inactiveResolve.body).toMatchObject({
+      data: {
+        items: [],
+        missingUserIds: [localUserId, foreignUserId, hiddenUserId],
+        inactiveUserIds: [],
+      },
+    })
+    await settingsRowPool.query(`UPDATE users SET is_active = true WHERE id = $1`, [localUserId])
+
+    const delegatedAssign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/assign`,
+      {
+        method: 'POST',
+        headers: delegatedHeaders,
+        body: JSON.stringify({ template: 'admin', orgId: orgA }),
+      },
+    )
+    expect(delegatedAssign.status).toBe(403)
+
+    const delegatedUnassign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/unassign`,
+      {
+        method: 'POST',
+        headers: delegatedHeaders,
+        body: JSON.stringify({ template: 'employee', orgId: orgA }),
+      },
+    )
+    expect(delegatedUnassign.status).toBe(403)
+    const preserved = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+      [localUserId],
+    )
+    expect(preserved.rows).toHaveLength(1)
+
+    const platformTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:admin`,
+    )
+    const platformToken = (platformTokenRes.body as { token?: string } | undefined)?.token
+    expect(platformToken).toBeTruthy()
+    if (!platformToken) return
+    const platformHeaders = {
+      Authorization: `Bearer ${platformToken}`,
+      'Content-Type': 'application/json',
+    }
+    const platformGlobalSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=${encodeURIComponent(foreignUserId)}&scope=global`,
+      { headers: platformHeaders },
+    )
+    expect(platformGlobalSearch.status).toBe(200)
+    const platformItems = (platformGlobalSearch.body as {
+      data?: { items?: Array<{ id?: string }> }
+    } | undefined)?.data?.items ?? []
+    expect(platformItems.map((item) => item.id)).toContain(foreignUserId)
+
+    const missingUserId = randomUUID()
+    const mixedGlobalAssign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: platformHeaders,
+      body: JSON.stringify({ userIds: [localUserId, missingUserId], template: 'admin', scope: 'global' }),
+    })
+    expect(mixedGlobalAssign.status).toBe(404)
+    const afterMixedGlobal = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_admin'`,
+      [localUserId],
+    )
+    expect(afterMixedGlobal.rows).toHaveLength(0)
+
+    const mixedGlobalUnassign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/unassign`, {
+      method: 'POST',
+      headers: platformHeaders,
+      body: JSON.stringify({ userIds: [localUserId, missingUserId], template: 'employee', scope: 'global' }),
+    })
+    expect(mixedGlobalUnassign.status).toBe(404)
+    const afterMixedGlobalUnassign = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+      [localUserId],
+    )
+    expect(afterMixedGlobalUnassign.rows).toHaveLength(1)
+
+    const platformAssign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/assign`,
+      {
+        method: 'POST',
+        headers: platformHeaders,
+        body: JSON.stringify({ template: 'admin', scope: 'global' }),
+      },
+    )
+    expect(platformAssign.status).toBe(200)
+    const platformUnassign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/unassign`,
+      {
+        method: 'POST',
+        headers: platformHeaders,
+        body: JSON.stringify({ template: 'admin', scope: 'global' }),
+      },
+    )
+    expect(platformUnassign.status).toBe(200)
   })
 
   it('supports attendance admin audit log filters and summary endpoint', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13355,7 +14808,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13375,7 +14828,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenPreview).toBeTruthy()
 
     const previewPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       previewLimit: 1,
       rows: [
@@ -13429,7 +14882,7 @@ attendanceIntegrationDescribe(
     expect(commitTokenCommit).toBeTruthy()
 
     const commitPayload = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       returnItems: false,
       rows: [
@@ -13482,7 +14935,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13495,7 +14948,7 @@ attendanceIntegrationDescribe(
     const csvText = `${csvHeader}\n${csvRows.join('\n')}`
 
     const csvPayloadBase = {
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       csvText,
       mapping: {
         columns: [
@@ -13508,7 +14961,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -13573,7 +15026,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13597,7 +15050,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       fileId: String(fileId || ''),
       mapping: {
@@ -13611,7 +15064,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -13698,9 +15151,10 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-fileid-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13822,7 +15276,8 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const runSuffix = Date.now().toString(36)
-    const requesterId = `attendance-api-csv-${runSuffix}`
+    const requesterId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(requesterId)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -13927,7 +15382,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -13959,7 +15414,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       mappingProfileId: 'dingtalk_csv_daily_summary',
@@ -14103,7 +15558,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14129,7 +15584,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14144,7 +15599,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14251,7 +15706,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14277,7 +15732,7 @@ attendanceIntegrationDescribe(
 
     const csvPayloadBase = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14292,7 +15747,7 @@ attendanceIntegrationDescribe(
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: sharedImportUserId,
       },
       mode: 'override',
     }
@@ -14410,7 +15865,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14458,7 +15913,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -14471,7 +15926,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken: previewCommitToken,
       }),
@@ -14487,7 +15942,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14495,8 +15950,9 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
-    const mappedUserIdA = `attendance-async-${runSuffix}-a`
-    const mappedUserIdB = `attendance-async-${runSuffix}-b`
+    const mappedUserIdA = randomUUID()
+    const mappedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([mappedUserIdA, mappedUserIdB])
     const asyncGroupName = `CSV Async Group ${runSuffix}`
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
     const csvRows = [
@@ -14534,7 +15990,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `upload-async-idempo-${Date.now()}`
     const commitPayload = {
       orgId,
-      userId: 'attendance-test',
+      userId: sharedImportUserId,
       timezone: 'UTC',
       csvFileId: String(fileId || ''),
       idempotencyKey,
@@ -14640,8 +16096,7 @@ attendanceIntegrationDescribe(
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
-    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
-    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+    await waitForImportUploadCleanup([csvPath, metaPath])
 
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
@@ -14677,7 +16132,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14685,10 +16140,13 @@ attendanceIntegrationDescribe(
     const orgId = 'default'
     const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
+    const streamedUserIdA = randomUUID()
+    const streamedUserIdB = randomUUID()
+    await ensureActiveImportIdentitiesForTest([streamedUserIdA, streamedUserIdB])
     const csvText = [
       '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
-      `${workDate},attendance-stream-${runSuffix}-a,CSV Stream Group ${runSuffix},09:00,18:00,正常`,
-      `${workDate},attendance-stream-${runSuffix}-b,CSV Stream Group ${runSuffix},09:10,18:10,正常`,
+      `${workDate},${streamedUserIdA},CSV Stream Group ${runSuffix},09:00,18:00,正常`,
+      `${workDate},${streamedUserIdB},CSV Stream Group ${runSuffix},09:10,18:10,正常`,
       '',
     ].join('\n')
 
@@ -14739,7 +16197,7 @@ attendanceIntegrationDescribe(
         },
         body: JSON.stringify({
           orgId,
-          userId: 'attendance-test',
+          userId: sharedImportUserId,
           timezone: 'UTC',
           csvFileId: String(fileId || ''),
           idempotencyKey: `upload-async-stream-${Date.now()}`,
@@ -14800,7 +16258,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14827,7 +16285,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -14840,7 +16298,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -14855,7 +16313,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14881,7 +16339,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId: 'default',
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: missingFileId,
         mapping: {
@@ -14894,7 +16352,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -14910,7 +16368,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14958,7 +16416,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -14971,7 +16429,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -14987,7 +16445,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15035,7 +16493,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         orgId,
-        userId: 'attendance-test',
+        userId: sharedImportUserId,
         timezone: 'UTC',
         csvFileId: String(fileId || ''),
         mapping: {
@@ -15048,7 +16506,7 @@ attendanceIntegrationDescribe(
             { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
           ],
         },
-        userMap: { A001: 'attendance-test' },
+        userMap: { A001: sharedImportUserId },
         mode: 'override',
         commitToken,
       }),
@@ -15075,7 +16533,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -15142,7 +16600,7 @@ attendanceIntegrationDescribe(
     let groupId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       const auth = { Authorization: `Bearer ${token}` }
@@ -15185,7 +16643,7 @@ attendanceIntegrationDescribe(
 
       // (3) §3b scope gate: an outsider (non-admin, not a group manager) → 403
       process.env.RBAC_BYPASS = 'false'
-      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&roles=employee&perms=attendance:read`)
+      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&tenantId=default&roles=employee&perms=attendance:read`)
       const outsiderToken = (outsiderTokenRes.body as { token?: string } | undefined)?.token
       if (outsiderToken) {
         const forbidden = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: { Authorization: `Bearer ${outsiderToken}` } })
@@ -15237,7 +16695,7 @@ attendanceIntegrationDescribe(
       )
 
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
@@ -15336,7 +16794,7 @@ attendanceIntegrationDescribe(
       )
 
       const adminTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       expect(adminToken).toBeTruthy()
@@ -15418,7 +16876,7 @@ attendanceIntegrationDescribe(
     } finally {
       if (originalSettings) {
         const cleanupTokenRes = await requestJson(
-          `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+          `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
         )
         const cleanupToken = (cleanupTokenRes.body as { token?: string } | undefined)?.token
         if (cleanupToken) {
@@ -15495,7 +16953,7 @@ attendanceIntegrationDescribe(
       )
 
       const adminTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       expect(adminToken).toBeTruthy()
@@ -15559,7 +17017,7 @@ attendanceIntegrationDescribe(
       expect(longItems.flatMap(item => item.layers).some((layer: any) => layer.kind === 'calendar_policy')).toBe(false)
     } finally {
       const cleanupTokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
       ).catch(() => null)
       const cleanupToken = (cleanupTokenRes?.body as { token?: string } | undefined)?.token
       if (cleanupToken) {
@@ -15618,7 +17076,7 @@ attendanceIntegrationDescribe(
       )
 
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
@@ -15691,17 +17149,17 @@ attendanceIntegrationDescribe(
 
       // Read-only token for cross-user RBAC negative case
       const readOnlyRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=user&perms=attendance:read`
       )
       const readOnlyToken = (readOnlyRes.body as { token?: string } | undefined)?.token
       // Read + approve token for cross-user RBAC positive case
       const approveRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read,attendance:approve`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&tenantId=default&roles=user&perms=attendance:read,attendance:approve`
       )
       const approveToken = (approveRes.body as { token?: string } | undefined)?.token
       // Admin token for groupId / 404 case
       const adminRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const adminToken = (adminRes.body as { token?: string } | undefined)?.token
       expect(readOnlyToken).toBeTruthy()
@@ -15817,14 +17275,15 @@ attendanceIntegrationDescribe(
       requestIds.push(requestId)
       await pool.query(
         `INSERT INTO approval_instances
-           (id, status, version, current_step, total_steps, current_node_key, metadata)
-         VALUES ($1, 'pending', 0, 0, 0, 'attendance_request_step_0', '{}'::jsonb)`,
+           (id, status, version, current_step, total_steps, current_node_key, metadata, workflow_key)
+         VALUES ($1, 'pending', 0, 0, 0, 'attendance_request_step_0', '{}'::jsonb, 'attendance.request')`,
         [approvalId]
       )
       await pool.query(
         `INSERT INTO attendance_requests
-           (id, org_id, user_id, work_date, request_type, status, reason, metadata, approval_instance_id)
-         VALUES ($1, $2, $3, $4, 'leave', 'pending', $5, $6::jsonb, $7)`,
+           (id, org_id, user_id, work_date, request_type, status, reason, metadata, approval_instance_id,
+            approval_workflow_key)
+         VALUES ($1, $2, $3, $4, 'leave', 'pending', $5, $6::jsonb, $7, 'attendance.request')`,
         [
           requestId,
           orgId,
@@ -15972,7 +17431,7 @@ attendanceIntegrationDescribe(
     const roleName = `Effective Calendar Role ${runSuffix}`
 
     const adminTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     expect(adminToken).toBeTruthy()
@@ -17629,6 +19088,10 @@ attendanceIntegrationDescribe(
         const runsAfterFirst = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
         expect(runsAfterFirst).toHaveLength(1)
         expect(runsAfterFirst[0]).toMatchObject({ triggered_by: 'scheduler', dry_run: false })
+        await pool.query(
+          'UPDATE attendance_leave_accrual_runs SET created_at = $1 WHERE id = $2',
+          [now, runsAfterFirst[0].id],
+        )
         expect(await annualSchedItemFor(pool, runsAfterFirst[0].id, uid)).toEqual({ status: 'granted' })
         const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
         expect(lotsAfterFirst).toHaveLength(1)
@@ -18009,6 +19472,8 @@ attendanceIntegrationDescribe(
       const token = await tokenFor(userId)
       const tokenExp = await tokenFor(userExp)
       if (!token || !tokenExp) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
+      await seedAttendanceOrgMembershipForTest(pool, userExp)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       // comp_time leave type (explicit code='comp_time'; idempotent across reruns → 409 then look up)
@@ -18113,6 +19578,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const hdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr, body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7x ${runSuffix}`, paid: false, requiresApproval: true }) })
@@ -18205,6 +19671,7 @@ attendanceIntegrationDescribe(
       const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
       const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
       if (!adminToken || !otherToken) return
+      await seedAttendanceOrgMembershipForTest(pool, adminU)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ code: 'comp_time', name: `Comp Time Auth ${runSuffix}`, paid: false, requiresApproval: true }) })
@@ -18237,5 +19704,696 @@ attendanceIntegrationDescribe(
       await pool.end().catch(() => undefined)
     }
   })
+
+  it('W4C-3a reproduces the committed legacy-import-v1 governing-SHA golden', async () => {
+    if (!baseUrl || !importUploadDir) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T12:00:00.000Z'))
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      const orgId = 'default'
+      const adminId = 'legacy-golden-admin'
+      const mergeUserId = '22222222-2222-4222-8222-222222222222'
+      const newUserId = '33333333-3333-4333-8333-333333333333'
+      const asyncUserId = '44444444-4444-4444-8444-444444444444'
+      const asyncRaceUserId = '55555555-5555-4555-8555-555555555555'
+      const raceUserId = '66666666-6666-4666-8666-666666666666'
+      const uploadUserId = '77777777-7777-4777-8777-777777777777'
+      const mergeRecordId = '11111111-1111-4111-8111-111111111111'
+      const groupName = 'Legacy Golden Team'
+      const syncKey = 'legacy-import-v1-sync'
+      const syncRaceKey = 'legacy-import-v1-sync-race'
+      const asyncKey = 'legacy-import-v1-async'
+      const asyncRaceKey = 'legacy-import-v1-async-race'
+      const fixedDates = {
+        merge: '2026-07-28',
+        fresh: '2026-07-29',
+        race: '2026-07-30',
+        async: '2026-07-31',
+        upload: '2026-08-01',
+      }
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      }
+
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status, permissions)
+         VALUES ($1, 'legacy-golden-admin@example.invalid', 'no-login', true, 'activated', $2::jsonb)
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated',
+           permissions = EXCLUDED.permissions`,
+        [adminId, JSON.stringify(['attendance:read', 'attendance:write', 'attendance:admin'])],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [adminId, orgId],
+      )
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [adminId],
+      )
+      await pool.query(
+        `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+         VALUES ($1, 'attendance', true)
+         ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = true`,
+        [adminId],
+      )
+      const subjectUserIds = [
+        mergeUserId,
+        newUserId,
+        asyncUserId,
+        asyncRaceUserId,
+        raceUserId,
+        uploadUserId,
+      ]
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, activation_status)
+         SELECT user_id, user_id || '@example.invalid', 'no-login', true, 'activated'
+           FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (id) DO UPDATE SET
+           is_active = true,
+           activation_status = 'activated'`,
+        [subjectUserIds],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         SELECT user_id, $2, true FROM unnest($1::text[]) AS user_id
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [subjectUserIds, orgId],
+      )
+
+      await pool.query(
+        `INSERT INTO attendance_records (
+           id, org_id, user_id, work_date, first_in_at, last_out_at,
+           work_minutes, late_minutes, early_leave_minutes, status,
+           is_workday, timezone, meta, source_batch_id
+         ) VALUES (
+           $1::uuid, $2, $3, $4::date, $5::timestamptz, $6::timestamptz,
+           420, 5, 10, 'normal', true, 'UTC', $7::jsonb, NULL
+         )
+         ON CONFLICT (org_id, user_id, work_date) DO UPDATE SET
+           id = EXCLUDED.id,
+           first_in_at = EXCLUDED.first_in_at,
+           last_out_at = EXCLUDED.last_out_at,
+           work_minutes = EXCLUDED.work_minutes,
+           late_minutes = EXCLUDED.late_minutes,
+           early_leave_minutes = EXCLUDED.early_leave_minutes,
+           status = EXCLUDED.status,
+           timezone = EXCLUDED.timezone,
+           meta = EXCLUDED.meta,
+           source_batch_id = NULL`,
+        [
+          mergeRecordId,
+          orgId,
+          mergeUserId,
+          fixedDates.merge,
+          `${fixedDates.merge}T09:30:00.000Z`,
+          `${fixedDates.merge}T17:30:00.000Z`,
+          JSON.stringify({ seeded: true, keep: 'legacy' }),
+        ],
+      )
+
+      const syncPayload = {
+        orgId,
+        userId: adminId,
+        idempotencyKey: syncKey,
+        timezone: 'UTC',
+        source: 'manual',
+        mode: 'merge',
+        returnItems: true,
+        itemsLimit: 1,
+        batchMeta: { fixture: 'legacy-import-v1', compatibility: 'kept' },
+        userMapKeyField: 'empNo',
+        userMap: {
+          M001: {
+            userId: mergeUserId,
+            profile: { department: 'Legacy', policyTier: 'gold' },
+          },
+          N001: {
+            userId: newUserId,
+            profile: { department: 'New', policyTier: 'silver' },
+          },
+        },
+        groupSync: {
+          autoCreate: true,
+          autoAssignMembers: true,
+          timezone: 'UTC',
+        },
+        rows: [
+          {
+            workDate: fixedDates.merge,
+            fields: {
+              empNo: 'M001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.merge}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.merge}T18:00:00.000Z`,
+              status: 'normal',
+              punchSequence: ['09:00', '12:00', '13:00', '18:00'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T08:55:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:05:00.000Z`,
+              status: 'normal',
+              punchSequence: ['08:55', '12:01', '12:58', '18:05'],
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'N001',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.fresh}T18:10:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            workDate: fixedDates.fresh,
+            fields: {
+              empNo: 'UNMAPPED-RAW',
+              attendance_group: groupName,
+              firstInAt: `${fixedDates.fresh}T09:15:00.000Z`,
+            },
+          },
+        ],
+      }
+
+      const syncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncFirst.status, syncFirst.raw).toBe(200)
+      const syncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(syncPayload),
+      })
+      expect(syncEarly.status, syncEarly.raw).toBe(200)
+
+      const syncRacePayload = {
+        orgId,
+        userId: raceUserId,
+        idempotencyKey: syncRaceKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [{
+          userId: raceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T09:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T18:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const syncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit`, {
+          method: 'POST', headers, body: JSON.stringify(syncRacePayload),
+        }),
+      ])
+      expect(syncRace.map((entry) => entry.status)).toEqual([200, 200])
+
+      const asyncPayload = {
+        orgId,
+        userId: asyncUserId,
+        idempotencyKey: asyncKey,
+        timezone: 'UTC',
+        mode: 'override',
+        returnItems: false,
+        rows: [
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:00:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:00:00.000Z`,
+              status: 'normal',
+            },
+          },
+          {
+            userId: asyncUserId,
+            workDate: fixedDates.async,
+            fields: {
+              firstInAt: `${fixedDates.async}T09:05:00.000Z`,
+              lastOutAt: `${fixedDates.async}T18:05:00.000Z`,
+              status: 'normal',
+            },
+          },
+        ],
+      }
+      const asyncFirst = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncFirst.status, asyncFirst.raw).toBe(200)
+      const asyncJobId = String((asyncFirst.body as any)?.data?.job?.id || '')
+      expect(asyncJobId).toBeTruthy()
+      const asyncEarly = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST', headers, body: JSON.stringify(asyncPayload),
+      })
+      expect(asyncEarly.status, asyncEarly.raw).toBe(200)
+      const asyncCompleted = await waitForImportJobCompletion(baseUrl, token, asyncJobId, {
+        attempts: 200,
+        intervalMs: 25,
+        settle: (job) => Array.isArray(job?.skippedRows),
+      })
+
+      const asyncRacePayload = {
+        ...asyncPayload,
+        userId: asyncRaceUserId,
+        idempotencyKey: asyncRaceKey,
+        rows: [{
+          userId: asyncRaceUserId,
+          workDate: fixedDates.race,
+          fields: {
+            firstInAt: `${fixedDates.race}T10:00:00.000Z`,
+            lastOutAt: `${fixedDates.race}T19:00:00.000Z`,
+            status: 'normal',
+          },
+        }],
+      }
+      const asyncRace = await Promise.all([
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+        requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+          method: 'POST', headers, body: JSON.stringify(asyncRacePayload),
+        }),
+      ])
+      expect(asyncRace.map((entry) => entry.status)).toEqual([200, 200])
+      const asyncRaceJobId = String((asyncRace[0].body as any)?.data?.job?.id || '')
+      if (asyncRaceJobId) {
+        await waitForImportJobCompletion(baseUrl, token, asyncRaceJobId, { attempts: 200, intervalMs: 25 })
+      }
+
+      const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+      const csvText = `${csvHeader}\n${fixedDates.upload},U001,Legacy Upload Team,09:00,18:00,正常\n`
+      const uploadRes = await requestJson(
+        `${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=legacy-import-v1.csv`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/csv' },
+          body: csvText,
+        },
+      )
+      expect(uploadRes.status, uploadRes.raw).toBe(201)
+      const fileId = String((uploadRes.body as any)?.data?.fileId || '')
+      expect(fileId).toBeTruthy()
+      const uploadPayload = {
+        orgId,
+        userId: uploadUserId,
+        idempotencyKey: 'legacy-import-v1-upload',
+        timezone: 'UTC',
+        fileId,
+        mapping: { columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ] },
+        userMap: { U001: uploadUserId },
+        groupSync: { autoCreate: true, autoAssignMembers: true, timezone: 'UTC' },
+        mode: 'override',
+        returnItems: false,
+      }
+      const uploadCommit = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST', headers, body: JSON.stringify(uploadPayload),
+      })
+      expect(uploadCommit.status, uploadCommit.raw).toBe(200)
+      const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+      const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+      const uploadCleanup = {
+        fileId,
+        intent: { kind: 'uploaded_import_file', expectedOwnerOrgId: orgId },
+        csvPresent: await fs.stat(csvPath).then(() => true).catch(() => false),
+        metaPresent: await fs.stat(metaPath).then(() => true).catch(() => false),
+      }
+
+      const syncBatchId = String((syncFirst.body as any)?.data?.batchId || '')
+      const syncRaceBatchId = String((syncRace[0].body as any)?.data?.batchId || '')
+      const asyncBatchId = String(asyncCompleted?.batchId || '')
+      const asyncRaceBatchId = String((asyncRace[0].body as any)?.data?.job?.batchId || '')
+      const uploadBatchId = String((uploadCommit.body as any)?.data?.batchId || '')
+      const batchIds = [syncBatchId, syncRaceBatchId, asyncBatchId, asyncRaceBatchId, uploadBatchId]
+        .filter(Boolean)
+
+      const batches = await pool.query(
+        `SELECT id::text, org_id, idempotency_key, created_by, source,
+                rule_set_id::text, mapping, row_count, status, meta
+           FROM attendance_import_batches
+          WHERE id = ANY($1::uuid[])
+          ORDER BY idempotency_key NULLS LAST, org_id`,
+        [batchIds],
+      )
+      const items = await pool.query(
+        `SELECT i.id::text, i.batch_id::text, i.org_id, i.user_id,
+                i.work_date::text, i.record_id::text, i.preview_snapshot
+           FROM attendance_import_items i
+           JOIN attendance_import_batches b ON b.id = i.batch_id AND b.org_id = i.org_id
+          WHERE i.batch_id = ANY($1::uuid[])
+          ORDER BY b.idempotency_key NULLS LAST, i.work_date, i.user_id`,
+        [batchIds],
+      )
+      const records = await pool.query(
+        `SELECT id::text, org_id, user_id, work_date::text,
+                first_in_at::text, last_out_at::text, work_minutes,
+                late_minutes, early_leave_minutes, status, is_workday,
+                timezone, meta, source_batch_id::text
+           FROM attendance_records
+          WHERE org_id = $1
+            AND (source_batch_id = ANY($2::uuid[]) OR id = $3::uuid)
+          ORDER BY user_id, work_date, id`,
+        [orgId, batchIds, mergeRecordId],
+      )
+      const groups = await pool.query(
+        `SELECT id::text, org_id, name, code, timezone, rule_set_id::text, description
+           FROM attendance_groups
+          WHERE org_id = $1 AND name = ANY($2::text[])
+          ORDER BY lower(name), id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const members = await pool.query(
+        `SELECT m.id::text, m.org_id, m.group_id::text, g.name AS group_name, m.user_id
+           FROM attendance_group_members m
+           JOIN attendance_groups g ON g.id = m.group_id
+          WHERE m.org_id = $1 AND g.name = ANY($2::text[])
+          ORDER BY lower(g.name), m.user_id, m.id`,
+        [orgId, [groupName, 'Legacy Upload Team']],
+      )
+      const jobs = await pool.query(
+        `SELECT j.id::text, j.org_id, j.batch_id::text, j.created_by, j.idempotency_key,
+                j.status, j.progress, j.total, j.error,
+                COALESCE(t.response, j.payload) AS payload
+           FROM attendance_import_jobs j
+           LEFT JOIN attendance_import_legacy_terminal_responses t
+             ON t.job_id = j.id AND t.org_id = j.org_id
+          WHERE j.id = ANY($1::uuid[])
+          ORDER BY j.idempotency_key NULLS LAST, j.org_id`,
+        [[asyncJobId, asyncRaceJobId].filter(Boolean)],
+      )
+
+      const generatedIdLabels = new Map<string, string>()
+      for (const row of batches.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `batch:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      for (const row of jobs.rows) {
+        generatedIdLabels.set(
+          row.id,
+          `job:${row.org_id}:${row.idempotency_key ?? row.id}`,
+        )
+      }
+      const itemOrdinals = new Map<string, number>()
+      for (const row of items.rows) {
+        const ordinal = itemOrdinals.get(row.batch_id) ?? 0
+        generatedIdLabels.set(
+          row.id,
+          `item:${generatedIdLabels.get(row.batch_id) ?? row.batch_id}:${ordinal}`,
+        )
+        itemOrdinals.set(row.batch_id, ordinal + 1)
+      }
+      for (const row of records.rows) {
+        if (row.id !== mergeRecordId) {
+          generatedIdLabels.set(row.id, `record:${row.org_id}:${row.user_id}:${row.work_date}`)
+        }
+      }
+      for (const row of groups.rows) {
+        generatedIdLabels.set(row.id, `group:${row.org_id}:${String(row.name).trim().toLowerCase()}`)
+      }
+      for (const row of members.rows) {
+        generatedIdLabels.set(row.id, `member:${row.org_id}:${String(row.group_name).trim().toLowerCase()}:${row.user_id}`)
+      }
+      generatedIdLabels.set(fileId, `upload-file:${orgId}:legacy-import-v1-upload`)
+      const normalize = (value: unknown, key = ''): unknown => {
+        if (typeof value === 'string') {
+          return generatedIdLabels.get(value) ?? value
+        }
+        if (Array.isArray(value)) return value.map((entry) => normalize(entry))
+        if (value && typeof value === 'object') {
+          const out: Record<string, unknown> = {}
+          for (const currentKey of Object.keys(value as Record<string, unknown>).sort()) {
+            const current = (value as Record<string, unknown>)[currentKey]
+            if (currentKey === 'elapsedMs') {
+              const number = Number(current)
+              out[currentKey] = number === 0 ? 0 : { type: 'number', relation: 'nonnegative' }
+              continue
+            }
+            if (/^(created|updated|started|finished)At$/i.test(currentKey)) {
+              out[currentKey] = current == null ? null : '<db-timestamp>'
+              continue
+            }
+            out[currentKey] = normalize(current, currentKey)
+          }
+          return out
+        }
+        return value
+      }
+      const responseShape = (response: HttpResponse) => ({
+        status: response.status,
+        body: normalize(response.body),
+      })
+      const canonicalizeGolden = (value: any) => {
+        const copy = structuredClone(value)
+        const compareText = (left: unknown, right: unknown) =>
+          String(left ?? '').localeCompare(String(right ?? ''))
+        const normalizeDatabaseInstant = (value: unknown, key: string) => {
+          if (value == null) return value
+          const timestamp = new Date(String(value).replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))
+          if (Number.isNaN(timestamp.getTime())) {
+            throw new Error(`Invalid ${key} timestamp in legacy-import-v1 golden: ${String(value)}`)
+          }
+          return timestamp.toISOString()
+        }
+        const sortRace = (entries: any[]) => entries.sort((left, right) => {
+          const leftReplay = left?.body?.data?.idempotent === true ? 1 : 0
+          const rightReplay = right?.body?.data?.idempotent === true ? 1 : 0
+          return leftReplay - rightReplay
+        })
+        const normalizeAsyncReplayLifecycle = (entries: any[]) => {
+          const replayEntries = entries.filter((entry) => entry?.body?.data?.idempotent === true)
+          if (replayEntries.length !== 1) {
+            throw new Error(`Expected one async idempotent replay, received ${replayEntries.length}`)
+          }
+          const job = replayEntries[0]?.body?.data?.job
+          if (!job || typeof job !== 'object') {
+            throw new Error('Async idempotent replay is missing its job projection')
+          }
+          const status = String(job.status ?? '')
+          if (!['queued', 'running', 'completed'].includes(status)) {
+            throw new Error(`Unexpected async idempotent replay status: ${status || '<empty>'}`)
+          }
+          const total = job.total
+          const progress = job.progress
+          const processedRows = job.processedRows
+          const failedRows = job.failedRows
+          if (
+            !Number.isInteger(total) || total < 0 ||
+            !Number.isInteger(progress) || progress < 0 || progress > total ||
+            !Number.isInteger(processedRows) || processedRows < 0 || processedRows > total ||
+            !Number.isInteger(failedRows) || failedRows < 0 || failedRows > total ||
+            processedRows + failedRows !== total
+          ) {
+            throw new Error('Async idempotent replay contains an invalid lifecycle counter')
+          }
+          const progressPercent = job.progressPercent
+          // Mirrors mapImportJobRow's public projection formula. The same projection derives
+          // failedRows as total - processedRows until a terminal summary replaces both values.
+          const expectedProgressPercent = total > 0
+            ? Math.round((progress / total) * 100)
+            : 0
+          if (
+            typeof progressPercent !== 'number' ||
+            !Number.isInteger(progressPercent) ||
+            progressPercent !== expectedProgressPercent
+          ) {
+            throw new Error('Async idempotent replay contains an invalid progress percentage')
+          }
+          if (
+            typeof job.throughputRowsPerSec !== 'number' ||
+            !Number.isFinite(job.throughputRowsPerSec) ||
+            job.throughputRowsPerSec < 0
+          ) {
+            throw new Error('Async idempotent replay contains an invalid throughput')
+          }
+          // canonicalizeGolden receives the output of normalize(), which preserves zero and turns
+          // every positive elapsed duration into this relation marker before either side is compared.
+          const elapsedMsIsValid = job.elapsedMs === 0 || (
+            job.elapsedMs &&
+            typeof job.elapsedMs === 'object' &&
+            job.elapsedMs.type === 'number' &&
+            job.elapsedMs.relation === 'nonnegative' &&
+            Object.keys(job.elapsedMs).length === 2
+          )
+          if (!elapsedMsIsValid) {
+            throw new Error('Async idempotent replay contains an invalid elapsed duration')
+          }
+          if (status === 'queued' && (progress !== 0 || job.startedAt !== null || job.finishedAt !== null)) {
+            throw new Error('Queued async idempotent replay contains a started or finished lifecycle')
+          }
+          if (status === 'running' && (job.startedAt === null || job.finishedAt !== null)) {
+            throw new Error('Running async idempotent replay contains an invalid lifecycle timestamp')
+          }
+          if (status === 'completed' && (progress !== total || job.startedAt === null || job.finishedAt === null)) {
+            throw new Error('Completed async idempotent replay contains an incomplete lifecycle')
+          }
+
+          // The replay can legally observe the worker before, during, or after completion. Keep the
+          // created response byte-locked and normalize only these lifecycle values on the replay;
+          // its key set, identity, engine, strategies, error, and every other field remain golden-bound.
+          for (const key of [
+            'elapsedMs',
+            'failedRows',
+            'finishedAt',
+            'processedRows',
+            'progress',
+            'progressPercent',
+            'startedAt',
+            'status',
+            'throughputRowsPerSec',
+          ]) {
+            if (!Object.prototype.hasOwnProperty.call(job, key)) {
+              throw new Error(`Async idempotent replay is missing lifecycle field: ${key}`)
+            }
+            job[key] = `<async-replay-${key}>`
+          }
+        }
+        sortRace(copy.sync.lockedRace)
+        sortRace(copy.async.lockedRace)
+        normalizeAsyncReplayLifecycle(copy.async.lockedRace)
+        copy.database.batches.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        for (const item of copy.database.items) {
+          const warnings = Array.isArray(item.preview_snapshot?.warnings)
+            ? item.preview_snapshot.warnings
+            : []
+          item.id = [
+            'item',
+            item.batch_id,
+            item.record_id === null ? 'skip' : 'apply',
+            item.user_id ?? 'null',
+            item.work_date ?? 'null',
+            JSON.stringify(warnings),
+          ].join(':')
+        }
+        copy.database.items.sort((left: any, right: any) =>
+          compareText(left.batch_id, right.batch_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.user_id, right.user_id)
+          || compareText(left.id, right.id))
+        for (const record of copy.database.records) {
+          record.first_in_at = normalizeDatabaseInstant(record.first_in_at, 'first_in_at')
+          record.last_out_at = normalizeDatabaseInstant(record.last_out_at, 'last_out_at')
+        }
+        copy.database.records.sort((left: any, right: any) =>
+          compareText(left.user_id, right.user_id)
+          || compareText(left.work_date, right.work_date)
+          || compareText(left.id, right.id))
+        copy.database.groups.sort((left: any, right: any) =>
+          compareText(String(left.name).toLowerCase(), String(right.name).toLowerCase()))
+        copy.database.members.sort((left: any, right: any) =>
+          compareText(left.group_id, right.group_id)
+          || compareText(left.user_id, right.user_id))
+        copy.database.jobs.sort((left: any, right: any) =>
+          compareText(left.idempotency_key, right.idempotency_key))
+        return copy
+      }
+      const w4Residue = await pool.query(
+        `SELECT
+           (SELECT count(*)::int
+              FROM attendance_result_operation_batches
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS batches,
+           (SELECT count(*)::int
+              FROM attendance_result_operations
+             WHERE org_id = $1 AND batch_command_id = ANY($2::uuid[])) AS operations,
+           (SELECT count(*)::int
+              FROM attendance_result_event_outbox e
+              JOIN attendance_result_operations o
+                ON o.org_id = e.org_id
+               AND o.entrypoint = e.entrypoint
+               AND o.operation_id = e.operation_id
+             WHERE o.org_id = $1 AND o.batch_command_id = ANY($2::uuid[])) AS outbox,
+           (SELECT count(*)::int
+              FROM attendance_record_calculations
+             WHERE org_id = $1 AND source_batch_id = ANY($2::uuid[])) AS calculations,
+           (SELECT count(*)::int
+              FROM attendance_record_segments s
+              JOIN attendance_record_calculations c
+                ON c.org_id = s.org_id
+               AND c.id = s.calculation_id
+             WHERE c.org_id = $1 AND c.source_batch_id = ANY($2::uuid[])) AS segments`,
+        [orgId, batchIds],
+      )
+      const zeroUnexpectedW4Rows = Object.values(w4Residue.rows[0] ?? {})
+        .every((value) => Number(value) === 0)
+      const fixture = normalize({
+        schemaVersion: 1,
+        fixtureName: 'legacy-import-v1',
+        governingSha: '1055e543a3680be9f37462de23483bf61ad4610c',
+        fixedClock: '2026-07-30T12:00:00.000Z',
+        uuidSource: 'sha256(legacy-import-v1:<ordinal>)',
+        sync: {
+          firstExecution: responseShape(syncFirst),
+          directEarlyReplay: responseShape(syncEarly),
+          lockedRace: syncRace.map(responseShape),
+        },
+        async: {
+          firstExecution: responseShape(asyncFirst),
+          earlyReplay: responseShape(asyncEarly),
+          lockedRace: asyncRace.map(responseShape),
+          completedPublicJob: normalize(asyncCompleted),
+        },
+        uploadCleanup,
+        database: {
+          batches: batches.rows,
+          items: items.rows,
+          records: records.rows,
+          groups: groups.rows,
+          members: members.rows.map(({ group_name: _groupName, ...row }) => row),
+          jobs: jobs.rows,
+        },
+        zeroUnexpectedW4Rows,
+      })
+      const output = `${JSON.stringify(fixture, null, 2)}\n`
+      const fixturePath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.json')
+      const checksumPath = path.join(__dirname, '../fixtures/attendance/legacy-import-v1.sha256')
+      const expectedBytes = await fs.readFile(fixturePath)
+      const checksum = (await fs.readFile(checksumPath, 'utf8')).trim().split(/\s+/)[0]
+      expect(createHash('sha256').update(expectedBytes).digest('hex')).toBe(checksum)
+      const canonicalActual = canonicalizeGolden(JSON.parse(output))
+      const canonicalExpected = canonicalizeGolden(JSON.parse(expectedBytes.toString('utf8')))
+      expect(canonicalActual).toEqual(canonicalExpected)
+      expect(batches.rows.length).toBe(batchIds.length)
+      expect(generatedIdLabels.size).toBeGreaterThanOrEqual(4)
+      expect(zeroUnexpectedW4Rows).toBe(true)
+      expect(uploadCleanup).toMatchObject({ csvPresent: false, metaPresent: false })
+    } finally {
+      vi.useRealTimers()
+      await pool.end().catch(() => undefined)
+    }
+  }, 300_000)
 
 })

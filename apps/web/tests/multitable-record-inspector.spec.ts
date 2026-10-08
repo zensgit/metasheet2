@@ -32,6 +32,7 @@ import MetaRecordInspector from '../src/multitable/components/MetaRecordInspecto
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
+import { dateTimeZoneHint } from '../src/multitable/utils/business-timezone'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -53,6 +54,7 @@ function fakeApiClient() {
 }
 
 interface HarnessOptions {
+  apiClient?: ReturnType<typeof fakeApiClient>
   record?: MetaRecord | null
   fields?: MetaField[]
   onClose?: () => void
@@ -72,7 +74,7 @@ function mountInspector(options: HarnessOptions = {}): { container: HTMLElement;
         canComment: false,
         canDelete: false,
         sheetId: 'sheet_1',
-        apiClient: fakeApiClient() as any,
+        apiClient: (options.apiClient ?? fakeApiClient()) as any,
         ...(options.onClose ? { onClose: options.onClose } : {}),
         ...(options.openComments !== undefined ? { openComments: options.openComments } : {}),
       })
@@ -201,6 +203,68 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('tab structure + ARIA pairing', () => {
+    // 客户反馈 2026-09-24 #4c follow-up: the business timezone (Asia/Shanghai default), 24-hour, to the second.
+    it.each(['en', 'zh-CN'])('history preserves original time and displays the business timezone (%s)', async (locale) => {
+      useLocale().setLocale(locale)
+      const createdAt = '2026-09-14T08:00:00.000Z'
+      const apiClient = fakeApiClient()
+      apiClient.listRecordHistory.mockResolvedValue([
+        { id: 'time-1', version: 1, action: 'update', source: 'rest', actorId: 'actor-1', actorName: 'Example User', changedFieldIds: [], createdAt },
+        { id: 'time-2', version: 0, action: 'create', source: 'rest', actorId: 'unknown-actor', actorName: null, changedFieldIds: [], createdAt: 'legacy-time-unavailable' },
+      ])
+      const { container, app } = mountInspector({ apiClient })
+      try {
+        tabButtons(container)[1].click()
+        await flushUi()
+        const times = container.querySelectorAll('.meta-record-drawer__history-meta time')
+        expect(times).toHaveLength(2)
+        const hint = dateTimeZoneHint('Asia/Shanghai', locale === 'zh-CN', new Date(createdAt))
+        expect(times[0].textContent).toBe(hint ? `2026-09-14 16:00:00 ${hint}` : '2026-09-14 16:00:00')
+        expect(times[0].getAttribute('datetime')).toBe(createdAt)
+        expect(times[0].getAttribute('title')).toBe(createdAt)
+        expect(times[1].textContent).toBe('legacy-time-unavailable')
+        expect(tabPanel(container)?.textContent).toContain('Example User')
+        expect(tabPanel(container)?.textContent).toContain('unknown-actor')
+      } finally {
+        app.unmount()
+      }
+    })
+
+    // 客户反馈 2026-09-24 #4c follow-up: the comments tab hands MetaCommentsPanel the business-timezone formatter —
+    // 13:05Z reads 2026-09-24 21:05 (Asia/Shanghai default), 24-hour, not the browser's toLocaleString().
+    it('comments tab shows comment times in the business timezone, 24-hour', async () => {
+      useLocale().setLocale('en')
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RECORD,
+            fields: FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            openComments: true,
+            comments: [{
+              id: 'c1', spreadsheetId: 'sheet_1', rowId: 'rec_1', targetFieldId: null, mentions: [], authorId: 'u1',
+              authorName: 'Amy', content: 'hello', resolved: false, createdAt: '2026-09-24T13:05:07.000Z',
+            }] as any,
+          })
+        },
+      })
+      app.mount(container)
+      try {
+        await flushUi()
+        expect(container.querySelector('.meta-comments-drawer__time')?.textContent?.trim()).toBe('2026-09-24 21:05')
+      } finally {
+        app.unmount()
+        container.remove()
+      }
+    })
+
     it('renders a tablist with 4 tabs (S5: details/history/comments/attachments) and exactly 1 rendered tabpanel', async () => {
       const { container, app } = mountInspector()
       await flushUi()
@@ -629,11 +693,17 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
     it('with a router installed (real-app parity), renders the inbox link + unread badge and resolves to the comment-inbox route', async () => {
       const { container, app } = await mountInspectorWithRouter()
       await flushUi()
-      const link = container.querySelector<HTMLAnchorElement>('.meta-record-drawer__inbox-link')
+      // Record inspector v3 (2026-09-05, PR-A §1.2): the inbox link moved into the kebab menu, which
+      // Teleports its open content to `document.body` — open it and query `document.body`, not
+      // `container`.
+      const trigger = container.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+      trigger?.click()
+      await flushUi()
+      const link = document.querySelector<HTMLAnchorElement>('.meta-record-drawer__inbox-link')
       expect(link).toBeTruthy()
       expect(link!.textContent).toContain('Inbox')
       expect(link!.getAttribute('href')).toBe('/multitable/comments/inbox')
-      expect(container.querySelector('.meta-record-drawer__inbox-badge')?.textContent).toBe('3')
+      expect(document.querySelector('.meta-record-drawer__inbox-badge')?.textContent).toBe('3')
       app.unmount()
     })
   })
@@ -654,6 +724,137 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
       expect(src).not.toMatch(/[^.]\bfetch\(/)
       expect(src).not.toMatch(/(?<!api)client\.\w+\(/)
+    })
+  })
+
+  // #5795 refuter round: the workbench no longer preloads a term-less roster, so the host-bound
+  // `mentionSearch` is the ONLY way these editors reach people beyond the thread / earlier results. Each
+  // test mounts the REAL intermediate components (no stubs) and proves the search the host handed to the
+  // shell is the one a typed `@term` reaches:
+  //   comments tab: MetaRecordInspector -> MetaCommentsPanel -> MetaCommentComposer
+  //   details tab:  MetaRecordInspector -> MetaRecordFieldsPanel -> MetaRichLongTextEditor
+  //   shell:        MetaRecordDrawer -> MetaRecordInspector -> (details tab chain above)
+  describe('#5795: the host mentionSearch reaches the real mention editors (hand-off wiring)', () => {
+    const RICH_FIELDS = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_notes', name: 'Notes', type: 'longText', property: { rich: true } },
+    ] as unknown as MetaField[]
+    const RICH_RECORD = { id: 'rec_1', version: 1, data: { fld_title: 'Alpha', fld_notes: '' } } as unknown as MetaRecord
+
+    const fakeMentionSearch = () => vi.fn(async (_q: string) => ({ items: [], requiresQuery: false, hasMore: false }))
+    const waitForMentionDebounce = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220))
+      await flushUi()
+    }
+    function typeIntoEditable(editable: HTMLElement, text: string) {
+      editable.textContent = text
+      const range = document.createRange()
+      range.setStart(editable.firstChild!, text.length)
+      range.collapse(true)
+      const sel = window.getSelection()!
+      sel.removeAllRanges()
+      sel.addRange(range)
+      editable.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    it('comments tab: typing "@term" in the composer calls the search handed to the inspector', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        data: () => ({ draft: '' }),
+        render(this: { draft: string }) {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RECORD,
+            fields: FIELDS,
+            canEdit: true,
+            canComment: true,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            openComments: true,
+            comments: [],
+            commentDraft: this.draft,
+            mentionSearch: search,
+            'onUpdate:commentDraft': (value: string) => { this.draft = value },
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+      expect(activeTabButton(container)!.textContent?.trim()).toBe('Comments')
+
+      const textarea = container.querySelector('textarea.meta-comment-composer__textarea') as HTMLTextAreaElement
+      expect(textarea).toBeTruthy()
+      textarea.value = 'hello @fakeperson'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakeperson')
+      app.unmount()
+    })
+
+    it('details tab: typing "@term" in a rich longText field calls the search handed to the inspector', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RICH_RECORD,
+            fields: RICH_FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            mentionSearch: search,
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+
+      const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+      expect(editable).toBeTruthy()
+      editable.focus()
+      typeIntoEditable(editable, 'see @fakefield')
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakefield')
+      app.unmount()
+    })
+
+    it('deprecated MetaRecordDrawer shell: the search still reaches the rich longText editor', async () => {
+      const search = fakeMentionSearch()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordDrawer, {
+            visible: true,
+            record: RICH_RECORD,
+            fields: RICH_FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            mentionSearch: search,
+          })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+
+      const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+      expect(editable).toBeTruthy()
+      editable.focus()
+      typeIntoEditable(editable, '@fakeshell')
+      await waitForMentionDebounce()
+
+      expect(search).toHaveBeenCalledWith('fakeshell')
+      app.unmount()
     })
   })
 

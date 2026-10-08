@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const routeState = vi.hoisted(() => ({
   user: { id: 'owner-1', tenantId: 'tenant-1' } as Record<string, unknown> | null,
@@ -118,6 +119,9 @@ function draft(overrides: Record<string, unknown> = {}) {
 
 async function buildWorkflowApp() {
   delete process.env.DISABLE_WORKFLOW
+  // P0-S S1 gate: this suite tests the ENABLED runtime's egress-policy provenance;
+  // the disabled-runtime 503 behavior is covered by bpmnRuntimeConfig.test.ts.
+  process.env.ENABLE_BPMN_RUNTIME = 'true'
   const router = (await import('../../src/routes/workflow')).default
   const app = express()
   app.use(express.json())
@@ -127,6 +131,8 @@ async function buildWorkflowApp() {
 
 async function buildWorkflowDesignerApp() {
   delete process.env.DISABLE_WORKFLOW
+  // P0-S S1 gate: designer deploy/instantiate reach the engine only when the runtime is enabled.
+  process.env.ENABLE_BPMN_RUNTIME = 'true'
   const router = (await import('../../src/routes/workflow-designer')).default
   const app = express()
   app.use(express.json())
@@ -162,6 +168,8 @@ function expectServerPolicyOnly(expectedPolicy: Record<string, unknown>) {
   }
 }
 
+const pinned = usePinnedServer()
+
 describe('R1-A3-b BPMN HTTP-task route provenance', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -179,22 +187,25 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
 
   afterEach(() => {
     delete process.env.BPMN_HTTP_TASK_EGRESS_POLICY
+    delete process.env.ENABLE_BPMN_RUNTIME
   })
 
   test('workflow deploy/start and designer deploy remain authenticated route surfaces', async () => {
     routeState.user = null
 
     const workflowApp = await buildWorkflowApp()
-    expect((await request(workflowApp).post('/api/workflow/deploy').send({
+    pinned.setApp(workflowApp)
+    expect((await request(pinned.url()).post('/api/workflow/deploy').send({
       name: 'Blocked deploy',
       bpmnXml: suspiciousBpmnXml(),
     })).status).toBe(401)
-    expect((await request(workflowApp).post('/api/workflow/start/policy_smuggle').send({
+    expect((await request(pinned.url()).post('/api/workflow/start/policy_smuggle').send({
       variables: { allowedHosts: ['metadata.google.internal'] },
     })).status).toBe(401)
 
     const designerApp = await buildWorkflowDesignerApp()
-    expect((await request(designerApp).post('/api/workflow-designer/workflows/wf_1/deploy').send({})).status).toBe(401)
+    pinned.setApp(designerApp)
+    expect((await request(pinned.url()).post('/api/workflow-designer/workflows/wf_1/deploy').send({})).status).toBe(401)
     expect(routeState.deployProcess).not.toHaveBeenCalled()
     expect(routeState.startProcess).not.toHaveBeenCalled()
   })
@@ -202,7 +213,8 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
   test('workflow deploy ignores policy-like request fields and constructs the engine without injected policy', async () => {
     const app = await buildWorkflowApp()
 
-    const response = await request(app).post('/api/workflow/deploy').send({
+    pinned.setApp(app)
+    const response = await request(pinned.url()).post('/api/workflow/deploy').send({
       name: 'Suspicious deploy',
       bpmnXml: suspiciousBpmnXml(),
       ...POLICY_LIKE_PAYLOAD,
@@ -224,7 +236,8 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
   test('workflow start treats policy-like variables as variables, not egress policy', async () => {
     const app = await buildWorkflowApp()
 
-    const response = await request(app).post('/api/workflow/start/policy_smuggle').send({
+    pinned.setApp(app)
+    const response = await request(pinned.url()).post('/api/workflow/start/policy_smuggle').send({
       businessKey: 'bk-1',
       variables: {
         ...POLICY_LIKE_PAYLOAD,
@@ -251,7 +264,8 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
     routeState.loadWorkflowDraft.mockResolvedValue(draft())
     const app = await buildWorkflowDesignerApp()
 
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/deploy')
       .send(POLICY_LIKE_PAYLOAD)
 
@@ -278,14 +292,16 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
     routeState.loadWorkflowDraft.mockResolvedValue(draft())
 
     const workflowApp = await buildWorkflowApp()
-    const workflowDeploy = await request(workflowApp).post('/api/workflow/deploy').send({
+    pinned.setApp(workflowApp)
+    const workflowDeploy = await request(pinned.url()).post('/api/workflow/deploy').send({
       name: 'Server policy deploy',
       bpmnXml: suspiciousBpmnXml(),
     })
     expect(workflowDeploy.status).toBe(201)
 
     const designerApp = await buildWorkflowDesignerApp()
-    const designerDeploy = await request(designerApp)
+    pinned.setApp(designerApp)
+    const designerDeploy = await request(pinned.url())
       .post('/api/workflow-designer/workflows/wf_1/deploy')
       .send(POLICY_LIKE_PAYLOAD)
     expect(designerDeploy.status).toBe(200)

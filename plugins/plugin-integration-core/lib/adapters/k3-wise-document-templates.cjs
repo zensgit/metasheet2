@@ -181,10 +181,18 @@ const MATERIAL_CUSTOMER_PROFILE = {
   documentType: 'material',
   targetObject: 'material',
   label: 'K3 WISE Material (customer profile)',
-  operations: ['upsert'],
+  // 'read' makes the profile's own readPath (GetDetail) reachable — required by BOTH the C6
+  // lookup (planning add-vs-update) and the ruled chain's post-save GetDetail read-back. It
+  // was incoherent before: the profile declared readPath yet ensureOperation refused read.
+  operations: ['upsert', 'read'],
   // Hard Save-only lock (M1): the adapter forces autoSubmit/autoAudit off and strips any
   // submit/audit endpoint when this profile is selected — non-overridable by config/request.
   lifecycle: 'save-only',
+  // K3WriteDecision (owner, 20260805): the first-version apply row cap is FROZEN in this
+  // profile literal. The adapter re-pins it AFTER the operator-overlay merge (same shape as
+  // the save-only lifecycle lock), so config cannot raise or remove it; upsert refuses an
+  // over-limit batch BEFORE login, so a refused call has zero external side effects.
+  maxApplyRows: 3,
   savePath: '/K3API/Material/Save',
   readPath: '/K3API/Material/GetDetail',
   readMethod: 'POST',

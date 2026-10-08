@@ -160,6 +160,13 @@
               <div class="meta-form-share__allowlist-subsection">
                 <label class="meta-form-share__label">{{ f('candidate.addSection') }}</label>
                 <div v-if="candidatesLoading" class="meta-form-share__empty">{{ f('candidate.loading') }}</div>
+                <!-- #5795: a term-less candidate call answers `requiresQuery` + no items (the endpoint no
+                     longer lists the roster). That is a prompt, not an empty result. -->
+                <div
+                  v-else-if="candidatesRequireQuery"
+                  class="meta-form-share__empty"
+                  data-form-share-candidates-search-required="true"
+                >{{ f('candidate.typeToSearch') }}</div>
                 <div v-else-if="filteredCandidates.length === 0" class="meta-form-share__empty">{{ f('candidate.empty') }}</div>
                 <div v-else class="meta-form-share__candidate-list">
                   <button
@@ -190,6 +197,11 @@
                     </span>
                   </button>
                 </div>
+                <div
+                  v-if="!candidatesLoading && candidatesHasMore"
+                  class="meta-form-share__hint"
+                  data-form-share-candidates-truncated="true"
+                >{{ f('candidate.refineSearch') }}</div>
               </div>
             </div>
 
@@ -297,6 +309,10 @@ const copied = ref(false)
 const candidateQuery = ref('')
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const candidatesLoading = ref(false)
+// #5795 candidate response markers: `requiresQuery` = the server refused to list without a search term;
+// `hasMore` = the answer was clamped to the server ceiling.
+const candidatesRequireQuery = ref(false)
+const candidatesHasMore = ref(false)
 let candidateTimer: number | null = null
 const { isZh } = useLocale()
 
@@ -374,6 +390,8 @@ async function loadConfig() {
 async function loadCandidates() {
   if (!props.client || !props.visible || !showAllowlistSection.value) {
     candidates.value = []
+    candidatesRequireQuery.value = false
+    candidatesHasMore.value = false
     return
   }
   candidatesLoading.value = true
@@ -383,7 +401,11 @@ async function loadCandidates() {
       limit: 20,
     })
     candidates.value = response.items
+    candidatesRequireQuery.value = response.requiresQuery === true
+    candidatesHasMore.value = response.hasMore === true
   } catch (err) {
+    candidatesRequireQuery.value = false
+    candidatesHasMore.value = false
     error.value = err instanceof Error ? err.message : f('error.loadCandidates')
   } finally {
     candidatesLoading.value = false
@@ -566,6 +588,8 @@ watch(
       void loadCandidates()
     } else {
       candidates.value = []
+      candidatesRequireQuery.value = false
+      candidatesHasMore.value = false
     }
   },
   { immediate: true },

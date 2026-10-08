@@ -2,12 +2,16 @@ import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
+  ApprovalActionType,
   ApprovalAssigneeSource,
+  ApprovalAssigneeSourceKind,
   ApprovalAutoApprovalReason,
+  ApprovalType,
   AutoApprovalActorMode,
   AutoApprovalMergeReason,
   AutoApprovalPolicy,
   AutoApprovalPolicySource,
+  SamePersonPolicy,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
@@ -16,27 +20,67 @@ import type {
   ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalNodeType,
   ApprovalRequesterSnapshot,
+  ConditionBranch,
   ConditionFormulaPredicate,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
+  EmptyAssigneeFallback,
   EmptyAssigneePolicy,
   AmountConsistencyMapping,
   FormField,
   FormSchema,
   FormFieldVisibilityOperator,
   FormFieldVisibilityRule,
+  HandlerMode,
+  HandlerNodeConfig,
   NodeFieldAccess,
   NodeFieldPermission,
+  NodeOperationPolicy,
+  NodeOperationPolicyActionKey,
   SignaturePolicy,
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
+  RequesterChoiceAssigneeSource,
+  RestoreApprovalTemplateVersionRequest,
   RuntimeGraph,
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
+import {
+  effectiveCommentRequired,
+  isOperationAllowedAtNode,
+  nodeOperationPolicyAt,
+  resolveEffectiveNodeOperations,
+  seatNodeKeysForViewer,
+  type NodeOperationGraphView,
+} from './approval-effective-node-operations'
+import {
+  assignmentMatchesActor,
+  decisionDoorIsSeatGated,
+  readParallelBranchStates,
+  resolveCanDecideCurrentNode,
+} from './approval-seat-authorization'
+import {
+  ACTION_POLICY_KEYS,
+  APPROVAL_POLICY_DENIED_ACTION,
+  APPROVAL_TERMINAL_STATUSES,
+  HANDLER_ASSIGNEE_SOURCE_KINDS,
+  HANDLER_NODE_OPERATION_POLICY_KEYS,
+  NODE_FIELD_ACCESS_VALUES,
+  NODE_FIELD_ACCESS_WRITABLE_VALUES,
+  isApprovalAddSignAggregation,
+  isApprovalAddSignMode,
+  type ApprovalAddSignAggregation,
+  type ApprovalAddSignMode,
+} from '../types/approval-product'
+import {
+  ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
+  buildAddSignAppendedRoundMetadata,
+  readAddSignAppendedRound,
+} from './approval-add-sign-after'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -44,21 +88,62 @@ import {
   type ApprovalGraphAutoApprovalEvent,
   type ApprovalGraphResolution,
   type ParallelInstanceState,
+  canonicalizeRecordLinkFormData,
   pruneHiddenFormData,
   validateApprovalFormData,
+  validateFieldType,
+  validateFieldConstraints,
+  validateDetailFieldValue,
+  DATE_RANGE_DATE_TYPES,
+  resolveVisibilityFieldReference,
+  getVisibleFormFieldIds,
+  isEmptyValue,
 } from './ApprovalGraphExecutor'
-import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
+import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
+import { fieldDerivedAssigneeSourceKey, isSystemSentinelActor, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
+import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
+import {
+  buildApprovalDesignatedFallbackResolver,
+  loadApprovalDesignatedFallbackEligibility,
+  readApprovalDesignatedFallbackEligibilitySnapshot,
+  serializeApprovalDesignatedFallbackEligibility,
+  type ApprovalDesignatedFallbackEligibilitySnapshot,
+} from './approval-designated-fallback-eligibility'
+import {
+  inheritSequentialQueueMetadata,
+  isSequentialQueueActive,
+  promoteNextSequentialQueueAssignment,
+  readSequentialQueueMetadata,
+} from './approval-sequential-mode'
 import { validateAmountTotalConsistency } from './amount-total-check'
+import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
+import {
+  ApprovalAttachmentBindError,
+  bindAttachmentsOnSubmit,
+  collectAttachmentIdsByField,
+} from './approval-attachment-reconciler'
+import {
+  ApprovalProcessAttachmentBindError,
+  bindProcessAttachmentsOnAction,
+} from './approval-process-attachment-bind'
 import {
   ApprovalConditionFormulaError,
+  approvalConditionFormulaHasCaptureProneIdentity,
+  approvalConditionFormulaHasDynamicDependency,
+  approvalConditionFormulaIsProvablyAlwaysTrue,
   assertApprovalConditionFormulaValidForSchema,
   extractRequesterRoleLiterals,
   formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
+  extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
-import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import {
+  ApprovalDepartmentUnavailableError,
+  canonicalizeApprovalDepartmentFormData,
+} from './approval-department-field'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
-import { fetchCuratedApprovalRoleIds } from './approval-directory'
+import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -67,7 +152,54 @@ import type {
   UnifiedApprovalDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
-import { ServiceError } from './ApprovalBridgeService'
+import {
+  ACCOUNT_ACTIVATION_INVALID_CODE,
+  ACCOUNT_PENDING_ACTIVATION_CODE,
+  evaluateUserAuthenticationGate,
+} from '../auth/user-activation'
+import {
+  ServiceError,
+  CancelRoundOutletForbiddenError,
+  CancelRoundSuiteForbiddenError,
+  rejectIfCancelRound,
+} from './ApprovalBridgeService'
+import {
+  CANCEL_ROUND_TEMPLATE_ID,
+  CANCEL_ROUND_TEMPLATE_VERSION_ID,
+  CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+  CANCEL_ROUND_APPROVAL_NODE_KEY,
+  buildCancelRoundRuntimeGraph,
+} from '../db/seeds/approval-cancel-round-published-definition'
+import {
+  assertAttendanceCentralMutationFailClosed,
+  attendanceCentralApprovalErrorToServiceFields,
+  authorizeAttendanceCentralReassign,
+  classifyAndLockAttendanceRequestForInstance,
+  classifyAttendanceRequestForInstanceV1,
+  filterBulkReassignDiscoveryForAttendance,
+  type AttendanceReassignAuditWitnessV1,
+  AttendanceCentralApprovalError,
+  isCancelRoundInstance,
+  APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+} from '../attendance/w4c3b-central-approval-hooks'
+// Lock §3 C-1 — the PORT the cancel-round redemption reaches 完整业务取消 through. Approval takes
+// no runtime dependency on the attendance PLUGIN; the plugin binds its boundary here at activate.
+// (`AttendanceW4TransactionClientV1`, the entry's client contract, is already imported below.)
+import {
+  classifyCancelRoundCancellationOutcomeV1,
+  deriveCancelRoundW4OperationIdV1,
+  getAttendanceCancellationExecutionPort,
+  getCancelRoundCancelledEventDelivery,
+  readCancelRoundDurableProjectionV1,
+} from '../core/attendance-cancellation-execution-port'
+import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
+import type { AttendanceRequestOperationBoundaryResultV1 } from '../attendance/w4c3b-request-operation-boundary'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  type AttendanceW4TransactionClientV1,
+} from '../attendance/w4c0-identity'
+import { isRetryableSqlState } from '../attendance/w4c0-operation-registry'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
   buildApprovalCompletionEvent,
@@ -77,12 +209,37 @@ import {
 } from './ApprovalCompletionEvent'
 import {
   buildApprovalTaskCreatedEvent,
+  collectLiveApprovalTaskCreatedEvents,
   emitApprovalTaskCreatedEvent,
   type ApprovalTaskCreatedInstanceSnapshot,
   type ApprovalTaskCreatedTaskSnapshot,
 } from './ApprovalTaskCreatedEvent'
+import { enqueueApprovalEventIfDurable } from '../multitable/automation-producer-emit'
+import { isDurableDeliveryEnabled } from '../multitable/automation-durable-delivery'
+import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
+import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
+import {
+  sortRecordLinkSubmitCandidates,
+  validateRecordLinkAtSubmit,
+} from '../multitable/approval-fwb-record-link'
+import {
+  probeRecordLinkReadableForUser,
+  projectRecordLinkFormSnapshotForViewer,
+} from './approval-record-link-read-projection'
+import {
+  loadApprovalTemplateVisibilityActorOnQuery,
+  lockRecordLinkActorAuthorityRowsOnQuery,
+  lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
+  lockRecordLinkMultiTargetCreatePathOnQuery,
+  resolveRecordLinkTargetAuthOnQuery,
+  userHasApprovalsWriteOnQuery,
+} from './approval-record-link-txn-auth'
+import {
+  ApprovalOrgUnresolvedError,
+  deriveApprovalInstanceOrgId,
+} from './approval-instance-org-derivation'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -90,12 +247,44 @@ const metricsLogger = new Logger('ApprovalMetricsHook')
 const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
 const approvalProductLogger = new Logger('ApprovalProductService')
 
+function logMetricsHookFailure(label: string, error: unknown): void {
+  metricsLogger.warn(`metrics hook ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+
+/**
+ * Dispatch-only metrics hook (UNCHANGED). The `Promise.resolve().then(fn)` hop keeps the caller's
+ * synchronous path free of any work `fn` performs before its first await, and the caller never learns
+ * when — or whether — the write landed. Correct for observability-only writes (node decision, terminal).
+ */
 function safeMetricsCall(label: string, fn: () => Promise<void>): void {
   Promise.resolve()
     .then(fn)
     .catch((error) => {
-      metricsLogger.warn(`metrics hook ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+      logMetricsHookFailure(label, error)
     })
+}
+
+/**
+ * H-1 — the AWAITABLE half of `safeMetricsCall`: identical log-and-swallow contract (a metrics failure
+ * can never fail or roll back the approval flow — the promise always resolves), but the caller awaits
+ * the write's SETTLEMENT rather than only its dispatch.
+ *
+ * Why a second form exists: the node-activation stamp is NOT an observability-only write.
+ * `approval_metrics.current_node_deadline_at` / `current_node_timeout_effect` are the SLA scanner's
+ * ARMED STATE, read back as `applyNodeTimeoutEffect`'s in-transaction race guard (see the
+ * `!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || ... !== scannedEffect` guard below).
+ * Dispatched-but-unsettled, that write can land AFTER a later reader/writer has already observed or
+ * moved those columns and silently overwrite newer state. See
+ * docs/development/h1-approval-node-timeout-activation-race-design-20260922.md.
+ */
+async function settleMetricsCall(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    // Restores the microtask trampoline `safeMetricsCall` uses. Discriminating power here comes from
+    // the `await`s at the call sites (see the H-1 test names), not from this hop.
+    await Promise.resolve().then(fn)
+  } catch (error) {
+    logMetricsHookFailure(label, error)
+  }
 }
 
 interface ApprovalTemplateListQuery {
@@ -134,7 +323,11 @@ export interface ApprovalTemplateVisibilityActor {
   isTemplateManager: boolean
 }
 
-type TemplateRow = {
+// Exported (approval form grouping lock v2.13 §6 phase 3, A-4) so
+// `ApprovalTemplateGroupSectionService.ts` can map its own section-scoped query results through
+// the SAME row shape and DTO mapper below rather than re-deriving them — one row->DTO
+// definition, not a second one that could drift from `visibility_scope` / `sla_hours` coercion.
+export type TemplateRow = {
   id: string
   key: string
   name: string
@@ -167,6 +360,7 @@ type TemplateVersionRow = {
    * published-without-a-note version, or any version predating the column.
    */
   publish_note?: string | null
+  restored_from_version_id?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -175,6 +369,343 @@ function isPostgresUniqueViolation(error: unknown): boolean {
   return typeof error === 'object'
     && error !== null
     && (error as { code?: unknown }).code === '23505'
+}
+
+/**
+ * Lock:143 — the closed `suite` domain, verbatim: `suite ∈ {'attendance','leave','other','forbidden'}`.
+ * A value outside this set is a template/seed CONFIGURATION error, never a silently-defaulted one
+ * (Codex review 2026-09-19, finding 2: the pre-fix code kept the out-of-domain string verbatim and
+ * took `other`'s number, so a value like `'Forbidden'` walked straight through the lock's only
+ * named creation-time code, `CANCEL_ROUND_SUITE_FORBIDDEN` — §14.3 #14 — and landed in
+ * `policy_snapshot_at_create`, corrupting the very snapshot I4/G4 designate as the audit basis).
+ */
+const CANCEL_ROUND_SUITES = ['attendance', 'leave', 'other', 'forbidden'] as const
+type CancelRoundSuite = (typeof CANCEL_ROUND_SUITES)[number]
+
+/** Lock:143 — phase 1 ships only `leave`; the tag is absent on every pre-existing instance. */
+const CANCEL_ROUND_DEFAULT_SUITE: CancelRoundSuite = 'leave'
+
+/**
+ * Lock:143 — the `suite` CEILINGS. The ratified clause `lock:143` is a private owner document,
+ * not tracked in this repository; its current values are recorded in-repo at
+ * `docs/development/approval-cancel-round-phase1-design-20260918.md` §2.4 "Constants and the
+ * identity predicate" (window ceiling table) alongside this table's contract and its 2026-09-19
+ * rename rationale — if that table and this constant ever disagree, THIS constant is
+ * authoritative and the table is the one that has drifted:
+ * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` 0 (lock:143 fixes that suite's window
+ * at 0 and §14.3 #14 blocks it at creation before the number matters). Lock:143's
+ * `windowDays ∈ [0, 上限]` makes these an ENFORCED UPPER BOUND, not a default — renamed from
+ * `CANCEL_ROUND_SUITE_DEFAULT_WINDOW_DAYS` per Codex review 2026-09-19 finding 2 (命名即合同: the old
+ * identifier was itself the bug's self-description). They remain the value used when the tag is
+ * ABSENT, which is lock:143's 「由模板管理员在上限内设」 read: nothing set ⇒ the widest the suite allows.
+ */
+const CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS: Readonly<Record<CancelRoundSuite, number>> = Object.freeze({
+  attendance: 180,
+  leave: 90,
+  other: 90,
+  forbidden: 0,
+})
+
+export type CancelRoundRoundPolicy = { suite: CancelRoundSuite; windowDays: number }
+
+/**
+ * Lock:143 / §5 I4 / §2-G4 — the SINGLE derivation of `roundPolicy = { windowDays, suite }` for BOTH
+ * time points: the creation snapshot (`policy_snapshot_at_create`) and C-2's final in-transaction
+ * evaluation (`policy_snapshot_at_decision`). Deliberately ONE function: the lock requires both
+ * points to evaluate the same policy, and a second clamp/derivation at the decision point would
+ * drift from this one (Codex review 2026-09-19 finding 2 explicitly rejects a decision-side clamp).
+ *
+ * Domain, ENFORCED rather than assumed:
+ * - `suite`: absent (`undefined`/`null`) ⇒ `CANCEL_ROUND_DEFAULT_SUITE`. Anything else MUST be one of
+ *   `CANCEL_ROUND_SUITES`; out-of-domain is a 409 `CANCEL_ROUND_SUITE_UNKNOWN`, never a silent
+ *   fallback to `leave`/`other`.
+ * - `windowDays`: absent ⇒ the suite's ceiling. Anything else MUST be an INTEGER in `[0, ceiling]`
+ *   (`Number.isInteger` already excludes NaN/±Infinity and every non-number type); otherwise a 409
+ *   `CANCEL_ROUND_WINDOW_OUT_OF_RANGE`. BLOCK, not clamp — lock:143 says `windowDays ∈ [0, 上限]`,
+ *   「由模板管理员在上限内设」, i.e. the bound is a domain constraint on what may be SET; a clamp
+ *   turns a misconfiguration into a silent 「悄悄按 90 算」 that no administrator can audit, and this
+ *   repo's narrowing-fix discipline is write-path REJECT with read-path byte parity.
+ * - `forbidden` short-circuits the window check and returns lock:143's fixed `windowDays = 0`, so
+ *   the LOCK-ANCHORED §14.3 #14 code (`CANCEL_ROUND_SUITE_FORBIDDEN`, raised by the caller right
+ *   after this call) always wins over a window complaint for that suite — a deliberate, documented
+ *   precedence, not an accident of statement order.
+ *
+ * Both rejections are values-free: `details` carries the closed set, or the already-validated suite
+ * and its ceiling — never the offending value (same discipline as
+ * `validateAndFreezeRequesterChoices`'s values-free 422s).
+ *
+ * C-2 consumption note (the second time point is NOT in this slice): the final in-transaction
+ * evaluation must call THIS function and treat a throw as `blocked` + the thrown code — never as a
+ * silent `expired`. `expired` is an irreversible terminal state and must not be built on a
+ * configuration error (same trade-off the lock already makes for `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`).
+ *
+ * NEW CODES — implementer erratum: neither `CANCEL_ROUND_SUITE_UNKNOWN` nor
+ * `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` is registered in the lock's §14.3 table (which names only
+ * `CANCEL_ROUND_OUTLET_FORBIDDEN` and `CANCEL_ROUND_SUITE_FORBIDDEN`). Registered instead in this
+ * slice's design MD §3.1 and flagged for owner registration — the lock file itself is
+ * owner-authored and is NOT edited from here. Same discipline as `CANCEL_ROUND_REQUESTER_ONLY`.
+ */
+function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): CancelRoundRoundPolicy {
+  const rawSuite = metadata.suite
+  let suite: CancelRoundSuite
+  if (rawSuite === undefined || rawSuite === null) {
+    suite = CANCEL_ROUND_DEFAULT_SUITE
+  } else if (typeof rawSuite === 'string' && (CANCEL_ROUND_SUITES as readonly string[]).includes(rawSuite)) {
+    suite = rawSuite as CancelRoundSuite
+  } else {
+    throw new ServiceError(
+      "This document's suite tag is not one this system recognises — ask an administrator to correct the template's suite configuration",
+      409,
+      'CANCEL_ROUND_SUITE_UNKNOWN',
+      { allowedSuites: [...CANCEL_ROUND_SUITES] },
+    )
+  }
+
+  const ceiling = CANCEL_ROUND_SUITE_WINDOW_DAY_CEILINGS[suite]
+  if (suite === 'forbidden') return { suite, windowDays: ceiling }
+
+  const rawWindowDays = metadata.windowDays
+  if (rawWindowDays === undefined || rawWindowDays === null) return { suite, windowDays: ceiling }
+  if (
+    typeof rawWindowDays !== 'number'
+    || !Number.isInteger(rawWindowDays)
+    || rawWindowDays < 0
+    || rawWindowDays > ceiling
+  ) {
+    throw new ServiceError(
+      "This document's cancel window is outside the range its suite allows — ask an administrator to correct the template's window setting",
+      409,
+      'CANCEL_ROUND_WINDOW_OUT_OF_RANGE',
+      { suite, ceiling },
+    )
+  }
+  return { suite, windowDays: rawWindowDays }
+}
+
+/**
+ * Lock §2-G3 — the machine-checkable reason categories a cancel-round seat can be refused for.
+ * Categories only: the error body NEVER carries a person id or name (「提示管理员」 lands in the message
+ * and the audit trail, not in a values-bearing `details`).
+ *
+ * Per-member reachability, MEASURED at gate round 6 rather than asserted (this repo's
+ * 「豁免理由会腐烂,要变成数据」 discipline — every claim below is pinned by a live test, not by a
+ * comment):
+ * - `inactive` — `is_active = FALSE` or `role = 'disabled'`. Covered by 负控 N1 / N2.
+ * - `pending_activation` — `activation_status = 'pending_activation'`. Covered by 负控 N2.
+ * - `not_found` — a claimed PERSON id with no `users` row. Covered by 负控 N2 (deletes the row) and
+ *   by 负控 N4 (proves the sentinel drop did not swallow humans into this bucket). Its production
+ *   population is narrow and that is DATA, not an assumption: a two-syntax census at this head finds
+ *   17 `DELETE FROM users` sites, all 13 files under `scripts/ops/` (staging smoke scripts, each
+ *   narrowed to its own fixture prefix), ZERO under any package `src`, `plugins`, or web-app `src`
+ *   tree; the kysely syntax (`deleteFrom('users')`) is 0 repo-wide; positive control (the same grep
+ *   against the `tests` trees) is 294. Runtime departures set `is_active = FALSE`
+ *   (`directory/deprovision-ledger.ts`), they do not delete. Before gate round 6 this bucket ALSO
+ *   caught the `system:auto-approval` sentinel — that was G6-1, and it is fixed by dropping the
+ *   `system:` namespace before the gate runs, never by making this bucket fail open.
+ * - `activation_invalid` — `parseUserActivationStatus` rejecting the stored value. UNREACHABLE while
+ *   `users.activation_status` carries `users_activation_status_check` and NOT NULL; kept as the
+ *   fail-closed landing spot if that constraint is ever relaxed. That reachability claim is NOT left
+ *   as prose: `approval-cancel-round-creation.db.test.ts` reads `pg_constraint` / `information_schema`
+ *   LIVE and pins both the allowed value set and the NOT NULL, so relaxing either turns the test red
+ *   at exactly the place this member would start mattering.
+ *
+ * OWNER RULING 2026-09-20, reading (a), verbatim: 「席位回原审批主体,并重验当前资格。原主体**无法可靠
+ * 还原**或已失格则**阻断**,**不静默回退给历史被委托人**;补多人委托同一人的反例。」 The first two
+ * members below are that ruling's 「无法可靠还原」 arm — they are RESOLUTION failures (the seat could not
+ * be attributed to a subject at all), not QUALIFICATION failures (the subject was attributed and then
+ * refused). They are listed FIRST because that is the order of the pipeline they fail in, and the
+ * reported `reasons` array is a filter over this constant so the output order is this order:
+ * - `seat_unresolvable` — an `approve` row maps to MORE THAN ONE candidate original subject, so there
+ *   is no unique 原审批主体 to seat. Two arms, and their reachability differs — stated as DATA:
+ *     · arm 1 (MEASURED, 负控 `N9(a)`): a legacy-corpus row (no `metadata.nodeKey`) whose actor held
+ *       delegated seats from TWO DIFFERENT delegators on the same instance — i.e. the owner's own
+ *       「多人委托同一人」 counter-example, written through the shipped legacy route.
+ *     · arm 2 (CONSTRUCTED as of gate round 3 P2-1, 负控 `N17(a)` — FIXTURE-LEVEL, end-to-end
+ *       re-entry still NOT walked): two assignment rows with the SAME `(instance, node_key,
+ *       assignee)` and DIFFERENT `delegatedFrom`. `idx_approval_assignments_active_unique` is
+ *       partial (`WHERE is_active = true`), so the shape needs a node RE-ENTRY that rewrites the
+ *       delegation between epochs; `N17(a)` seeds exactly that residue with an INSERT and measures
+ *       the block (mutation M-vi reds it and nothing else). It shares this member with arm 1 rather
+ *       than getting an untested member of its own; the design MD §3.4 keeps the registration OPEN
+ *       for the half that is still a judgement call — whether BLOCK is the answer this cell WANTS.
+ * - `delegate_not_seat` — an `approve` row cannot be attributed to a node (no `metadata.nodeKey`) AND
+ *   its actor held exactly one delegated seat on this instance. Seating the actor would seat the
+ *   HISTORICAL DELEGATEE, which the ruling forbids in as many words; restoring to that one delegator
+ *   is not 可靠 either, because the same actor may also have approved a seat OF THEIR OWN through the
+ *   same node-key-less route. Covered by 负控 `N7(a)` / `N8(a)` / `P13(a)` / `P12(a)`.
+ *   The narrow-but-load-bearing exclusion: an actor with NO delegated seat on the instance is their
+ *   own subject and is seated normally even without a `nodeKey` — 正控 `P19(a)` pins that, and it is
+ *   what keeps the ENTIRE pre-delegation legacy corpus cancellable.
+ *
+ * The task brief also sketched a third new member, `original_ineligible`. It is deliberately NOT
+ * added: 「原主体…已失格」 is already answered, for the RESTORED subject, by the four qualification
+ * members above (负控 `N5(a)` is its live witness — deactivating the delegator A now blocks with
+ * `inactive`). A fifth synonym would be a second vocabulary for one fact and would lose the WHY,
+ * i.e. the 「另造更窄同类物」 this repo forbids. Flagged for owner in the design MD §3.1.
+ */
+const CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS = [
+  'seat_unresolvable',
+  'delegate_not_seat',
+  'inactive',
+  'pending_activation',
+  'activation_invalid',
+  'not_found',
+] as const
+type CancelRoundSeatIneligibilityReason = (typeof CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS)[number]
+
+/**
+ * The 「无法可靠还原」 tally the seat derivation hands to the eligibility gate, so that BOTH arms of the
+ * owner's ruling leave through the SAME exit (`CANCEL_ROUND_SEAT_INELIGIBLE`, §14.3) instead of a
+ * second throw site for one contract code. Counted per `approve` ROW, not per person: an unresolvable
+ * row has no person to count.
+ */
+type CancelRoundUnseatableRows = {
+  count: number
+  reasons: ReadonlySet<CancelRoundSeatIneligibilityReason>
+}
+
+const CANCEL_ROUND_SEAT_RESOLUTION_REASONS: ReadonlySet<CancelRoundSeatIneligibilityReason> = new Set([
+  'seat_unresolvable',
+  'delegate_not_seat',
+])
+
+/**
+ * Lock §2-G3 (lock:74-76) — 「撤销:保留原节点的会签/或签语义,但**重新验证当前资格**(在职、仍在该
+ * 组织单元）;…资格不成立的席位 ⇒ 阻断并提示管理员」. Codex review 2026-09-19 finding 1
+ * (CONFIRMED P1, real-DB): the cancel round replays the original document's `approval_records
+ * (action='approve')` actor ids verbatim into `requesterSnapshot.requesterChoices`, and the
+ * `requester_choice` resolver's own module doc states it does NO live directory read because
+ * 「the choices were scope-validated at create」 — a precondition `createCancelRoundInstance` was the
+ * ONLY caller not satisfying. A deactivated approver was seated silently (201/pending), could not
+ * log in (`AuthService` → `evaluateUserAuthenticationGate`), could not be reassigned or transferred
+ * (§14.3 #12/#13 reject cancel rounds outright), and the `'all'` co-sign node therefore deadlocked
+ * behind `uq_approval_rounds_pending_document` forever.
+ *
+ * WHAT this reuses, and why it is WIDER than the normal path rather than a narrower lookalike:
+ * - The set-membership IDIOM is `validateAndFreezeRequesterChoices`'s company-scope baseline: read
+ *   the directory for the chosen ids, then refuse if ANY id is not in the eligible set. Absence of
+ *   a `users` row therefore FAILS CLOSED by construction, exactly as it does there (a missing row
+ *   is not in `activeIds`) — not an extra rule invented here.
+ * - The PREDICATE is `evaluateUserAuthenticationGate`, the shared gate for password login, token
+ *   refresh/verify, DingTalk SSO and API tokens. It denies `role = 'disabled'` and
+ *   `activation_status = 'pending_activation'` in addition to `is_active = FALSE`. Checking only
+ *   `is_active` would seat people the login gate refuses — i.e. would be a NARROWER lookalike of the
+ *   thing it claims to mirror, which is itself contract narrowing.
+ * - Consequence, disclosed rather than laundered: this gate is WIDER than
+ *   `validateAndFreezeRequesterChoices`'s own company baseline (`is_active = TRUE` alone). Aligning
+ *   the NORMAL create path to the login gate would be a behaviour change to a shipped endpoint and
+ *   is an OWNER call; it is deliberately NOT done here. See the slice's design MD §3.4.
+ *
+ * WHERE: the caller invokes this inside the creation transaction, under the SAME
+ * `SELECT * FROM approval_instances … FOR UPDATE` as the WI-16 requester gate and the §14.3 #14
+ * suite gate, and BEFORE the first INSERT — a stale read must not authorize a seat.
+ *
+ * HOW it fails: BLOCK with zero rows. It must NEVER drop an ineligible id and continue: the cancel
+ * node is `approvalMode: 'all'`, so filtering would silently LOWER the co-sign threshold — the
+ * opposite of 「阻断并提示管理员」.
+ *
+ * A directory read that THROWS is not wrapped into a named retryable (unlike
+ * `validateAndFreezeRequesterChoices`'s 503): inside this transaction any failed statement aborts
+ * the txn and the caller's `rollbackQuietly` guarantees zero rows, which is already the fail-closed
+ * outcome — adding a named code no real-DB test can exercise would be an untested assertion.
+ *
+ * NEW CODE — implementer erratum: `CANCEL_ROUND_SEAT_INELIGIBLE` is not registered in the lock's
+ * §14.3 table; registered in this slice's design MD §3.1 and flagged for owner.
+ *
+ * NOT IN THIS SLICE (「仍在该组织单元」, the org half of G3): no `user_orgs` seat-eligibility
+ * predicate exists ANYWHERE in this repo today, so adding one is NEW behaviour, not parity with the
+ * normal path — an owner call, and `approval_instances.org_id` is nullable so its NULL semantics
+ * must be defined first. Recorded OPEN in the design MD §3.4 and the verification MD, not silently
+ * skipped.
+ */
+async function assertCancelRoundSeatsEligibleInTxn(
+  client: ApprovalDbClient,
+  approverIds: readonly string[],
+  // Owner ruling 2026-09-20 (reading (a)): 「原主体无法可靠还原…则阻断」. The rows the seat derivation
+  // could NOT attribute to a subject arrive here rather than at a second throw site, so this stays the
+  // ONE exit for `CANCEL_ROUND_SEAT_INELIGIBLE`. Defaulted so the other call sites (and every test that
+  // exercises the qualification half alone) are unchanged.
+  unseatable: CancelRoundUnseatableRows = { count: 0, reasons: new Set() },
+): Promise<void> {
+  const reasons = new Set<CancelRoundSeatIneligibilityReason>(unseatable.reasons)
+  let ineligibleCount = unseatable.count
+  const ids = [...new Set(approverIds)]
+  // NOT an early `return` any more: with zero resolvable seats and a non-zero `unseatable.count`,
+  // returning here would let the caller's zero-seat pre-check answer `no_human_approver` — which is
+  // false (there WERE human approvers; their seats could not be attributed) and, worse, is the
+  // 「静默回退」 the ruling forbids wearing a different error code.
+  if (ids.length > 0) {
+    const directory = await client.query<{
+      id: string
+      is_active: boolean | null
+      role: string | null
+      activation_status: string | null
+    }>(
+      `SELECT id, is_active, role, activation_status FROM users WHERE id = ANY($1::varchar[])`,
+      [ids],
+    )
+    const byId = new Map(directory.rows.map((row) => [row.id, row]))
+    for (const id of ids) {
+      const row = byId.get(id)
+      if (!row) {
+        ineligibleCount += 1
+        reasons.add('not_found')
+        continue
+      }
+      const denial = evaluateUserAuthenticationGate(row)
+      if (!denial) continue
+      ineligibleCount += 1
+      reasons.add(
+        denial.code === ACCOUNT_PENDING_ACTIVATION_CODE
+          ? 'pending_activation'
+          : denial.code === ACCOUNT_ACTIVATION_INVALID_CODE
+            ? 'activation_invalid'
+            : 'inactive',
+      )
+    }
+  }
+  if (ineligibleCount === 0) return
+  // The qualification hint says RESTORE, deliberately not "restore or replace": §14.3 #12/#13 reject
+  // `bulkReassignApprovals` and `applyApprovalDepartureTransfer` on cancel rounds outright, and
+  // §14.2 rejects `transfer`, so replacing the person is not a remedy this system offers. An
+  // admin-facing message must not promise an action the contract forbids.
+  //
+  // For the RESOLUTION arm that same rule cuts the other way: there is no account to restore, so
+  // telling an administrator to restore one would promise a remedy that cannot work. The message is
+  // therefore chosen by reason CLASS (both are still values-free — categories, never a person).
+  const hasResolutionFailure = [...reasons].some((reason) => CANCEL_ROUND_SEAT_RESOLUTION_REASONS.has(reason))
+  throw new ServiceError(
+    hasResolutionFailure
+      ? 'Cancel round could not be started: at least one approval on this document cannot be attributed to the approver whose authority it was made under, so its seat cannot be re-convened — ask an administrator to review this document before retrying'
+      : 'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry',
+    409,
+    'CANCEL_ROUND_SEAT_INELIGIBLE',
+    {
+      ineligibleCount,
+      // Stable, deterministic order from the constant — never the iteration order of the seat list
+      // (which is itself derived from person ids).
+      reasons: CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS.filter((reason) => reasons.has(reason)),
+    },
+  )
+}
+
+/**
+ * Lock §14.2 判据 IV — what the in-lock final evaluation answers. `redeem` is 判据 II's branch
+ * (C-1 through the W4 external transaction entry); the other two are C-3's persistent closure.
+ * `blocked` carries the bounded code that the engine record's reason `business_blocked:<code>` is
+ * built from, with the finer cause in `detail` — the pin already recorded in the phase-2
+ * verification MD §2.
+ */
+type CancelRoundFinalEvaluationV1 =
+  | { readonly decision: 'redeem' }
+  | { readonly decision: 'expired' }
+  | { readonly decision: 'blocked'; readonly code: string; readonly detail: string | null }
+
+/** The `reason` written into the C-3 closure record, per lock §3 C-3 / §14.2 判据 IV. */
+function cancelRoundCloseReason(
+  evaluation: Exclude<CancelRoundFinalEvaluationV1, { decision: 'redeem' }>,
+): string {
+  return evaluation.decision === 'expired' ? 'round_expired' : `business_blocked:${evaluation.code}`
 }
 
 type PublishedDefinitionRow = {
@@ -220,6 +751,12 @@ type ApprovalRecordInsert = {
   toVersion: number
   metadata: Record<string, unknown>
   targetUserId?: string | null
+  /**
+   * H-5 — `approval_records.reason`. Only the legacy `/reject` door has ever written this column
+   * (see `ApprovalActionRequest.reason`); every other insert site omits it and the column is
+   * written NULL, exactly as it was before the column entered this writer's statement.
+   */
+  reason?: string | null
 }
 
 type ApprovalHistoryEntry = {
@@ -252,6 +789,17 @@ export type ApprovalBulkReassignSkipReason =
   | 'target-is-requester'
   | 'target-already-assignee'
   | 'target-user-invalid'
+  /**
+   * Lock §14.3 #12 (lock:373) — the cancel-round outlet chokepoint at `rejectIfCancelRound`.
+   * Byte-exact `cancel_round` (underscore, NOT the kebab-case `cancel-round` every sibling
+   * literal in this union uses): this is the one bulk-reassign skip reason that reaches the
+   * frontend (`ApprovalBulkReassignSkipReason` → `apps/web/src/approvals/api.ts:1646` →
+   * `batchTransfer.ts:28`'s label map → the sync pin at
+   * `apps/web/tests/approvalBatchTransferView.spec.ts:284-298`), and that pin compares this
+   * exact string against the FE mapping key — a normalized `cancel-round` would silently miss
+   * it and render "原因未知" instead of the dedicated copy.
+   */
+  | 'cancel_round'
   | 'error'
 
 export type ApprovalBulkReassignRequest = {
@@ -293,12 +841,185 @@ type ApprovalDbClient = {
   release: () => void
 }
 
-type ValidationContext = {
+/**
+ * Lock-5 L5-B gate B-3 — an accepted after-sign (后加签) request, carried from the `add_sign`
+ * validation branch into the approve pipeline of the SAME dispatch. `aggregation` governs the
+ * appended round (OD-L5-5(a)); a single addee defaults to `'all'`, which one seat satisfies.
+ */
+interface AfterSignPlan {
+  targetUserIds: string[]
+  aggregation: ApprovalAddSignAggregation
+}
+
+/**
+ * Owner disposition (1) on the ledger's "OD-L5-4(b) — four enumerated completions" row
+ * (2026-10-01): an after-sign whose approval does NOT complete the node's current round is refused.
+ * Raised INSIDE the engine's own partial-vote branches (sequential head with a queue behind it, 会签
+ * with undecided siblings, threshold still short with siblings left) so the judgment is the one the
+ * engine already makes for a plain approve — never a second copy of the completion rule. The throw
+ * rolls the whole transaction back, so no seat, epoch, version or audit row survives (§2.4: 3-arg,
+ * values-free — the member knows which node and which button).
+ */
+function afterSignRoundIncomplete(): ServiceError {
+  return new ServiceError(
+    'After-mode add_sign requires the current round to complete with this approval',
+    409,
+    'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE',
+  )
+}
+
+function throwAsServiceError(error: unknown): never {
+  const fields = attendanceCentralApprovalErrorToServiceFields(error)
+  if (fields) {
+    throw new ServiceError(fields.message, fields.statusCode, fields.code)
+  }
+  throw error
+}
+
+async function guardAttendanceCentralMutationOrThrow(
+  client: ApprovalDbClient,
+  instance: ApprovalInstanceRow,
+): Promise<void> {
+  try {
+    await assertAttendanceCentralMutationFailClosed(client, instance)
+  } catch (error) {
+    throwAsServiceError(error)
+  }
+}
+
+/**
+ * W4C-3b R0 test-only concurrency seam for bulkReassignApprovals.
+ * Production callers never set this; tests use it to interleave a second connection
+ * while the reassign txn still holds FOR UPDATE locks.
+ */
+export type W4c3bBulkReassignBarrierPoint =
+  | 'after_instance_lock'
+  | 'after_attendance_auth'
+  | 'before_version_bump'
+
+type W4c3bBulkReassignBarrierFn = (
+  point: W4c3bBulkReassignBarrierPoint,
+  info: { instanceId: string },
+) => Promise<void>
+
+let bulkReassignTestBarrierForTests: W4c3bBulkReassignBarrierFn | null = null
+
+/** Test-only. Pass null to clear. */
+export function __setW4c3bBulkReassignTestBarrierForTests(
+  hook: W4c3bBulkReassignBarrierFn | null,
+): void {
+  bulkReassignTestBarrierForTests = hook
+}
+
+async function awaitBulkReassignTestBarrier(
+  point: W4c3bBulkReassignBarrierPoint,
+  instanceId: string,
+): Promise<void> {
+  if (bulkReassignTestBarrierForTests) {
+    await bulkReassignTestBarrierForTests(point, { instanceId })
+  }
+}
+
+/**
+ * F4-E departure transfer (Lock-4) test-only concurrency seam, mirroring the shipped
+ * `W4c3bBulkReassignBarrierPoint` seam above. Production callers never set this; tests use it to
+ * interleave a second connection (a concurrent decide/approve on the same node) while the departure
+ * txn still holds the instance FOR UPDATE lock — proving the race is resolved by that lock, not by
+ * argument.
+ */
+export type ApprovalDepartureTransferBarrierPoint = 'after_instance_lock'
+
+type ApprovalDepartureTransferBarrierFn = (
+  point: ApprovalDepartureTransferBarrierPoint,
+  info: { instanceId: string },
+) => Promise<void>
+
+let departureTransferTestBarrierForTests: ApprovalDepartureTransferBarrierFn | null = null
+
+/** Test-only. Pass null to clear. */
+export function __setApprovalDepartureTransferTestBarrierForTests(
+  hook: ApprovalDepartureTransferBarrierFn | null,
+): void {
+  departureTransferTestBarrierForTests = hook
+}
+
+async function awaitApprovalDepartureTransferBarrier(
+  point: ApprovalDepartureTransferBarrierPoint,
+  instanceId: string,
+): Promise<void> {
+  if (departureTransferTestBarrierForTests) {
+    await departureTransferTestBarrierForTests(point, { instanceId })
+  }
+}
+
+/** F4-E — per-instance reason `applyApprovalDepartureTransfer` did not move the departed user's seat(s). */
+export type ApprovalDepartureTransferSkipReason =
+  | 'not-found'
+  | 'not-pending'
+  | 'attendance-central-unsupported'
+  | 'no-active-seat'
+  | 'target-is-requester'
+  | 'target-already-assignee'
+  /**
+   * Lock §14.3 #13 (lock:374) — same mechanism and literal as
+   * `ApprovalBulkReassignSkipReason`'s `'cancel_round'` above; this union has no route to the
+   * frontend (its sole consumer is `approval-departure-transfer-dispatch.ts:92`), so no FE pin
+   * applies here, but the literal is kept byte-identical for consistency across the two
+   * §14.3 #12/#13 seat-write chokepoints.
+   */
+  | 'cancel_round'
+  | 'error'
+
+export interface ApprovalDepartureTransferSkip {
+  id: string
+  reason: ApprovalDepartureTransferSkipReason
+}
+
+/** F4-E — outcome of `applyApprovalDepartureTransfer` across every pending instance where the
+ *  departed user held an active seat. */
+export interface ApprovalDepartureTransferResult {
+  /** Instance ids where at least one seat moved to the resolved manager. */
+  transferred: string[]
+  /** OD-L4-9(a) fail-closed: no manager resolvable — seat(s) left in place, audited + warned. */
+  noManagerResolved: string[]
+  skipped: ApprovalDepartureTransferSkip[]
+}
+
+/**
+ * F4-E signal-consumer override. The directory consumer resolves the manager from the departed
+ * account's captured org position after the deprovision transaction commits. The writer still
+ * rechecks that supplied local user is active before moving any seat. Omit the whole options object
+ * to retain the direct/test entry point's legacy live requester resolution.
+ */
+export interface ApprovalDepartureTransferOptions {
+  resolvedManagerId: string | null
+}
+
+/**
+ * P1#2e producer family 1 — wrap an in-transaction pg client (the connection that has BEGUN and not yet
+ * COMMITted) as the durable seam's `TransactionalQueryable`. The `isTransaction: true` marker documents intent
+ * but proves nothing on its own; `produceAutomationEvent`'s `pg_current_xact_id()` probe (pg-transaction-guard)
+ * is the real guard and THROWS at runtime on a pool / autocommit client / forged marker, so a half-committed
+ * approval-event enqueue is unrepresentable. Only ever hand this the same `client` the source write ran on.
+ */
+function approvalTxnHandle(client: ApprovalDbClient): TransactionalQueryable {
+  return {
+    isTransaction: true,
+    query: async (sql: string, params?: unknown[]) => {
+      const r = await client.query(sql, params)
+      return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+    },
+  }
+}
+
+// EXPORTED (Lock-4 P3-A unit-test surface) so tests/unit/approval-lock4-*.test.ts can exercise the
+// pure normalizer functions below directly, without a mocked pg pool or a real DB.
+export type ValidationContext = {
   status: number
   code: string
 }
 
-const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
+export const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
   status: 400,
   code: 'VALIDATION_ERROR',
 }
@@ -318,7 +1039,9 @@ const STORED_RUNTIME_CONTEXT: ValidationContext = {
   code: 'APPROVAL_RUNTIME_GRAPH_INVALID',
 }
 
-const FORM_FIELD_TYPES = new Set([
+// EXPORTED (Lock-8 L8-A §2.1 N-1: the census import-anchor, not a re-declared list) so a census
+// test can assert exact-set equality against the canonical type set and mutation-prove membership.
+export const FORM_FIELD_TYPES = new Set([
   'text',
   'textarea',
   'number',
@@ -327,24 +1050,149 @@ const FORM_FIELD_TYPES = new Set([
   'select',
   'multi-select',
   'user',
+  // Lock-2 L2-A: top-level directory-backed department selector.
+  'department',
   'attachment',
   'detail',
+  // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
+  'record-link',
+  // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4): a start+end date pair.
+  // Top-level only — explicitly excluded from DETAIL_LEAF below (OD-L8-4: two-to-three sub-values
+  // in a single-leaf column structure ripples into lineDerivation/FWB-per-column/diff-granularity).
+  'date_range',
+  // Lock-8 L8-A (§1.1, OD-L8-2): display-only 说明. Top-level only — excluded from DETAIL_LEAF
+  // below (a valueless control inside a repeating row has no per-row meaning).
+  'explanation',
 ])
 
-// Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
-// itself — one nesting level only). `attachment` is permitted at the type/contract layer;
-// the authoring UI (C-3) governs which are offered.
-const DETAIL_LEAF_FIELD_TYPES = new Set(
-  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+// L8-C (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6/OD-L8-7): the
+// allowlist of props keys permitted on the EXISTING `number` type (top-level fields AND detail
+// columns — this function runs for both). NOT a new FormFieldType member: M10 forecloses that
+// ("may enhance an existing number field only when labeled 'formatted number'") and §0.3 gives the
+// mechanical reason (thirteen site families, only presentation maps compile-forced). Sized by a
+// repo-source sweep (OD-L8-7(a)), not memory: `min`/`max`/`step`/`precision` are the shipped
+// `el-input-number` keys (numberFieldProps.ts), `derivedFrom` is the shipped line-derivation
+// declaration (lineDerivation.ts, commonTemplatePresets.ts:201) — both already ride through props
+// verbatim today — plus the three NEW L8-C display keys. EXPORTED so a census test can assert exact-
+// set equality and mutation-prove membership (gate C-2 / N-1 pattern).
+export const NUMBER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'min',
+  'max',
+  'step',
+  'precision',
+  'derivedFrom',
+  'currencySymbol',
+  'thousandsSeparator',
+  'uppercaseCny',
+])
+
+// Lock-8 L8-B (§1.2): the allowlist of props keys permitted on `date_range`. `dateType` is
+// REQUIRED with no absent-default (a range whose granularity is implicit cannot be compared or
+// diffed unambiguously); `startLabel`/`endLabel` are required (C-7's 控件名称 1/2); `durationLabel`
+// is optional (a custom override for the always-rendered derived duration, OD-L8-8 — its ABSENCE
+// does not turn the duration display off, only its label falls back to a default).
+export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'dateType',
+  'startLabel',
+  'endLabel',
+  'durationLabel',
+])
+
+// Lock-8 L8-A (§1.1, OD-L8-3(a)): the allowlist of props keys permitted on `explanation`. `text`
+// is the ONLY key — the rendered body shown to the requester/approver. Mirrors record-link's
+// fail-closed shape (§0.4): unknown keys fail publish, canonicalized props never spread residually.
+export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
+
+export const DEPARTMENT_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'selection',
+  'display',
+  'defaultMode',
+  'defaultDepartmentIds',
+  'maxSelections',
+])
+
+// Lock-2 §L2-B. `maxSelections` is the carrier required by ratified OD-L2-3's publish-time cap;
+// the prose list in §L2-B names only the other four keys, while the owner record explicitly binds
+// this fifth key. Unknown keys fail rather than riding through as semantic free text.
+export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'allowSelf',
+  'selection',
+  'defaultMode',
+  'defaultUserIds',
+  'maxSelections',
+])
+
+// Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
+// this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
+// contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
+// nested link semantics are undefined — top-level only). `date_range` is v1-excluded from detail
+// (Lock-8 OD-L8-4, a POSITIVE edit) — belt-and-suspenders with the explicit `nested` guard inside
+// `normalizeFormField`'s date_range block below (`if (nested) failValidation(...)`). CORRECTION
+// (PR #4964 gate F3): that explicit guard fires FIRST for a nested date_range column — it throws
+// before `normalizeDetailFieldParts` ever reaches this set's `.has()` check below — so removing
+// ONLY this filter's date_range exclusion is NOT observable through the public create/update API
+// (the earlier guard pre-empts it) and B-4's test (`.rejects.toThrow(/date_range cannot nest.../)`)
+// pins THAT guard's message, not this one. This filter's own date_range exclusion is confirmed
+// independently load-bearing only in combination — removing BOTH guards together genuinely admits
+// date_range as a detail column (mutation-verified); removing only the explicit guard makes THIS
+// filter the one that rejects (with its own, different message) — see approval-lock8-date-range
+// .test.ts's OD-L8-4 describe block for the full mutation log. Earlier PR-body language claiming
+// this filter alone is "what B-4's mutation removes to prove load-bearing" was imprecise and has
+// been corrected.
+//
+// Lock-8 L8-A (§1.1, MS-4): `explanation` is excluded too — UNLIKE record-link/date_range it has
+// NO separate explicit `nested` guard in `normalizeFormField` (its props block below runs
+// regardless of nesting; the shared column-shape checks harmlessly canonicalize `props.text`
+// either way), so THIS filter is the sole, independently mutation-provable rejection site for a
+// nested explanation column — no pre-emption ambiguity to correct later.
+//
+// EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department} rather than re-declaring it.
+export const DETAIL_LEAF_FIELD_TYPES = new Set(
+  [...FORM_FIELD_TYPES].filter(
+    (type) => type !== 'detail'
+      && type !== 'record-link'
+      && type !== 'date_range'
+      && type !== 'explanation'
+      && type !== 'department',
+  ),
 )
 
-const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
+// Lock-3 §1.1 R-1 (mirror site 3 of 3): `handler` joins the runtime admission set. Enumerated, not
+// permissive — an unknown type like `handlerx` is still rejected (G-6). Keep in sync with the
+// `ApprovalNodeType` union and the FE `apps/web/src/types/approval.ts` node-type list.
+const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end', 'handler'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
-const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
+const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold', 'sequential'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
-const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
+// Lock-4 §3 F4-B — 'designated' joins the enum. §1.3 four-allowlist arithmetic tracks the FE side.
+const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve', 'designated'])
+// Lock-4 F4-A (OD-L4-1(a) / OD-L4-2(a)) — EXPORTED so tests/unit/approval-lock4-f4a-*.test.ts can
+// pin the exact-set membership directly. Deliberately does NOT contain 'auto_reject': §4's RATIFIED
+// text is "auto_approve only, auto_reject deferred… no inert third option" — the type union itself
+// (types/approval-product.ts `ApprovalType`) omits it too, so this Set and that union can never
+// drift apart. `normalizeApprovalType` below rejects ANY string outside this Set, which is what
+// makes 'auto_reject' "NOT reachable" at publish (OD-L4-2(a)) without declaring it anywhere.
+export const APPROVAL_TYPES = new Set<ApprovalType>(['manual', 'auto_approve'])
+// Lock-4 F4-C (OD-L4-4(a)) — EXPORTED for the same reason. `'self_approve'` is the absent-equivalent
+// default and is EXCLUDED from the §2.2 enable-predicate widening below (a node authored with
+// `samePersonPolicy: 'self_approve'` must still be able to OPT OUT of a template-level policy —
+// see `hasEnabledAutoApprovalRule`'s doc comment).
+export const SAME_PERSON_POLICIES = new Set<SamePersonPolicy>([
+  'self_approve',
+  'auto_skip',
+  'transfer_direct_manager',
+  'transfer_dept_head',
+])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
-const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
+// Lock-7B OD-L7B-10 (C-2) — NODE_FIELD_ACCESS_VALUES now lives in ../types/approval-product (imported
+// above) so approval-form-redaction.ts (C-4) can read the SAME canonical enumeration without a
+// circular import (ApprovalProductService.ts imports FROM approval-form-redaction.ts, not the
+// reverse). C-9 — the publish-rejection message is DERIVED from that enumeration, never hand-rewritten.
+const NODE_FIELD_ACCESS_VALUES_MESSAGE = (() => {
+  const values = [...NODE_FIELD_ACCESS_VALUES]
+  return `${values.slice(0, -1).join(', ')}, or ${values[values.length - 1]}`
+})()
 // T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
 // wired `remind` (a notification), slice 2 wires `transfer` + `jump` (state mutations) — auto_* remain
 // rejected at publish and runtime-inert (terminal effects stay behind the closed gate below).
@@ -366,9 +1214,161 @@ export type ApprovalNodeTimeoutEffectOutcome =
   | 'skipped_invalid_config'
   | 'skipped_terminal_gated'
   | 'skipped_parallel_state'
+  // Lock §14.3 outlet #3 — a cancel-round instance never advances through the timeout scanner's
+  // transfer/jump firer; logged/metrics-only, never surfaced to the frontend (v5.9 lock text).
+  | 'skipped_cancel_round'
+// Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级, OD-L4-9(a):
+// system sentinel recorded as the actor of an out-of-band departure transfer. `isSystemSentinelActor`
+// (ApprovalAssigneeResolver.ts) drops any `system:`-prefixed actor on a bare `startsWith` predicate, so
+// this NEW value needs zero edits there — it is covered by construction, not by an enumerated list.
+const APPROVAL_DEPARTURE_SYSTEM_ACTOR = 'system:approval-departure'
+/**
+ * Lock §3 C-3 「actor = 系统终结身份」/ §14.2 判据 IV — the sentinel recorded as the actor of a
+ * cancel round's SYSTEM-side close (窗口/策略已关, 业务不可逆). It is the only thing that tells a
+ * system closure apart from an approver's own reject in `approval_records`, so it must stay
+ * distinct from both real user ids and the other two sentinels. Same `system:` prefix convention,
+ * so `isSystemSentinelActor` covers it by construction (see the departure sentinel's note above).
+ */
+const APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR = 'system:approval-cancel-round'
+
+/**
+ * Lock §3 C-2 全局锁序 —— 「rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → …」.
+ *
+ * `dispatchAction` historically opened `BEGIN` and IMMEDIATELY took `approval_instances … FOR
+ * UPDATE` with nothing in between, so any advisory lock taken later on that path would be taken
+ * AFTER a row lock — a global-order violation the W4 external entry's own
+ * `assertExternalTransactionRolloutLockHeldV1` cannot see (it queries `pg_locks` for held-ness
+ * only, never for acquisition order, so it would PASS while the order is broken). This repo has a
+ * deterministic-deadlock precedent for that exact shape (#4899), so the order is restructured
+ * rather than asserted.
+ *
+ * This resolver is the ONE predicate that answers 「does this dispatch have to take the org's
+ * rollout shared lock, and on WHICH org key?」. It is called TWICE — once before `BEGIN` (to decide
+ * the isolation level and take the lock first) and once after the instance row lock (fail-closed
+ * re-assert). Deliberately ONE function called twice, not two hand-written conditions: if the
+ * re-assert asked a WIDER question (e.g. 「is it a cancel round?」 alone) it would fail closed on a
+ * legitimate cancel round whose original document is not attendance-owned.
+ *
+ * WHICH org (census Q-E, phase-2 verification MD §3.3c): NOT `approval_instances.org_id`. The
+ * demand comes from `w4c3b-request-operation-boundary.ts:814`, which asserts the lock on the org
+ * the adapter resolved from the `attendance_requests` row. Q-E leg 1 shows the two columns can
+ * hold different values and derive different class-`00` keys — they are two INDEPENDENT
+ * derivations (the instance's is subject-based, `deriveAttendanceApprovalOrgStampV1`), not one
+ * copied from the other. So the org is resolved through the request row, three hops:
+ * round engine instance → its pending `approval_rounds.document_id` → the ORIGINAL document
+ * instance → its `attendance_requests` row.
+ *
+ * The last hop reuses the LOCKING path's own predicate with `lock: 'none'` (Q-E leg 3: the repo's
+ * other instance→request join, `filterBulkReassignDiscoveryForAttendance`, ADMITS rows this one
+ * rejects — adopting it would widen what the pre-read accepts, a contract-shaped change).
+ *
+ * `document_id` is read WITHOUT a lock here and that is sound for the same measured reason the
+ * final evaluator relies on: ZERO assignments to `approval_rounds.document_id` anywhere in `src`
+ * or `plugins`. `attendance_requests.org_id` is NOT immutable (4 `org_id = EXCLUDED.org_id`
+ * upsert writers), which is precisely why the post-lock re-assert is load-bearing.
+ *
+ * WHICH ACTION (the second axis, and the one that decides scope). Only the approve fall-through
+ * — outlet #5/#5′ — can reach W4 at all. 判据 III's revoke/reject branches terminate the round
+ * row with a bare `UPDATE approval_rounds`: no W4 call, no attendance write, nothing that needs
+ * the rollout lock. `comment` writes no round state at all, and the five verbs
+ * `assertCancelRoundActionAllowed` refuses must reach that refusal as cheaply as they did before.
+ * So a resolver keyed on the instance ALONE would have widened all of them: already-shipped
+ * 判据 III behaviour would silently move to SERIALIZABLE, gain an org-wide advisory lock, gain a
+ * `40001` failure mode it never had, and a forbidden verb would take an org lock before being
+ * rejected — plus the re-assert's 409 would start preceding §14.3 #4/#6's outlet-guard codes.
+ * `action === 'approve'` is the tightest predicate available BEFORE `BEGIN` (terminality is not
+ * knowable until the executor runs inside the transaction, and over-locking a non-terminal
+ * approve is harmless), and it is checked FIRST, before any query — so every other action pays
+ * not even the pre-read's round trip.
+ */
+export type CancelRoundRolloutLockRequirementV1 =
+  | Readonly<{ kind: 'none' }>
+  | Readonly<{ kind: 'required'; orgId: string; documentId: string; requestId: string }>
+
+/**
+ * The `{ kind: 'required' }` branch of {@link CancelRoundRolloutLockRequirementV1} — named so a
+ * call site that only ever runs once the lock is known to be held (never the `'none'` branch)
+ * states that in its own type instead of repeating the `Extract<>` inline. Currently used by
+ * `redeemCancelRoundInTxn`'s `rolloutLock` param.
+ */
+export type CancelRoundRolloutLockRequiredV1 = Extract<CancelRoundRolloutLockRequirementV1, { kind: 'required' }>
+
+/**
+ * EXPORTED for the WI-0 lock-order census (Q-F) — not for production callers. `dispatchAction` is
+ * its only production call site (twice); the census drives THIS function rather than a
+ * transcription of it, so a drift in the org derivation reddens the census.
+ */
+export async function resolveCancelRoundRolloutLockRequirementV1(
+  client: ApprovalDbClient,
+  engineInstanceId: string,
+  action: ApprovalActionType,
+): Promise<CancelRoundRolloutLockRequirementV1> {
+  // The action axis, checked before anything touches the database (see the note above).
+  if (action !== 'approve') return { kind: 'none' }
+  const instanceProbe = await client.query<{ id: string; workflow_key: string | null }>(
+    `SELECT id, workflow_key FROM approval_instances
+      WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'`,
+    [engineInstanceId],
+  )
+  const probe = instanceProbe.rows[0]
+  // Not a cancel round (the overwhelming majority of dispatches) ⇒ nothing changes for it: no
+  // advisory lock, no SERIALIZABLE, one extra primary-key lookup. Also the answer for a missing
+  // row: `dispatchAction`'s own 404 below is the authority on existence, not this probe.
+  if (!probe || !isCancelRoundInstance(probe)) return { kind: 'none' }
+
+  // Same source of truth the in-lock final evaluator uses (`evaluateCancelRoundFinalInLock`):
+  // the ONE pending round row for this engine instance. A non-1 count is left to that evaluator's
+  // `CANCEL_ROUND_INVARIANT_VIOLATION`, which runs inside the transaction; answering `none` here
+  // only means 「no lock demanded」, and the re-assert re-runs this same query under the row lock.
+  const roundProbe = await client.query<{ document_id: string }>(
+    `SELECT document_id FROM approval_rounds
+      WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+    [engineInstanceId],
+  )
+  if (roundProbe.rows.length !== 1) return { kind: 'none' }
+  const documentId = roundProbe.rows[0].document_id
+
+  const originalProbe = await client.query<{
+    id: string
+    workflow_key: string | null
+    business_key: string | null
+  }>(
+    `SELECT id, workflow_key, business_key FROM approval_instances WHERE id = $1`,
+    [documentId],
+  )
+  const original = originalProbe.rows[0]
+  if (!original) return { kind: 'none' }
+
+  const classification = await classifyAttendanceRequestForInstanceV1(client, original, { lock: 'none' })
+  if (classification.kind !== 'attendance' || !classification.request) return { kind: 'none' }
+  return {
+    kind: 'required',
+    orgId: classification.request.orgId,
+    documentId,
+    requestId: classification.request.requestId,
+  }
+}
+
+/** Byte-equality of the two evaluations. Any drift is refused, in either direction. */
+function cancelRoundRolloutLockRequirementsEqual(
+  a: CancelRoundRolloutLockRequirementV1,
+  b: CancelRoundRolloutLockRequirementV1,
+): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'none' || b.kind === 'none') return true
+  return a.orgId === b.orgId && a.documentId === b.documentId && a.requestId === b.requestId
+}
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
+// Lock-1 §K1 / OD-L1-2(a) — single-tenant default bucket for `approval_usable_member_groups.org_id`
+// when `PublishApprovalTemplateRequest.orgId` is omitted/blank. Mirrors the `DEFAULT_ORG_ID =
+// 'default'` idiom re-declared per-module across this codebase (directory-sync.ts,
+// admin-directory-routing-policy.ts, admin-directory-local.ts, admin-directory-department-bindings.ts)
+// rather than importing a shared symbol none of those export. NEVER `?? ''` / bare `||` here — a
+// blank string must normalize to this constant, not to an org-agnostic `WHERE org_id = ''` that
+// would match nothing (or, worse, get built without the predicate at all).
+const DEFAULT_ORG_ID = 'default'
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -380,6 +1380,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function handoverAssignmentMetadata(
+  sourceAssignments: readonly Pick<ApprovalAssignmentRow, 'metadata'>[],
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const inherited = inheritSequentialQueueMetadata(
+    sourceAssignments.map((assignment) => assignment.metadata),
+    metadata,
+  )
+  if (!inherited) {
+    throw new ServiceError(
+      'Sequential approval queue handover metadata is invalid',
+      409,
+      'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+    )
+  }
+  return inherited
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -387,9 +1405,26 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeApprovalMode(value: unknown, context: ValidationContext, path: string): ApprovalMode | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !APPROVAL_MODES.has(value as ApprovalMode)) {
-    failValidation(context, `${path} must be single, all, any, or threshold`)
+    failValidation(context, `${path} must be single, all, any, threshold, or sequential`)
   }
   return value as ApprovalMode
+}
+
+// Lock-4 F4-A (OD-L4-1(a) / OD-L4-2(a)) — EXPORTED for direct unit-test exercise. Rejects ANY
+// off-`APPROVAL_TYPES` string, including 'auto_reject': that is the whole enforcement mechanism
+// behind "auto_reject… must NOT be reachable — publish rejects it" (§4's own words) — there is no
+// separate auto_reject-specific branch, because the type is never admitted to the Set in the first
+// place. Same fixed-Set-membership shape as `normalizeEmptyAssigneePolicy` immediately below.
+export function normalizeApprovalType(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): ApprovalType | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !APPROVAL_TYPES.has(value as ApprovalType)) {
+    failValidation(context, `${path} must be manual or auto_approve`)
+  }
+  return value as ApprovalType
 }
 
 function normalizeEmptyAssigneePolicy(
@@ -399,9 +1434,65 @@ function normalizeEmptyAssigneePolicy(
 ): EmptyAssigneePolicy | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !EMPTY_ASSIGNEE_POLICIES.has(value as EmptyAssigneePolicy)) {
-    failValidation(context, `${path} must be error or auto-approve`)
+    failValidation(context, `${path} must be error, auto-approve, or designated`)
   }
   return value as EmptyAssigneePolicy
+}
+
+// Lock-4 §3 F4-B — a lenient string-array normalizer (unlike `normalizeStringArray`, an EMPTY array
+// is tolerated here, not rejected). This is deliberate: `{userIds: [], roleIds: []}` must normalize
+// down to "absent" so the B-s10 cross-field publish gate below treats an explicitly-empty fallback
+// identically to an omitted one — one emptiness check, not two divergent shapes of the same bug.
+function normalizeOptionalNonEmptyEntriesStringArray(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((entry) => !isNonEmptyString(entry))) {
+    failValidation(context, `${path} must be a string array`)
+  }
+  return value.map((entry) => entry.trim())
+}
+
+/**
+ * Lock-4 §3 F4-B (OD-L4-3(a)) — normalizes `emptyAssigneeFallback`, the ONE key carrying
+ * `emptyAssigneePolicy: 'designated'`'s targets. Unknown SUB-keys (inside the object) are REJECTED
+ * (Lock-1 §G-1 posture for NEW kinds — no silent drop), mirroring `prior_node_approver`'s own
+ * exact-shape check. Returns `undefined` when both arrays end up empty/absent — see the array
+ * normalizer's own comment for why.
+ *
+ * Placement on a NON-approval node type (cc/condition/parallel/start/end) is a DIFFERENT question,
+ * answered by the per-type rebuild in the switch below: this key is silently dropped there, exactly
+ * like its sibling `emptyAssigneePolicy` (an existing, pre-F4-B key) already is — a deliberate
+ * byte-for-byte match to the sibling it is co-located with, not a gap this slice introduces. This
+ * differs from the newer `nodeOperationPolicy` / Lock-7 pin-2 precedent (explicit 400 on a
+ * non-carrying node type); retrofitting `emptyAssigneePolicy` itself to that stricter posture is a
+ * separate, pre-existing-behavior change out of scope for this slice.
+ */
+function normalizeEmptyAssigneeFallback(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): EmptyAssigneeFallback | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  const knownKeys = ['userIds', 'roleIds']
+  const extraKeys = Object.keys(value).filter((key) => !knownKeys.includes(key))
+  if (extraKeys.length > 0) {
+    failValidation(context, `${path} carries unknown keys: ${extraKeys.join(', ')}`)
+  }
+  const userIds = normalizeOptionalNonEmptyEntriesStringArray(value.userIds, context, `${path}.userIds`)
+  const roleIds = normalizeOptionalNonEmptyEntriesStringArray(value.roleIds, context, `${path}.roleIds`)
+  const nonEmptyUserIds = userIds && userIds.length > 0 ? userIds : undefined
+  const nonEmptyRoleIds = roleIds && roleIds.length > 0 ? roleIds : undefined
+  if (!nonEmptyUserIds && !nonEmptyRoleIds) return undefined
+  return {
+    ...(nonEmptyUserIds ? { userIds: nonEmptyUserIds } : {}),
+    ...(nonEmptyRoleIds ? { roleIds: nonEmptyRoleIds } : {}),
+  }
 }
 
 function normalizeOptionalBoolean(
@@ -416,7 +1507,19 @@ function normalizeOptionalBoolean(
   return value
 }
 
-function normalizeAutoApprovalPolicy(
+// Lock-4 F4-C (OD-L4-4(a)) — EXPORTED for direct unit-test exercise. `samePersonPolicy` lives INSIDE
+// this existing object (one vocabulary, per §2.2/§2.3 four-allowlist arithmetic already listing
+// `autoApprovalPolicy`).
+//
+// 'auto_skip' synthesis (RATIFIED verbatim, AutoApprovalPolicy doc comment above): mergeWithRequester
+// "stays the persisted carrier" for 自动跳过, and the cascade arm that reads it
+// (`evaluateAutoApprovalAssignment`) is UNCHANGED — so a node authored with ONLY
+// `samePersonPolicy:'auto_skip'` must normalize to carry `mergeWithRequester: true` too, or the
+// unchanged cascade arm never fires for it and gate C-1's byte-identical claim is false.
+// `samePersonPolicy:'auto_skip'` WINS over an explicit `mergeWithRequester` in the same payload
+// (the enum is the authoritative selection); any other samePersonPolicy value (or its absence)
+// leaves `mergeWithRequester` exactly as authored.
+export function normalizeAutoApprovalPolicy(
   value: unknown,
   context: ValidationContext,
   path: string,
@@ -445,12 +1548,24 @@ function normalizeAutoApprovalPolicy(
     && (typeof value.actorMode !== 'string' || !AUTO_APPROVAL_ACTOR_MODES.has(value.actorMode as AutoApprovalActorMode))) {
     failValidation(context, `${path}.actorMode must be system or original_approver`)
   }
+  let samePersonPolicy: SamePersonPolicy | undefined
+  if (value.samePersonPolicy !== undefined) {
+    if (typeof value.samePersonPolicy !== 'string' || !SAME_PERSON_POLICIES.has(value.samePersonPolicy as SamePersonPolicy)) {
+      failValidation(
+        context,
+        `${path}.samePersonPolicy must be self_approve, auto_skip, transfer_direct_manager, or transfer_dept_head`,
+      )
+    }
+    samePersonPolicy = value.samePersonPolicy as SamePersonPolicy
+  }
+  const effectiveMergeWithRequester = samePersonPolicy === 'auto_skip' ? true : mergeWithRequester
 
   return {
-    ...(mergeWithRequester !== undefined ? { mergeWithRequester } : {}),
+    ...(effectiveMergeWithRequester !== undefined ? { mergeWithRequester: effectiveMergeWithRequester } : {}),
     ...(mergeAdjacentApprover !== undefined ? { mergeAdjacentApprover } : {}),
     ...(dedupeHistoricalApprover !== undefined ? { dedupeHistoricalApprover } : {}),
     ...(value.actorMode ? { actorMode: value.actorMode as AutoApprovalActorMode } : {}),
+    ...(samePersonPolicy ? { samePersonPolicy } : {}),
   }
 }
 
@@ -518,6 +1633,58 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'manager_at_level', level }
       }
+      case 'continuous_dept_heads': {
+        // Lock-1 §K4: `levels` validated byte-identically to `continuous_managers` — an
+        // out-of-range / non-integer / missing `levels` is rejected, never silently
+        // defaulted (enum-strictness).
+        const levels = source.levels
+        if (typeof levels !== 'number' || !Number.isInteger(levels) || levels < 1 || levels > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.levels must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'continuous_dept_heads', levels }
+      }
+      case 'dept_head_at_level': {
+        // Lock-1 §K5-b: `level` validated byte-identically to `manager_at_level` — an
+        // out-of-range / non-integer / missing `level` is rejected, never silently
+        // defaulted (enum-strictness).
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'dept_head_at_level', level }
+      }
+      case 'prior_node_approver': {
+        // Lock-1 §K3 + G-1: exact-shape validation — `nodeKey` is a required non-empty string,
+        // and (the Lock-1 G-1 posture for NEW kinds, stricter than the shipped kinds) unknown
+        // extra keys are REJECTED, never silently dropped. Whether the referenced node exists,
+        // is an approval node, and is strictly upstream on every runtime-reachable path is the
+        // PUBLISH gate's job (`assertPriorNodeApproverReferencesUpstream`) — normalize stays a
+        // shape check so stored drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'nodeKey'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for prior_node_approver`)
+        }
+        if (!isNonEmptyString(source.nodeKey)) {
+          failValidation(context, `${sourcePath}.nodeKey is required`)
+        }
+        return { kind: 'prior_node_approver', nodeKey: source.nodeKey.trim() }
+      }
+      case 'user_group': {
+        // Lock-1 §K1 + G-1: exact-shape validation — `groupIds` is a non-empty string array
+        // (byte-identical to `normalizeStringArray`'s posture for static_user/static_role) and
+        // (the Lock-1 G-1 posture for NEW kinds) unknown extra keys are REJECTED. Whether every
+        // referenced id resolves to a REAL group bound to the publishing org is the PUBLISH gate's
+        // job (`assertUserGroupSourcesBoundToOrg`) — normalize stays a shape check so stored
+        // drafts remain readable/re-saveable while being fixed.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'groupIds'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for user_group`)
+        }
+        return {
+          kind: 'user_group',
+          groupIds: normalizeStringArray(source.groupIds, context, `${sourcePath}.groupIds`),
+        }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)
@@ -526,6 +1693,78 @@ function normalizeApprovalAssigneeSources(
           kind: 'form_field_user',
           fieldId: source.fieldId.trim(),
         }
+      case 'form_field_user_manager':
+      case 'form_field_user_dept_head': {
+        // Lock-2 §L2-C + the Lock-1 G-1 posture for NEW kinds: exact-shape validation — unknown
+        // extra keys are REJECTED, never silently dropped; `fieldId` is a required non-empty
+        // string; `level` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` byte-identically to the
+        // shipped level-addressed kinds (out-of-range / non-integer / missing is rejected, never
+        // silently defaulted — enum-strictness). This normalize runs on save, publish, and
+        // restore, so pin (5) (level in range) holds on every stored graph. Whether the
+        // referenced field exists top-level, is a `user` field, is required, and carries no
+        // visibilityRule is the cross-schema validator's job
+        // (`validateApprovalAssigneeSourcesAgainstFormSchema` — pins (1)-(4)+(6)); normalize
+        // stays a shape check so stored drafts remain readable/re-saveable while being fixed.
+        const kind = source.kind as 'form_field_user_manager' | 'form_field_user_dept_head'
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'fieldId', 'level'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for ${kind}`)
+        }
+        if (!isNonEmptyString(source.fieldId)) {
+          failValidation(context, `${sourcePath}.fieldId is required`)
+        }
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind, fieldId: source.fieldId.trim(), level }
+      }
+      case 'requester_choice': {
+        // Lock-1 §K2 + G-1: exact-shape validation — mode enum, scope discriminated by type,
+        // and (stricter than the shipped kinds, per the Lock-1 G-1 gate for NEW kinds) unknown
+        // extra keys on the source or its scope are REJECTED, never silently dropped.
+        const sourceKeys = Object.keys(source)
+        if (sourceKeys.some((key) => !['kind', 'mode', 'scope'].includes(key))) {
+          failValidation(context, `${sourcePath} carries unknown keys for requester_choice`)
+        }
+        const mode = source.mode
+        if (mode !== 'single' && mode !== 'multi') {
+          failValidation(context, `${sourcePath}.mode must be single or multi`)
+        }
+        const scope = source.scope
+        if (!isRecord(scope) || !isNonEmptyString(scope.type)) {
+          failValidation(context, `${sourcePath}.scope.type is required`)
+        }
+        switch (scope.type) {
+          case 'company':
+            if (Object.keys(scope).some((key) => key !== 'type')) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the company scope`)
+            }
+            return { kind: 'requester_choice', mode, scope: { type: 'company' } }
+          case 'members':
+            if (Object.keys(scope).some((key) => !['type', 'userIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the members scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'members', userIds: normalizeStringArray(scope.userIds, context, `${sourcePath}.scope.userIds`) },
+            }
+          case 'role':
+            if (Object.keys(scope).some((key) => !['type', 'roleIds'].includes(key))) {
+              failValidation(context, `${sourcePath}.scope carries unknown keys for the role scope`)
+            }
+            return {
+              kind: 'requester_choice',
+              mode,
+              scope: { type: 'role', roleIds: normalizeStringArray(scope.roleIds, context, `${sourcePath}.scope.roleIds`) },
+            }
+          default:
+            // `return` of the never-returning failValidation makes the exhaustiveness explicit
+            // for both TS and eslint's no-fallthrough (every scope branch returns or throws).
+            return failValidation(context, `${sourcePath}.scope.type must be company, members, or role`)
+        }
+      }
       default:
         failValidation(context, `${sourcePath}.kind is invalid`)
     }
@@ -542,16 +1781,65 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
   // would be ambiguous as a single approver). See approval-detail-subform-design-lock §1.
   const fieldById = new Map(formSchema.fields.map((field) => [field.id, field]))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-10: handler nodes ALSO carry `assigneeSources` (incl. form_field_user), so a handler's
+    // sources must be schema-checked too — WITHOUT this, a handler's form_field_user would never be
+    // validated (silent skip). Both approval and handler share this guard.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
-      if (source.kind !== 'form_field_user') continue
-      const field = fieldById.get(source.fieldId)
-      if (!field || field.type !== 'user') {
-        failValidation(
-          context,
-          `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
-        )
+      // Lock-2 §L2-C publish pins for the form-field contact extensions — closing the silent-skip
+      // this loop otherwise carries for every non-form_field_user kind (the kind-axis twin of
+      // Lock-3 R-10's node-type axis on this same function). Pins, in order:
+      //   (1) the referenced field exists and is TOP-LEVEL only (`fieldById` maps top-level fields
+      //       only — a detail sub-field has N row-values and is ambiguous as a single approver);
+      //   (2) the field's type is `user`;
+      //   (3) `required: true` — alone it closes nothing, because `validateApprovalFormData`
+      //       enforces `required` for VISIBLE fields only;
+      //   (4) NO `visibilityRule` — which makes the (3)+(4) pair provably sufficient: a field with
+      //       no rule is visible on both visibility passes regardless of data (OD-L2-5(a); the
+      //       independent create-time door 2 — APPROVAL_FORM_ROUTING_FIELD_EMPTY — backs this pair
+      //       so neither door covers for the other);
+      //   (5) `level` in range — enforced by `normalizeApprovalAssigneeSources`, which runs on
+      //       every save/publish/restore path ahead of this validator;
+      //   (6) multi-select is admitted only with a positive publish-time maxSelections cap. Runtime
+      //       never truncates; all selected principals are unioned by the resolver (OD-L2-3/7).
+      if (
+        source.kind === 'form_field_user'
+        || source.kind === 'form_field_user_manager'
+        || source.kind === 'form_field_user_dept_head'
+      ) {
+        const field = fieldById.get(source.fieldId)
+        if (!field || field.type !== 'user') {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a user field`,
+          )
+        }
+        if (field.required !== true) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a required user field`,
+          )
+        }
+        if (field.visibilityRule !== undefined) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a field with a visibility rule`,
+          )
+        }
+        if (
+          isRecord(field.props)
+          && field.props.selection === 'multi'
+          && (typeof field.props.maxSelections !== 'number'
+            || !Number.isInteger(field.props.maxSelections)
+            || field.props.maxSelections < 1)
+        ) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} requires maxSelections for a multi-select user field`,
+          )
+        }
+        continue
       }
     }
   })
@@ -618,12 +1906,16 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
 function assertNoUnconfiguredPlaceholderRoles(approvalGraph: ApprovalGraph): void {
   for (const node of approvalGraph.nodes) {
-    if (node.type !== 'approval') continue
+    // Lock-3 R-11: a handler ALSO carries static_role sources, so an untouched-preset SENTINEL role on a
+    // handler must fail-fast at publish too — otherwise a handler could publish carrying an unclaimable
+    // placeholder role (silent skip). The 节点 label branches so the message names the right node type.
+    if (node.type !== 'approval' && node.type !== 'handler') continue
+    const nodeLabel = node.type === 'handler' ? '办理节点' : '审批节点'
     const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
     for (const source of sources) {
       if (source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)) {
         throw new ServiceError(
-          `审批节点「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
+          `${nodeLabel}「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
           400,
           'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
           { nodeKey: node.key },
@@ -695,6 +1987,319 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  // FWB-0 Layer 2: record-link is top-level only; pin non-blank props.baseId + props.sheetId.
+  // OpenAPI RecordLinkFieldProps is additionalProperties:false — only baseId/sheetId allowed.
+  // Fail closed on any other key (do not silently drop author input). Creator read authorization
+  // against those pins is enforced at publish (async capability check).
+  let pinnedProps: Record<string, unknown> | undefined
+  if (value.type === 'record-link') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] record-link cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => key !== 'baseId' && key !== 'sheetId')
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] record-link props may only contain baseId and sheetId (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+    }
+    const baseId = props && typeof props.baseId === 'string' ? props.baseId.trim() : ''
+    const sheetId = props && typeof props.sheetId === 'string' ? props.sheetId.trim() : ''
+    if (!baseId || !sheetId) {
+      failValidation(context, `formSchema.fields[${index}] record-link requires non-blank props.baseId and props.sheetId`)
+    }
+    // Canonicalize: only the two trimmed pins (never spread residual props).
+    pinnedProps = { baseId, sheetId }
+  }
+
+  // L8-C (§1.3, OD-L8-6/OD-L8-7): allowlist + canonicalize `number` props. Runs for BOTH top-level
+  // fields and detail columns (this function handles both; `nested` only gates record-link above).
+  // Unlike record-link this is NOT a fixed 2-key reconstruction — pre-existing shipped keys
+  // (min/max/step/precision/derivedFrom) must keep riding through untouched (gate C-2 / X-1's
+  // byte-for-byte round-trip), so canonicalization here is a KEY FILTER over the ORIGINAL key
+  // order (`Object.keys(props).filter(...)`), never a rebuild in the allowlist's own order —
+  // reordering would make `templateVersionDiff.ts` (§2.5) see a spurious change on every existing
+  // number field the first time it is re-saved after this lands.
+  let numberProps: Record<string, unknown> | undefined
+  if (value.type === 'number') {
+    const props = isRecord(value.props) ? value.props : null
+    if (props) {
+      const extraKeys = Object.keys(props).filter((key) => !NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      if (extraKeys.length > 0) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] number props may only contain ${[...NUMBER_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+        )
+      }
+      // The three NEW L8-C display keys are type-checked at publish (fail closed on the wrong
+      // shape) so FE hydration (typeof-guarded, see templateAuthoring.ts fieldDraftFromField) is
+      // lossless by construction — a stored `uppercaseCny: "true"` can never silently round-trip
+      // to `false`. Pre-existing keys (min/max/step/precision/derivedFrom) are NOT newly
+      // type-validated here — out of this slice's scope, unchanged behavior.
+      if (props.currencySymbol !== undefined && typeof props.currencySymbol !== 'string') {
+        failValidation(context, `formSchema.fields[${index}] number props.currencySymbol must be a string`)
+      }
+      if (props.thousandsSeparator !== undefined && typeof props.thousandsSeparator !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.thousandsSeparator must be a boolean`)
+      }
+      if (props.uppercaseCny !== undefined && typeof props.uppercaseCny !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] number props.uppercaseCny must be a boolean`)
+      }
+      const canonical: Record<string, unknown> = {}
+      for (const key of Object.keys(props)) {
+        if (NUMBER_FIELD_ALLOWED_PROP_KEYS.has(key)) canonical[key] = props[key]
+      }
+      numberProps = canonical
+    }
+  }
+
+  // Lock-8 L8-B (§1.2, OD-L8-4/OD-L8-7-style strict allowlist): date_range is top-level only
+  // (already excluded from DETAIL_LEAF above; this direct check gives a named, field-index-scoped
+  // rejection rather than relying solely on the derived-list path in `normalizeDetailFieldParts`,
+  // mirroring record-link's own belt-and-suspenders nested guard). `dateType`/`startLabel`/
+  // `endLabel` are REQUIRED with NO absent-default — "a range whose granularity is implicit cannot
+  // be compared or diffed unambiguously" (§1.2) — `durationLabel` is optional. Unlike L8-C's
+  // props-are-already-in-the-wild allowlist, `date_range` is a BRAND NEW type: no pre-existing
+  // template can carry these keys, so canonicalizing in this function's own fixed key order (rather
+  // than filtering over `Object.keys(props)`'s original order) creates no spurious version-diff.
+  let dateRangeProps: Record<string, unknown> | undefined
+  if (value.type === 'date_range') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] date_range cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DATE_RANGE_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props may only contain ${[...DATE_RANGE_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const dateType = props?.dateType
+    if (typeof dateType !== 'string' || !DATE_RANGE_DATE_TYPES.has(dateType)) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.dateType must be one of ${[...DATE_RANGE_DATE_TYPES].join(', ')}`,
+      )
+    }
+    const startLabel = props?.startLabel
+    if (typeof startLabel !== 'string' || !startLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.startLabel is required`)
+    }
+    const endLabel = props?.endLabel
+    if (typeof endLabel !== 'string' || !endLabel.trim()) {
+      failValidation(context, `formSchema.fields[${index}] date_range props.endLabel is required`)
+    }
+    if (
+      props?.durationLabel !== undefined &&
+      (typeof props.durationLabel !== 'string' || !props.durationLabel.trim())
+    ) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] date_range props.durationLabel must be a non-blank string when present`,
+      )
+    }
+    const canonical: Record<string, unknown> = {
+      dateType,
+      startLabel: (startLabel as string).trim(),
+      endLabel: (endLabel as string).trim(),
+    }
+    if (typeof props?.durationLabel === 'string' && props.durationLabel.trim()) {
+      canonical.durationLabel = props.durationLabel.trim()
+    }
+    dateRangeProps = canonical
+  }
+
+  let departmentProps: Record<string, unknown> | undefined
+  if (value.type === 'department') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] department cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DEPARTMENT_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] department props contain unknown keys`)
+    }
+    const selection = props?.selection
+    const display = props?.display
+    if (selection !== 'single' && selection !== 'multi') {
+      failValidation(context, `formSchema.fields[${index}] department props.selection must be single or multi`)
+    }
+    if (display !== 'leaf_only' && display !== 'full_path') {
+      failValidation(context, `formSchema.fields[${index}] department props.display must be leaf_only or full_path`)
+    }
+    const defaultMode = props?.defaultMode
+    if (
+      defaultMode !== undefined
+      && defaultMode !== 'requester_department'
+      && defaultMode !== 'designated'
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.defaultMode is invalid`)
+    }
+    const defaultDepartmentIds = props?.defaultDepartmentIds
+    let normalizedDefaultDepartmentIds: string[] | undefined
+    if (defaultDepartmentIds !== undefined) {
+      if (!Array.isArray(defaultDepartmentIds)) {
+        failValidation(context, `formSchema.fields[${index}] department props.defaultDepartmentIds must be an array`)
+      }
+      normalizedDefaultDepartmentIds = defaultDepartmentIds.map((id) => (
+        typeof id === 'string' ? id.trim() : ''
+      ))
+      if (
+        normalizedDefaultDepartmentIds.some((id) => !id)
+        || new Set(normalizedDefaultDepartmentIds).size !== normalizedDefaultDepartmentIds.length
+      ) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] department props.defaultDepartmentIds must contain unique non-blank ids`,
+        )
+      }
+    }
+    const maxSelections = props?.maxSelections
+    if (
+      maxSelections !== undefined
+      && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.maxSelections must be a positive integer`)
+    }
+    if (selection === 'single') {
+      if (maxSelections !== undefined && maxSelections !== 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields require maxSelections 1 when present`)
+      }
+      if (normalizedDefaultDepartmentIds && normalizedDefaultDepartmentIds.length > 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields allow at most one default department`)
+      }
+    }
+    if (
+      typeof maxSelections === 'number'
+      && normalizedDefaultDepartmentIds
+      && normalizedDefaultDepartmentIds.length > maxSelections
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department defaults exceed maxSelections`)
+    }
+    departmentProps = {
+      selection,
+      display,
+      ...(defaultMode !== undefined ? { defaultMode } : {}),
+      ...(normalizedDefaultDepartmentIds ? { defaultDepartmentIds: normalizedDefaultDepartmentIds } : {}),
+      ...(maxSelections !== undefined ? { maxSelections } : {}),
+    }
+  }
+
+  let userProps: Record<string, unknown> | undefined
+  if (value.type === 'user') {
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !USER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] user props contain unknown keys`)
+    }
+    if (props) {
+      const allowSelf = props.allowSelf
+      if (allowSelf !== undefined && typeof allowSelf !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] user props.allowSelf must be a boolean`)
+      }
+      const selection = props.selection
+      if (selection !== undefined && selection !== 'single' && selection !== 'multi') {
+        failValidation(context, `formSchema.fields[${index}] user props.selection must be single or multi`)
+      }
+      const defaultMode = props.defaultMode
+      if (defaultMode !== undefined && defaultMode !== 'requester' && defaultMode !== 'designated') {
+        failValidation(context, `formSchema.fields[${index}] user props.defaultMode is invalid`)
+      }
+      let defaultUserIds: string[] | undefined
+      if (props.defaultUserIds !== undefined) {
+        if (!Array.isArray(props.defaultUserIds)) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must be an array`)
+        }
+        defaultUserIds = props.defaultUserIds.map((id) => typeof id === 'string' ? id.trim() : '')
+        if (defaultUserIds.some((id) => !id) || new Set(defaultUserIds).size !== defaultUserIds.length) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must contain unique non-blank ids`)
+        }
+      }
+      const maxSelections = props.maxSelections
+      if (
+        maxSelections !== undefined
+        && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+      ) {
+        failValidation(context, `formSchema.fields[${index}] user props.maxSelections must be a positive integer`)
+      }
+      const effectiveSelection = selection === 'multi' ? 'multi' : 'single'
+      if (effectiveSelection === 'single') {
+        if (maxSelections !== undefined && maxSelections !== 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields require maxSelections 1 when present`)
+        }
+        if (defaultUserIds && defaultUserIds.length > 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields allow at most one default user`)
+        }
+      }
+      if (typeof maxSelections === 'number' && defaultUserIds && defaultUserIds.length > maxSelections) {
+        failValidation(context, `formSchema.fields[${index}] user defaults exceed maxSelections`)
+      }
+      if (defaultMode === 'requester' && defaultUserIds && defaultUserIds.length > 0) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults cannot carry defaultUserIds`)
+      }
+      if (defaultMode === 'requester' && allowSelf !== true) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults require allowSelf`)
+      }
+      userProps = {
+        ...(allowSelf !== undefined ? { allowSelf } : {}),
+        ...(selection !== undefined ? { selection } : {}),
+        ...(defaultMode !== undefined ? { defaultMode } : {}),
+        ...(defaultUserIds !== undefined ? { defaultUserIds } : {}),
+        ...(maxSelections !== undefined ? { maxSelections } : {}),
+      }
+    }
+  }
+
+  // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
+  // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
+  // to require, default, choose among, or prompt for). The generic shape checks above only reject a
+  // WRONGLY-TYPED value (e.g. `required: 'yes'`); a well-typed-but-meaningless one (`required: true`,
+  // a real placeholder string) must be rejected HERE, per-type. `props.text` is the ONLY allowed
+  // key — the rendered body (OD-L8-3(a)); the strict allowlist mirrors record-link's fail-closed
+  // shape (§0.4): unknown keys fail publish, canonicalized props never spread residually. No
+  // separate `nested` guard (unlike record-link/date_range): `DETAIL_LEAF_FIELD_TYPES` above is the
+  // sole, independently mutation-provable rejection for a nested explanation column (MS-4).
+  let explanationProps: Record<string, unknown> | undefined
+  if (value.type === 'explanation') {
+    if (value.required === true) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot be required (no submitted value)`)
+    }
+    if (value.defaultValue !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a defaultValue (no submitted value)`)
+    }
+    if (value.placeholder !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry a placeholder (no submitted value)`)
+    }
+    if (value.options !== undefined) {
+      failValidation(context, `formSchema.fields[${index}] explanation cannot carry options (no submitted value)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !EXPLANATION_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}] explanation props may only contain ${[...EXPLANATION_FIELD_ALLOWED_PROP_KEYS].join(', ')} (unknown: ${extraKeys.join(', ')})`,
+      )
+    }
+    const text = props?.text
+    if (typeof text !== 'string' || !text.trim()) {
+      failValidation(context, `formSchema.fields[${index}] explanation props.text is required`)
+    }
+    explanationProps = { text: (text as string).trim() }
+  }
+
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
   const detail = normalizeDetailFieldParts(value, index, context, nested)
 
@@ -713,7 +2318,21 @@ function normalizeFormField(
           })),
         }
       : {}),
-    ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
+    ...(pinnedProps
+      ? { props: pinnedProps }
+      : numberProps !== undefined
+        ? { props: numberProps }
+        : dateRangeProps
+          ? { props: dateRangeProps }
+          : explanationProps
+            ? { props: explanationProps }
+            : departmentProps
+              ? { props: departmentProps }
+              : userProps !== undefined
+                ? { props: userProps }
+                : isRecord(value.props)
+                  ? { props: { ...value.props } }
+                  : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -780,6 +2399,13 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   const fields = value.fields.map((field, index) => normalizeFormField(field, index, context))
   if (new Set(fields.map((field) => field.id)).size !== fields.length) {
     failValidation(context, 'formSchema field ids must be unique')
+  }
+  if (isApprovalAttachmentsEnabled()) {
+    for (const field of fields) {
+      if (field.type === 'detail' && field.columns?.some((column) => column.type === 'attachment')) {
+        failValidation(context, 'attachment fields are not allowed inside detail groups')
+      }
+    }
   }
   validateFormFieldVisibilityRules(fields, context)
 
@@ -887,20 +2513,67 @@ function validateFormFieldVisibilityRules(
     if (!rule) return
 
     const target = fieldMap.get(rule.fieldId)
-    if (!target) {
+    if (target) {
+      // Whole-field reference — the existing type-based denylist, extended by Lock-8 L8-B
+      // (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-5(a)) per-type predicate: every
+      // OTHER type keeps this plain whole-field form; `date_range` is refused HERE — "never as one
+      // comparable value" — its ONLY legal reference is the dotted `.start`/`.end` endpoint address
+      // resolved in the branch below.
+      if (rule.fieldId === field.id) {
+        failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
+      }
+      if (target.type === 'detail') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+        )
+      }
+      // FWB-0 Layer 2 P1-2: record-link values are objects (`{ recordId }`). Simple visibility
+      // operators compare against scalar strings and would silently fail-open / never match.
+      // v1 fail-closed: reject record-link as a visibility dependency (save/publish).
+      if (target.type === 'record-link') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a record-link field (v1)`,
+        )
+      }
+      if (target.type === 'date_range') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a date_range field as a single value — reference its .start or .end endpoint (Lock-8 OD-L8-5)`,
+        )
+      }
+      // Lock-8 L8-A (§1.1, MS-8): explanation carries NO value at all (not merely non-scalar) —
+      // there is nothing to compare, so a dependent field can never legitimately key visibility off
+      // one. Unlike date_range there is no endpoint address to fall back to; the exclusion is total.
+      if (target.type === 'explanation') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference an explanation field (it carries no value)`,
+        )
+      }
+      if (target.type === 'department') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a department field as a scalar value (v1)`,
+        )
+      }
+      return
+    }
+
+    // Lock-8 L8-B OD-L8-5(a): the ONLY other legal `fieldId` shape is a date_range endpoint
+    // address `${fieldId}.start` / `${fieldId}.end` — every other unresolvable string (unknown
+    // field, malformed address, a dotted suffix off a non-date_range base) is rejected the same
+    // way "field must reference an existing field" always was.
+    const reference = resolveVisibilityFieldReference(rule.fieldId, fields)
+    if (!reference) {
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId must reference an existing field`,
       )
     }
-    if (rule.fieldId === field.id) {
+    if (reference.field.id === field.id) {
       failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
-    }
-    if (target.type === 'detail') {
-      failValidation(
-        context,
-        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
-      )
     }
   })
 
@@ -914,7 +2587,12 @@ function validateFormFieldVisibilityRules(
 
     visitState.set(fieldId, 1)
     const field = fieldMap.get(fieldId)
-    const dependencyId = field?.visibilityRule?.fieldId
+    // OD-L8-5(a): a dotted endpoint address resolves to its BASE field id for cycle-walk purposes
+    // — there is no separate "endpoint field" to visit, only the date_range field that owns it.
+    const rawDependencyId = field?.visibilityRule?.fieldId
+    const dependencyId = rawDependencyId
+      ? resolveVisibilityFieldReference(rawDependencyId, fields)?.field.id
+      : undefined
     if (dependencyId) {
       visit(dependencyId, [...path, fieldId])
     }
@@ -973,7 +2651,7 @@ function normalizeNodeFieldPermissions(
       failValidation(context, `${entryPath}.fieldId is required`)
     }
     if (typeof entry.access !== 'string' || !NODE_FIELD_ACCESS_VALUES.has(entry.access as NodeFieldAccess)) {
-      failValidation(context, `${entryPath}.access must be editable, readonly, or hidden`)
+      failValidation(context, `${entryPath}.access must be ${NODE_FIELD_ACCESS_VALUES_MESSAGE}`)
     }
     const fieldId = entry.fieldId.trim()
     if (seen.has(fieldId)) {
@@ -1023,6 +2701,89 @@ function normalizeNodeSignaturePolicy(
     ...(value.kind !== undefined ? { kind: (value.kind as string).trim() } : {}),
     ...(value.appliesTo !== undefined ? { appliesTo: value.appliesTo as SignaturePolicy['appliesTo'] } : {}),
   }
+}
+
+/** Lock-5 §1.1 — the complete `nodeOperationPolicy` sub-key set an `approval` node admits. */
+const NODE_OPERATION_POLICY_BOOLEAN_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+] as const
+const NODE_OPERATION_POLICY_RETURN_REVIEW_MODES = ['resume_forward', 'jump_back_to_current'] as const
+const NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES = ['never', 'reject_only', 'always'] as const
+
+/**
+ * Lock-5 §1.1 L5-A — normalize a node's `nodeOperationPolicy`. Modelled key-for-key on
+ * `normalizeNodeSignaturePolicy` above (gate A-6):
+ *   - an UNKNOWN sub-key `failValidation`s (400) — never silently stripped;
+ *   - an out-of-enum `returnReviewMode` / `commentRequired` `failValidation`s — never COERCED to a
+ *     default (the shipped `addSignMode` coercion is exactly the mislabel this program is repairing);
+ *   - absent, or an object whose every switch is absent, → `undefined` so the CALLER OMITS the key.
+ *     Authoring all-default switches therefore leaves the persisted config byte-identical (A-6's
+ *     emptiness half + Lock-4 §0's `buildStepConfig` omit-empty discipline).
+ *
+ * `admittedKeys` narrows the admitted set per node type (§2.5, the registry's job): an `approval`
+ * node admits all six; a `handler` node admits `allowTransfer` + `commentRequired` only (§1.6 /
+ * OD-L5-11(a)) and the caller raises `APPROVAL_HANDLER_CONFIG_INVALID` for the other three BEFORE
+ * calling this, so the message a handler author sees names the handler contract.
+ *
+ * DISCLOSED HAZARD (inherited from `signaturePolicy`, NOT introduced here — §1.1): because
+ * `normalizeApprovalGraph` also runs on every LOAD (`asApprovalGraph` / `asRuntimeGraph`),
+ * strict-on-unknown means a sub-key written by a NEWER server makes the graph unloadable on an
+ * older one. The fix, if wanted, is a forward-compatibility slice covering BOTH keys — never a
+ * weakening here.
+ */
+function normalizeNodeOperationPolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+  admittedKeys: readonly string[] = [
+    ...NODE_OPERATION_POLICY_BOOLEAN_KEYS,
+    'returnReviewMode',
+    'commentRequired',
+  ],
+): NodeOperationPolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  const allowed = new Set(admittedKeys)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      failValidation(context, `${path}.${key} is not supported`)
+    }
+  }
+  const normalized: NodeOperationPolicy = {}
+  for (const key of NODE_OPERATION_POLICY_BOOLEAN_KEYS) {
+    const raw = value[key]
+    if (raw === undefined) continue
+    if (typeof raw !== 'boolean') {
+      failValidation(context, `${path}.${key} must be a boolean`)
+    }
+    normalized[key] = raw as boolean
+  }
+  if (value.returnReviewMode !== undefined) {
+    if (!(NODE_OPERATION_POLICY_RETURN_REVIEW_MODES as readonly unknown[]).includes(value.returnReviewMode)) {
+      failValidation(
+        context,
+        `${path}.returnReviewMode must be ${NODE_OPERATION_POLICY_RETURN_REVIEW_MODES.join(' or ')}`,
+      )
+    }
+    normalized.returnReviewMode = value.returnReviewMode as NodeOperationPolicy['returnReviewMode']
+  }
+  if (value.commentRequired !== undefined) {
+    if (!(NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES as readonly unknown[]).includes(value.commentRequired)) {
+      failValidation(
+        context,
+        `${path}.commentRequired must be one of ${NODE_OPERATION_POLICY_COMMENT_REQUIRED_VALUES.join(', ')}`,
+      )
+    }
+    normalized.commentRequired = value.commentRequired as NodeOperationPolicy['commentRequired']
+  }
+  // An all-absent object is OMITTED rather than persisted as `{}` (§1.1) — byte-stability for a
+  // template whose author opened the tab and changed nothing.
+  return Object.keys(normalized).length > 0 ? normalized : undefined
 }
 
 /**
@@ -1092,7 +2853,10 @@ function validateNodeFieldPermissionsAgainstFormSchema(
 ): void {
   const fieldIds = new Set(formSchema.fields.map((field) => field.id))
   approvalGraph.nodes.forEach((node) => {
-    if (node.type !== 'approval') return
+    // Lock-3 R-12: a handler's `fieldPermissions` must be schema-checked too — §3 makes a handler's field
+    // permissions load-bearing (Lock-7 enforces them), so a permission referencing a deleted field must
+    // fail at authoring rather than being silently skipped.
+    if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { fieldPermissions?: NodeFieldPermission[] }
     for (const permission of config.fieldPermissions ?? []) {
       if (!fieldIds.has(permission.fieldId)) {
@@ -1103,6 +2867,204 @@ function validateNodeFieldPermissionsAgainstFormSchema(
       }
     }
   })
+  // Lock-7 L7-B (R-4) — the field-edit-enforcement publish pins land HERE, so all five authoring entry
+  // points (restore/create/update/publish/clone) raise them and the dispatch re-normalize path (which
+  // does NOT call this function) never does, keeping in-flight instances dispatchable (§2.1).
+  validateFieldEditEnforcementPins(approvalGraph, formSchema, context)
+}
+
+/**
+ * Lock-7 L7-B pins 1 & 3 — the NEW publish-time fail-closed field-edit-enforcement pins, raised at all
+ * FIVE authoring entry points beside `validateNodeFieldPermissionsAgainstFormSchema` (restore, create,
+ * update, publish, clone). NOT called on the dispatch re-normalize path (`asRuntimeGraph`), so it never
+ * makes an in-flight instance undispatchable (§2.1). Pin 2 (D-1 fix slice: ANY `fieldPermissions` entry
+ * on a non-write-capable node type, not just `editable`) lives in `normalizeApprovalGraph` — it must
+ * inspect the raw per-type config BEFORE the switch drops the key. This function reads the NORMALIZED
+ * graph: `fieldPermissions` entries survive only on approval / handler nodes, and driver references
+ * survive on approval / handler / condition nodes, so it has
+ * everything it needs.
+ */
+/**
+ * Lock-7 OD-L7-8 — the set of TOP-LEVEL form field ids that DRIVE routing: any field referenced by a
+ * `form_field_user` assignee source (on an approval/handler node), by a `ConditionRule.fieldId`, or by
+ * a condition-formula operand. Editing such a field mid-flight re-routes the graph (the executor +
+ * assignment resolver are rebuilt from the instance's CURRENT form_snapshot at every dispatch,
+ * `:6059-6065` / `:6270-6276`), so an approver editing it is choosing their own downstream reviewer /
+ * branch.
+ *
+ * SHARED by BOTH the publish pin (which rejects a driver marked `editable`, an authoring-time check)
+ * AND the runtime write guard in `applyHandlerFieldWrites` (which refuses a WRITE to any driver field
+ * INDEPENDENT of the matrix — because OD-L7-9's absent≡editable otherwise leaves a driver simply
+ * OMITTED from a handler's matrix default-editable and therefore writable). Factored so the two can
+ * never drift.
+ */
+function collectRoutingDriverFieldIds(
+  nodes: ReadonlyArray<{ type: ApprovalNodeType; config: unknown }>,
+): Set<string> {
+  const driverFieldIds = new Set<string>()
+  for (const node of nodes) {
+    const config = node.config as {
+      assigneeSources?: ApprovalAssigneeSource[]
+      branches?: ConditionBranch[]
+    }
+    if (node.type === 'approval' || node.type === 'handler') {
+      for (const source of config.assigneeSources ?? []) {
+        // form_field_user is the shipped driver kind. Lock-2's field-derived kinds
+        // (manager_at_level etc.) are conditionally drivers too, but Lock-2 is not on main and
+        // OD-L7-8 cites them without re-adjudicating — deferred to when Lock-2 lands.
+        if (source.kind === 'form_field_user' && typeof source.fieldId === 'string' && source.fieldId) {
+          driverFieldIds.add(source.fieldId)
+        }
+      }
+    }
+    if (node.type === 'condition') {
+      for (const branch of config.branches ?? []) {
+        for (const rule of branch.rules ?? []) {
+          if (typeof rule.fieldId === 'string' && rule.fieldId) driverFieldIds.add(rule.fieldId)
+        }
+        if (branch.formula?.expression) {
+          for (const fieldId of extractApprovalConditionFormulaFieldIds(branch.formula.expression)) {
+            driverFieldIds.add(fieldId)
+          }
+        }
+      }
+    }
+  }
+  return driverFieldIds
+}
+
+function validateFieldEditEnforcementPins(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const routingDriverFieldIds = collectRoutingDriverFieldIds(approvalGraph.nodes)
+
+  // --- Lock-7B §1.2 (OD-L7B-3/OD-L7B-4/OD-L7B-9) — the three NEW `required` publish rejections. ---
+  // Publish-only by construction: this function is reached ONLY from
+  // `validateNodeFieldPermissionsAgainstFormSchema`, itself called from the five authoring entry
+  // points (restore/create/update/publish/clone) and NEVER from the dispatch re-normalize path
+  // (`asRuntimeGraph` calls `normalizeApprovalGraph` directly, not this function) — so `context` here
+  // is never `STORED_RUNTIME_CONTEXT`. The explicit guard below states that exemption at the site
+  // itself (§2.1), mirroring the S-4 D-1 choke's own `context !== STORED_RUNTIME_CONTEXT` guard,
+  // rather than relying only on the caller graph.
+  //
+  // ORDERING PIN (§1.2 item 2 / P3-1): the driver-required check below MUST run before pin 1's own
+  // (widened) test further down, so a driver field marked `required` always yields
+  // `APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED` — never pin 1's generic driver message (G-7
+  // asserts the code, and therefore asserts the order).
+  if (context !== STORED_RUNTIME_CONTEXT) {
+    const formFieldTypeById = new Map(formSchema.fields.map((field) => [field.id, field.type]))
+    for (const node of approvalGraph.nodes) {
+      if (node.type !== 'approval' && node.type !== 'handler') continue
+      const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
+      for (const permission of permissions) {
+        if (permission.access !== 'required') continue
+        // OD-L7B-3 — `required` is satisfiable on HANDLER nodes only in v1: an approval node has no
+        // field write surface (OD-L7-3), so `required` there is unsatisfiable by anyone at that node.
+        if (node.type === 'approval') {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks field ${permission.fieldId} required on an approval node; required is satisfiable on handler nodes only (Lock-7B OD-L7B-3)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_NODE_TYPE',
+            { nodeKey: node.key, nodeType: node.type, fieldId: permission.fieldId },
+          )
+        }
+        // OD-L7B-4 — a routing driver is never writable at any node (`:10482`, matrix-independent),
+        // so `required` on one is unsatisfiable. SAME shared `collectRoutingDriverFieldIds` the
+        // runtime write guard and pin 1 use (Lock-7 OD-L7-8 discipline) — one derivation, no drift.
+        if (routingDriverFieldIds.has(permission.fieldId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} required; a routing driver may never be required (Lock-7B OD-L7B-4)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+            { nodeKey: node.key, fieldId: permission.fieldId },
+          )
+        }
+        // OD-L7B-9 — a field type that can never hold a value at a handler node: `explanation`
+        // carries no submitted value at any time (Lock-8 A-1); `record-link`/`attachment` are
+        // refused at handler write time pending binding + authz (`:10508`) — a TEMPORARY refusal,
+        // reopened in whichever slice adds that type's handler write support.
+        const fieldType = formFieldTypeById.get(permission.fieldId)
+        if (fieldType === 'explanation' || fieldType === 'record-link' || fieldType === 'attachment') {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks field ${permission.fieldId} (type ${fieldType}) required; that type can never hold a value at a handler node (Lock-7B OD-L7B-9)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_TYPE',
+            { nodeKey: node.key, fieldId: permission.fieldId, fieldType },
+          )
+        }
+      }
+    }
+  }
+
+  // --- Pin 1 (OD-L7-8(a) / G-4): a routing driver may not be `editable` OR `required` at ANY node. ---
+  // The load-bearing pin: it closes a privilege-escalation path that opens the moment writes land.
+  // Authoring-time half — reject a driver marked explicitly WRITABLE (Lock-7B §2.2 widens this from a
+  // bare `=== 'editable'` equality to set membership over the shared writable set, so a driver marked
+  // `required` cannot slip past this pin either — defense-in-depth ONLY: the actual escalation stays
+  // closed by the matrix-independent runtime driver guard at `:10482` and by the OD-L7B-4 rejection
+  // above, which — per the ordering pin — always fires FIRST for a `required` driver). The runtime
+  // write guard in applyHandlerFieldWrites closes the DEFAULT-editable (absent-matrix) case that
+  // absent≡editable (OD-L7-9) leaves open, since an authoring-time "reject absent driver" would be a
+  // §2.1 narrowing.
+  if (routingDriverFieldIds.size > 0) {
+    for (const node of approvalGraph.nodes) {
+      if (node.type !== 'approval' && node.type !== 'handler') continue
+      const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
+      for (const permission of permissions) {
+        if (NODE_FIELD_ACCESS_WRITABLE_VALUES.has(permission.access) && routingDriverFieldIds.has(permission.fieldId)) {
+          // P3-1: §2.2 authorised widening the PREDICATE from `=== 'editable'` to writable-set
+          // membership, not rewriting the author-facing TEXT for the pre-existing `editable` case —
+          // the shipped Lock-7 wording is kept byte-for-byte for that legacy input; only a member
+          // OTHER than `editable` (i.e. `required`, defense-in-depth only — OD-L7B-4 above always
+          // fires first for a `required` driver, per the ordering pin) gets the widened "writable"
+          // phrasing, since "may never be editable" would be actively wrong for that case.
+          const message =
+            permission.access === 'editable'
+              ? `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`
+              : `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} ${permission.access}; a routing driver may never be writable (Lock-7 OD-L7-8)`
+          failValidation(context, message)
+        }
+      }
+    }
+  }
+
+  // --- Pin 3 (G-5): an unfillable required × hidden field. ---
+  // A `required: true` field is unfillable iff it is NOT guaranteed-filled-at-create AND `hidden` at
+  // EVERY write-capable node (approval + handler). "Guaranteed-filled-at-create" = required with NO
+  // `visibilityRule`: AGE's `getVisibleFormFieldIds` no-rule-≡-visible arm (AGE:250-251, re-read at
+  // this baseline) makes such a field always visible, and `validateApprovalFormData` (AGE:649) forces
+  // a required-visible field to be filled at create. A field carrying a `visibilityRule` MAY be
+  // create-hidden, so if it is also hidden at every write node, nobody can ever fill it. We
+  // deliberately OVER-reject a `visibilityRule` that is provably always-visible (there is no shipped
+  // always-visible analyzer for `visibilityRule`, unlike formulas) — fail-closed per master M4. A node
+  // with NO entry for the field ≡ `editable` (OD-L7-9) ⇒ fillable there ⇒ not unfillable.
+  const writeCapableNodes = approvalGraph.nodes.filter((node) => node.type === 'approval' || node.type === 'handler')
+  for (const field of formSchema.fields) {
+    if (field.required !== true) continue
+    if (!field.visibilityRule) continue
+    if (writeCapableNodes.length === 0) continue
+    let firstHidingNodeKey: string | null = null
+    let hiddenEverywhere = true
+    for (const node of writeCapableNodes) {
+      const entry = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions
+        ?.find((permission) => permission.fieldId === field.id)
+      if (entry?.access === 'hidden') {
+        // Deterministic node key for the error (graph order) — the field is hidden at several.
+        if (!firstHidingNodeKey) firstHidingNodeKey = node.key
+      } else {
+        hiddenEverywhere = false
+        break
+      }
+    }
+    if (hiddenEverywhere && firstHidingNodeKey) {
+      failValidation(
+        context,
+        `formSchema field ${field.id} is required but hidden at every write-capable node (node ${firstHidingNodeKey}); it is unfillable (Lock-7 G-5)`,
+      )
+    }
+  }
 }
 
 /**
@@ -1258,6 +3220,575 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
   }
 }
 
+/**
+ * Lock-4 §3 F4-B, gate B-s10 — cross-field publish/author-time 400: an `emptyAssigneePolicy:
+ * 'designated'` node must carry a non-empty `emptyAssigneeFallback`. Quoting the ratified text
+ * (docs/development/approval-lock4-flow-policies-20260817.md §3): "an empty primary source with
+ * 'designated' dispatches to the designated set" presupposes there IS a designated set.
+ *
+ * Called ONLY from the FIVE authoring entry points (create/update/publish/restore/clone), mirroring
+ * `validateFieldEditEnforcementPins`'s own documented posture — NOT from `normalizeApprovalGraph`
+ * (which `asApprovalGraph`/`asRuntimeGraph` re-run on every LOAD and DISPATCH). Enforcing this rule
+ * inside the re-normalize path would make an already-published, already-dispatching instance's graph
+ * throw on its next read if the rule ever tightened; the lock's own words are "fail-closed at the
+ * AUTHORING CHOKE, not at dispatch" — this function IS that choke, deliberately not the load path.
+ *
+ * Takes the ALREADY-NORMALIZED graph (typed `emptyAssigneePolicy`/`emptyAssigneeFallback`), exactly
+ * like `validateNodeTimeoutConfigs` immediately above — both run downstream of `assertApprovalGraph`.
+ */
+function validateEmptyAssigneeFallbackConfigs(approvalGraph: ApprovalGraph): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config = node.config as { emptyAssigneePolicy?: EmptyAssigneePolicy; emptyAssigneeFallback?: EmptyAssigneeFallback }
+    // Fix-round P2-3 (gate P3A-F4B-20260819) — symmetric to the check below: `emptyAssigneeFallback`
+    // is a dangling key under any policy value OTHER than `'designated'` (types/approval-product.ts's
+    // own contract: "ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
+    // other policy value"). Without this, a present-but-inert fallback widens the P1-1 bricking
+    // surface to any stray key, not just authors who actually use the feature. X-4 values-free: the
+    // message carries the node key and the POLICY NAME only, never the fallback's ids.
+    if (config.emptyAssigneeFallback !== undefined && config.emptyAssigneePolicy !== 'designated') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} emptyAssigneeFallback is only allowed when emptyAssigneePolicy is 'designated' (got ${config.emptyAssigneePolicy ?? 'absent'})`,
+        400,
+        'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED',
+      )
+    }
+    if (config.emptyAssigneePolicy !== 'designated') continue
+    const fallback = config.emptyAssigneeFallback
+    const hasTarget = Boolean(fallback && ((fallback.userIds?.length ?? 0) > 0 || (fallback.roleIds?.length ?? 0) > 0))
+    if (!hasTarget) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} emptyAssigneeFallback is required when emptyAssigneePolicy is 'designated'`,
+        400,
+        'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED',
+      )
+    }
+  }
+}
+
+/**
+ * Lock-3 §1.3 — handler topology legality (publish/author-time 400). A handler is LEGAL on the main
+ * path between start and end, and inside a `condition` branch body. It is ILLEGAL in v1 inside a
+ * parallel region and as a parallel `joinNodeKey`: `collectAllBranchAssignees` and the fingerprint
+ * gate both skip non-`approval` nodes, so a handler in one branch sharing an assignee with a sibling is
+ * invisible to every publish-time cross-branch gate and would collide only at runtime (§1.4). Checked
+ * with the SHIPPED `collectParallelRegionNodeKeys` primitive plus a `joinNodeKey` equality test — no
+ * new walker. Widening is OD-L3-1(b) and must first extend those two gates. Distinct ServiceError codes
+ * so the two illegal placements are individually testable (G-8).
+ */
+function validateHandlerNodePlacement(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  const joinNodeKeys = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const joinNodeKey = (node.config as { joinNodeKey?: unknown }).joinNodeKey
+    if (typeof joinNodeKey === 'string' && joinNodeKey.trim()) joinNodeKeys.add(joinNodeKey.trim())
+  }
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'handler') continue
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node is not supported inside a parallel region in v1`,
+        400,
+        'APPROVAL_HANDLER_IN_PARALLEL',
+        { nodeKey: node.key },
+      )
+    }
+    if (joinNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a handler node cannot be a parallel join node in v1`,
+        400,
+        'APPROVAL_HANDLER_AS_JOIN',
+        { nodeKey: node.key },
+      )
+    }
+  }
+}
+
+/**
+ * Lock-4 F4-A gate A-1 (OD-L4-1(a)) — "A non-`manual` node inside a parallel region is rejected in
+ * v1." Structural placement (approvalType admitted only on `type:'approval'`, forbidden elsewhere)
+ * is enforced per-node inside `normalizeApprovalGraph`'s node loop (a graph-shape-only check, no
+ * `edges` needed); THIS check needs the full graph (`collectParallelRegionNodeKeys` walks branch
+ * edges), so — same reason `validateHandlerNodePlacement` above is a separate graph-level pass and
+ * not folded into the per-node switch — it runs as its own pass, wired at every one of the FIVE
+ * `normalizeApprovalGraph` call sites that also call `validateHandlerNodePlacement` (createTemplate,
+ * updateTemplate, publishTemplate, restoreTemplateVersion, cloneTemplate). A non-`manual` node MAY
+ * still be a condition-branch TARGET (OD-L4-1(a)) — condition branches are not parallel regions, so
+ * no separate check is needed for that case.
+ */
+export function validateApprovalTypePlacement(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const approvalType = (node.config as { approvalType?: unknown }).approvalType
+    if (approvalType === undefined || approvalType === 'manual') continue
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a non-manual approvalType is not supported inside a parallel region in v1`,
+        400,
+        'APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED',
+        { nodeKey: node.key },
+      )
+    }
+  }
+}
+
+/**
+ * Fingerprint of a DYNAMIC assignee source: equal fingerprints ⇒ the sources PROVABLY resolve to
+ * the same user(s) for every request (same kind + same parameters). Static kinds return null —
+ * duplicate static assignees across parallel branches are already rejected inside
+ * `normalizeApprovalGraph` (`collectBranchAssignees`). FE mirror:
+ * apps/web/src/approvals/parallelEdit.ts `dynamicAssigneeSourceFingerprint` — keep in lockstep.
+ */
+function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): string | null {
+  switch (source.kind) {
+    case 'requester':
+    case 'direct_manager':
+    case 'dept_head':
+      return source.kind
+    case 'continuous_managers':
+      return `continuous_managers:${source.levels}`
+    case 'manager_at_level':
+      return `manager_at_level:${source.level}`
+    case 'continuous_dept_heads':
+      return `continuous_dept_heads:${source.levels}`
+    case 'dept_head_at_level':
+      return `dept_head_at_level:${source.level}`
+    case 'prior_node_approver':
+      // Lock-1 §K3 / §2.4 locked entry: provably identical for the same referenced node — two
+      // branches asking "the deciders of node X" resolve the same people on every request.
+      return `prior_node_approver:${source.nodeKey}`
+    case 'form_field_user':
+      return `form_field_user:${source.fieldId}`
+    case 'form_field_user_manager':
+    case 'form_field_user_dept_head':
+      // Lock-2 §2.5 locked entries: `<kind>:<fieldId>:<level>` — provably identical for the same
+      // field and level (the same chosen contact walks the same chain to the same position on
+      // every request), so identical sources on parallel branches are publish-blocked, unlike
+      // K2's deliberate `null`. Delegates to the SAME exported producer the create-time snapshot
+      // freeze and the resolver arms use, so fingerprint and snapshot key cannot drift.
+      return fieldDerivedAssigneeSourceKey(source)
+    case 'static_user':
+    case 'static_role':
+      // Statics are owned by collectBranchAssignees' duplicate check, not this gate.
+      return null
+    case 'requester_choice':
+      // Lock-1 §K2: `null` DELIBERATELY, not an oversight — the `_exhaustive` guard below forces
+      // this entry to exist, and this is the recorded decision. Two `requester_choice` sources on
+      // parallel branches are NOT provably identical: the requester may pick different people per
+      // branch, so per this gate's own rule (only provably-identical sources are publish-blocked)
+      // the same-person collision belongs to the RUNTIME
+      // `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` 409 guard
+      // (`assertNoActiveAssignmentConflicts`), which sees the actual chosen ids. Publish cannot.
+      return null
+    case 'user_group':
+      // Lock-1 §K1 / §2.4 locked entry: `user_group:<sorted groupIds joined by ','>` — SORTED so
+      // [a,b] and [b,a] fingerprint identically (provably the same resolved set either order).
+      // Two branches referencing the same group set are provably identical (EAGER_EXPANSION
+      // freezes the SAME snapshot for both), so parallel-duplicate publish-blocking applies.
+      return `user_group:${[...source.groupIds].sort().join(',')}`
+    default: {
+      const _exhaustive: never = source
+      return _exhaustive
+    }
+  }
+}
+
+/**
+ * Publish preflight: reject a parallel gateway whose branches carry PROVABLY-IDENTICAL dynamic
+ * assignee sources. Such branches resolve to the same user(s) on EVERY request, so fan-out's
+ * `assertNoActiveAssignmentConflicts` raises the typed 409
+ * `APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT` for 100% of instances — authoring was false-green.
+ * Raised here with the SAME code (status 400: an authoring-time config error, like
+ * `APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED`) so the shape can never reach a published definition.
+ *
+ * Only provably-identical sources are flagged: DIFFERENT kinds (requester vs direct_manager) or
+ * DIFFERENT parameters (manager_at_level 1 vs 2) may still collide for SOME org shapes and remain
+ * the runtime guard's job — publish cannot know the org. Deliberately publish-scoped (NOT
+ * create/update, NOT normalize): stored drafts must stay readable and re-saveable while being
+ * fixed. The caller skips it when the publish policy carries `autoApproval.mergeAdjacentApprover`
+ * — the same exemption `allowParallelDuplicateAssignees` grants the static check, because the
+ * merge machinery legitimately absorbs same-approver overlap.
+ *
+ * Traversal (review #4433 owner P2): the walk enumerates EVERY runtime-reachable path inside a
+ * branch — NOT just the first-outgoing-edge chain. Condition successors match
+ * `resolveConditionTarget` / `collectBranchAssignees`: configured `branches[].edgeKey` +
+ * `defaultEdgeKey` when present; when default is ABSENT, configured rule edges plus the first
+ * outgoing fallback. Stray outgoing edges beyond that fallback are never walked. Linear nodes follow
+ * the first outgoing edge. The branch's fingerprint set is the UNION over all condition paths up
+ * to the join node, and a conflict is flagged when SOME path through one branch and SOME path
+ * through another carry the identical dynamic source — exactly the pairings for which the runtime
+ * 409 is reachable. Cycles are cut with a per-branch visited set. A nested parallel node
+ * (normalize rejects it on authoring paths; a legacy graph could still carry one) is treated
+ * defensively as a PASS-THROUGH fan-out over its configured `branches` edgeKeys (all
+ * simultaneously active). Fingerprints are deduped WITHIN a branch first (sequential same-source
+ * nodes — or the same source on two ALTERNATIVE paths of one branch — are not a parallel
+ * conflict) and then compared across branches. FE mirror: apps/web/src/approvals/parallelEdit.ts
+ * `parallelDynamicAssigneeConflicts` — SAME traversal, keep in lockstep.
+ */
+function assertNoParallelDynamicAssigneeConflicts(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of approvalGraph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const parallelConfig = node.config as { branches: string[]; joinNodeKey: string }
+    const seenAcrossBranches = new Map<string, string>()
+    for (const branchEdgeKey of parallelConfig.branches) {
+      const branchFingerprints = new Map<string, string>()
+      const entryKey = edgeByKey.get(branchEdgeKey)?.target
+      // FIFO worklist in edge-declaration order (deterministic carrier node per fingerprint); the
+      // visited set both cuts cycles and bounds the walk to each node at most once per branch.
+      const queue: string[] = entryKey === undefined ? [] : [entryKey]
+      const visited = new Set<string>()
+      for (let head = 0; head < queue.length; head += 1) {
+        const currentKey = queue[head]
+        if (currentKey === parallelConfig.joinNodeKey || visited.has(currentKey)) continue
+        visited.add(currentKey)
+        const current = nodeByKey.get(currentKey)
+        if (!current) continue
+        if (current.type === 'approval') {
+          const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+          for (const source of sources) {
+            const fingerprint = dynamicAssigneeSourceFingerprint(source)
+            if (fingerprint && !branchFingerprints.has(fingerprint)) branchFingerprints.set(fingerprint, current.key)
+          }
+        }
+        const targets = runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)
+        for (const target of targets) queue.push(target)
+      }
+      for (const [fingerprint, carrierNodeKey] of branchFingerprints) {
+        const priorNodeKey = seenAcrossBranches.get(fingerprint)
+        if (priorNodeKey !== undefined) {
+          throw new ServiceError(
+            `approvalGraph parallel node ${node.key} has branches whose approvers provably resolve identically (${fingerprint}) — every request would fail with a parallel assignment conflict`,
+            400,
+            'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+            { nodeKey: node.key, source: fingerprint, conflictingNodeKeys: [priorNodeKey, carrierNodeKey] },
+          )
+        }
+        seenAcrossBranches.set(fingerprint, carrierNodeKey)
+      }
+    }
+  }
+}
+
+/**
+ * Runtime-possible successor node keys for a walk that must match
+ * `ApprovalGraphExecutor.resolveConditionTarget` / `firstTargetForNode`:
+ *   - condition: declared branches[].edgeKey + defaultEdgeKey (when set); if default is
+ *     ABSENT, also the first outgoing fallback. Other stray edges are ignored. EdgeKeys that do not
+ *     resolve to an edge sourced by this node are skipped (authoring's collectBranchAssignees
+ *     fails hard on the same shape; this helper is also used by the publish dynamic-conflict
+ *     walk where a skip is safe).
+ *   - parallel (defensive nested): configured branches[] edgeKeys only.
+ *   - linear: first outgoing edge only.
+ */
+function runtimeSuccessorTargets(
+  node: ApprovalGraph['nodes'][number],
+  edgeByKey: Map<string, ApprovalGraph['edges'][number]>,
+  outgoingBySource: Map<string, ApprovalGraph['edges']>,
+): string[] {
+  if (node.type === 'condition') {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      if (typeof raw !== 'string') return
+      const key = raw.trim()
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) {
+      pushKey(branch.edgeKey)
+    }
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) {
+      pushKey(config.defaultEdgeKey)
+    }
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      if (!edge || edge.source !== node.key) continue
+      targets.push(edge.target)
+    }
+    if (!hasDefault) {
+      const firstEdge = outgoingBySource.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) {
+        targets.push(firstEdge.target)
+      }
+    }
+    return targets
+  }
+
+  if (node.type === 'parallel') {
+    const config = node.config as { branches?: string[] }
+    const targets: string[] = []
+    for (const branchEdgeKey of config.branches ?? []) {
+      const edge = edgeByKey.get(branchEdgeKey)
+      if (edge && edge.source === node.key) targets.push(edge.target)
+    }
+    return targets
+  }
+
+  const firstEdge = outgoingBySource.get(node.key)?.[0]
+  return firstEdge ? [firstEdge.target] : []
+}
+
+/**
+ * Lock-1 §K3 publish gate: every `prior_node_approver` reference must name an `approval` node
+ * STRICTLY UPSTREAM on EVERY runtime-reachable path from the start node to the carrying node —
+ * a DOMINANCE check ("every path" is load-bearing: a node reachable only through one condition
+ * branch resolves empty on the other, and a node inside a parallel region referenced from outside
+ * it may not have decided when the referencing node activates). No shipped gate performs this —
+ * `assertNoParallelDynamicAssigneeConflicts` walks FORWARD from a branch entry unioning
+ * fingerprints, a different predicate; what THIS gate reuses is its primitives
+ * (`runtimeSuccessorTargets`, the edge maps, the visited set), exactly as Lock-1 §K3 instructs.
+ *
+ * Mechanism: T strictly dominates C in the runtime-successor graph rooted at the start node ⟺
+ * removing T makes C unreachable from start (with T ≠ C). The removal-reachability test is run
+ * per reference; explicit dangling / non-approval / self checks come first so each failure names
+ * its reason. Deliberately CONSERVATIVE for parallel regions: a target inside one parallel branch
+ * never dominates a node past the join (a sibling-branch path avoids it), so such references are
+ * rejected even under joinMode 'all' — the lock's "may not have decided" posture; a reference to
+ * an upstream node WITHIN the same branch passes (no path through a sibling branch can re-enter
+ * this branch before the join).
+ *
+ * Deliberately publish-scoped (NOT create/update, NOT normalize) like
+ * `assertNoParallelDynamicAssigneeConflicts`: stored drafts stay readable and re-saveable while
+ * being fixed; instances only ever run PUBLISHED graphs, so publish is the single admission point
+ * (§2.2: an illegal reference is an authoring-time 400, never a dispatch-time surprise). Errors
+ * are values-free: node keys and source indexes only (§2.6 — template-authored identifiers).
+ */
+export function assertPriorNodeApproverReferencesUpstream(approvalGraph: ApprovalGraph): void {
+  const edgeByKey = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const outgoingBySource = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of approvalGraph.edges) {
+    const existing = outgoingBySource.get(edge.source)
+    if (existing) existing.push(edge)
+    else outgoingBySource.set(edge.source, [edge])
+  }
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  const startKey = approvalGraph.nodes.find((node) => node.type === 'start')?.key ?? null
+
+  // Keys reachable from start over runtime-possible successors, treating `skipKey` (the reference
+  // target under test) as removed. FIFO worklist + visited set (cycle-safe, each node once).
+  const reachableWithout = (skipKey: string): Set<string> => {
+    const visited = new Set<string>()
+    if (startKey === null || startKey === skipKey) return visited
+    const queue: string[] = [startKey]
+    for (let head = 0; head < queue.length; head += 1) {
+      const currentKey = queue[head]
+      if (currentKey === skipKey || visited.has(currentKey)) continue
+      visited.add(currentKey)
+      const current = nodeByKey.get(currentKey)
+      if (!current) continue
+      for (const target of runtimeSuccessorTargets(current, edgeByKey, outgoingBySource)) {
+        queue.push(target)
+      }
+    }
+    return visited
+  }
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+    sources.forEach((source, sourceIndex) => {
+      if (source.kind !== 'prior_node_approver') return
+      const targetNodeKey = source.nodeKey
+      const fail = (reason: string, message: string): never => {
+        throw new ServiceError(message, 400, 'APPROVAL_ASSIGNEE_PRIOR_NODE_REFERENCE_INVALID', {
+          nodeKey: node.key,
+          sourceIndex,
+          targetNodeKey,
+          reason,
+        })
+      }
+      const target = nodeByKey.get(targetNodeKey)
+      if (!target) {
+        fail('dangling', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references a node (${targetNodeKey}) that does not exist`)
+      }
+      if (target.key === node.key) {
+        fail('self', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver references its own node`)
+      }
+      if (target.type !== 'approval') {
+        fail('not-approval', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver must reference an approval node (${targetNodeKey} is ${target.type})`)
+      }
+      // Strict dominance by removal-reachability: if the carrier is still reachable from start
+      // with the target removed, SOME runtime-reachable path avoids the target (downstream,
+      // sibling condition branch, or sibling parallel branch) — reject. An entirely-unreachable
+      // carrier passes vacuously (it can never activate; other gates own dead-node hygiene).
+      if (reachableWithout(targetNodeKey).has(node.key)) {
+        fail('not-upstream-on-every-path', `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] prior_node_approver target ${targetNodeKey} is not strictly upstream on every runtime-reachable path`)
+      }
+    })
+  }
+}
+
+/**
+ * Reject a rules-mode condition branch whose `rules` array is EMPTY. The runtime
+ * (`ApprovalGraphExecutor.resolveConditionTarget`) evaluates a rules-mode branch as
+ * `branch.rules.every(...)`, which is vacuously TRUE over `[]` — an empty branch silently captures
+ * ALL traffic (first-match-wins) and dead-codes the default edge and every later branch. The
+ * fall-through "else" is the node's `defaultEdgeKey` — a separate mechanism — so an empty rules
+ * array in a non-formula branch is never legitimate. A formula branch may carry `rules: []`
+ * only when its parsed AST depends on request-specific form/requester data. A literal-only
+ * formula is another match-all capture shape and is rejected by the same choke points.
+ *
+ * Deliberately NOT inside `normalizeApprovalGraph`: `asApprovalGraph` re-normalizes STORED rows on
+ * plain reads, and a retroactive reject there could brick reads of existing templates. Instead this
+ * raises its own code directly (status 400) at the create / update / publish choke points, exactly
+ * like `validateNodeTimeoutConfigs`, so all three surface the same error while stored-graph READS
+ * stay unaffected (the runtime additionally fails closed on legacy graphs: an empty rules-mode
+ * branch never matches).
+ */
+function validateConditionBranchRules(approvalGraph: ApprovalGraph, formSchema: FormSchema): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as { branches?: unknown }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!isRecord(branch)) return
+      const formula = isRecord(branch.formula) ? branch.formula : null
+      const formulaExpression = formula && typeof formula.expression === 'string'
+        ? formula.expression
+        : null
+      const hasDynamicFormula = formulaExpression !== null
+        && approvalConditionFormulaHasDynamicDependency(formulaExpression)
+      const rules = branch.rules
+      if (formulaExpression === null && Array.isArray(rules) && rules.length === 0) {
+        throw new ServiceError(
+          `approvalGraph node ${node.key} condition branch ${branchIndex + 1} has no rules and no formula — an empty rules branch would match every request`,
+          400,
+          'APPROVAL_CONDITION_BRANCH_RULES_EMPTY',
+          { nodeKey: node.key, branchIndex },
+        )
+      }
+      if (formulaExpression !== null && !hasDynamicFormula) {
+        throw new ServiceError(
+          'Condition formula must depend on request data',
+          400,
+          'APPROVAL_CONDITION_FORMULA_STATIC',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaHasCaptureProneIdentity(formulaExpression)
+      ) {
+        throw new ServiceError(
+          'Condition formula uses a capture-prone identity',
+          400,
+          'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE',
+          { branchIndex },
+        )
+      }
+      if (
+        formulaExpression !== null
+        && hasDynamicFormula
+        && approvalConditionFormulaIsProvablyAlwaysTrue(formulaExpression, formSchema)
+      ) {
+        throw new ServiceError(
+          'Condition formula must not capture every valid request',
+          400,
+          'APPROVAL_CONDITION_FORMULA_ALWAYS_TRUE',
+          { branchIndex },
+        )
+      }
+    })
+  }
+}
+
+/**
+ * FWB-0 Layer 2 P1-2: simple condition rules compare form values to scalar strings with `===`.
+ * A record-link value is `{ recordId: string }` — comparisons would silently never match.
+ * v1 fail-closed: reject any condition rule (or formula field ref) that targets a record-link field
+ * at create/update/publish. Formula type-inference already marks record-link unsupported; this
+ * guard makes the simple-rules path equally fail-closed with an explicit message.
+ *
+ * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2) extends the SAME fail-closed
+ * reasoning to `date_range`: its value is `{ start, end }`, also non-scalar, also silently
+ * never-matching under `===`/`gt`/`lt`. Graph CONDITION rules (branching) are a separate mechanism
+ * from field `visibilityRule` (OD-L8-5 governs the latter with a dotted `.start`/`.end` endpoint
+ * address); this lock does not extend endpoint addressing to condition branches — `date_range` is
+ * simply excluded from them, exactly like record-link, rather than left auto-admitted and
+ * fail-open (§0.3's governing fact: a new member auto-admits into every hand-maintained gate).
+ *
+ * Lock-8 L8-A (§1.1, MS-10) reuses the SAME mechanism for `explanation`: it carries no value at
+ * all (a stricter case than "non-scalar" — there is nothing to compare, ever), so a condition rule
+ * or formula referencing one can never legitimately match. Name kept generic (this function
+ * already covers non-scalar AND valueless types under one gate) rather than adding a parallel one.
+ */
+function validateNonScalarFieldsNotUsedInConditions(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const nonScalarFieldTypes: ReadonlyArray<{ type: FormField['type']; label: string }> = [
+    { type: 'record-link', label: 'record-link' },
+    { type: 'date_range', label: 'date_range' },
+    { type: 'explanation', label: 'explanation' },
+    { type: 'department', label: 'department' },
+  ]
+  const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
+  const nonScalarFieldIds = new Set(
+    nonScalarFieldTypes.flatMap(({ type }) =>
+      (formSchema.fields ?? []).filter((field) => field.type === type).map((field) => field.id),
+    ),
+  )
+  if (nonScalarFieldIds.size === 0) return
+  const labelFor = (fieldId: string): string =>
+    nonScalarFieldTypes.find((entry) => entry.type === fieldTypeById.get(fieldId))?.label ?? 'non-scalar'
+
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as {
+      branches?: Array<{ rules?: Array<{ fieldId?: string }>; formula?: { expression?: string } }>
+    }
+    if (!Array.isArray(config.branches)) continue
+    config.branches.forEach((branch, branchIndex) => {
+      if (!branch || typeof branch !== 'object') return
+      const rules = Array.isArray(branch.rules) ? branch.rules : []
+      for (const rule of rules) {
+        const fieldId = typeof rule?.fieldId === 'string' ? rule.fieldId.trim() : ''
+        if (fieldId && nonScalarFieldIds.has(fieldId)) {
+          failValidation(
+            context,
+            `approvalGraph node ${node.key} condition branch ${branchIndex + 1} cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
+          )
+        }
+      }
+      // Formula path: reject explicit `{fieldId}` references to non-scalar fields with a clear
+      // message (type inference would also fail; keep the error explicit for authors).
+      const expression = typeof branch.formula?.expression === 'string' ? branch.formula.expression : ''
+      if (expression) {
+        for (const fieldId of nonScalarFieldIds) {
+          // Token-aware enough for authoring: `{fieldId}` or `{ fieldId }` field refs.
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(expression)) {
+            failValidation(
+              context,
+              `approvalGraph node ${node.key} condition branch ${branchIndex + 1} formula cannot reference ${labelFor(fieldId)} field ${fieldId} (v1)`,
+            )
+          }
+        }
+      }
+    })
+  }
+}
+
 function normalizeApprovalGraph(
   value: unknown,
   context: ValidationContext,
@@ -1288,6 +3819,94 @@ function normalizeApprovalGraph(
       config: {} as Record<string, unknown>,
     }
 
+    // Lock-7 L7-B pin 2 (OD-L7-4(a) / G-12), WIDENED by the D-1 fix slice
+    // (docs/development/approval-lock7-field-edit-enforcement-20260817.md §2.7 D-1) — a PRESENT
+    // `fieldPermissions` key (any shape, not just an array of entries) on a node type with NO
+    // field-permission surface is REJECTED here, not the shipped SILENT drop. The switch below
+    // rebuilds cc/parallel/condition from a per-type whitelist and sends start/end to
+    // `default: config = {}`, so ANY `fieldPermissions` value was previously dropped with no error and
+    // no effect — an author configuring it believed the field hidden/read-only/protected when it was
+    // not. P4-B originally closed only the `editable` arm (the load-bearing privilege-escalation
+    // half); this closes the `readonly`/`hidden` arm D-1 left open, per OD-L7-4's ratified boundary:
+    // field permissions belong to approval + handler node types ONLY — every OTHER access value on
+    // these types is equally unsupported, not just `editable`.
+    //
+    // The guard is `!== undefined` on the RAW key, not `Array.isArray(...) && length > 0`: a
+    // non-array shape (an object, a string, `null`) is exactly the same silent-loss class D-1 names —
+    // it is not an array, so the switch below drops it unconditionally too, and
+    // `normalizeNodeFieldPermissions` hard-400s the identical shape on an approval/handler node
+    // (`must be an array`), so tolerating it here would leave a type-asymmetric residual channel.
+    // Deliberately NOT `'fieldPermissions' in node.config`: `in` is true for a key explicitly present
+    // with value `undefined`, and `publishTemplate` re-normalizes an ALREADY-NORMALIZED graph (whose
+    // spread may carry an explicit `undefined`), so `in` would 400 a legitimate republish.
+    //
+    // An EMPTY array IS tolerated (OD-L7-9 absent/empty ≡ no permissions) — a conservative default,
+    // not an FE-compat requirement: no live authoring surface actually sends `fieldPermissions: []`
+    // on any of these five node types (the linear editor's `fieldPermissions: []` step-draft default
+    // is for APPROVAL steps only, a type this guard exempts, and `approvalNodeEdit.ts` deletes an
+    // empty array before emitting even there; the cc/condition/parallel edit models never carry the
+    // key at all). Tolerating `[]` costs nothing and matches the shipped omit-when-empty convention
+    // used throughout this file (`normalizeNodeFieldPermissions` itself returns `undefined` for `[]`).
+    //
+    // Gated OFF for the dispatch re-normalize (STORED_RUNTIME_CONTEXT): the normalizer has NEVER
+    // copied `fieldPermissions` into a stored cc/start/end/condition/parallel node's config (see the
+    // switch below), so no LEGITIMATELY published graph can carry one — but a defensively-constructed
+    // or hand-edited stored graph must still tolerate-and-drop rather than fail dispatch, so an
+    // in-flight instance is never made undispatchable (§2.1 widen-only rule; D-1 / OD-L7-4).
+    if (node.type !== 'approval' && node.type !== 'handler' && context !== STORED_RUNTIME_CONTEXT) {
+      const rawPermissions = (node.config as { fieldPermissions?: unknown }).fieldPermissions
+      const isTolerableEmptyArray = Array.isArray(rawPermissions) && rawPermissions.length === 0
+      if (rawPermissions !== undefined && !isTolerableEmptyArray) {
+        throw new ServiceError(
+          `approvalGraph.nodes[${index}].config.fieldPermissions is not supported on a ${node.type} node; field permissions apply to approval and handler nodes only (Lock-7 D-1 / OD-L7-4)`,
+          400,
+          'APPROVAL_NODE_FIELD_PERMISSIONS_UNSUPPORTED_NODE_TYPE',
+          { nodeKey: normalizedNode.key, nodeType: node.type },
+        )
+      }
+    }
+
+    // Lock-5 §2.5 / gate A-5 — `nodeOperationPolicy` is a MEMBER-ACTION policy, so it is admitted
+    // ONLY on the two node types that hold a member seat: `approval` (all six §1.1 fields) and
+    // `handler` (two, §1.6). On `start`/`end`/`cc`/`condition`/`parallel` it fails the AUTHORING
+    // choke with a 400 rather than being silently dropped by the per-type rebuild below (the
+    // `default: config = {}` arm). Unlike Lock-7's `editable` gate above this is NOT relaxed for
+    // `STORED_RUNTIME_CONTEXT`: the key is new in this slice, so no stored graph can legitimately
+    // carry it on such a node — a graph that does is structurally invalid, and fail-closed is
+    // correct. `normalizeApprovalGraph` re-runs on every load, so this also pins the placement for
+    // reads, not just publish.
+    if (
+      node.type !== 'approval'
+      && node.type !== 'handler'
+      && (node.config as { nodeOperationPolicy?: unknown }).nodeOperationPolicy !== undefined
+    ) {
+      failValidation(
+        context,
+        `approvalGraph.nodes[${index}].config.nodeOperationPolicy is not supported on a ${node.type} node`,
+      )
+    }
+
+    // Lock-4 F4-A gate A-1 — `approvalType` (审批类型) is a CONFIG field admitted ONLY on
+    // `type:'approval'` (OD-L4-1(a): "on start/end/cc/condition/parallel is rejected"). Also rejected
+    // on `handler` by extension of the same reasoning (a handler carries no approval-decision
+    // concept at all — Lock-3 §1.2's `emptyAssigneePolicy`/`autoApprovalPolicy` forbidden-key
+    // precedent below). Same shape as the `nodeOperationPolicy` guard immediately above and
+    // deliberately NOT relaxed for `STORED_RUNTIME_CONTEXT`: the key is new in this slice, so no
+    // stored graph can legitimately carry it on a non-approval node — a graph that does is
+    // structurally invalid, and fail-closed is correct on every read too, not just publish. Without
+    // this explicit 400, the per-type rebuilds below would silently DROP the key on cc/parallel/
+    // condition/start/end (each rebuilds `config` from its own fixed whitelist) — the exact silent-
+    // loss class the `nodeOperationPolicy`/`fieldPermissions` guards above already close.
+    if (
+      node.type !== 'approval'
+      && (node.config as { approvalType?: unknown }).approvalType !== undefined
+    ) {
+      failValidation(
+        context,
+        `approvalGraph.nodes[${index}].config.approvalType is not supported on a ${node.type} node`,
+      )
+    }
+
     switch (node.type) {
       case 'approval':
         {
@@ -1299,7 +3918,17 @@ function normalizeApprovalGraph(
           const hasLegacyAssignees = (node.config.assigneeType === 'user' || node.config.assigneeType === 'role')
             && Array.isArray(node.config.assigneeIds)
             && node.config.assigneeIds.every((entry) => isNonEmptyString(entry))
-          if (!assigneeSources && !hasLegacyAssignees) {
+          // Lock-4 F4-A (OD-L4-1(a)) — normalized BEFORE the assignee-required check below: an
+          // `auto_approve` node's assignee resolution is SKIPPED entirely (the executor short-circuits
+          // before `resolveAssignmentsForApprovalNode` — see `ApprovalGraphExecutor.ts resolveFromNode`),
+          // so an empty/absent source list is legal HERE AND ONLY HERE. A `manual` node (absent ≡
+          // manual) still 400s on no assignees — byte-identical to today.
+          const approvalType = normalizeApprovalType(
+            node.config.approvalType,
+            context,
+            `approvalGraph.nodes[${index}].config.approvalType`,
+          )
+          if (!assigneeSources && !hasLegacyAssignees && approvalType !== 'auto_approve') {
             failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds or assigneeSources`)
           }
           if (assigneeSources && (node.config.assigneeType !== undefined || node.config.assigneeIds !== undefined) && !hasLegacyAssignees) {
@@ -1344,6 +3973,20 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.emptyAssigneePolicy`,
           )
+          // B-s10's cross-field rule ('designated' requires a non-empty emptyAssigneeFallback) is
+          // DELIBERATELY NOT enforced here. `normalizeApprovalGraph` re-runs on every LOAD
+          // (`asApprovalGraph` / `asRuntimeGraph`, i.e. the dispatch re-normalize path too), and the
+          // lock is explicit: fail-closed "at the AUTHORING CHOKE, not at dispatch." Enforcing it here
+          // would make an already-published, already-dispatching instance's graph throw on its NEXT
+          // read if the rule ever tightened — the same hazard `validateFieldEditEnforcementPins`
+          // documents and avoids by living OUTSIDE this function. See
+          // `validateEmptyAssigneeFallbackConfigs`, called only from the five authoring entry points
+          // (create/update/publish/restore/clone), never from the dispatch/read path.
+          const emptyAssigneeFallback = normalizeEmptyAssigneeFallback(
+            node.config.emptyAssigneeFallback,
+            context,
+            `approvalGraph.nodes[${index}].config.emptyAssigneeFallback`,
+          )
           const autoApprovalPolicy = normalizeAutoApprovalPolicy(
             node.config.autoApprovalPolicy,
             context,
@@ -1364,6 +4007,16 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.signaturePolicy`,
           )
+          // Lock-5 §1.1 L5-A / §2.2 — this is the FIRST of the four allowlists the key must land in
+          // (the other three are on the FE, `templateAuthoring.ts`). An un-copied field is silently
+          // dropped by this fixed spread, so omitting it here would make the key vanish on save AND
+          // on every reload (`asApprovalGraph` / `asRuntimeGraph` re-normalize) — `signaturePolicy`'s
+          // live failure mode.
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            node.config.nodeOperationPolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.nodeOperationPolicy`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -1374,11 +4027,20 @@ function normalizeApprovalGraph(
             ...(assigneeSources ? { assigneeSources } : {}),
             ...(approvalMode ? { approvalMode } : {}),
             ...(approvalThreshold !== undefined ? { approvalThreshold } : {}),
+            // Lock-4 F4-A allowlist 1 (§2.3) — an un-copied `approvalType` vanishes on save AND on
+            // every reload, exactly as `signaturePolicy`'s comment above states for its own key.
+            ...(approvalType ? { approvalType } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
+            // Lock-4 §3 F4-B — allowlist 1 of 4 (§1.3). An un-copied key is silently dropped by this
+            // fixed spread, vanishing on save AND on every reload (`asApprovalGraph` / `asRuntimeGraph`
+            // re-normalize) — this is the F4-B-specific instance of the signaturePolicy live failure
+            // mode this comment block already warns about below.
+            ...(emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
             ...(timeout ? { timeout } : {}),
             ...(signaturePolicy ? { signaturePolicy } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
           }
         }
         break
@@ -1467,6 +4129,131 @@ function normalizeApprovalGraph(
             : {}),
         }
         break
+      case 'handler':
+        {
+          // Lock-3 §1.2 R-2 (D-1 fix): a handler node MUST have an explicit case here. WITHOUT it a
+          // handler falls to `default: config = {}` and its whole roster/mode is SILENTLY DROPPED — the
+          // exact D-1 defect (non-approval nodes hit the empty-config default). The choke enforces §1.2's
+          // prohibitions: the criterion is "would a misconfiguration be REJECTED today", not "would we
+          // author it". Distinct ServiceError codes (not failValidation, which collapses to the shared
+          // graph-invalid code) so callers/tests branch on the cause. All checks read the RAW config.
+          const handlerPath = `approvalGraph.nodes[${index}].config`
+          const rawConfig = node.config
+          // §1.2: approval-node keys on a handler make it read as an approval node by every config-shape
+          // reader. `emptyAssigneePolicy` (any value, incl. 'auto-approve') is inadmissible — auto-skipping
+          // 财务打款/盖章 is a genuine fail-open (§1.2 / OD-L3-2a). `timeout` is CONFIRM-EXCLUDE (the scanner's
+          // single-cursor model is untested for a non-approvalNodeOrder type). Rejecting on key PRESENCE is
+          // what keeps v1 free of a second vocabulary.
+          for (const forbiddenKey of ['assigneeType', 'assigneeIds', 'approvalMode', 'approvalThreshold', 'autoApprovalPolicy', 'emptyAssigneePolicy', 'timeout', 'signaturePolicy'] as const) {
+            if (rawConfig[forbiddenKey] !== undefined) {
+              throw new ServiceError(
+                `${handlerPath}.${forbiddenKey} is not allowed on a handler node`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: `handlerMode` is a NEW key ∈ {'all','any'}; absent ≡ 'all'. `'single'`/`'threshold'`/
+          // `'sequential'` are named-rejected (corpus C-3 evidences neither) — never coerced.
+          let handlerMode: HandlerMode | undefined
+          if (rawConfig.handlerMode !== undefined) {
+            if (rawConfig.handlerMode !== 'all' && rawConfig.handlerMode !== 'any') {
+              throw new ServiceError(
+                `${handlerPath}.handlerMode must be 'all' or 'any'`,
+                400,
+                'APPROVAL_HANDLER_MODE_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            handlerMode = rawConfig.handlerMode
+          }
+          // §1.1: `assigneeSources` is the ONLY assignee carrier and is REQUIRED — a handler with nobody
+          // to handle it is a publish-time error, never a dispatch-time surprise. An empty array is
+          // rejected by normalizeApprovalAssigneeSources; `undefined` is rejected here.
+          if (rawConfig.assigneeSources === undefined) {
+            throw new ServiceError(
+              `${handlerPath}.assigneeSources is required on a handler node`,
+              400,
+              'APPROVAL_HANDLER_CONFIG_INVALID',
+              { nodeKey: normalizedNode.key },
+            )
+          }
+          const assigneeSources = normalizeApprovalAssigneeSources(
+            rawConfig.assigneeSources,
+            context,
+            `${handlerPath}.assigneeSources`,
+          )!
+          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the SEVEN kinds
+          // in HANDLER_ASSIGNEE_SOURCE_KINDS. `continuous_managers` (corpus C-2 approver-only) and every
+          // forward Lock-1 kind (requester_choice, user_group, …) are rejected until their own slice
+          // admits them (§1.5 "each row lands in the same slice as its kind"). Rejecting on the KIND, not
+          // silently dropping it, is the fail-closed gate G-13 tests.
+          for (const source of assigneeSources) {
+            if (!(HANDLER_ASSIGNEE_SOURCE_KINDS as readonly string[]).includes(source.kind)) {
+              throw new ServiceError(
+                `${handlerPath}.assigneeSources kind '${source.kind}' is not supported on a handler node`,
+                400,
+                'APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+          }
+          // §1.1: 办理意见 opt-in; absent ≡ false (OD-L3-3a). Boolean only — never a coerced default.
+          let opinionRequired: boolean | undefined
+          if (rawConfig.opinionRequired !== undefined) {
+            if (typeof rawConfig.opinionRequired !== 'boolean') {
+              throw new ServiceError(
+                `${handlerPath}.opinionRequired must be a boolean`,
+                400,
+                'APPROVAL_HANDLER_CONFIG_INVALID',
+                { nodeKey: normalizedNode.key },
+              )
+            }
+            opinionRequired = rawConfig.opinionRequired
+          }
+          // §1.1/§3: fieldPermissions share the approval-node shape (ENFORCEMENT is Lock-7); normalized +
+          // round-tripped so authoring persists the intent, cross-checked against the form schema by
+          // validateNodeFieldPermissionsAgainstFormSchema (R-12).
+          const fieldPermissions = normalizeNodeFieldPermissions(
+            rawConfig.fieldPermissions,
+            context,
+            `${handlerPath}.fieldPermissions`,
+          )
+          // Lock-5 §1.6 L5-F / OD-L5-11(a): a handler admits a NARROWED nodeOperationPolicy —
+          // `allowTransfer` + `commentRequired` ONLY. Lock-3 §2.2 already 409s add_sign/reduce_sign/
+          // return at a handler node, so a switch over those verbs is M8 theater; they are rejected
+          // HERE, at the authoring choke, with Lock-3's own code so the message names the handler
+          // contract. `allowTransfer` absent ≡ true reproduces Lock-3's hardcoded transfer-allowed
+          // with no behavior change (gate F-1's positive control).
+          const rawOperationPolicy = rawConfig.nodeOperationPolicy
+          if (isRecord(rawOperationPolicy)) {
+            for (const key of Object.keys(rawOperationPolicy)) {
+              if (!(HANDLER_NODE_OPERATION_POLICY_KEYS as readonly string[]).includes(key)) {
+                throw new ServiceError(
+                  `${handlerPath}.nodeOperationPolicy.${key} is not allowed on a handler node`,
+                  400,
+                  'APPROVAL_HANDLER_CONFIG_INVALID',
+                  { nodeKey: normalizedNode.key },
+                )
+              }
+            }
+          }
+          const nodeOperationPolicy = normalizeNodeOperationPolicy(
+            rawOperationPolicy,
+            context,
+            `${handlerPath}.nodeOperationPolicy`,
+            HANDLER_NODE_OPERATION_POLICY_KEYS,
+          )
+          normalizedNode.config = {
+            assigneeSources,
+            ...(handlerMode ? { handlerMode } : {}),
+            ...(opinionRequired !== undefined ? { opinionRequired } : {}),
+            ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(nodeOperationPolicy ? { nodeOperationPolicy } : {}),
+          }
+        }
+        break
       default:
         normalizedNode.config = {}
         break
@@ -1513,7 +4300,13 @@ function normalizeApprovalGraph(
       if (!edge || edge.source !== node.key) {
         failValidation(
           context,
-          `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
+          'approvalGraph parallel gateway references an invalid branch edge',
+        )
+      }
+      if (edge.target === parallelConfig.joinNodeKey) {
+        failValidation(
+          context,
+          'approvalGraph parallel branch must contain at least one body node',
         )
       }
     }
@@ -1521,14 +4314,15 @@ function normalizeApprovalGraph(
     if (!joinNode) {
       failValidation(
         context,
-        `approvalGraph parallel node ${node.key} references unknown join node ${parallelConfig.joinNodeKey}`,
+        'approvalGraph parallel gateway references an invalid join node',
       )
     }
 
-    // Collect the approval-node assignees reachable from each branch start up to
-    // the join node. Reject duplicate assigneeIds across branches because the
-    // active-assignment unique index cannot hold two active rows for the same
-    // user at once. Nested parallel is explicitly rejected in v1.
+    // Stored graphs keep the historical first-edge compatibility check here.
+    // New writes and publish additionally run validateAllParallelBranchPaths via
+    // assertApprovalGraph; keeping the strict gate out of normalizeApprovalGraph
+    // prevents a newly-tightened rule from bricking ordinary reads or in-flight
+    // instances created from a previously accepted graph.
     const assigneesPerBranch: Array<Set<string>> = []
     for (const branchEdgeKey of parallelConfig.branches) {
       const edge = edgeMap.get(branchEdgeKey)!
@@ -1548,7 +4342,7 @@ function normalizeApprovalGraph(
           if (seen.has(assignee)) {
             failValidation(
               context,
-              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+              'approvalGraph parallel branches must not contain the same approver',
             )
           }
           seen.add(assignee)
@@ -1560,6 +4354,40 @@ function normalizeApprovalGraph(
   return { nodes, edges }
 }
 
+/**
+ * Structural walk of ONE parallel branch: prove every runtime-possible path from
+ * `startNodeKey` reaches `joinNodeKey`, and collect static assignees along the way
+ * (UNION over all paths — feeds the cross-branch duplicate-approver check).
+ *
+ * Runtime semantics (mirrored here so create/update/publish catch shapes that would
+ * only fail mid-request) — see `ApprovalGraphExecutor.resolveConditionTarget`:
+ *   - condition nodes: successors are the DEDUPLICATED set of
+ *     `config.branches[].edgeKey` plus `config.defaultEdgeKey` when present.
+ *     Each declared edgeKey must exist AND have `source ===` this condition node
+ *     (`targetForEdge` is a global key lookup, so a key owned by another node is
+ *     malformed and must fail authoring rather than route elsewhere). When
+ *     default is ABSENT, also include the first outgoing edge
+ *     (`firstTargetForNode` fallback). Stray outgoing edges NOT referenced by
+ *     config are NOT runtime-possible and must not be walked (they must not
+ *     false-fail a valid branch).
+ *   - linear nodes (approval/cc/start/…): follow the first outgoing edge only,
+ *     matching `firstTargetForNode`.
+ *   - reject end / unknown / nested parallel / cycle / dead-end before join with
+ *     the same failValidation messages as before (stable codes via ValidationContext).
+ *
+ * Complexity (tri-color / memoized per branch — required: no graph node-count cap):
+ *   - VISITING (gray): node is on the active DFS stack → true back-edge / cycle.
+ *   - DONE (black): node-to-join subgraph already proven; return the memoized static-
+ *     assignee set (self ∪ descendants) without rewalking.
+ *   - Convergent DAG diamonds therefore cost O(V+E) per branch, not O(paths). A pure
+ *     path-local rewalk is exponential on layered diamonds (2^N path recomputations of
+ *     the shared tail) and is rejected by the layered-DAG regression test.
+ *
+ * Mutation: reverting the condition arm to `outgoing[current][0]` only REDs the
+ * exact golden in approval-product-service.test.ts (default edge → end while the
+ * first rules edge joins). Dropping DONE memoization REDs the layered-diamond
+ * acceptance (or hangs) while leaving the golden green.
+ */
 function collectBranchAssignees(
   startNodeKey: string,
   joinNodeKey: string,
@@ -1580,9 +4408,181 @@ function collectBranchAssignees(
   while (currentKey) {
     if (currentKey === joinNodeKey) return assignees
     if (visited.has(currentKey)) {
-      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+      failValidation(context, 'approvalGraph parallel branch contains a cycle')
     }
     visited.add(currentKey)
+    const node = nodeByKey.get(currentKey)
+    if (!node) {
+      failValidation(context, 'approvalGraph parallel branch references an invalid node')
+    }
+    if (node.type === 'parallel') {
+      failValidation(context, 'approvalGraph parallel branches cannot contain a nested parallel gateway')
+    }
+    if (node.type === 'end') {
+      failValidation(context, `approvalGraph parallel branch must reach join before end (at ${node.key})`)
+    }
+    if (node.type === 'approval') {
+      const config = node.config as {
+        assigneeIds?: string[]
+        assigneeSources?: ApprovalAssigneeSource[]
+        approvalMode?: ApprovalMode
+      }
+      if (config.approvalMode === 'threshold') {
+        throw new ServiceError(
+          "approvalGraph approvalMode 'threshold' is not supported inside a parallel region",
+          400,
+          'APPROVAL_THRESHOLD_IN_PARALLEL',
+        )
+      }
+      if (config.approvalMode === 'sequential') {
+        throw new ServiceError(
+          "approvalGraph approvalMode 'sequential' is not supported inside a parallel region",
+          400,
+          'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+        )
+      }
+      config.assigneeIds?.forEach((assignee) => assignees.add(assignee))
+      for (const source of config.assigneeSources ?? []) {
+        if (source.kind === 'static_user') source.userIds.forEach((assignee) => assignees.add(assignee))
+        if (source.kind === 'static_role') source.roleIds.forEach((assignee) => assignees.add(assignee))
+      }
+    }
+    currentKey = outgoing.get(currentKey)?.[0]?.target ?? null
+  }
+  failValidation(
+    context,
+    'approvalGraph parallel branch never reaches its configured join',
+  )
+}
+
+function collectAllBranchAssignees(
+  startNodeKey: string,
+  joinNodeKey: string,
+  nodeByKey: Map<string, ApprovalGraph['nodes'][number]>,
+  edges: ApprovalGraph['edges'],
+  context: ValidationContext,
+): Set<string> {
+  const outgoing = new Map<string, ApprovalGraph['edges']>()
+  const edgeByKey = new Map<string, ApprovalGraph['edges'][number]>()
+  for (const edge of edges) {
+    const existing = outgoing.get(edge.source) || []
+    existing.push(edge)
+    outgoing.set(edge.source, existing)
+    edgeByKey.set(edge.key, edge)
+  }
+
+  // Per-branch tri-color state. The explicit stack avoids JS call-stack overflow
+  // on a valid deeply-nested condition chain while preserving O(V+E) memoization.
+  const visitState = new Map<string, 'visiting' | 'done'>()
+  const doneMemo = new Map<string, Set<string>>()
+
+  const localApprovalAssignees = (node: ApprovalGraph['nodes'][number]): string[] => {
+    if (node.type !== 'approval') return []
+    const approvalConfig = node.config as {
+      assigneeIds?: string[]
+      assigneeSources?: ApprovalAssigneeSource[]
+      approvalMode?: ApprovalMode
+    }
+    // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
+    // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
+    if (approvalConfig.approvalMode === 'threshold') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+        400,
+        'APPROVAL_THRESHOLD_IN_PARALLEL',
+      )
+    }
+    if (approvalConfig.approvalMode === 'sequential') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'sequential' inside a parallel region — sequential mode is linear-only in v1`,
+        400,
+        'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+      )
+    }
+    const local: string[] = []
+    for (const assignee of approvalConfig.assigneeIds ?? []) {
+      local.push(assignee)
+    }
+    for (const source of approvalConfig.assigneeSources ?? []) {
+      if (source.kind === 'static_user') {
+        source.userIds.forEach((assignee) => local.push(assignee))
+      }
+      if (source.kind === 'static_role') {
+        source.roleIds.forEach((assignee) => local.push(assignee))
+      }
+    }
+    return local
+  }
+
+  /**
+   * Runtime-possible condition successors — mirrors resolveConditionTarget's edge
+   * selection (rules arms + default, else firstTarget), with authoring ownership
+   * checks so a mis-owned edgeKey cannot silently route via global key lookup.
+   */
+  const conditionSuccessorTargets = (node: ApprovalGraph['nodes'][number]): string[] => {
+    const config = node.config as {
+      branches?: Array<{ edgeKey?: string }>
+      defaultEdgeKey?: string
+    }
+    const declaredKeys: string[] = []
+    const seenKeys = new Set<string>()
+    const pushKey = (raw: string | undefined): void => {
+      if (typeof raw !== 'string') return
+      const key = raw.trim()
+      if (!key || seenKeys.has(key)) return
+      seenKeys.add(key)
+      declaredKeys.push(key)
+    }
+    for (const branch of config.branches ?? []) {
+      pushKey(branch.edgeKey)
+    }
+    const hasDefault = typeof config.defaultEdgeKey === 'string' && config.defaultEdgeKey.trim().length > 0
+    if (hasDefault) {
+      pushKey(config.defaultEdgeKey)
+    }
+
+    const targets: string[] = []
+    for (const edgeKey of declaredKeys) {
+      const edge = edgeByKey.get(edgeKey)
+      // Global targetForEdge would still return a foreign-source edge's target; reject
+      // that malformed config at authoring instead of treating it as a legal route.
+      if (!edge || edge.source !== node.key) {
+        failValidation(
+          context,
+          `approvalGraph parallel branch condition ${node.key} references invalid edge ${edgeKey}`,
+        )
+      }
+      targets.push(edge.target)
+    }
+
+    // resolveConditionTarget: default ABSENT → firstTargetForNode fallback only.
+    // Stray outgoing edges beyond the first are never selected when default is set,
+    // and when default is absent only the first outgoing is the fallback — never a
+    // non-declared non-first edge.
+    if (!hasDefault) {
+      const firstEdge = outgoing.get(node.key)?.[0]
+      if (firstEdge && !seenKeys.has(firstEdge.key)) {
+        targets.push(firstEdge.target)
+      }
+    }
+    return targets
+  }
+
+  interface WalkFrame {
+    key: string
+    targets: string[]
+    nextTargetIndex: number
+    result: Set<string>
+  }
+
+  const stack: WalkFrame[] = []
+  const pushNode = (currentKey: string): void => {
+    if (currentKey === joinNodeKey) return
+    if (visitState.get(currentKey) === 'visiting') {
+      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+    }
+    if (visitState.get(currentKey) === 'done') return
+
     const node = nodeByKey.get(currentKey)
     if (!node) {
       failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
@@ -1591,57 +4591,106 @@ function collectBranchAssignees(
       failValidation(context, `approvalGraph parallel branch cannot contain nested parallel node ${node.key}`)
     }
     if (node.type === 'end') {
+      failValidation(context, `approvalGraph parallel branch must reach join before end (at ${node.key})`)
+    }
+
+    const targets = node.type === 'condition'
+      ? conditionSuccessorTargets(node)
+      : (outgoing.get(currentKey)?.[0] ? [outgoing.get(currentKey)![0].target] : [])
+    if (targets.length === 0) {
       failValidation(
         context,
-        `approvalGraph parallel branch must reach join before end (at ${node.key})`,
+        `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
       )
     }
-    if (node.type === 'approval') {
-      const approvalConfig = node.config as {
-        assigneeIds?: string[]
-        assigneeSources?: ApprovalAssigneeSource[]
-        approvalMode?: ApprovalMode
+
+    visitState.set(currentKey, 'visiting')
+    stack.push({
+      key: currentKey,
+      targets,
+      nextTargetIndex: 0,
+      result: new Set(localApprovalAssignees(node)),
+    })
+  }
+
+  pushNode(startNodeKey)
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]
+    if (frame.nextTargetIndex < frame.targets.length) {
+      const target = frame.targets[frame.nextTargetIndex]
+      frame.nextTargetIndex += 1
+      if (target === joinNodeKey) continue
+      const targetState = visitState.get(target)
+      if (targetState === 'visiting') {
+        failValidation(context, `approvalGraph parallel branch contains a cycle near ${target}`)
       }
-      // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
-      // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
-      if (approvalConfig.approvalMode === 'threshold') {
-        throw new ServiceError(
-          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
-          400,
-          'APPROVAL_THRESHOLD_IN_PARALLEL',
-        )
+      if (targetState === 'done') {
+        for (const assignee of doneMemo.get(target) ?? []) frame.result.add(assignee)
+        continue
       }
-      for (const assignee of approvalConfig.assigneeIds ?? []) {
-        assignees.add(assignee)
+      pushNode(target)
+      continue
+    }
+
+    stack.pop()
+    visitState.set(frame.key, 'done')
+    doneMemo.set(frame.key, frame.result)
+    const parent = stack[stack.length - 1]
+    if (parent) {
+      for (const assignee of frame.result) parent.result.add(assignee)
+    }
+  }
+
+  return doneMemo.get(startNodeKey) ?? new Set()
+}
+
+function validateAllParallelBranchPaths(
+  approvalGraph: ApprovalGraph,
+  context: ValidationContext,
+  options: { allowParallelDuplicateAssignees?: boolean } = {},
+): void {
+  const edgeMap = new Map(approvalGraph.edges.map((edge) => [edge.key, edge]))
+  const nodeByKey = new Map(approvalGraph.nodes.map((node) => [node.key, node]))
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const config = node.config as { branches: string[]; joinNodeKey: string }
+    const assigneesPerBranch = config.branches.map((branchEdgeKey) => {
+      const edge = edgeMap.get(branchEdgeKey)
+      if (!edge || edge.source !== node.key) {
+        failValidation(context, `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`)
       }
-      for (const source of approvalConfig.assigneeSources ?? []) {
-        if (source.kind === 'static_user') {
-          source.userIds.forEach((assignee) => assignees.add(assignee))
+      return collectAllBranchAssignees(
+        edge.target,
+        config.joinNodeKey,
+        nodeByKey,
+        approvalGraph.edges,
+        context,
+      )
+    })
+    if (options.allowParallelDuplicateAssignees) continue
+    const seen = new Set<string>()
+    for (const branchAssignees of assigneesPerBranch) {
+      for (const assignee of branchAssignees) {
+        if (seen.has(assignee)) {
+          failValidation(
+            context,
+            `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+          )
         }
-        if (source.kind === 'static_role') {
-          source.roleIds.forEach((assignee) => assignees.add(assignee))
-        }
+        seen.add(assignee)
       }
     }
-    // Walk the first outgoing edge — condition nodes aren't explored for every
-    // branch here (the form-data isn't available at template validation
-    // time), so duplicate detection is conservative across the statically
-    // reachable first-edge path. Condition branches inside parallel remain
-    // legal at runtime; this check only flags obvious overlaps.
-    const nextEdge = outgoing.get(currentKey)?.[0]
-    currentKey = nextEdge?.target ?? null
   }
-  failValidation(
-    context,
-    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
-  )
 }
 
 function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
   return normalizeApprovalGraph(value, STORED_GRAPH_CONTEXT)
 }
 
-function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
+// Exported for the same reason as `TemplateRow` above — the section-scoped list query
+// (`ApprovalTemplateGroupSectionService.ts`) selects `t.*` from this same table and must map it
+// through this exact function so the `data[]` shape is byte-identical to the unsectioned path.
+export function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
   return {
     id: row.id,
     key: row.key,
@@ -1665,6 +4714,10 @@ function toApprovalTemplateDetailDTO(bundle: TemplateBundle): ApprovalTemplateDe
     ...toApprovalTemplateListItemDTO(bundle.template),
     formSchema: asFormSchema(bundle.version.form_schema),
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
+    // L6-P1 carrier fix — the active published definition's policy, or null pre-publish. Every
+    // caller of this builder passes an honest `publishedDefinition` (never a hardcoded stand-in),
+    // so this is the single point that turns "was there a publish" into the authoring-facing field.
+    policy: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph).policy : null,
   }
 }
 
@@ -1679,6 +4732,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
     publishNote: bundle.version.publish_note ?? null,
+    restoredFromVersionId: bundle.version.restored_from_version_id ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -1730,19 +4784,91 @@ function toUnifiedApprovalDTO(
   }
 }
 
-function assignmentMatchesActor(
-  assignment: ApprovalAssignmentRow,
+/**
+ * D-5 (Lock-9 implementation brief): exported so the process-attachment upload route (§5.2) can
+ * re-derive the acting seat WITHOUT reimplementing the user/role match rule.
+ *
+ * The BODY now lives in `./approval-seat-authorization` (moved unchanged) so the detail DTO
+ * builders can call the door's own predicate without importing this module — `ApprovalProductService`
+ * imports `ApprovalBridgeService`, so the other direction would be a cycle. Re-exported from here so
+ * every existing importer and `path:line` reference keeps resolving.
+ */
+export { assignmentMatchesActor } from './approval-seat-authorization'
+
+/**
+ * Approval change-request design lock v5.9 §14.1 (判据 I, lock:104) — the cancel-round identity
+ * predicate. The BODY lives in `../attendance/w4c3b-central-approval-hooks` (a deliberate leaf
+ * module with zero imports of its own): `ApprovalBridgeService.ts` needs it too (outlet #8,
+ * `Bridge:1077`), and `ApprovalProductService` already imports `ApprovalBridgeService` for
+ * `ServiceError` — so the other direction would be a cycle, same reasoning as
+ * `assignmentMatchesActor` above. Re-exported from here so `createCancelRoundInstance` and every
+ * chokepoint in this file can import it as `./ApprovalProductService`.
+ */
+export { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'
+
+/**
+ * Lock §9-9 (lock:143 area) — the allowed action set on a cancel-round instance:
+ * `{approve, reject, revoke, comment}`. Everything else (`handle`, `return`, `transfer`,
+ * `add_sign`, `reduce_sign`) is rejected here, at `dispatchAction`'s single action-judgment call
+ * site (outlets #4/#5/#6 in lock §14.3 share this one call point — #5 is the one action this
+ * function LETS THROUGH, not a separate branch). No-op for a non-cancel-round instance.
+ */
+const CANCEL_ROUND_ALLOWED_ACTIONS: ReadonlySet<ApprovalActionType> = new Set([
+  'approve',
+  'reject',
+  'revoke',
+  'comment',
+])
+
+function assertCancelRoundActionAllowed(
+  instance: { workflow_key?: string | null },
+  action: ApprovalActionType,
+): void {
+  if (!isCancelRoundInstance(instance) || CANCEL_ROUND_ALLOWED_ACTIONS.has(action)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances do not accept action "${action}"`,
+  )
+}
+
+/**
+ * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
+ * NOT an authority. `dispatchAction`'s own `actorCanAct` (this file, `currentNodeAssignments` +
+ * `assignmentMatchesActor`) remains the ONE load-bearing gate (the bind-time 403
+ * `APPROVAL_ASSIGNMENT_REQUIRED`, G-5).
+ *
+ * P2-2 fix-round correction: the original cut checked ONLY `approval_instances.current_node_key`,
+ * which — inside a parallel region — is the FORK node key, not any branch's node key (assignments
+ * live at `branch_a`/`branch_b`, never at the fork). That made this fail-fast REJECT every actor in
+ * every parallel region categorically (not "narrower in a rare edge case" as originally disclosed;
+ * the v1 carrier is upload-then-`comment+rider`, so the capability was dead on any parallel
+ * template). Fixed by resolving the SAME pending-branch frontier `dispatchAction` resolves
+ * (`collectActiveNodeKeys`, shared with the redaction gate at :220 of
+ * `approval-attachment-runtime.ts` — the identical `current_node_key` + `metadata.parallelBranchStates`
+ * derivation, already excluding `complete` branches) and matching against ANY of those keys, not
+ * just the stored `current_node_key`. This also closes the previously-disclosed false-positive gap
+ * (a completed branch's assignment could fail-fast-allow): a completed branch's node key is no
+ * longer in the derived set at all. The remaining, narrower gap: this still does not reproduce
+ * `dispatchAction`'s actor-to-branch pairing (which branch a MULTI-branch-assigned actor's
+ * submission applies to) — it is a fail-fast set-membership check, not the authority. Bind time
+ * remains the ONE authority (G-5); a residual false positive here costs nothing beyond a wasted
+ * upload that the bind-time gate then genuinely refuses.
+ */
+export async function actorHasActiveSeatAtInstance(
+  db: Queryable,
+  instanceId: string,
   actorId: string,
-  actorRoles: string[],
-): boolean {
-  if (!assignment.is_active) return false
-  if (assignment.assignment_type === 'user') {
-    return assignment.assignee_id === actorId
-  }
-  if (assignment.assignment_type === 'role') {
-    return actorRoles.includes(assignment.assignee_id)
-  }
-  return false
+  actorRoles: readonly string[],
+): Promise<boolean> {
+  const instanceResult = await db.query('SELECT current_node_key, metadata FROM approval_instances WHERE id = $1', [instanceId])
+  const row = instanceResult.rows[0] as { current_node_key?: string | null; metadata?: Record<string, unknown> | null } | undefined
+  const activeNodeKeys = collectActiveNodeKeys(row?.current_node_key ?? null, row?.metadata ?? null)
+  if (activeNodeKeys.length === 0) return false
+  const assignmentsResult = await db.query(
+    'SELECT * FROM approval_assignments WHERE instance_id = $1 AND node_key = ANY($2::text[]) AND is_active = TRUE',
+    [instanceId, activeNodeKeys],
+  )
+  const rows = assignmentsResult.rows as unknown as ApprovalAssignmentRow[]
+  return rows.some((assignment) => assignmentMatchesActor(assignment, actorId, [...actorRoles]))
 }
 
 function normalizePage(value: unknown, fallback: number): number {
@@ -1947,12 +5073,19 @@ export function applyTemplateVisibilityFilter(
   return index
 }
 
-function assertApprovalGraph(
+// EXPORTED (Lock-4 P3-A unit-test surface) — runs the FULL publish-time authoring-choke pipeline
+// (normalize + all-parallel-branch-paths) without a DB or HTTP server, so gate A-1's placement 400s
+// are directly unit-testable. Callers still need `validateApprovalTypePlacement` /
+// `validateHandlerNodePlacement` / `validateNodeTimeoutConfigs` separately for the graph-level passes
+// this function does not run (see the 5 real call sites in this file for the full chain).
+export function assertApprovalGraph(
   value: unknown,
   context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
   options?: { allowParallelDuplicateAssignees?: boolean },
 ): ApprovalGraph {
-  return normalizeApprovalGraph(value, context, options)
+  const graph = normalizeApprovalGraph(value, context, options)
+  validateAllParallelBranchPaths(graph, context, options)
+  return graph
 }
 
 function asFormSchema(value: Record<string, unknown>): FormSchema {
@@ -1990,7 +5123,10 @@ function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
   }
 
   const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
-  const graph = assertApprovalGraph(
+  // Published runtime graphs may predate the all-path authoring gate. Preserve
+  // their historical first-edge validation so reads and in-flight execution do
+  // not become retroactively unavailable after a validator tightening.
+  const graph = normalizeApprovalGraph(
     {
       nodes: value.nodes,
       edges: value.edges,
@@ -2034,37 +5170,6 @@ function buildPersistableParallelState(state: ParallelInstanceState): Record<str
         },
       ]),
     ),
-  }
-}
-
-function readParallelBranchStates(metadata: unknown): ParallelInstanceState | null {
-  if (!isRecord(metadata)) return null
-  const states = (metadata as { parallelBranchStates?: unknown }).parallelBranchStates
-  if (!isRecord(states)) return null
-  if (typeof states.parallelNodeKey !== 'string'
-    || typeof states.joinNodeKey !== 'string'
-    || (states.joinMode !== 'all' && states.joinMode !== 'any')
-    || !isRecord(states.branches)) {
-    return null
-  }
-  const branches: Record<string, ParallelInstanceState['branches'][string]> = {}
-  for (const [edgeKey, entryRaw] of Object.entries(states.branches)) {
-    if (!isRecord(entryRaw)) return null
-    const entry = entryRaw as { edgeKey?: unknown; currentNodeKey?: unknown; complete?: unknown }
-    if (typeof entry.edgeKey !== 'string') return null
-    if (entry.currentNodeKey !== null && typeof entry.currentNodeKey !== 'string') return null
-    if (typeof entry.complete !== 'boolean') return null
-    branches[edgeKey] = {
-      edgeKey: entry.edgeKey,
-      currentNodeKey: entry.currentNodeKey as string | null,
-      complete: entry.complete,
-    }
-  }
-  return {
-    parallelNodeKey: states.parallelNodeKey as string,
-    joinNodeKey: states.joinNodeKey as string,
-    joinMode: states.joinMode as 'all' | 'any',
-    branches,
   }
 }
 
@@ -2129,11 +5234,31 @@ function graphAssignmentsForAudit(assignments: ApprovalGraphAssignment[]): Admin
   }))
 }
 
-function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
+// Lock-4 F4-C gate X-1 (§2.2) — EXPORTED so tests/unit/approval-lock4-f4c-*.test.ts can mutate-prove
+// each disjunction term independently (析取式判定必须逐项单删). `getEffectiveAutoApprovalPolicy` and
+// `runtimeGraphHasAutoApprovalPolicy` BOTH delegate here — a single widening covers both call sites,
+// so a discriminating X-1 fixture must trip THIS predicate specifically.
+//
+// `samePersonPolicy !== undefined && samePersonPolicy !== 'self_approve'` is the widening term.
+// 'self_approve' is EXCLUDED deliberately: `getEffectiveAutoApprovalPolicy` treats a node-level
+// `autoApprovalPolicy` key being PRESENT at all as a whole-object override of any template-level
+// policy — an all-false/absent-flags node policy today returns `null` and DISABLES the template
+// cascade at that node (the documented opt-out). Widening on mere key-presence would newly ENABLE
+// the cascade on such a node and silently break that opt-out; a node authored with EXACTLY
+// `{ samePersonPolicy: 'self_approve' }` must still be able to shadow/disable a template-level
+// `mergeWithRequester:true` at that one node.
+//
+// NOTE: `samePersonPolicy: 'auto_skip'` needs NO separate term here — `normalizeAutoApprovalPolicy`
+// already synthesizes `mergeWithRequester: true` for it, which trips the FIRST (pre-existing) term.
+// An X-1 fixture built on 'auto_skip' alone is therefore NON-discriminating (it would still pass
+// with this widening reverted) — the discriminating fixture is 'transfer_direct_manager' /
+// 'transfer_dept_head', which synthesizes no legacy flag.
+export function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
   return Boolean(
     policy?.mergeWithRequester ||
     policy?.mergeAdjacentApprover ||
-    policy?.dedupeHistoricalApprover,
+    policy?.dedupeHistoricalApprover ||
+    (policy?.samePersonPolicy !== undefined && policy.samePersonPolicy !== 'self_approve'),
   )
 }
 
@@ -2166,6 +5291,86 @@ function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | nu
 }
 
 /**
+ * Lock-2 §2.3 (locked refactor, performed by the first slice to land after the lock): the per-kind
+ * capability traits that drive the create-time detectors below. The detectors used to be FOUR
+ * hand-maintained `||` chains over the same kinds ("hand-maintained disjunctions in four places do
+ * not converge") — each detector's kind set is now DERIVED from this ONE table, and the table is a
+ * `Record` over the full `ApprovalAssigneeSourceKind` union, so adding a kind without classifying
+ * it is a COMPILE error here (the same enforcement posture as the fingerprint `_exhaustive`
+ * guard). A mechanical exact-set test pins each derived set; editing a trait row — touching no
+ * detector — reds that test (Lock-2 gate D-3's "the set must first be proven DERIVED" arm).
+ *
+ * Traits:
+ *  - `requesterOrgRead`  — resolves from the REQUESTER's create-frozen org relations; arms the
+ *                          B5-b org-read fail-closed wedge (`runtimeGraphUsesOrgAssigneeSource`).
+ *  - `managerChain`      — consumes the requester `managerChainIds` snapshot (opt-in
+ *                          `includeManagerChain` bake).
+ *  - `deptHeadChain`     — consumes the requester `deptHeadChainIds` snapshot (opt-in
+ *                          `includeDeptHeadChain` bake).
+ *  - `fieldDerivedOrgRead` — Lock-2 §L2-C: resolves from a FORM-FIELD-CHOSEN principal's org
+ *                          relations at create (its OWN detector + wedge — deliberately NOT an
+ *                          extension of `runtimeGraphUsesOrgAssigneeSource`, which gates whether
+ *                          the REQUESTER's relations are read: folding these in would make every
+ *                          such template pay a requester org read it does not need, while omitting
+ *                          them would leave the new reads uncovered by any wedge).
+ */
+interface ApprovalAssigneeSourceKindTraits {
+  requesterOrgRead: boolean
+  managerChain: boolean
+  deptHeadChain: boolean
+  fieldDerivedOrgRead: boolean
+}
+
+const NO_ORG_TRAITS: ApprovalAssigneeSourceKindTraits = {
+  requesterOrgRead: false,
+  managerChain: false,
+  deptHeadChain: false,
+  fieldDerivedOrgRead: false,
+}
+
+export const APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS: Record<ApprovalAssigneeSourceKind, ApprovalAssigneeSourceKindTraits> = {
+  static_user: NO_ORG_TRAITS,
+  static_role: NO_ORG_TRAITS,
+  requester: NO_ORG_TRAITS,
+  // Shipped form_field_user resolves the chosen person THEMSELVES from the form snapshot — no
+  // directory read at all, so no org trait (C-3's 联系人自己 needs no extension machinery).
+  form_field_user: NO_ORG_TRAITS,
+  direct_manager: { ...NO_ORG_TRAITS, requesterOrgRead: true },
+  dept_head: { ...NO_ORG_TRAITS, requesterOrgRead: true },
+  continuous_managers: { ...NO_ORG_TRAITS, requesterOrgRead: true, managerChain: true },
+  manager_at_level: { ...NO_ORG_TRAITS, requesterOrgRead: true, managerChain: true },
+  // Lock-1 §K2: resolves from the create-frozen requester CHOICE, not the org directory.
+  requester_choice: NO_ORG_TRAITS,
+  continuous_dept_heads: { ...NO_ORG_TRAITS, requesterOrgRead: true, deptHeadChain: true },
+  dept_head_at_level: { ...NO_ORG_TRAITS, requesterOrgRead: true, deptHeadChain: true },
+  // Lock-1 §K3: resolves from INSTANCE-INTERNAL audit rows — deliberately NOT org-armed (§K3:
+  // arming the org wedge for it would fail creates that need no org read at all).
+  prior_node_approver: NO_ORG_TRAITS,
+  // Lock-1 §K1: user_group resolves purely from the create-frozen `groupMemberIds` snapshot — no
+  // live directory read at dispatch — so it arms NONE of the org detectors/wedges (mirrors
+  // requester_choice / prior_node_approver). Giving it any org trait would silently re-arm the
+  // REQUESTER org wedge, which its EAGER_EXPANSION freeze deliberately does not need.
+  user_group: NO_ORG_TRAITS,
+  // Lock-2 §L2-C: field-derived contact extensions — their org read is anchored on the CHOSEN
+  // contact, not the requester, so they arm ONLY the field-derived detector/wedge.
+  form_field_user_manager: { ...NO_ORG_TRAITS, fieldDerivedOrgRead: true },
+  form_field_user_dept_head: { ...NO_ORG_TRAITS, fieldDerivedOrgRead: true },
+}
+
+function assigneeSourceKindsWithTrait(trait: keyof ApprovalAssigneeSourceKindTraits): ReadonlySet<string> {
+  return new Set(
+    (Object.keys(APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS) as ApprovalAssigneeSourceKind[])
+      .filter((kind) => APPROVAL_ASSIGNEE_SOURCE_KIND_TRAITS[kind][trait]),
+  )
+}
+
+/** Derived, not enumerated (Lock-2 §2.3) — exported for the mechanical exact-set assertions. */
+export const ORG_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('requesterOrgRead')
+export const MANAGER_CHAIN_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('managerChain')
+export const DEPT_HEAD_CHAIN_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('deptHeadChain')
+export const FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS = assigneeSourceKindsWithTrait('fieldDerivedOrgRead')
+
+/**
  * True when any approval node's assignee sources include a management-chain source
  * (`continuous_managers` or `manager_at_level`). Used at create time to decide
  * whether to walk the (more expensive) management chain into the requester snapshot
@@ -2175,14 +5380,258 @@ function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | nu
  */
 export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
+    // Lock-3 R-13: a handler using `manager_at_level` must ALSO bake the manager chain into the snapshot,
+    // else it resolves empty at dispatch (silent skip). (`continuous_managers` is not admitted on a
+    // handler per §1.5, but keeping the shared predicate node-type-symmetric is harmless and future-proof.)
+    if (node.type !== 'approval' && node.type !== 'handler') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some(
+      (source) => isRecord(source) && typeof source.kind === 'string' && MANAGER_CHAIN_ASSIGNEE_SOURCE_KINDS.has(source.kind),
+    )
+  })
+}
+
+/**
+ * Lock-1 §K4 / §K5-b: true when any approval node's assignee sources include `continuous_dept_heads`
+ * OR `dept_head_at_level`. Used at create time to decide whether to walk the (more expensive)
+ * department-head chain into the requester snapshot — a SEPARATE opt-in gate from
+ * `runtimeGraphUsesManagerChain` above, because both kinds bake the SAME `deptHeadChainIds`
+ * snapshot field (a different walk over a different pointer — see the union members' doc
+ * comments) via a DIFFERENT option (`includeDeptHeadChain`), so an unrelated template never pays
+ * for either walk. K5-b is strictly downstream of K4: it reads the identical snapshot field K4
+ * builds, so it shares this ONE gate rather than minting its own — mirroring how
+ * `runtimeGraphUsesManagerChain` above carries both `continuous_managers` AND `manager_at_level`
+ * for the manager-chain snapshot. Missing this extension would reproduce the exact "silent skip"
+ * class R-13 names: a graph using ONLY `dept_head_at_level` would never bake `deptHeadChainIds`,
+ * so the resolver's positional read would see `undefined` and resolve empty — indistinguishable
+ * from "no head at that level" and liable to silently auto-approve under
+ * `emptyAssigneePolicy:'auto-approve'`. Node-type is `approval`-only (§2.3 registry row: neither
+ * kind is admitted on a `handler` node in this slice — Lock-3 §1.5's forward ADMIT for K5-b on
+ * handler is deliberately NOT landed here; see the `dept_head_at_level` resolver arm comment).
+ * `kind` is read structurally so this works before the kind is added to the typed union (same
+ * posture as `runtimeGraphUsesManagerChain`).
+ */
+export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
     if (node.type !== 'approval') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
     return sources.some(
-      (source) => isRecord(source) && (source.kind === 'continuous_managers' || source.kind === 'manager_at_level'),
+      (source) => isRecord(source) && typeof source.kind === 'string' && DEPT_HEAD_CHAIN_ASSIGNEE_SOURCE_KINDS.has(source.kind),
     )
   })
+}
+
+/**
+ * B5-b owner P1: does the graph use ANY org-derived assignee source? All four kinds resolve from
+ * `orgRelations` — so when the org read FAILED (transient) or the routing POLICY is misconfigured,
+ * an empty `orgRelations` is not "requester has no manager", it is "we could not find out". Letting
+ * that empty flow into assignment resolution turns `emptyAssigneePolicy: 'auto-approve'` into a
+ * FAIL-OPEN (a broken routing policy silently auto-approves approvals). The create-time guard keyed
+ * on this detector fail-closes instead: 422 for the persistent policy config error, 503 for the
+ * transient read failure — with NO instance and NO assignment created. Genuine data absence (the
+ * read SUCCEEDED, the requester simply has no manager) still follows `emptyAssigneePolicy`.
+ *
+ * Lock-1 §2.1 EXTENSION (K4 + K5-b): `continuous_dept_heads` and `dept_head_at_level` are EXTENDED
+ * into this detector alongside the four shipped org-derived kinds — §2.1 names both explicitly
+ * ("That detector MUST be extended to K4 and K5-b"). Leaving either unextended would reproduce
+ * exactly the B5-b fail-open this guard closed: an org read failure plus
+ * `emptyAssigneePolicy: 'auto-approve'` would silently auto-approve instead of fail-closing at
+ * create.
+ */
+export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    // Lock-3 R-14 (P1): a handler using an org-derived source (direct_manager / dept_head /
+    // manager_at_level) MUST also arm the create-time org-read fail-closed guard. Leaving it approval-only
+    // reproduces the exact B5-b fail-open — a failed/misconfigured org read yields empty `orgRelations`,
+    // which for a handler would resolve empty and (§2.2) fail APPROVAL_ASSIGNEE_EMPTY only if lucky, or
+    // worse mask a routing error. Include handler so create fails 422/503 with ZERO rows (G-3).
+    if (node.type !== 'approval' && node.type !== 'handler') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some(
+      (source) => isRecord(source) && typeof source.kind === 'string' && ORG_ASSIGNEE_SOURCE_KINDS.has(source.kind),
+    )
+  })
+}
+
+/**
+ * Lock-2 §L2-C / §2.3 — every form-field contact-extension source in the published runtime graph,
+ * deduped by its fingerprint key (`fieldDerivedAssigneeSourceKey` — identical sources share ONE
+ * frozen entry) with the FIRST carrying node's key retained for values-free error reporting.
+ * Drives the create-time freeze (`resolveAndFreezeFieldDerivedAssignees`) and IS the new
+ * detector: a non-empty map means the create path performs field-derived org reads and the NEW
+ * fail-closed wedge arms; an empty map means no field-derived work at all (the
+ * `includeManagerChain` opt-in posture — unrelated approvals pay nothing). Node types `approval`
+ * AND `handler` — the Lock-2 §2.4 registry rows admit both, and leaving `handler` out would
+ * reproduce the exact R-13/R-14 "silent skip" class (a handler-carried source would never bake
+ * its snapshot entry and would resolve empty at dispatch). The kind membership is DERIVED from
+ * the trait table (`FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS`), not a fourth hand-edited chain.
+ * `kind`/`fieldId`/`level` are read structurally (same posture as the other detectors above).
+ */
+export function collectRuntimeGraphFieldDerivedSources(
+  runtimeGraph: RuntimeGraph,
+): Map<string, { nodeKey: string; source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user_manager' | 'form_field_user_dept_head' }> }> {
+  const byKey = new Map<string, { nodeKey: string; source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user_manager' | 'form_field_user_dept_head' }> }>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval' && node.type !== 'handler') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (
+        !isRecord(source)
+        || typeof source.kind !== 'string'
+        || !FIELD_DERIVED_ORG_ASSIGNEE_SOURCE_KINDS.has(source.kind)
+        || typeof source.fieldId !== 'string'
+        || source.fieldId.trim().length === 0
+        || typeof source.level !== 'number'
+        || !Number.isInteger(source.level)
+        || source.level < 1
+      ) continue
+      const typed = {
+        kind: source.kind as 'form_field_user_manager' | 'form_field_user_dept_head',
+        fieldId: source.fieldId.trim(),
+        level: source.level,
+      }
+      const key = fieldDerivedAssigneeSourceKey(typed)
+      if (!byKey.has(key)) byKey.set(key, { nodeKey: node.key, source: typed })
+    }
+  }
+  return byKey
+}
+
+/**
+ * Lock-1 §K3: the set of node keys referenced by any `prior_node_approver` source in the published
+ * runtime graph. OPT-IN gate in the `runtimeGraphUsesManagerChain` posture: an empty set means the
+ * runtime paths do no K3 work at all (no audit-row read), so unrelated approvals pay nothing.
+ * `kind`/`nodeKey` are read structurally (same posture as the other detectors above).
+ *
+ * Deliberately NOT added to `runtimeGraphUsesOrgAssigneeSource`: K3 resolves from INSTANCE-INTERNAL
+ * audit rows, not the org directory — §2.1 extends that org-read fail-closed detector to K4 and
+ * K5-b only, and arming it for K3 would fail creates that need no org read at all.
+ */
+export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: RuntimeGraph): Set<string> {
+  const targets = new Set<string>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (
+        isRecord(source)
+        && source.kind === 'prior_node_approver'
+        && typeof source.nodeKey === 'string'
+        && source.nodeKey.trim().length > 0
+      ) {
+        targets.add(source.nodeKey.trim())
+      }
+    }
+  }
+  return targets
+}
+
+/**
+ * Lock-1 §K1: every group id referenced by a `user_group` source, over ANY graph — typed on the
+ * plain `ApprovalGraph` shape (not `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors
+ * above: the publish HARD GATE (`assertUserGroupSourcesBoundToOrg`) must run BEFORE
+ * `buildRuntimeGraph` (on the same `approvalGraph` the other publish-time authoring gates read),
+ * while the create-time freeze runs AFTER (`asRuntimeGraph`'s published/frozen graph) —
+ * `RuntimeGraph extends ApprovalGraph`, so one function structurally serves both call sites. This
+ * is the ONE opt-in gate in the `runtimeGraphUsesManagerChain` family that is keyed to
+ * `node.type === 'approval'` (§2.3 registry: `user_group` is admitted on `approval` only this
+ * slice — cc-as-recipient, OD-L1-7, is a SEPARATE contract deferred to its own slice, so there is
+ * no cc-node group shape to scan for yet; extending this collector to `cc` nodes is that
+ * follow-up's job, not this one's — the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s own
+ * doc comment names: keep detector scope in exact lockstep with what is actually admitted).
+ */
+export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
+  const groupIds = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) continue
+      for (const groupId of source.groupIds) {
+        if (typeof groupId === 'string' && groupId.trim().length > 0) groupIds.add(groupId.trim())
+      }
+    }
+  }
+  return groupIds
+}
+
+/**
+ * Lock-1 §K1 / OD-L1-2(a) — the PUBLISH HARD GATE: every group id any `user_group` source
+ * references MUST be bound to `orgId` in `approval_usable_member_groups` (curated set, empty by
+ * default). A group with NO binding row for this org — dangling (bound nowhere) or foreign (bound
+ * to a DIFFERENT org only) — fails publish, values-free (the group id itself is template-authored,
+ * like `prior_node_approver`'s `nodeKey`, and is permitted per §2.6; the rejection never touches
+ * group MEMBERSHIP). UNCONDITIONAL like the K3 dominance gate: no policy exemption makes a
+ * foreign/dangling group reference resolvable.
+ */
+export function assertUserGroupSourcesBoundToOrg(
+  approvalGraph: ApprovalGraph,
+  curatedGroupIds: ReadonlySet<string>,
+): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
+    // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
+    // before any graph reaches publish), but the two functions read the SAME field and should not
+    // differ in how defensively they do it.
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    sources.forEach((source: unknown, sourceIndex: number) => {
+      if (!isRecord(source) || source.kind !== 'user_group' || !Array.isArray(source.groupIds)) return
+      for (const rawGroupId of source.groupIds) {
+        // Trimmed the same way collectApprovalGraphMemberGroupIds trims before adding to the
+        // curated set — untrimmed comparison was harmless today (normalizeStringArray already
+        // trims at authoring time) but the two functions read this field with different
+        // normalization, which is a latent inconsistency (fix-round NIT-2).
+        const groupId = typeof rawGroupId === 'string' ? rawGroupId.trim() : ''
+        if (!groupId || !curatedGroupIds.has(groupId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} assigneeSources[${sourceIndex}] user_group references a group not bound to this organization`,
+            400,
+            'APPROVAL_ASSIGNEE_GROUP_NOT_BOUND',
+            { nodeKey: node.key, sourceIndex, groupId, reason: 'not-bound' },
+          )
+        }
+      }
+    })
+  }
+}
+
+/**
+ * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
+ * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
+ * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
+ */
+export function collectRuntimeGraphRequesterChoiceSources(
+  runtimeGraph: RuntimeGraph,
+): Map<string, RequesterChoiceAssigneeSource[]> {
+  const byNodeKey = new Map<string, RequesterChoiceAssigneeSource[]>()
+  for (const node of runtimeGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) continue
+    for (const source of sources) {
+      if (!isRecord(source) || source.kind !== 'requester_choice') continue
+      const existing = byNodeKey.get(node.key)
+      if (existing) existing.push(source as unknown as RequesterChoiceAssigneeSource)
+      else byNodeKey.set(node.key, [source as unknown as RequesterChoiceAssigneeSource])
+    }
+  }
+  return byNodeKey
 }
 
 /**
@@ -2304,6 +5753,15 @@ function evaluateAutoApprovalAssignment(
 ): AutoApprovalEvaluation | null {
   if (assignment.assignmentType !== 'user') return null
 
+  // Lock-3 §2.4 — HANDLER nodes are EXEMPT from auto-approval / dedup: no handler node is ever
+  // auto-completed, and a requester who is themself a handler (提交人本人) must keep their handler
+  // seat rather than have merge-with-requester dispose of it. Return BEFORE reading the effective
+  // policy (a TEMPLATE-level policy applies to every node) and BEFORE `getApprovalMode`, which would
+  // throw for a handler key — so a handler + a template-level auto-approval policy never crashes the
+  // cascade. `getEffectiveAutoApprovalPolicy` already returns node-`source` only for `approval` nodes.
+  const node = runtimeGraph.nodes.find((entry) => entry.key === assignment.nodeKey)
+  if (node?.type === 'handler') return null
+
   const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
   if (!effectivePolicy) return null
 
@@ -2314,6 +5772,11 @@ function evaluateAutoApprovalAssignment(
       event: buildAutoApprovalEvent(assignment, approvalMode, 'auto-merge-requester', effectivePolicy),
     }
   }
+
+  // Lock-4 F4-D / OD-L4-7(a): a K3 seat exists specifically so the prior node's ACTUAL
+  // decider reviews again. It remains subject to mergeWithRequester above, but neither
+  // history-derived flag may consume it merely because that same decider appears in history.
+  if (isPriorNodeApproverHistoryDedupExempt(assignment.metadata)) return null
 
   if (effectivePolicy.policy.mergeAdjacentApprover) {
     const adjacent = findLatestApprovalHistory(
@@ -2423,6 +5886,28 @@ function buildApprovalAssignmentResolver(options: {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
   requesterSnapshot: Record<string, unknown> | null
+  /**
+   * Lock-1 §K3 — LATE-BOUND provider of the prior-node decider map (referenced node key → actual
+   * decider user ids), read by the CALLER from instance-internal `approval_records` rows at node
+   * activation and threaded here so the resolver itself stays pure (§2.1: no resolver-internal
+   * database access; K3's input is caller-supplied alongside the snapshots). A PROVIDER rather
+   * than a plain map because dispatchAction constructs its executor before the actor's effective
+   * branch node — and therefore the in-flight approve merge — is known; the provider is invoked
+   * only when the executor actually resolves a node, which is always after the caller populated
+   * it. Omitted on the create/preview path (no instance rows exist yet): a `prior_node_approver`
+   * node reached by a create-time auto-approval cascade resolves EMPTY and falls to
+   * `emptyAssigneePolicy` (OD-L1-4(a)), and a route preview shows the honest EMPTY_ASSIGNEES
+   * marker (the §K2 pre-choice precedent).
+   */
+  getPriorNodeApprovers?: () => Record<string, string[]> | undefined
+  /**
+   * Lock-4 F4-C — LATE-BOUND provider of the EFFECTIVE `samePersonPolicy` at a node, mirroring
+   * `getPriorNodeApprovers` exactly (§2.1 resolver purity: `resolveApprovalAssignees` takes no
+   * `runtimeGraph`, so it cannot itself read `getEffectiveAutoApprovalPolicy` — see C-s5 in the
+   * design brief). Callers compute this from `getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)`.
+   * Omitted on paths with no runtime graph in scope (none today — every call site below has one).
+   */
+  getEffectiveSamePersonPolicy?: (nodeKey: string) => SamePersonPolicy | undefined
 }): ApprovalGraphAssignmentResolver {
   return ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
     nodeKey,
@@ -2431,6 +5916,8 @@ function buildApprovalAssignmentResolver(options: {
     formSchema: options.formSchema,
     formSnapshot: options.formSnapshot,
     requesterSnapshot: options.requesterSnapshot,
+    priorNodeApprovers: options.getPriorNodeApprovers?.(),
+    getEffectiveSamePersonPolicy: options.getEffectiveSamePersonPolicy,
   })
 }
 
@@ -2441,12 +5928,29 @@ function buildApprovalAssignmentResolver(options: {
 export interface ApprovalRoutePreviewResult {
   route: Array<{
     nodeKey: string
+    // Lock-3 R-19: the row carries its node TYPE so a handler renders as 办理 (distinguishable from an
+    // approver) instead of an indistinguishable assignee row. Absent-safe for old clients (additive).
+    nodeType: ApprovalNodeType
     nodeLabel: string
     assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
     resolveError?: string
   }>
   totalSteps: number
   truncated: boolean
+}
+
+/**
+ * 撤销锁增补 P-11 (c) — the lock §14.1 seat-arm fence: the ONLY seat arms a cancel round may carry.
+ * `source_queue` is excluded on purpose (the todo-center lock records that arm's decision door,
+ * read admission and badge disagreeing), so the cancel line cannot inherit that disagreement.
+ */
+export const CANCEL_ROUND_ALLOWED_SEAT_ARMS: ReadonlySet<string> = new Set(['user', 'role'])
+
+export function cancelRoundSeatArmsWithinFence(assignments: ReadonlyArray<{ assignmentType?: unknown }>): boolean {
+  return assignments.every(
+    (assignment) =>
+      typeof assignment.assignmentType === 'string' && CANCEL_ROUND_ALLOWED_SEAT_ARMS.has(assignment.assignmentType),
+  )
 }
 
 export class ApprovalProductService {
@@ -2460,6 +5964,43 @@ export class ApprovalProductService {
     client: { query: typeof pool.query },
     instanceId: string,
   ): Promise<ApprovalHistoryEntry[]> {
+    // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation for edits landed by PRIOR transactions: a
+    // handler field edit appended revision rows whose `audit_record_id` (the `handle` row's id) is the
+    // content-edit ordinal in `approval_records.id` (BIGSERIAL) space. Exclude any prior approval whose
+    // audit ordinal PRECEDES the latest content edit — those approvals predate the current form and
+    // must not seed an auto-approval skip. This is the NEW per-edit marker (NOT `nodeEntryEpoch`,
+    // which never bumps on a same-round edit). The single-call edit+complete case is handled by the
+    // caller passing `[]` (this txn's edit is not yet persisted here).
+    //
+    // Lock-4 OD-L4-10(a) / F4-D 回退 invalidation, priced into Lock-6 L6-A (gate A-7): a BACKWARD
+    // re-entry must invalidate every dedup-relevant approval that predates it, or `mergeAdjacentApprover`
+    // / `dedupeHistoricalApprover` re-merge a re-entered node against a stale pre-re-entry decision and
+    // silently nullify the send-back. OD-L4-10(a)'s boundary is corrected here (adversarial gate finding
+    // on #4965, live-reproduced): it is BACKWARD RE-ENTRY, not literally `action='return'` — a backward
+    // `timeout.jumpToNodeKey` effect (`applyNodeTimeoutEffect`) reaches an already-visited node through
+    // the SAME `resolveReturnToNode` resolver and is exactly as nullifying if left unfloored. A FORWARD
+    // jump (admin jump is structurally forward-only — `isReachableDownstream` rejects otherwise — and a
+    // forward timeout-jump is legitimate progress) must NOT re-floor; "compose after the jump" stays
+    // correct for those. The floor below therefore keys on `action = 'return'` OR a `'jump'` row this
+    // service stamped `metadata.backwardReentry: true` (computed at the jump dispatch site via the SAME
+    // "already on the static path to the current node" predicate the manual return action's own target
+    // validation uses).
+    //
+    // Scope by `to_version` rather than the literal `nodeEntryEpoch` int: `to_version` is a per-instance
+    // monotonic counter stamped on every 'approve'-and-cascade-adjacent `approval_records` row this query
+    // reads (manual approves AND `insertAutoApprovalEvents` rows alike — NOT every action; `transfer` /
+    // `comment` / `sign` rows outside a cascade are written with `toVersion` left at the CURRENT version,
+    // unbumped, and are excluded here by the `action = 'approve'` filter regardless) with no legacy-NULL
+    // case, so it needs no cutoff-fallback branch the way the T2-4 threshold tally's epoch reader does
+    // (:8000ish, "Dual-read fallback (§6)") — the SAME round-boundary idea that machinery already proves
+    // out for the threshold tally, applied here without inventing a second bookkeeping column. `>=` (not
+    // `>`): the invalidating action's OWN same-transaction cascade events (`insertAutoApprovalEvents`
+    // stamps them with the SAME `toVersion` as the return/backward-jump row, §L6-A round-scoping) must
+    // stay visible to LATER evaluations, not just future actions strictly after this version. Neither the
+    // manual-return nor the backward-jump call site depends on this predicate for its OWN evaluation — at
+    // the moment either one's cascade runs, its own audit row is not committed yet, so both pass `[]`
+    // directly (mirrors the create-cascade pattern below) rather than relying on this floor to
+    // self-exclude a not-yet-existing row.
     const result = await client.query<{
       id: string | number
       actor_id: string
@@ -2469,6 +6010,16 @@ export class ApprovalProductService {
        FROM approval_records
        WHERE instance_id = $1
          AND action = 'approve'
+         AND id > COALESCE(
+           (SELECT MAX(audit_record_id) FROM approval_form_field_revisions WHERE instance_id = $1),
+           0
+         )
+         AND to_version >= COALESCE(
+           (SELECT MAX(to_version) FROM approval_records
+             WHERE instance_id = $1
+               AND (action = 'return' OR (action = 'jump' AND (metadata->>'backwardReentry')::boolean IS TRUE))),
+           0
+         )
        ORDER BY occurred_at ASC, id ASC`,
       [instanceId],
     )
@@ -2542,7 +6093,23 @@ export class ApprovalProductService {
         return resolution
       }
 
-      const evaluations = resolution.assignments
+      const currentNode = runtimeGraph.nodes.find((node) => node.key === nodeKey)
+      if (currentNode?.type === 'handler') {
+        return resolution
+      }
+
+      const approvalMode = executor.getApprovalMode(nodeKey)
+      const evaluationCandidates = approvalMode === 'sequential'
+        ? resolution.assignments.filter((assignment) => isSequentialQueueActive(assignment.metadata))
+        : resolution.assignments
+      if (approvalMode === 'sequential' && evaluationCandidates.length !== 1) {
+        throw new ServiceError(
+          'Sequential approval queue has no unique active head',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      const evaluations = evaluationCandidates
         .filter((assignment) =>
           !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
         .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
@@ -2580,7 +6147,21 @@ export class ApprovalProductService {
         appendAutoApprovalHistory(history, evaluation.event)
       }
 
-      const approvalMode = executor.getApprovalMode(nodeKey)
+      if (approvalMode === 'sequential' && remainingAssignments.length > 0) {
+        const promotedAssignments = promoteNextSequentialQueueAssignment(remainingAssignments)
+        if (!promotedAssignments) {
+          throw new ServiceError(
+            'Sequential approval queue metadata is invalid',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        resolution = {
+          ...resolution,
+          assignments: promotedAssignments,
+        }
+        continue
+      }
       if (approvalMode === 'all' && remainingAssignments.length > 0) {
         return {
           ...resolution,
@@ -2838,9 +6419,123 @@ export class ApprovalProductService {
       status: row.status,
       publishNote: row.publish_note ?? null,
       publishedDefinitionId: row.published_definition_id ?? null,
+      restoredFromVersionId: row.restored_from_version_id ?? null,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
     }))
+  }
+
+  async restoreTemplateVersion(
+    templateId: string,
+    versionId: string,
+    request: RestoreApprovalTemplateVersionRequest,
+  ): Promise<ApprovalTemplateVersionDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const expectedLatestVersionId = normalizeRequiredString(
+      request.expectedLatestVersionId,
+      'expectedLatestVersionId',
+    )
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [templateId],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      if (template.latest_version_id !== expectedLatestVersionId) {
+        throw new ServiceError(
+          'Approval template changed since version history was loaded',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_STALE',
+        )
+      }
+      if (versionId === template.latest_version_id) {
+        throw new ServiceError(
+          'The selected version is already the latest version',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_ALREADY_LATEST',
+        )
+      }
+
+      const sourceResult = await client.query<TemplateVersionRow>(
+        `SELECT *
+         FROM approval_template_versions
+         WHERE id = $1 AND template_id = $2`,
+        [versionId, templateId],
+      )
+      const source = sourceResult.rows[0]
+      if (!source) {
+        throw new ServiceError(
+          'Approval template version not found',
+          404,
+          'APPROVAL_TEMPLATE_VERSION_NOT_FOUND',
+        )
+      }
+
+      // Revalidate the historical snapshot against today's authoring contract before copying it.
+      // The new row is always a draft; publishing remains a separate, explicit operation.
+      const formSchema = assertFormSchema(source.form_schema)
+      const approvalGraph = assertApprovalGraph(source.approval_graph)
+      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeTimeoutConfigs(approvalGraph)
+      validateEmptyAssigneeFallbackConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
+      validateApprovalTypePlacement(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
+
+      const maxVersionResult = await client.query<{ max_version: string }>(
+        `SELECT COALESCE(MAX(version), 0)::text AS max_version
+         FROM approval_template_versions
+         WHERE template_id = $1`,
+        [templateId],
+      )
+      const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
+      const restoredResult = await client.query<TemplateVersionRow>(
+        `INSERT INTO approval_template_versions (
+           template_id, version, status, form_schema, approval_graph, restored_from_version_id
+         )
+         VALUES ($1, $2, 'draft', $3, $4, $5)
+         RETURNING *`,
+        [
+          templateId,
+          nextVersion,
+          JSON.stringify(formSchema),
+          JSON.stringify(approvalGraph),
+          source.id,
+        ],
+      )
+      const restoredVersion = restoredResult.rows[0]
+
+      const updatedTemplateResult = await client.query<TemplateRow>(
+        `UPDATE approval_templates
+         SET latest_version_id = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING *`,
+        [restoredVersion.id, templateId],
+      )
+      const updatedTemplate = updatedTemplateResult.rows[0]
+      await client.query('COMMIT')
+
+      return toApprovalTemplateVersionDetailDTO({
+        template: updatedTemplate,
+        version: restoredVersion,
+        publishedDefinition: null,
+      })
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
   }
 
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
@@ -2859,7 +6554,12 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeTimeoutConfigs(approvalGraph)
+    validateEmptyAssigneeFallbackConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
+    validateApprovalTypePlacement(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -3011,11 +6711,22 @@ export class ApprovalProductService {
         const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
 
         const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
-        const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
+        // A form-only edit still creates a NEW template version. Re-validate the
+        // copied historical graph under current authoring rules before writing it;
+        // ordinary reads remain on asApprovalGraph's compatibility path.
+        const nextApprovalGraph = assertApprovalGraph(
+          approvalGraph ?? asApprovalGraph(latestVersion.approval_graph),
+          REQUEST_VALIDATION_CONTEXT,
+        )
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateNonScalarFieldsNotUsedInConditions(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeTimeoutConfigs(nextApprovalGraph)
+        validateEmptyAssigneeFallbackConfigs(nextApprovalGraph)
+        validateHandlerNodePlacement(nextApprovalGraph)
+        validateApprovalTypePlacement(nextApprovalGraph)
+        validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -3043,6 +6754,15 @@ export class ApprovalProductService {
         version = bundle?.version ?? null
       }
 
+      // L6-P1 carrier fix — was hardcoded `publishedDefinition: null` regardless of whether the
+      // template has an active published definition. That hardcode is the second half of the
+      // shipped defect: `persistDraft()` re-hydrates the FE draft from THIS response
+      // (`draft.value = draftFromTemplate(updated)`), immediately before `confirmPublish` reads
+      // the draft back to build the next publish payload — so a wrong-null here silently dropped
+      // any policy field the editor doesn't own (e.g. `autoApproval`) one step before the
+      // republish that was supposed to carry it forward.
+      const publishedDefinition = await this.loadActivePublishedDefinition(client, template)
+
       await client.query('COMMIT')
 
       if (!version) {
@@ -3052,7 +6772,7 @@ export class ApprovalProductService {
       return toApprovalTemplateDetailDTO({
         template,
         version,
-        publishedDefinition: null,
+        publishedDefinition,
       })
     } catch (error) {
       await rollbackQuietly(client)
@@ -3113,7 +6833,21 @@ export class ApprovalProductService {
       )
 
       const formSchema = asFormSchema(version.form_schema)
-      const approvalGraph = asApprovalGraph(version.approval_graph)
+      const storedApprovalGraph = asApprovalGraph(version.approval_graph)
+      // Publishing is a write choke point: historical drafts stay readable, but
+      // must satisfy the current all-runtime-path contract before activation.
+      const approvalGraph = assertApprovalGraph(
+        storedApprovalGraph,
+        REQUEST_VALIDATION_CONTEXT,
+        { allowParallelDuplicateAssignees: policy.autoApproval?.mergeAdjacentApprover === true },
+      )
+      // FWB-0 Layer 2: publisher must be able to READ every record-link target sheet (pinned props).
+      // Fail-closed before freezing the published definition.
+      await this.assertRecordLinkTargetsReadableByCreator(
+        formSchema,
+        typeof request.actorUserId === 'string' ? request.actorUserId : '',
+        client.query.bind(client),
+      )
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // RA-1b CURATED-VOCABULARY — THE HARD GATE. Only when the graph actually routes on requester.role do
@@ -3123,11 +6857,58 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
+      validateNonScalarFieldsNotUsedInConditions(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeTimeoutConfigs(approvalGraph)
+      validateEmptyAssigneeFallbackConfigs(approvalGraph)
+      validateHandlerNodePlacement(approvalGraph)
+      validateApprovalTypePlacement(approvalGraph)
+      validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
+      // Lock-1 §K3: every prior_node_approver reference must be an approval node strictly
+      // upstream on EVERY runtime-reachable path (dominance) — dangling / downstream / self /
+      // condition-branch-only / parallel-sibling references fail publish here, values-free.
+      // UNCONDITIONAL (unlike the parallel-conflict gate below): no policy exemption makes an
+      // undominated reference resolvable.
+      assertPriorNodeApproverReferencesUpstream(approvalGraph)
+      // Lock-1 §K1 / OD-L1-2(a) — THE HARD GATE (RA-1b shape): every group id any `user_group`
+      // source references must have a binding row for the NAMED org (`approval_usable_member_groups`,
+      // empty by default). Only when the graph actually uses `user_group` do we fetch the curated
+      // set (one read, on THIS transaction client) and reject any reference with ZERO binding rows
+      // for that org — dangling (bound nowhere) or simply never curated there.
+      //
+      // FIX-ROUND CORRECTION (gate finding P2-b/ii): the PRIOR comment here overclaimed "an author
+      // can never publish a reference to a group nobody curated for this org" as if `orgId` were a
+      // tenant boundary the CALLER is confined to. It is not, and per the owner's G-6 adjudication
+      // it is not supposed to be (OD-L1-2(a) delivers a curation NAMESPACE, not identity-resolved
+      // tenant anchoring — this codebase has no `orgs` table and the kernel create path never
+      // resolves an actor's org). `orgId` is a caller-supplied partition key on BOTH this gate and
+      // the picker: an author MAY name a different org's namespace (e.g. `org-b`) and publish a
+      // reference to whatever is bound THERE, even with no relationship to that namespace. What
+      // this gate actually guarantees: every referenced group has been explicitly curated — via
+      // `ensurePlatformAdmin`-gated bind, fix-round P1 — into AT LEAST the named namespace; a group
+      // with zero curation anywhere can never be referenced, regardless of which orgId is named.
+      // `orgId` mirrors the S7 §3.3 idiom: blank/absent normalizes to `DEFAULT_ORG_ID` — NEVER an
+      // org-agnostic match (a group bound only elsewhere still 400s under the default), so the
+      // default path fails closed exactly like an explicit one. UNCONDITIONAL like the K3 dominance
+      // gate above: no policy exemption makes a wholly-uncurated group reference resolvable.
+      const memberGroupIds = collectApprovalGraphMemberGroupIds(approvalGraph)
+      if (memberGroupIds.size > 0) {
+        const publishOrgId = typeof request.orgId === 'string' && request.orgId.trim().length > 0
+          ? request.orgId.trim()
+          : DEFAULT_ORG_ID
+        const curatedGroupIds = await fetchCuratedApprovalMemberGroupIds(publishOrgId, client.query.bind(client))
+        assertUserGroupSourcesBoundToOrg(approvalGraph, curatedGroupIds)
+      }
+      // F2 preflight: parallel branches with provably-identical DYNAMIC approver sources 409 every
+      // request at fan-out — reject at publish with the runtime's own code. Exempt when the publish
+      // policy's mergeAdjacentApprover absorbs same-approver overlap (mirrors the
+      // allowParallelDuplicateAssignees exemption the static duplicate check gets in asRuntimeGraph).
+      if (policy.autoApproval?.mergeAdjacentApprover !== true) {
+        assertNoParallelDynamicAssigneeConflicts(approvalGraph)
+      }
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
@@ -3380,6 +7161,19 @@ export class ApprovalProductService {
       throw new ServiceError('Approval template has no version to clone', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
     }
 
+    // Stored versions remain readable under the historical compatibility rules, but
+    // cloning creates a new draft version and must satisfy the current authoring gate.
+    const formSchema = assertFormSchema(source.version.form_schema)
+    const approvalGraph = assertApprovalGraph(source.version.approval_graph)
+    validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeTimeoutConfigs(approvalGraph)
+    validateEmptyAssigneeFallbackConfigs(approvalGraph)
+    validateHandlerNodePlacement(approvalGraph)
+    validateApprovalTypePlacement(approvalGraph)
+    validateConditionBranchRules(approvalGraph, formSchema)
+
     const newName = `${source.template.name} (副本)`
 
     for (let attempt = 0; attempt < TEMPLATE_CLONE_KEY_ATTEMPTS; attempt += 1) {
@@ -3411,8 +7205,8 @@ export class ApprovalProductService {
            RETURNING *`,
           [
             template.id,
-            JSON.stringify(source.version.form_schema),
-            JSON.stringify(source.version.approval_graph),
+            JSON.stringify(formSchema),
+            JSON.stringify(approvalGraph),
           ],
         )
         const version = versionResult.rows[0]
@@ -3459,6 +7253,611 @@ export class ApprovalProductService {
   }
 
   /**
+   * FWB-0 Layer 2 publish-time: every record-link field's pinned baseId/sheetId must resolve to a
+   * real sheet in that base, and the publisher must have BOTH base-read AND sheet-read.
+   *
+   * Runs on the publish transaction client only (no global RBAC cache). Targets are processed in
+   * deterministic order (baseId, sheetId, fieldId). Each target: lock authority rows, then
+   * constant-shape dual base+sheet auth (same stages for missing/mismatch/unreadable). One
+   * values-free public message for all refuse outcomes.
+   */
+  private async assertRecordLinkTargetsReadableByCreator(
+    formSchema: FormSchema,
+    creatorUserId: string,
+    queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>,
+  ): Promise<void> {
+    const recordLinkFields = (formSchema.fields ?? []).filter((field) => field.type === 'record-link')
+    if (recordLinkFields.length === 0) return
+    if (!creatorUserId.trim()) {
+      throw new ServiceError(
+        'record-link publish requires publisher identity',
+        400,
+        'VALIDATION_ERROR',
+      )
+    }
+    const unavailable = 'record-link target is not readable'
+    // Collect pins first; lock ALL targets in global phases (bases → sheets → actor once →
+    // sheet grants) BEFORE any auth re-read. Shared authority locks let peer publishes proceed;
+    // global phases retain one canonical order across every caller.
+    const targets = recordLinkFields
+      .map((field, index) => ({
+        fieldId: field.id,
+        order: index,
+        baseId: typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : '',
+        sheetId: typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : '',
+      }))
+      .sort((a, b) => {
+        if (a.baseId !== b.baseId) return a.baseId < b.baseId ? -1 : 1
+        if (a.sheetId !== b.sheetId) return a.sheetId < b.sheetId ? -1 : 1
+        if (a.fieldId !== b.fieldId) return a.fieldId < b.fieldId ? -1 : 1
+        return a.order - b.order
+      })
+
+    for (const target of targets) {
+      if (!target.baseId || !target.sheetId) {
+        throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+      }
+    }
+
+    try {
+      await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(queryFn, {
+        userId: creatorUserId,
+        targets: targets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+      })
+      for (const target of targets) {
+        const auth = await resolveRecordLinkTargetAuthOnQuery(queryFn, {
+          userId: creatorUserId,
+          baseId: target.baseId,
+          sheetId: target.sheetId,
+        })
+        if (!auth.ok) {
+          throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+        }
+      }
+    } catch (err) {
+      if (err instanceof ServiceError) throw err
+      throw new ServiceError(unavailable, 400, 'VALIDATION_ERROR')
+    }
+  }
+
+  /**
+   * FWB-0 Layer 2 submit-time authz (confused-deputy close): filler must READ every linked record.
+   * Missing / base-mismatch / unreadable / row-denied share one values-free error (no existence oracle)
+   * and run a constant-shape helper pipeline (see probeRecordLinkReadableForUser).
+   *
+   * P1-3 multi-link: EVERY configured link with a submitted value runs the full fixed pipeline
+   * before a single public refusal is emitted (no early return on the first failure that would
+   * form a depth/count oracle between two candidate links).
+   *
+   * Final in-txn path (lockTargetRows / lockAuthorityRows):
+   *   1) Collect valid targets
+   *   2) Globally phased multi-target locks via lockRecordLinkMultiTargetCreatePathOnQuery
+   *      (all bases → all sheets → actor once → sheet grants → row-auth/records)
+   *   3) Re-read every authorization WITHOUT further lock acquisition
+   * Global phases keep one canonical lock order; shared authority locks avoid serializing peer
+   * creates. Pre-txn / preview skip locks.
+   *
+   * Shared by createApproval (pre-txn + final in-txn recheck) and route-preview.
+   *
+   * @param options.queryFn — DB handle; final create recheck MUST pass the transaction client.
+   * @param options.lockTargetRows — after phased locks, revalidate approvals:write (DB/admin only)
+   *   and treat the path as the final create recheck (row/record locks already taken in phase 5).
+   * @param options.lockAuthorityRows — enable multi-target authority phases. Independent of
+   *   lockTargetRows. When omitted, defaults to lockTargetRows.
+   * @param options.transcripts — optional per-link ordered helper transcripts for parity tests
+   *   (one transcript per candidate in canonical lock order, not formSchema order).
+   * @param options.sortCandidates — when false, skip canonical sort of re-read order
+   *   (MUTATION/test only). Production always sorts (default true).
+   * @param options.interleavedAuthorityLocks — MUTATION ONLY. Restores per-candidate
+   *   interleaving so phase-order tests can distinguish the production path.
+   *
+   * Note: authority-row FOR SHARE blocks concurrent UPDATE/DELETE on every DB source the final
+   * re-read consumes while allowing peer approval creates to read the same authority concurrently
+   * (see RECORD_LINK_AUTHORITY_LOCK_ORDER). Final write is DB/admin only.
+   */
+  private async assertRecordLinksReadableAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    fillerUserId: string,
+    options: {
+      queryFn?: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+      lockTargetRows?: boolean
+      /** Independent of lockTargetRows. Omit to default to lockTargetRows. */
+      lockAuthorityRows?: boolean
+      transcripts?: string[][]
+      /**
+       * Canonical multi-link re-read order. Default true. Set false only in mutation/tests.
+       */
+      sortCandidates?: boolean
+      /**
+       * MUTATION ONLY: restore interleaved per-candidate locking for phase-order tests.
+       * Never true on production create/preview paths.
+       */
+      interleavedAuthorityLocks?: boolean
+    } = {},
+  ): Promise<string | null> {
+    if (!pool && !options.queryFn) return 'Database not available'
+    const unavailable = 'linked record is not readable'
+
+    // Normalize ALL candidate links first (no per-link early return).
+    type LinkCandidate = {
+      fieldId: string
+      sheetId: string
+      recordId: string
+      baseId: string
+      shapeOk: boolean
+    }
+    const links: LinkCandidate[] = []
+    for (const field of formSchema.fields ?? []) {
+      if (field.type !== 'record-link') continue
+      const raw = formData[field.id]
+      if (raw === undefined || raw === null) continue
+      const sheetId = typeof field.props?.sheetId === 'string' ? field.props.sheetId.trim() : ''
+      const baseId = typeof field.props?.baseId === 'string' ? field.props.baseId.trim() : ''
+      let recordId = ''
+      let shapeOk = false
+      if (typeof raw === 'object' && !Array.isArray(raw) && raw !== null) {
+        const recordIdRaw = (raw as { recordId?: unknown }).recordId
+        recordId = typeof recordIdRaw === 'string' ? recordIdRaw.trim() : ''
+        const keys = Object.keys(raw as object)
+        shapeOk = keys.length === 1 && keys[0] === 'recordId' && recordId.length > 0
+          && sheetId.length > 0 && baseId.length > 0
+      }
+      links.push({
+        fieldId: field.id,
+        sheetId: sheetId || '_invalid_sheet',
+        recordId: recordId || '_invalid_record',
+        baseId: baseId || '_invalid_base',
+        shapeOk,
+      })
+    }
+    if (links.length === 0) return null
+
+    const orderedLinks = options.sortCandidates === false
+      ? links
+      : sortRecordLinkSubmitCandidates(links)
+
+    const queryFn = options.queryFn
+      ?? ((sqlText: string, params?: unknown[]) => pool!.query(sqlText, params))
+
+    const lockTargetRows = options.lockTargetRows === true
+    const lockAuthorityRows = options.lockAuthorityRows === undefined
+      ? lockTargetRows
+      : options.lockAuthorityRows === true
+    const interleaved = options.interleavedAuthorityLocks === true
+
+    // Global multi-target lock BEFORE any per-link auth re-read (create final path).
+    if (lockAuthorityRows || lockTargetRows) {
+      const shapeOkTargets = orderedLinks
+        .filter((l) => l.shapeOk)
+        .map((l) => ({ baseId: l.baseId, sheetId: l.sheetId, recordId: l.recordId }))
+      if (shapeOkTargets.length > 0) {
+        if (lockTargetRows) {
+          await lockRecordLinkMultiTargetCreatePathOnQuery(
+            queryFn,
+            { userId: fillerUserId, targets: shapeOkTargets },
+            { interleavedPerCandidate: interleaved },
+          )
+        } else {
+          await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(
+            queryFn,
+            {
+              userId: fillerUserId,
+              targets: shapeOkTargets.map((t) => ({ baseId: t.baseId, sheetId: t.sheetId })),
+            },
+            { interleavedPerCandidate: interleaved },
+          )
+        }
+      }
+    }
+
+    // Run the fixed pipeline for EVERY link (including shape-invalid — still full depth).
+    // Locks already held: probes re-read only (no further lock acquisition).
+    let anyFailed = false
+    for (const link of orderedLinks) {
+      const transcript = options.transcripts ? [] as string[] : undefined
+      let readable = false
+      if (link.shapeOk) {
+        // Locks (when requested) were acquired once for all targets above. Per-link probe
+        // re-reads only — never re-enters per-candidate lock acquisition.
+        readable = await probeRecordLinkReadableForUser(
+          queryFn,
+          {
+            userId: fillerUserId,
+            baseId: link.baseId,
+            sheetId: link.sheetId,
+            recordId: link.recordId,
+            lockTargetRow: false,
+            lockAuthorityRows: false,
+            requireApprovalsWrite: lockTargetRows,
+          },
+          transcript,
+        )
+      } else if (transcript) {
+        for (const step of [
+          'lock_authority',
+          'lock_row_auth',
+          'sheet_membership',
+          'record_exists',
+          'base_readable',
+          'sheet_capabilities',
+          'row_deny_strict',
+          ...(lockTargetRows ? (['approvals_write'] as const) : []),
+        ]) {
+          transcript.push(step)
+        }
+      }
+      if (transcript && options.transcripts) options.transcripts.push(transcript)
+      const result = await validateRecordLinkAtSubmit(
+        { fillerCanReadRecord: async () => readable },
+        fillerUserId,
+        link.sheetId,
+        link.recordId,
+      )
+      if (!result.ok) anyFailed = true
+    }
+    return anyFailed ? unavailable : null
+  }
+
+  /**
+   * Lock-2 §L2-C — resolve every form-field contact-extension source AT CREATE from the person
+   * chosen in its referenced `user` field, and return the FROZEN map (source fingerprint →
+   * resolved local user ids) the requester snapshot carries. Order inside the method (§2.1
+   * validation-first): door 2 — the independent create-time 422 `APPROVAL_FORM_ROUTING_FIELD_EMPTY`
+   * for an EMPTY referenced field (§2.2; it survives any later widening of the publish pins, and
+   * fires BEFORE any field-derived org read so a payload failure never costs a directory read) —
+   * then ONE org-relations read per DISTINCT chosen contact.
+   *
+   * Anchoring (§L2-C corp-scoping): the contact's org relations resolve through the SAME
+   * machinery — and therefore the same routing-policy anchor — as the requester's own create-time
+   * read (`resolveApprovalRequesterOrgRelations`: policy-canonical integration when a policy
+   * governs, S7/legacy pick otherwise; every chain read is integration-scoped, never global). A
+   * contact linked in more than one policy-governed org raises the shipped
+   * `ApprovalRoutingPolicyError` and surfaces as the fail-closed 422
+   * `APPROVAL_ROUTING_POLICY_MISCONFIGURED`; any other read failure is a retryable 503
+   * `APPROVAL_FORM_ROUTING_ORG_UNRESOLVED` (the NEW wedge, §2.3) — both BEFORE any insert, zero
+   * rows. Genuine data absence (contact has no directory account / no primary department / a
+   * chain shorter than the configured level) is NOT a failure: the entry freezes as the resolved
+   * (possibly empty) list and empty resolution falls to the node's `emptyAssigneePolicy` (§2.6).
+   *
+   * The chains are the SHIPPED walks re-anchored on the contact (`form_field_user_manager` →
+   * `resolveManagerChain`'s leader-pointer walk via `includeManagerChain`;
+   * `form_field_user_dept_head` → K4's `resolveDeptHeadChain` parent-tree walk via
+   * `includeDeptHeadChain`, whose RATIFIED continue-past-empty-level posture binds this use), and
+   * `level` addresses the DENSE chain positionally (`chain[level - 1]`), byte-identical to
+   * `manager_at_level` / `dept_head_at_level` semantics. Anchor self-exclusion (the contact is
+   * never their own manager/head) is inherent to the walks; REQUESTER self-exclusion is
+   * deliberately NOT applied (§L2-C — the resolver arm documents the posture).
+   *
+   * Every error is values-free: node keys, field ids, and source fingerprint params are
+   * template-authored and permitted (§2.6); the chosen contact's id IS a form value and never
+   * appears in any message or details.
+   */
+  private async resolveAndFreezeFieldDerivedAssignees(
+    sources: ReturnType<typeof collectRuntimeGraphFieldDerivedSources>,
+    formData: Record<string, unknown>,
+  ): Promise<Record<string, string[]>> {
+    if (!pool) throw new Error('Database not available')
+
+    // Door 2 first (payload-level, no DB): every referenced field must carry a resolvable single
+    // value. The publish pins ((3) required + (4) no visibilityRule) make absence unreachable for
+    // templates published on this contract; this door is deliberately independent of them (§2.2).
+    const anchorNeeds = new Map<string, { includeManagerChain: boolean; includeDeptHeadChain: boolean }>()
+    const anchorsBySourceKey = new Map<string, string[]>()
+    for (const [key, occurrence] of sources) {
+      const anchorIds = resolveFormUserValues(formData[occurrence.source.fieldId])
+      if (anchorIds.length === 0) {
+        throw new ServiceError(
+          `Approval node ${occurrence.nodeKey} routes on form field ${occurrence.source.fieldId}, which is empty`,
+          422,
+          'APPROVAL_FORM_ROUTING_FIELD_EMPTY',
+          { nodeKey: occurrence.nodeKey, fieldId: occurrence.source.fieldId },
+        )
+      }
+      anchorsBySourceKey.set(key, anchorIds)
+      for (const anchorId of anchorIds) {
+        const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
+        if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
+        else needs.includeDeptHeadChain = true
+        anchorNeeds.set(anchorId, needs)
+      }
+    }
+
+    // ONE read per distinct anchor, walking only the chain(s) the referencing sources need.
+    const relationsByAnchor = new Map<string, ApprovalRequesterOrgRelations>()
+    for (const [anchorId, needs] of anchorNeeds) {
+      try {
+        relationsByAnchor.set(
+          anchorId,
+          await resolveApprovalRequesterOrgRelations(anchorId, pool.query.bind(pool), {
+            includeManagerChain: needs.includeManagerChain,
+            includeDeptHeadChain: needs.includeDeptHeadChain,
+          }),
+        )
+      } catch (error) {
+        // Values-free log: the anchor is a form value — never echo it.
+        metricsLogger.warn(
+          `Failed to resolve field-derived org relations for a form-chosen contact: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        )
+        if (error instanceof ApprovalRoutingPolicyError) {
+          throw new ServiceError(
+            'The directory routing policy governing a form-chosen contact is misconfigured, so approver resolution cannot run. Contact an administrator.',
+            422,
+            'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+          )
+        }
+        throw new ServiceError(
+          'Could not resolve the organization relations of a form-chosen contact required by this approval template. Please retry.',
+          503,
+          'APPROVAL_FORM_ROUTING_ORG_UNRESOLVED',
+        )
+      }
+    }
+
+    const frozen: Record<string, string[]> = {}
+    for (const [key, occurrence] of sources) {
+      const resolvedIds = new Set<string>()
+      for (const anchorId of anchorsBySourceKey.get(key) ?? []) {
+        const relations = relationsByAnchor.get(anchorId) ?? {}
+        const chain = occurrence.source.kind === 'form_field_user_manager'
+          ? (relations.managerChainIds ?? [])
+          : (relations.deptHeadChainIds ?? [])
+        const resolved = chain[occurrence.source.level - 1]
+        if (typeof resolved === 'string' && resolved.trim().length > 0) resolvedIds.add(resolved.trim())
+      }
+      frozen[key] = [...resolvedIds]
+    }
+    return frozen
+  }
+
+  /**
+   * Lock-1 §K2 — validate the submit-time requester choices against every published
+   * `requester_choice` node's configured scope, and return the FROZEN map (node key → chosen
+   * local user ids) the requester snapshot carries. Every rejection is a values-free 422
+   * (node keys and template-authored config only — never the chosen person ids) raised BEFORE
+   * any instance/assignment insert; a failed scope read is a retryable 503 (fail-closed,
+   * mirroring APPROVAL_REQUESTER_ORG_UNRESOLVED — an unverifiable choice must never freeze).
+   *
+   * Scope semantics (§K2, verbatim): `company` accepts any ACTIVE local user; `members`
+   * accepts only ids in the configured list (still active-checked — company is the widest
+   * scope and members/role only narrow it); `role` accepts only ids holding a configured
+   * role at create time, read FRESH from `user_roles`. That role read deliberately does NOT
+   * reuse `resolveApprovalRequesterRoleIds`: that helper INNER-JOINs `roles` on
+   * `approval_usable = true`, a curation flag governing the `requester.role` ROUTING
+   * predicate — importing it here would silently fail every choice scoped to a non-curated
+   * role. K2's role scope is plain role membership.
+   */
+  private async validateAndFreezeRequesterChoices(
+    payload: Record<string, string[]> | undefined,
+    sourcesByNode: Map<string, RequesterChoiceAssigneeSource[]>,
+    requireComplete: boolean,
+  ): Promise<Record<string, string[]>> {
+    if (!pool) throw new Error('Database not available')
+    // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
+    // values-free 422 (the offending VALUE is never echoed — only the node key).
+    const normalized = new Map<string, string[]>()
+    if (payload !== undefined) {
+      if (!isRecord(payload)) {
+        throw new ServiceError('requesterChoices must be an object of node key to user-id arrays', 422, 'APPROVAL_REQUESTER_CHOICE_INVALID')
+      }
+      for (const [rawNodeKey, rawList] of Object.entries(payload)) {
+        const nodeKey = rawNodeKey.trim()
+        if (!sourcesByNode.has(nodeKey)) {
+          // An entry for a node the published route does not resolve by requester choice cannot
+          // be validated against any scope — fail-closed, never silently dropped.
+          throw new ServiceError(
+            `requesterChoices references a node that has no requester_choice source`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_UNKNOWN_NODE',
+            { nodeKey },
+          )
+        }
+        if (!Array.isArray(rawList) || rawList.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+          throw new ServiceError(
+            `requesterChoices entries must be non-empty string arrays`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_INVALID',
+            { nodeKey },
+          )
+        }
+        // Trim + order-preserving dedupe; cardinality applies to the deduped list.
+        const ids: string[] = []
+        const seen = new Set<string>()
+        for (const entry of rawList) {
+          const id = entry.trim()
+          if (!seen.has(id)) {
+            seen.add(id)
+            ids.push(id)
+          }
+        }
+        normalized.set(nodeKey, ids)
+      }
+    }
+
+    const frozen: Record<string, string[]> = {}
+    // Batched activity check across every node's choices (company baseline for ALL scopes).
+    const allChosenIds = new Set<string>()
+    for (const ids of normalized.values()) for (const id of ids) allChosenIds.add(id)
+    let activeIds = new Set<string>()
+    if (allChosenIds.size > 0) {
+      try {
+        const activeResult = await pool.query<{ id: string }>(
+          `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+          [[...allChosenIds]],
+        )
+        activeIds = new Set(activeResult.rows.map((row) => row.id))
+      } catch (error) {
+        metricsLogger.warn(
+          `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
+        )
+        throw new ServiceError(
+          'Could not verify the chosen approvers for this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+        )
+      }
+    }
+
+    for (const [nodeKey, sources] of sourcesByNode) {
+      const ids = normalized.get(nodeKey)
+      if (!ids || ids.length === 0) {
+        if (requireComplete) {
+          // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
+          // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
+          throw new ServiceError(
+            `A requester choice is required for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_REQUIRED',
+            { nodeKey },
+          )
+        }
+        continue // read-only preview without choices: the node walks as EMPTY_ASSIGNEES, honestly.
+      }
+      for (const source of sources) {
+        // Mode cardinality — values-free 422 BEFORE any insert.
+        if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
+          throw new ServiceError(
+            source.mode === 'single'
+              ? `This approval node requires exactly one chosen approver`
+              : `This approval node requires at least one chosen approver`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
+            { nodeKey, mode: source.mode },
+          )
+        }
+        const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
+          throw new ServiceError(
+            `A chosen approver is outside the scope configured for this approval node`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
+            { nodeKey, scopeType },
+          )
+        }
+        // Baseline for every scope: each chosen id is an ACTIVE local user.
+        if (ids.some((id) => !activeIds.has(id))) outOfScope(source.scope.type)
+        if (source.scope.type === 'members') {
+          const allowed = new Set(source.scope.userIds.map((id) => id.trim()))
+          if (ids.some((id) => !allowed.has(id))) outOfScope('members')
+        } else if (source.scope.type === 'role') {
+          // FRESH plain `user_roles` membership — see the method doc for why this must NOT go
+          // through resolveApprovalRequesterRoleIds (approval_usable is routing-predicate
+          // curation, not approver selection).
+          let holders: Set<string>
+          try {
+            const holderResult = await pool.query<{ user_id: string }>(
+              `SELECT DISTINCT user_id FROM user_roles WHERE user_id = ANY($1::varchar[]) AND role_id = ANY($2::varchar[])`,
+              [ids, source.scope.roleIds],
+            )
+            holders = new Set(holderResult.rows.map((row) => row.user_id))
+          } catch (error) {
+            metricsLogger.warn(
+              `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
+            )
+            throw new ServiceError(
+              'Could not verify the chosen approvers for this approval template. Please retry.',
+              503,
+              'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+            )
+          }
+          if (ids.some((id) => !holders.has(id))) outOfScope('role')
+        }
+      }
+      frozen[nodeKey] = ids
+    }
+    return frozen
+  }
+
+  /** Lock-2 §L2-B: active-user and allow-self enforcement for every submitted contact value. */
+  private async assertUserFormValuesAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    requesterId: string,
+    fieldDerivedSources: ReturnType<typeof collectRuntimeGraphFieldDerivedSources>,
+  ): Promise<void> {
+    if (!pool) throw new Error('Database not available')
+    const routedFieldIds = new Set(
+      [...fieldDerivedSources.values()].map((entry) => entry.source.fieldId),
+    )
+    const values: Array<{ fieldId: string; allowSelf: boolean; ids: string[] }> = []
+    for (const field of formSchema.fields) {
+      if (field.type === 'user') {
+        const rawValue = formData[field.id]
+        if (field.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+          if (!routedFieldIds.has(field.id)) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id} must contain a user id`] },
+            )
+          }
+          continue
+        }
+        const ids = resolveFormUserValues(formData[field.id])
+        if (ids.length > 0) values.push({ fieldId: field.id, allowSelf: field.props?.allowSelf === true, ids })
+        continue
+      }
+      if (field.type !== 'detail' || !Array.isArray(formData[field.id])) continue
+      const rows = formData[field.id] as Array<Record<string, unknown>>
+      for (const column of field.columns ?? []) {
+        if (column.type !== 'user') continue
+        for (const row of rows) {
+          const rawValue = row?.[column.id]
+          if (column.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id}.${column.id} must contain a user id`] },
+            )
+          }
+          const ids = resolveFormUserValues(row?.[column.id])
+          if (ids.length > 0) values.push({ fieldId: `${field.id}.${column.id}`, allowSelf: column.props?.allowSelf === true, ids })
+        }
+      }
+    }
+    if (values.length === 0) return
+
+    const normalizedRequesterId = requesterId.trim()
+    const selfViolation = values.find((entry) => !entry.allowSelf && entry.ids.includes(normalizedRequesterId))
+    if (selfViolation) {
+      throw new ServiceError(
+        'The requester cannot be selected in this contact field',
+        422,
+        'APPROVAL_FORM_USER_SELF_NOT_ALLOWED',
+        { fieldId: selfViolation.fieldId },
+      )
+    }
+
+    const ids = [...new Set(values.flatMap((entry) => entry.ids))]
+    let activeResult: { rows: Array<{ id: string }> }
+    try {
+      activeResult = await pool.query<{ id: string }>(
+        `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+        [ids],
+      )
+    } catch {
+      throw new ServiceError(
+        'Could not verify the selected contacts. Please retry.',
+        503,
+        'APPROVAL_FORM_USER_DIRECTORY_UNRESOLVED',
+      )
+    }
+    const activeIds = new Set(activeResult.rows.map((row) => row.id))
+    const unavailable = values.find((entry) => entry.ids.some((id) => !activeIds.has(id)))
+    if (unavailable) {
+      throw new ServiceError(
+        'A selected contact is unavailable',
+        422,
+        'APPROVAL_FORM_USER_UNAVAILABLE',
+        { fieldId: unavailable.fieldId },
+      )
+    }
+  }
+
+  /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
    * construction lives here so preview can NEVER drift from create (the same normalization,
@@ -3466,10 +7865,17 @@ export class ApprovalProductService {
    * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
    */
   private async assembleCreationContext(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       whitelistFormDataToSchema?: boolean
+      // Lock-1 §K2: the READ-ONLY previews (B3-05/B3-06) may walk a `requester_choice` route
+      // WITHOUT the submit-time choices — the affected node then previews honestly as
+      // EMPTY_ASSIGNEES instead of 422-blocking the preview. The CREATE path (default) keeps
+      // the fail-closed contract: a published requester_choice node with no entry in the
+      // payload is a values-free 422 BEFORE any insert. Choices that ARE supplied are
+      // scope/cardinality-validated identically on every path (preview cannot drift).
+      requesterChoicePresence?: 'require' | 'optional'
       // RP-3 (B3-06 authoring 试运行): source the runtime graph from the LATEST (possibly draft)
       // version, compiled on the fly with the SAME buildRuntimeGraph the publish path uses (no
       // parallel impl) — lets an author dry-run un-published edits. Default 'active' = the
@@ -3495,6 +7901,8 @@ export class ApprovalProductService {
     runtimeGraph: RuntimeGraph
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
+    attachmentsEnabled: boolean
+    designatedFallbackEligibilitySnapshot: ApprovalDesignatedFallbackEligibilitySnapshot | undefined
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -3541,13 +7949,45 @@ export class ApprovalProductService {
         if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
       }
     }
-    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
+    const attachmentsEnabled = isApprovalAttachmentsEnabled()
+    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData, {
+      attachmentValueMode: attachmentsEnabled ? 'ids' : 'legacy',
+    })
     if (validationErrors.length > 0) {
       throw new ServiceError(
         'Approval form data is invalid',
         400,
         'VALIDATION_ERROR',
         { errors: validationErrors },
+      )
+    }
+
+    // FWB-0 Layer 2: freeze the canonical `{ recordId: trimmed }` shape after structural
+    // validation so graph execution + form_snapshot never persist padded ids that were
+    // authorized only after trim.
+    canonicalizeRecordLinkFormData(formSchema, normalizedFormData)
+
+    // FWB-0 Layer 2: submit-time record-link authz (confused-deputy close). Filler must READ every
+    // linked record; missing and unreadable share one values-free fail-closed shape (no existence
+    // oracle). Runs on the SAME assembleCreationContext substrate as create + route-preview so
+    // preview cannot drift from create.
+    //
+    // Dry-run identity contract (B3-06): when an admin previews AS a sample requester, the
+    // record-link read check uses the SAMPLE requester (requesterOverride), not the admin actor —
+    // otherwise the dry-run would authorize under the author's privileges and hide filler-denied
+    // links. Create/B3-05 have no override, so this is byte-identical to actor.userId there.
+    const recordLinkFillerUserId = options.requesterOverride?.userId?.trim() || actor.userId
+    const recordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+      formSchema,
+      normalizedFormData,
+      recordLinkFillerUserId,
+    )
+    if (recordLinkAuthzError) {
+      throw new ServiceError(
+        'Approval form data is invalid',
+        400,
+        'VALIDATION_ERROR',
+        { errors: [recordLinkAuthzError] },
       )
     }
 
@@ -3565,15 +8005,18 @@ export class ApprovalProductService {
 
     // Org-relation plumbing — freeze the requester's org relations (direct manager
     // / dept head / management chain, as LOCAL user ids) from the directory `raw`
-    // payload. READ-ONLY (directory_* SELECTs only) and best-effort: a directory
-    // read failure must never block create, so an unresolved lookup just omits the
-    // fields. direct_manager / dept_head read managerId / deptHeadId; the chain is
-    // walked only when the published graph uses a management-chain source
+    // payload. READ-ONLY (directory_* SELECTs only). A SUCCESSFUL read that finds no
+    // manager/dept/title simply omits those fields and emptyAssigneePolicy applies.
+    // A FAILED read (transient throw OR a misconfigured routing policy) is NOT
+    // best-effort when the graph consumes org data: the wedge guards below fail-close
+    // create AND the shared preview substrate (B3-05/B3-06) so a broken policy cannot
+    // silently auto-approve. direct_manager / dept_head read managerId / deptHeadId;
+    // the chain is walked only when the published graph uses a management-chain source
     // (continuous_managers or manager_at_level) — so the extra per-hop queries stay
-    // off every approval. Absence falls through to the node's emptyAssigneePolicy.
-    // Draft dry-run (B3-06) compiles the authoring graph with the SAME compiler the publish path
-    // uses; the default path reads the frozen published runtime graph (create + B3-05, unchanged).
-    // The `!` on the published branch is sound: the non-draft gate above already threw if absent.
+    // off every approval. Draft dry-run (B3-06) compiles the authoring graph with the
+    // SAME compiler the publish path uses; the default path reads the frozen published
+    // runtime graph (create + B3-05, unchanged). The `!` on the published branch is
+    // sound: the non-draft gate above already threw if absent.
     const runtimeGraph = previewFromDraft
       ? buildRuntimeGraph(asApprovalGraph(bundle.version.approval_graph), { allowRevoke: false })
       : asRuntimeGraph(bundle.publishedDefinition!.runtime_graph)
@@ -3592,20 +8035,85 @@ export class ApprovalProductService {
       // the sample requester's org data can never be client-supplied (owner order ③).
       ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
+    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
+    await this.assertUserFormValuesAtSubmit(
+      formSchema,
+      normalizedFormData,
+      effectiveRequester.userId,
+      fieldDerivedSources,
+    )
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
+    // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
+    // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
+    const needsDeptHeadChain = runtimeGraphUsesDeptHeadChain(runtimeGraph)
+    const needsDepartmentDirectory = formSchema.fields.some((field) => {
+      const value = normalizedFormData[field.id]
+      return field.type === 'department' && Array.isArray(value) && value.length > 0
+    })
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
+    // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
+    // requester is linked in >1 policy-governed org) is persistent, not transient — "please retry"
+    // is actively misleading for it. Track it separately so the wedge guards below surface a
+    // distinct, actionable code. Same guard POSITIONS as before (fires only when the graph actually
+    // routes on the attribute) — the blast radius of a broken policy stays scoped to templates that
+    // consume org data, exactly like today's transient-failure semantics.
+    let orgPolicyMisconfigured = false
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
+        includeDeptHeadChain: needsDeptHeadChain,
+        ...(needsDepartmentDirectory ? { includeDepartmentFieldContext: true } : {}),
       })
     } catch (error) {
       orgReadFailed = true
+      orgPolicyMisconfigured = error instanceof ApprovalRoutingPolicyError
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${effectiveRequester.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
+    }
+
+    if (needsDepartmentDirectory) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          orgPolicyMisconfigured ? 422 : 503,
+          orgPolicyMisconfigured
+            ? 'APPROVAL_ROUTING_POLICY_MISCONFIGURED'
+            : 'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      const integrationId = orgRelations.canonicalIntegrationId
+      if (!integrationId) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          422,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      try {
+        await canonicalizeApprovalDepartmentFormData(
+          formSchema,
+          normalizedFormData,
+          integrationId,
+          pool.query.bind(pool),
+        )
+      } catch (error) {
+        if (error instanceof ApprovalDepartmentUnavailableError) {
+          throw new ServiceError(
+            'Approval department selection is unavailable',
+            422,
+            'APPROVAL_DEPARTMENT_UNRESOLVED',
+          )
+        }
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          503,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
     }
 
     // RA-1b: `requester.role in [...]` routes on the requester's CURRENT role membership. Resolve it with a
@@ -3638,7 +8146,39 @@ export class ApprovalProductService {
     //   - read SUCCEEDED but empty (genuine row-level absence) -> 422, the requester's department is unset.
     // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
     // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
+    // B5-b owner P1 (fail-open closure): when the ORG READ failed — transient throw OR a
+    // misconfigured routing policy — an empty `orgRelations` must NOT flow into any org-derived
+    // assignee source (direct_manager / dept_head / continuous_managers / manager_at_level). It
+    // would resolve to an empty assignee set and, under `emptyAssigneePolicy: 'auto-approve'`,
+    // silently AUTO-APPROVE the instance: a broken policy becomes a fail-open. Fail-close at
+    // create instead, BEFORE any instance/assignment insert: 422 for the persistent config error
+    // ("contact an administrator" — retrying never fixes a policy), 503 for the transient failure
+    // (retryable). Genuine absence (read succeeded, requester has no manager) is untouched and
+    // still follows `emptyAssigneePolicy` — that is the pre-existing, deliberate semantic.
+    if (orgReadFailed && runtimeGraphUsesOrgAssigneeSource(runtimeGraph)) {
+      if (orgPolicyMisconfigured) {
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so approver resolution cannot run. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
+      throw new ServiceError(
+        'Could not resolve the requester organization relations required by this approval template. Please retry.',
+        503,
+        'APPROVAL_REQUESTER_ORG_UNRESOLVED',
+      )
+    }
+
     if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'department')) {
+      if (orgPolicyMisconfigured) {
+        // persistent CONFIG error — retrying never fixes a broken routing policy
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so the requester department cannot be resolved. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester department required by this approval template. Please retry.',
@@ -3658,6 +8198,13 @@ export class ApprovalProductService {
     // applies: a directory read that THREW -> 503 (retryable); a read that SUCCEEDED but left title unset
     // -> 422 (genuine row-level absence). Only fires when the graph actually routes on requester.title.
     if (!orgRelations.primaryTitle && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'title')) {
+      if (orgPolicyMisconfigured) {
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so the requester title cannot be resolved. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester title required by this approval template. Please retry.',
@@ -3683,6 +8230,55 @@ export class ApprovalProductService {
         503,
         'APPROVAL_REQUESTER_ROLE_UNRESOLVED',
       )
+    }
+
+    // Lock-2 §L2-C (form-field contact extensions) — resolve the chosen contact's manager /
+    // department-head extension AT CREATE (submit IS create: the anchor travels in this very
+    // payload) and FREEZE the result; the resolver then reads only the frozen map, so no live
+    // directory read ever happens at dispatch/return/admin-jump/timeout. Placed HERE, in the
+    // pre-`BEGIN` band with the shipped wedge guards above and BEFORE any instance/assignment
+    // insert: every failure — door-2 empty field 422, routing-policy 422, transient read 503 —
+    // leaves zero rows. Its own detector + wedge, deliberately NOT `runtimeGraphUsesOrgAssigneeSource`
+    // (§2.3): the requester wedge above stays requester-scoped, and a field-derived-only template
+    // never pays a requester org read it does not need. OPT-IN — an empty collection does no work.
+    let frozenFieldDerivedAssigneeIds: Record<string, string[]> | undefined
+    if (fieldDerivedSources.size > 0) {
+      frozenFieldDerivedAssigneeIds = await this.resolveAndFreezeFieldDerivedAssignees(
+        fieldDerivedSources,
+        normalizedFormData,
+      )
+    }
+
+    // Lock-1 §K2 (requester_choice) — validate the submitter's choices against each published
+    // node's configured scope and freeze them. Placed HERE, with the org/role wedge guards
+    // above and BEFORE any instance/assignment insert (mirroring the B5-b fail-closed
+    // placement): every rejection is a values-free 422 with zero rows persisted. OPT-IN — a
+    // graph without a requester_choice source (and a payload without choices) does no work.
+    const requesterChoiceSourcesByNode = collectRuntimeGraphRequesterChoiceSources(runtimeGraph)
+    let frozenRequesterChoices: Record<string, string[]> | undefined
+    if (requesterChoiceSourcesByNode.size > 0 || request.requesterChoices !== undefined) {
+      frozenRequesterChoices = await this.validateAndFreezeRequesterChoices(
+        request.requesterChoices,
+        requesterChoiceSourcesByNode,
+        options.requesterChoicePresence !== 'optional',
+      )
+    }
+
+    // Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — freeze-at-create: read the
+    // CURRENT member list of every group id the published runtime graph references, ONCE, into
+    // `groupMemberIds`. OPT-IN (same posture as includeManagerChain/needsDeptHeadChain above) — a
+    // graph without a `user_group` source does no work. No org check here: the org boundary is the
+    // PUBLISH-time hard gate (assertUserGroupSourcesBoundToOrg) — by the time a template is
+    // published its user_group sources already passed it, so create only needs the members. A
+    // group deleted/emptied after publish simply freezes `[]` for that id (§K1: never a
+    // dispatch-time failure — falls through to emptyAssigneePolicy like any other empty
+    // resolution). Best-effort is NOT appropriate here (unlike delegation below): a thrown read
+    // propagates the request failure structurally, exactly like every other snapshot-plumbing read
+    // in this method — there is no "genuine absence" reading for a DB error on a local table.
+    const memberGroupIds = collectApprovalGraphMemberGroupIds(runtimeGraph)
+    let frozenGroupMemberIds: Record<string, string[]> | undefined
+    if (memberGroupIds.size > 0) {
+      frozenGroupMemberIds = await fetchMemberGroupSnapshot(memberGroupIds, pool.query.bind(pool))
     }
 
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
@@ -3720,14 +8316,53 @@ export class ApprovalProductService {
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
+      // Lock-1 §K4: freeze the department-head chain baked above (opt-in, needsDeptHeadChain).
+      ...(orgRelations.deptHeadChainIds ? { deptHeadChainIds: orgRelations.deptHeadChainIds } : {}),
       ...(Object.keys(delegationMap).length > 0 ? { delegations: delegationMap } : {}),
+      // Lock-1 §K2: freeze the validated submit-time choices (node key → chosen local user
+      // ids). The resolver reads ONLY this map — immutable across return/admin-jump/timeout.
+      ...(frozenRequesterChoices && Object.keys(frozenRequesterChoices).length > 0
+        ? { requesterChoices: frozenRequesterChoices }
+        : {}),
+      // Lock-1 §K1: freeze the group member snapshot baked above (opt-in, memberGroupIds).
+      ...(frozenGroupMemberIds && Object.keys(frozenGroupMemberIds).length > 0
+        ? { groupMemberIds: frozenGroupMemberIds }
+        : {}),
+      // Lock-2 §L2-C: freeze the field-derived contact-extension resolution (source fingerprint →
+      // resolved local user ids). Present whenever the graph carries such a source — INCLUDING
+      // entries frozen as `[]` (read ran, resolved nobody → emptyAssigneePolicy at the node), so
+      // "resolved to nobody" is distinguishable from "never baked". The resolver reads ONLY this
+      // map — immutable across return/admin-jump/timeout; a directory change after create never
+      // alters it (the sanctioned in-flight mutation is `transfer`).
+      ...(frozenFieldDerivedAssigneeIds ? { fieldDerivedAssigneeIds: frozenFieldDerivedAssigneeIds } : {}),
     }
+    // Lock-1 §K3: `getPriorNodeApprovers` is deliberately OMITTED on the create/preview path — no
+    // instance exists yet, so there are no audit rows to read. A `prior_node_approver` node can
+    // only activate here through a same-transaction auto-approval cascade (publish guarantees its
+    // target is strictly upstream, so it is never the first pending node); in that case it
+    // resolves EMPTY and falls to `emptyAssigneePolicy` (OD-L1-4(a) — the cascade's decider is
+    // the system sentinel, which is dropped by definition; under `actorMode:'original_approver'`
+    // the attributable decider is not re-materialized from an unpersisted round either — the
+    // fail-closed arm, never a silent wrong approver). Route previews show the honest
+    // EMPTY_ASSIGNEES marker for such nodes (the §K2 pre-choice precedent).
+    const assignmentResolver = buildApprovalAssignmentResolver({
+      formSchema,
+      formSnapshot: normalizedFormData,
+      requesterSnapshot,
+      // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
+      // at every assignmentResolver call site in this file.
+      getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+    })
+    const designatedFallbackEligibility = await loadApprovalDesignatedFallbackEligibility(pool, runtimeGraph)
+    const designatedFallbackEligibilitySnapshot = serializeApprovalDesignatedFallbackEligibility(
+      designatedFallbackEligibility,
+    )
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
-      assignmentResolver: buildApprovalAssignmentResolver({
-        formSchema,
-        formSnapshot: normalizedFormData,
-        requesterSnapshot,
-      }),
+      assignmentResolver,
+      designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+        assignmentResolver,
+        designatedFallbackEligibility,
+      ),
       requesterContext: {
         department: requesterSnapshot.directoryDepartment ?? null,
         title: requesterSnapshot.directoryTitle ?? null,
@@ -3735,7 +8370,16 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
-    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+    return {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
+    }
   }
 
   /**
@@ -3749,12 +8393,15 @@ export class ApprovalProductService {
    * admin variant threads its sampleRequester through the same method under its own guard.
    */
   async previewApprovalRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
   ): Promise<ApprovalRoutePreviewResult> {
     // B3-05: the requester IS the session actor; publish gate applies (active runtime graph).
+    // §K2: choices are OPTIONAL on the read-only preview (a not-yet-chosen requester_choice
+    // node previews as EMPTY_ASSIGNEES); supplied choices are validated + resolved to names.
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
+      requesterChoicePresence: 'optional',
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
   }
@@ -3768,7 +8415,7 @@ export class ApprovalProductService {
    * (owner order ③). `actor` still authorizes template visibility inside assembleCreationContext.
    */
   async previewTemplateRoute(
-    request: { templateId: string; formData: Record<string, unknown> },
+    request: { templateId: string; formData: Record<string, unknown>; requesterChoices?: Record<string, string[]> },
     actor: CreateApprovalActor,
     options: {
       // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
@@ -3779,6 +8426,7 @@ export class ApprovalProductService {
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
       previewSource: 'draft',
+      requesterChoicePresence: 'optional',
       ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
     })
     return this.walkPreviewRoute(runtimeGraph, executor)
@@ -3792,8 +8440,12 @@ export class ApprovalProductService {
       const node = runtimeGraph.nodes.find((entry) => entry.key === key)
       return (node?.name && String(node.name).trim()) || key
     }
+    // Lock-3 R-19: resolve a frontier node's TYPE so the preview row is distinguishable (办理 vs 审批).
+    const nodeTypeOf = (key: string): ApprovalNodeType =>
+      (runtimeGraph.nodes.find((entry) => entry.key === key)?.type ?? 'approval')
     const route: Array<{
       nodeKey: string
+      nodeType: ApprovalNodeType
       nodeLabel: string
       assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
       resolveError?: string
@@ -3823,6 +8475,7 @@ export class ApprovalProductService {
         const assignments = resolution.assignments.filter((entry) => entry.nodeKey === nodeKey)
         route.push({
           nodeKey,
+          nodeType: nodeTypeOf(nodeKey),
           nodeLabel: nodeLabel(nodeKey),
           assignees: assignments.map((entry) => ({ id: entry.assigneeId, name: entry.assigneeId, assignmentType: entry.assignmentType })),
           ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
@@ -3831,8 +8484,13 @@ export class ApprovalProductService {
       // Parallel frontier: advancing a multi-branch region node-by-node through
       // resolveAfterApprove mirrors the runtime, but the preview only promises the FIRST-PASS
       // node set — advance from the primary cursor; if the executor cannot advance, truncate.
+      // Lock-3 R-19: `resolveAfterApprove` throws for a HANDLER cursor (its config accessor rejects a
+      // handler key), so advance a handler frontier with `resolveAfterHandle` — otherwise a graph with a
+      // handler would truncate at the handler row instead of previewing past it.
       try {
-        const next = executor.resolveAfterApprove(resolution.currentNodeKey)
+        const next = nodeTypeOf(resolution.currentNodeKey) === 'handler'
+          ? executor.resolveAfterHandle(resolution.currentNodeKey)
+          : executor.resolveAfterApprove(resolution.currentNodeKey)
         if (next.currentNodeKey && visited.has(next.currentNodeKey) && next.status !== 'approved') {
           truncated = true
           break
@@ -3875,7 +8533,16 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
     // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
-    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+    const {
+      bundle,
+      formSchema,
+      normalizedFormData,
+      runtimeGraph,
+      requesterSnapshot,
+      executor,
+      attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
+    } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -3885,6 +8552,9 @@ export class ApprovalProductService {
     const requestNo = await this.allocateRequestNo()
 
     const instanceMetadata: Record<string, unknown> = { templateKey: bundle.template.key }
+    if (designatedFallbackEligibilitySnapshot) {
+      instanceMetadata.designatedFallbackEligibility = designatedFallbackEligibilitySnapshot
+    }
     if (initial.parallelState) {
       instanceMetadata.parallelBranchStates = buildPersistableParallelState(initial.parallelState)
     }
@@ -3897,19 +8567,99 @@ export class ApprovalProductService {
       client = await pool.connect()
       await client.query('BEGIN')
 
+      // FWB-0 Layer 2 P1-4: final write-boundary revalidation on the TRANSACTION client
+      // immediately before insert. Locks every authority source the subsequent re-read
+      // consumes, the sheet+record row-auth advisory (record_permissions phantoms), and the
+      // target record FOR UPDATE, then re-reads multitable target auth and approvals:write
+      // through that same queryFn — DB/admin only (no actor.permissions / JWT as final write
+      // authority). Concurrent DELETE/INSERT on locked sources either blocks or is observed
+      // as empty — never authorize from the pre-txn precheck alone.
+      const finalRecordLinkAuthzError = await this.assertRecordLinksReadableAtSubmit(
+        formSchema,
+        normalizedFormData,
+        actor.userId,
+        {
+          queryFn: (sqlText, params) => client!.query(sqlText, params),
+          lockTargetRows: true,
+          // Explicit independent authority lock (mutation surface: set false → race goldens RED).
+          lockAuthorityRows: true,
+        },
+      )
+      if (finalRecordLinkAuthzError) {
+        throw new ServiceError(
+          'Approval form data is invalid',
+          400,
+          'VALIDATION_ERROR',
+          { errors: [finalRecordLinkAuthzError] },
+        )
+      }
+
+      const templateVisibleAtWrite = await this.templateVisibleAtCreateBoundary(
+        client,
+        bundle.template.id,
+        bundle.version.id,
+        actor.userId,
+      )
+      if (!templateVisibleAtWrite) {
+        throw new ServiceError(
+          'Approval template not found',
+          404,
+          'APPROVAL_TEMPLATE_NOT_FOUND',
+        )
+      }
+
+      // The record-link probe checks this for each linked record, but templates without a
+      // record-link field must receive the same DB-only final write check. Actor authority rows
+      // are already locked by templateVisibleAtCreateBoundary, so a concurrent revoke cannot land
+      // between this read and the instance insert.
+      const canWriteApprovalAtBoundary = await userHasApprovalsWriteOnQuery(
+        (sqlText, params) => client!.query(sqlText, params),
+        actor.userId,
+      )
+      if (!canWriteApprovalAtBoundary) {
+        throw new ServiceError('Forbidden', 403, 'FORBIDDEN')
+      }
+
+      // Lock-11 §10 D-3/D-4/D-9 — arm (a), keyed on the REQUESTER (`requesterSnapshot.id`, NOT
+      // `actor.userId` and NEVER `actor.tenantId`/`resolveApprovalTenantId` — the latter is
+      // header-forgeable, see routes/approvals.ts's `resolveApprovalTenantId` docblock and
+      // jwt-middleware.ts's `x-tenant-id` back-fill). Placed AFTER the 403 write-check and BEFORE
+      // the INSERT: a requester who fails both gets 403 (authorization first); 422 means
+      // specifically "authorized, but org unresolvable". Runs on the transaction client, matching
+      // the two guards above it — never the pool (TOCTOU against the just-locked authority rows).
+      let approvalOrgId: string
+      try {
+        approvalOrgId = await deriveApprovalInstanceOrgId(
+          (sqlText, params) => client!.query(sqlText, params),
+          typeof requesterSnapshot.id === 'string' ? requesterSnapshot.id : '',
+        )
+      } catch (error) {
+        if (error instanceof ApprovalOrgUnresolvedError) {
+          // Values-free (OD-L11-3 arm (i), D-3): no org id, no membership count, no user id in
+          // the thrown ServiceError — `details` is intentionally omitted so sendServiceError
+          // never surfaces it.
+          throw new ServiceError(
+            'Approval instance org could not be resolved',
+            422,
+            'APPROVAL_ORG_UNRESOLVED',
+          )
+        }
+        throw error
+      }
+
       await client.query(
         `INSERT INTO approval_instances
          (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
           requester_snapshot, subject_snapshot, policy_snapshot, metadata,
           current_step, total_steps, sync_status, sync_error,
           template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
-          created_at, updated_at)
+          created_at, updated_at, org_id)
          VALUES
          ($1, $2, 0, 'platform', NULL, 'approval-product-template', $3, $4,
           $5, $6, $7, $8,
           $9, $10, 'ok', NULL,
           $11, $12, $13, $14, $15, $16,
-          now(), now())`,
+          now(), now(), $17)`,
         [
           instanceId,
           initial.status,
@@ -3917,7 +8667,17 @@ export class ApprovalProductService {
           bundle.template.name,
           JSON.stringify(requesterSnapshot),
           JSON.stringify({ templateId: bundle.template.id, templateKey: bundle.template.key }),
-          JSON.stringify({ rejectCommentRequired: true, allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          // Lock-5 §1.3 — the SECOND hardcoding, moved in the same slice as the enforcement above.
+          // `rejectCommentRequired: true` is no longer written: the comment requirement is a NODE
+          // policy now, and a single instance-level literal cannot express a value that differs per
+          // node — worse, it would keep the bridge/card/FE readers disagreeing with the node, which
+          // is exactly the defect §1.3 names. The key is OMITTED rather than set to some other
+          // literal, and `effectiveCommentRequired` maps an ABSENT snapshot value to `'reject_only'`
+          // — byte-identical behavior to the `true` this replaces, for every reader
+          // (all of them already default an absent/`!== false` value to "required"). Instances
+          // created BEFORE this slice keep their stored `rejectCommentRequired: true` and resolve
+          // through the very same fallback (gate CR-2), so no backfill is needed.
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
           JSON.stringify(instanceMetadata),
           initial.currentStep ?? 0,
           initial.totalSteps,
@@ -3927,8 +8687,45 @@ export class ApprovalProductService {
           requestNo,
           JSON.stringify(normalizedFormData),
           initial.currentNodeKey,
+          approvalOrgId,
         ],
       )
+
+      // B3-07 §4.4 form-freeze bind (flag-gated, #4195): bind the submitter's staged (unbound)
+      // attachment uploads to this instance INSIDE the create transaction — the same txn that froze
+      // the id arrays into form_snapshot above, so a half-bound state is impossible. Any unbindable
+      // id (missing / foreign / already bound / GC-claimed) throws → the WHOLE create rolls back
+      // (fail-closed, G4). Flag OFF ⇒ zero behavior: no attachment values reach normalizedFormData
+      // (B2-28 strips them client-side and no upload endpoint exists to mint ids), and this block
+      // does not run.
+      if (attachmentsEnabled) {
+        const attachmentIdsByField = (() => {
+          try {
+            return collectAttachmentIdsByField(formSchema, normalizedFormData)
+          } catch {
+            throw new ServiceError('Approval attachment references are invalid', 400, 'APPROVAL_ATTACHMENT_BIND_FAILED')
+          }
+        })()
+        if (Object.keys(attachmentIdsByField).length > 0) {
+          try {
+            await bindAttachmentsOnSubmit(
+              client,
+              actor.userId,
+              actor.tenantId?.trim() || 'default',
+              instanceId,
+              attachmentIdsByField,
+            )
+          } catch (error) {
+            // Cap/count/total violations are 413; other unbindable ids stay 400. Values-free body either way.
+            const status = error instanceof ApprovalAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_ATTACHMENT_BIND_FAILED',
+            )
+          }
+        }
+      }
 
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).
@@ -3973,8 +8770,14 @@ export class ApprovalProductService {
           },
           actor: null,
         })
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue of the completion event, atomic with the
+        // terminal transition written above. Flag OFF ⇒ no-op (the post-commit emit is the delivery path).
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
 
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the txn (after every
+      // assignment write + same-txn cascade). Flag OFF ⇒ no-op. Legacy post-commit emit stays below.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
       await client.query('COMMIT')
     } catch (error) {
       await rollbackQuietly(client)
@@ -4041,11 +8844,1321 @@ export class ApprovalProductService {
       emitApprovalCompletionEvent(completionEvent)
     }
 
-    const approval = await this.getApproval(instanceId)
+    // VIEWER ROLES, not just the id — the same pair every dispatch-verb call site passes. The
+    // creation response is a viewer-scoped read like any other, and `canDecideCurrentNode` filters
+    // the seat rows by BOTH: a requester who is themselves a ROLE-seated approver at the entry node
+    // (`assigneeType: 'role'` on node 1) would otherwise be told `false` on this one response while
+    // a fresh detail GET says `true` and the door accepts them. Harmless before this field existed
+    // (`nodeOperations` fails OPEN on a missing carrier); the new field fails CLOSED, so the
+    // omission now costs a truthful answer.
+    const approval = await this.getApproval(instanceId, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
     return approval
+  }
+
+  /**
+   * Approval change-request design lock v5.9 §14.1 (WI-4) — the dedicated creation path for a
+   * cancel round. `createApproval` above hardcodes `workflow_key = 'approval-product-template'`
+   * (`:8052` literal) and runs the FULL org/role/department/delegation/group snapshot assembly a
+   * general-purpose template never needs for this one fixed, single-node, `requester_choice`-only
+   * graph — so this is a separate, narrower path, not a call into `createApproval`/
+   * `assembleCreationContext` with a different templateId (the latter's `templateVisibleAtCreateBoundary`
+   * / `applyTemplateVisibilityFilter` gate on department/role audience targeting that this
+   * system-only template was never given, and never should be — it is not reachable through
+   * template-center browsing).
+   *
+   * Reuses the class's own private DML helpers (`insertAssignments`, `insertApprovalRecord`,
+   * `bumpNodeActivationSeq`, `enqueueApprovalTaskCreatedEventsInTxn`, `projectApprovalOnCreate`,
+   * `emitApprovalTaskCreatedEventsPostCommit`, `getApproval`) so the round's own instance behaves
+   * byte-identically to any other platform instance for every reader downstream (detail GET,
+   * pending-count projection, `canDecideCurrentNode`), and the seed's fixed `runtime_graph` /
+   * `ApprovalGraphExecutor` / `buildApprovalAssignmentResolver` so seat resolution goes through the
+   * SAME `requester_choice` code path §14.1's module doc names, not a hand-rolled assignment insert.
+   *
+   * WI-16 (lock §6, "仅原 requester"): only the original document's `requester_snapshot.id` may
+   * call this — enforced here, at create time, under the SAME `FOR UPDATE` lock as the suite gate
+   * below (a stale read cannot authorize). The lock names no error code for this rejection (unlike
+   * the 8 outlet-guard codes and `CANCEL_ROUND_SUITE_FORBIDDEN`, which are lock-anchored) — flagged
+   * as an implementer erratum for owner/gate registration, same discipline as
+   * `CANCEL_ROUND_INVARIANT_VIOLATION` in the revoke/reject branches above.
+   */
+  async createCancelRoundInstance(
+    documentId: string,
+    actor: { userId: string; userName?: string },
+    options: { reason?: string | null } = {},
+  ): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const instanceId = crypto.randomUUID()
+    // lock:140 — `apr_…` is an APPLICATION-generated id, not part of the DDL's own generation.
+    const roundId = `apr_${crypto.randomUUID()}`
+    const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
+    let client: ApprovalDbClient | null = null
+    let initialAssignmentCount = 0
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      // §9-4 order for this path: no rollout/advisory lock is taken here at all (creation never
+      // touches W4 attendance calculation) — the only row this transaction must serialize against
+      // is the original document instance itself, locked FIRST and before any INSERT (Q-A).
+      const originalResult = await client.query<ApprovalInstanceRow & { org_id: string | null }>(
+        `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+        [documentId],
+      )
+      const original = originalResult.rows[0]
+      if (!original) {
+        throw new ServiceError('Approval instance not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      if (original.status !== 'approved') {
+        // Lock §0/§1 — a cancel round only exists for an already-approved document. No lock-
+        // anchored code for this rejection either; same erratum class as WI-16 above.
+        throw new ServiceError(
+          'A cancel round can only be started for an approved document',
+          409,
+          'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+        )
+      }
+
+      // WI-16 — see method doc. `requester_snapshot` is `NOT NULL DEFAULT '{}'::jsonb`, so a
+      // legacy/malformed row with no `.id` fails closed (never `undefined === undefined`).
+      const originalRequesterSnapshot = toNullableRecord(original.requester_snapshot)
+      const originalRequesterId =
+        typeof originalRequesterSnapshot?.id === 'string' ? originalRequesterSnapshot.id : null
+      if (!originalRequesterId || originalRequesterId !== actor.userId) {
+        throw new ServiceError(
+          'Only the original requester may start a cancel round for this document',
+          403,
+          'CANCEL_ROUND_REQUESTER_ONLY',
+        )
+      }
+
+      // §14.3 #14 (WI-6) — suite gate, BEFORE any write, per the lock's own zero-row requirement.
+      // No production template→suite mapping table exists yet (lock:375 defers that to §9-5); phase
+      // 1 reads the suite tag off the ORIGINAL instance's own `metadata.suite` so a fixture/seed can
+      // pin it directly (lock:143's "seed/夹具直接给出"), defaulting to `'leave'` — phase 1's only
+      // shipped suite — when the tag is absent (every pre-existing instance in the corpus).
+      //
+      // The derivation below ENFORCES lock:143's two domains (`suite ∈ {four values}`,
+      // `windowDays ∈ [0, 上限]`) rather than defaulting around them — Codex review 2026-09-19
+      // finding 2. Order matters and is deliberate: the enum/range check runs first so an
+      // out-of-domain tag can never reach (and slip past) this literal `=== 'forbidden'` comparison,
+      // while `forbidden` itself short-circuits the window check inside the helper so THIS
+      // lock-anchored code still wins for that suite.
+      const originalMetadata = toNullableRecord(original.metadata) ?? {}
+      // Single derivation, shared with the 判据 IV final evaluation (see
+      // `deriveCancelRoundRoundPolicy`) so the two snapshot time points cannot drift apart.
+      const { suite, windowDays } = deriveCancelRoundRoundPolicy(originalMetadata)
+      if (suite === 'forbidden') {
+        throw new CancelRoundSuiteForbiddenError(
+          "This document's suite does not permit a cancel round",
+        )
+      }
+
+      // I3 (§5) is ultimately enforced by `uq_approval_rounds_pending_document` (caught below on
+      // 23505) — this pre-check only turns the common case into a named error instead of a raw
+      // constraint violation for the concurrent/rare case.
+      const pendingRound = await client.query<{ id: string }>(
+        `SELECT id FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+        [documentId],
+      )
+      if (pendingRound.rows.length > 0) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+
+      // Seats (§14.1) — the original document's approvers, read off its own audit trail rather
+      // than its (possibly since-deactivated) `approval_assignments` rows, so a reassigned/expired
+      // seat cannot silently drop the person who actually approved.
+      //
+      // READING (a) of lock §2-G3's THIRD sentence (lock:74) 「历史委托不自动成为当前授权」: the seat
+      // belongs to the ORIGINAL APPROVER. 委托 is acting-on-behalf-of (履职代理), never a transfer of the
+      // seat itself, so a cancel round re-convenes the person whose authority the original decision was
+      // made under — not the person who happened to hold the delegation at the time.
+      //
+      // The audit trail names the person who pressed the button (the delegatee D). The ONE table that
+      // records WHOSE authority they pressed it under is `approval_assignments.metadata.delegatedFrom`,
+      // written by `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution
+      // point) and KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
+      // .countDelegatedApprovals` already reads exactly this column as a persistent audit fact, with no
+      // `is_active` filter of its own. So the seat query restores D back to the delegator A here, and
+      // NOTHING downstream changes: the same `isSystemSentinelActor` drop, the same zero-human-seat
+      // pre-check and the same `assertCancelRoundSeatsEligibleInTxn` re-qualification (G3's FIRST
+      // sentence, 「重新验证当前资格」) then run on whoever this query decides the seat holder is. That
+      // co-location is the point — ONE eligibility predicate, applied to the person actually seated,
+      // rather than a second delegation-specific gate that would be a narrower lookalike of it.
+      //
+      // JOIN PRECISION: the match is on (instance, node_key, assignee), NOT (instance, assignee). A
+      // delegatee who also holds a seat OF THEIR OWN at another node must keep that seat as their own;
+      // an instance-wide match would fold it into the delegator as well. `node_key` is written on every
+      // assignment row (`insertAssignments`), and `metadata.nodeKey` on every approve record written by
+      // the template-runtime dispatch and by `insertAutoApprovalEvents`. `entry_epoch` is deliberately
+      // NOT part of the join: it is NULL on pre-migration rows, and `NULL = NULL` would turn the whole
+      // restore into a silent no-op for exactly the legacy corpus this method is most likely to meet.
+      //
+      // 「无法可靠还原 ⇒ 阻断,不静默回退给历史被委托人」 — OWNER RULING 2026-09-20, reading (a),
+      // verbatim: 「席位回原审批主体,并重验当前资格。原主体无法可靠还原或已失格则阻断,不静默回退给
+      // 历史被委托人;补多人委托同一人的反例。」
+      //
+      // Up to the ruling this site carried a DISCLOSED GAP instead: the legacy
+      // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
+      // (routes/approvals.ts), so an approve row written there can carry no `nodeKey`, the node-scoped
+      // join missed, and `COALESCE` KEPT THE ACTOR — i.e. the historical delegatee silently held the
+      // seat, and the re-qualification below ran on them rather than on the subject reading (a) says
+      // holds it. That is precisely the fallback the ruling forbids, so the gap is now CLOSED IN THE
+      // BLOCKING DIRECTION rather than papered over with an instance-wide match (which would mis-fold
+      // the sibling-seat case above) or left open.
+      //
+      // The query therefore stops deciding the seat by itself. It returns, per `approve` row, the two
+      // sets the decision needs, and the attribution below is explicit:
+      //   · `node_actor_user_seats`      — the DISTINCT `delegatedFrom` of the actor's OWN **user**
+      //                                     assignment rows AT THIS ROW'S node (a NULL element means
+      //                                     "an un-delegated seat of their own"). EMPTY means this
+      //                                     actor never held a USER seat at that node;
+      //   · `node_actor_role_seat_count` — how many NON-user seats that node (structurally: role OR
+      //                                     source_queue; in practice ONLY role ever matches — see
+      //                                     the REGISTERED GAP below)
+      //                                     carries WHOSE `assignee_id` IS A ROLE THIS ACTOR HOLDS
+      //                                     ACCORDING TO A SERVER-SIDE RECORD (`user_roles`, or the
+      //                                     `users.role` column). This is the actor-side CREDENTIAL:
+      //                                     "that node carries a role seat" is a fact about the NODE
+      //                                     and is caller-nameable; "this actor is in that role" is a
+      //                                     fact about the ACTOR and is not — see CORROBORATION;
+      //   · `delegated_seat_nodes`       — the nodes at which THIS ACTOR holds a DELEGATED user seat
+      //                                     on this instance. Same row set as `instance_delegators`
+      //                                     below (byte-identical WHERE, plus one clause), selecting
+      //                                     the NODE instead of the delegator and dropping the
+      //                                     pre-migration rows whose `node_key` is NULL —
+      //                                     `approval_assignments.node_key` IS nullable in the live
+      //                                     schema (`\d approval_assignments`: no NOT NULL), so that
+      //                                     filter is not a no-op and the legacy NULL-node corpus is
+      //                                     deliberately outside conjunct (3);
+      //   · `instance_delegators`        — delegators for this actor ANYWHERE on this instance.
+      //
+      // CORROBORATION — why the node set is no longer filtered to `delegatedFrom IS NOT NULL`.
+      // `metadata` on a legacy `POST /:id/approve` row is copied VERBATIM out of the REQUEST BODY, so
+      // `metadata.nodeKey` is CALLER-SUPPLIED, not system-written. Filtering the node set to delegated
+      // rows made an unmatched `nodeKey` indistinguishable from "this actor holds their own seat here",
+      // and the whole block could then be walked past by sending `{"metadata":{"nodeKey":"anything"}}`
+      // — MEASURED on a real DB before this fix: the delegatee was seated and nothing blocked. The row
+      // must therefore be CORROBORATED against the assignment table rather than trusted. 负控 `N11(a)`
+      // is the witness; 正控 `P20(a)` shows that supplying the TRUE `nodeKey` is not a bypass either —
+      // it just produces the honest restore.
+      //
+      // Corroboration is NOT 「the nodeKey must land on one of the actor's own USER rows」, which was
+      // this fix's own first cut and which MEASURED as a false BLOCK on an entirely honest document:
+      // a person who decides a ROLE node in person, and is ALSO somebody's delegate at a user node on
+      // the same instance, has no user assignment row at the role node — `assignee_id` there is the
+      // ROLE — so that document became permanently un-cancellable (正控 `P22(a)` is that witness,
+      // 100% through `/actions`, no legacy route involved).
+      //
+      // NON-USER SEATS NEED A SERVER-SIDE CREDENTIAL TOO — gate round 3 P1, MEASURED as a live
+      // 「静默回退给历史被委托人」 on a real DB, and the reason the previous cut of this arm is gone.
+      // That cut let the row through on `node_non_user_seat_count > 0`, a predicate with NO ACTOR TERM: it asked
+      // only 「does that node carry a role seat」, which is a property of the NODE and can therefore
+      // be named out of a request body. Two variants were built on a real DB against it:
+      //   · FORGERY  — the delegatee names the ROLE node on their LEGACY row instead of their own
+      //     delegated user node: both rows fold onto the role node, the delegator A loses the seat
+      //     the ruling gives them, and 会签 drops 2 seats → 1. 负控 `N14(a)`;
+      //   · FORGERY2 — the actor is NOT in that role and never decided that node (a third person did):
+      //     naming it was enough to be seated, which falsified this comment's own earlier claim that
+      //     「the actor decided it through that seat」. 负控 `N15(a)`.
+      // GATE ROUND 4 REOPENED THIS ARM: the two halves above were a CAPABILITY, not an OCCUPANCY.
+      // 「this actor could hold a seat there」 (membership) ∧ 「the node's rows fit its seat BUDGET」
+      // (cardinality) is satisfied by a 或签 role node configured with two role ids: it lands TWO
+      // seat rows and needs ONE approve row, so the budget carries a permanent spare cell, and the
+      // gate reproduced the round-3 reading verbatim on a real DB (FORGERY4: `seats=[D]`, A lost,
+      // 会签 2 → 1, zero block; FORGERY3: `seats=[D, E]`, A lost). The arm therefore now requires
+      // THREE conjuncts, and blocks (never falls back to the actor) when ANY is missing — owner
+      // ruling 2026-09-20,「原主体无法可靠还原…则阻断,不静默回退给历史被委托人」.
+      //
+      // WHAT THIS IS, NAMED HONESTLY — it is 方案 (b)「预算换唯一占位」AS IMPLEMENTED, and it is NOT
+      // the gate's literal wording of (b)(「角色席位 + 该 actor 是**唯一**满足成员身份的人」). That
+      // literal predicate is a property of the DIRECTORY, not of the document: 「D is the only holder
+      // of `admin`」 is false in any deployment with two admins, so it would block the honest role-node
+      // corpus wholesale — the `8b29b4a2ce` failure mode the gate warns about in the same paragraph —
+      // and it does NOT block FORGERY3 either, because there the delegatee IS a genuine, and possibly
+      // sole, member of the node's OTHER role seat. Conjunct (3) below is therefore MY construction,
+      // not the gate's text. 「另造更窄/更宽同类物 = 合同变更」 is a registered house rule, so the
+      // divergence is flagged for owner in the design MD (§3.4) rather than shipped as if it were the
+      // reviewed wording. EVERYTHING HERE REMAINS A CANDIDATE: owner has not ruled reading (a).
+      //   (1) MEMBERSHIP — `node_actor_role_seat_count >= 1`: at least one of that node's non-user
+      //       seats names a role THIS ACTOR HOLDS ACCORDING TO A SERVER-WRITTEN RECORD. Reconstructed
+      //       from `user_roles.role_id` ∪ `users.role`, which is the persisted substrate the token's
+      //       own role claim is built out of: `AuthService.createToken` signs `role: user.role`, and
+      //       `resolveRbacProfile` computes that as `users.role` upgraded to `'admin'` when
+      //       `user_roles` says so. DISCLOSED ASYMMETRY (not a silent equivalence claim): decision-time
+      //       membership is NOT persisted anywhere, so this is a CURRENT-membership reconstruction —
+      //       strictly what 「重新验证当前资格」 asks for on the seat itself, and deliberately the
+      //       fail-closed direction: a person who has since left the role blocks the cancel round
+      //       rather than silently holding a seat the ruling gives to somebody else. The one channel
+      //       it cannot see is the `roles` ARRAY claim, which only the TEST `GET /api/auth/dev-token`
+      //       route mints (census: `jwt.sign` sites — `AuthService.createToken` and `routes/auth.ts`;
+      //       no production path writes it), so fixtures are made production-shaped instead
+      //       (正控 `P22(a)` now seeds the membership row; its twin 负控 `N16(a)` keeps the strictness
+      //       cost pinned as data rather than as prose);
+      //   (2) OCCUPANCY CAPACITY — THIS ACTOR's own approve rows at that node must fit the seats
+      //       THIS ACTOR could occupy there (`node_actor_role_seat_count`). A seat is occupied ONCE:
+      //       one person cannot settle two rows through one role seat. This REPLACES the previous
+      //       cut's node-wide seat BUDGET (`node_seat_row_count` — every assignment row of any type,
+      //       now deleted, token census re-taken in the verification MD), which gate round 4 measured
+      //       to be the capability/occupancy confusion itself: the budget counted seats NOBODY in this
+      //       row's actor position could fill, so a two-role-id 或签 node handed the forger a spare
+      //       grid cell. Counting per (actor, node) removes the spare — surplus created by ANOTHER
+      //       person's seat is no longer spendable by this actor. The count is still taken in
+      //       TypeScript AFTER the sentinel drop, never in SQL: `isSystemSentinelActor` is the shared
+      //       TS predicate, and a SQL `COUNT(*)` would re-spell it (and would re-open G6-1 by counting
+      //       auto-approval rows into a person's capacity). WITNESSES: 负控 `N20(a)` is the ISOLATING
+      //       one (the actor settles their delegated node honestly AND decides the role node, then
+      //       files ONE EXTRA legacy row naming that same role node ⇒ (1) and (3) both hold, only this
+      //       conjunct blocks); 负控 `N14(a)` / `N18(a)` also red here, but (3) blocks them too — that
+      //       OVERLAP is recorded in the mutation grid instead of being claimed as isolation.
+      //   (3) SETTLEMENT — every node at which this actor holds a DELEGATED user seat must carry a
+      //       decision record of its own (`delegated_seat_nodes` ⊆ the nodes some `approve` row names).
+      //       (1) and (2) are both facts about the FORGER; NEITHER notices that the DELEGATOR's seat
+      //       has disappeared. Gate round 4's FORGERY3 is exactly that shape: a third person honestly
+      //       decides the role node, the delegatee IS a genuine member of the node's OTHER role seat,
+      //       and their single legacy row names the role node — (1) and (2) both pass and A's seat is
+      //       silently gone (`seats=[D, E]`, MEASURED). This conjunct asks the ruling's own question
+      //       directly — 「原审批主体还原得了吗」 — and blocks when the node the actor stood in for has
+      //       no decision at all to restore from. ISOLATING witness: 负控 `N19(a)`.
+      //       SCOPE, deliberately: evaluated ONLY inside this non-user arm. The USER-seat arms above
+      //       keep their own answers (`P21(a)`'s registered residual included), and the entire
+      //       no-delegation corpus never reaches here at all (正控 `P19(a)`).
+      //       WEAK FORM ON PURPOSE — 「that node has SOME decision record」, not 「this actor's own row
+      //       settles that seat」. The strong form would also block honest documents where the seat was
+      //       legitimately never exercised BY THE DELEGATEE: a 或签 sibling won by somebody else, a
+      //       `transfer` that moved the seat on, a node re-entry that rewrote it. Its price is a
+      //       REGISTERED RESIDUAL WITH A LEG, not prose: a THIRD PARTY's row naming that node
+      //       satisfies it, and this arm then seats the delegatee anyway — 负控 `P27(a)` pins that
+      //       answer as data. Closing it needs (c) (the legacy route writing its own `nodeKey`),
+      //       which is an owner call on a shipped endpoint's contract.
+      //       SKIPPED NODES ARE EXEMPT — gate round 5 P2-1, MEASURED: the previous wording of this
+      //       paragraph listed 「an admin jump that skipped it」 among the shapes the weak form
+      //       tolerates. It does not: a node an admin jump (or a node-timeout jump) passed over
+      //       carries NO `approve` record at all, so the weak form judged it unsettled and turned a
+      //       zero-forgery honest document into a permanent 409 (the same document was cancellable
+      //       before conjunct (3) existed). Owner ruling 2026-09-25: 「管理员跳过(及超时跳过)的节点
+      //       不计入判定,诚实单据仍可撤销」. The exemption reads SERVER-WRITTEN evidence only — the
+      //       `action = 'jump'` audit row (`adminJump` / `timeoutEffect`) whose `oldAssignees` names
+      //       the seats the jump deactivated without a decision (`nodesSkippedByJump` below); it
+      //       never reads the row's own caller-supplied `nodeKey`. 正控 `P30(a)` / `P32(a)` are the
+      //       exempted shapes, 正控 `P31(a)` their un-jumped twin, and 负控 `N19(a)` still blocks: a
+      //       node NOBODY decided AND NO jump skipped stays unsettled. `sign` rows written by
+      //       `insertAutoApprovalEvents` with `metadata.skipped = true` are deliberately NOT skip
+      //       evidence — they record a skipped AUTO-APPROVAL (`evaluateSkippedCrossBranchAdjacent`);
+      //       the node itself stays pending for a person and is settled or jumped like any other.
+      //       Sentinel (`system:`) rows DO count as a decision record here: an auto-approved node WAS
+      //       decided and there is nothing to restore, so counting them keeps G6-1's corpus cancellable
+      //       (正控 `P10(a)` / 负控 `N6(a)`). Conjunct (2)'s capacity count, by contrast, is taken
+      //       AFTER the sentinel drop — a sentinel never occupies a person's seat. Two different
+      //       questions over two different populations, written out so the next reader does not take
+      //       one for a copy of the other.
+      // None of the three is 「metadata in the body is forbidden」: 正控 `P20(a)` still sends the TRUE
+      // `nodeKey` down the legacy route and still gets the honest restore.
+      //
+      // CENSUS — the round-3 precondition, RE-EVALUATED rather than voided (the previous reading was
+      // 60 (instance, node) budget groups, 58 within budget; that predicate no longer exists, so the
+      // number is not carried forward as if it still measured something). The successor census is per
+      // (actor, node) and is taken MECHANICALLY off the corpus the seven real-DB files leave in the
+      // database, plus the isolation legs above; it is recorded in the verification MD §O5/§O6 at this
+      // head, not asserted here.
+      //
+      // REGISTERED GAP, not a claim of coverage — `source_queue` SEATS CANNOT SATISFY HALF (1).
+      // A `source_queue` row's `assignee_id` is a PERMISSION/queue token (`ApprovalBridgeService`
+      // writes e.g. `plm:source-owned`) and is matched at dispatch against the actor's PERMISSIONS,
+      // not their roles; `user_roles` / `users.role` can never name it. So a document whose approver
+      // settled a `source_queue` node AND who also holds a delegated seat on that instance is now
+      // BLOCKED rather than seated. Fail-closed is the ruling's own direction, and the population is
+      // bridge-written instances, but this is a REAL narrowing and it has no leg — do not read the
+      // 「role / source_queue」 wording above as 「both are credentialled」. Widening half (1) to
+      // permissions is a separate owner call (design MD §3.4), deliberately not taken here.
+      // `dispatchAction` reads no UNIQUE credential for a queue seat either, so a permissions-based
+      // reconstruction would need its own census first.
+      //
+      // Both `delegatedFrom` sub-selects read `approval_assignments.metadata.delegatedFrom`, written by
+      // `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution point) and
+      // KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
+      // .countDelegatedApprovals` already reads exactly this column as a persistent audit fact, with no
+      // `is_active` filter of its own, so neither sub-select adds one either.
+      //
+      // JOIN PRECISION (unchanged): the node-scoped set matches on (instance, node_key, assignee), NOT
+      // (instance, assignee). A delegatee who also holds a seat OF THEIR OWN at another node must keep
+      // that seat as their own (正控 `P11(a)`). `entry_epoch` is deliberately NOT part of the match: it
+      // is NULL on pre-migration rows, and `NULL = NULL` would turn the whole restore into a silent
+      // no-op for exactly the legacy corpus this method is most likely to meet.
+      const approverRows = await client.query<{
+        actor_id: string
+        node_key: string | null
+        node_actor_user_seats: (string | null)[] | null
+        node_actor_role_seat_count: number | null
+        delegated_seat_nodes: (string | null)[] | null
+        instance_delegators: (string | null)[] | null
+      }>(
+        `SELECT r.actor_id AS actor_id,
+                r.metadata->>'nodeKey' AS node_key,
+                ARRAY(
+                  SELECT DISTINCT a.metadata->>'delegatedFrom'
+                    FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.node_key = r.metadata->>'nodeKey'
+                ) AS node_actor_user_seats,
+                (SELECT COUNT(*) FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.node_key = r.metadata->>'nodeKey'
+                     AND a.assignment_type <> 'user'
+                     AND EXISTS (
+                       SELECT 1 FROM user_roles ur
+                        WHERE ur.user_id = r.actor_id AND ur.role_id = a.assignee_id
+                        UNION ALL
+                       SELECT 1 FROM users u
+                        WHERE u.id = r.actor_id AND u.role = a.assignee_id
+                     ))::int AS node_actor_role_seat_count,
+                ARRAY(
+                  SELECT DISTINCT a.node_key
+                    FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.metadata->>'delegatedFrom' IS NOT NULL
+                     AND a.node_key IS NOT NULL
+                ) AS delegated_seat_nodes,
+                ARRAY(
+                  SELECT DISTINCT a.metadata->>'delegatedFrom'
+                    FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.metadata->>'delegatedFrom' IS NOT NULL
+                ) AS instance_delegators
+           FROM approval_records r
+          WHERE r.instance_id = $1 AND r.action = 'approve'`,
+        [documentId],
+      )
+      // SKIP EVIDENCE for conjunct (3) — owner ruling 2026-09-25 (gate round 5 P2-1). Every jump the
+      // system performs on an instance writes ONE `action = 'jump'` audit row (`adminJump` for the
+      // administrator's `POST /:id/jump`, `applyNodeTimeoutEffect` for the node-timeout scanner —
+      // `metadata.timeoutEffect`), and both stamp `oldAssignees` = the assignment rows that were
+      // ACTIVE at that moment and were deactivated by the jump without a decision (see
+      // `assignmentRowsForAudit`). Those node keys, and only those, are the nodes 「跳过」 means: the
+      // set is written by the server at the moment of the jump, so it cannot be named out of a request
+      // body the way `approve` rows' `metadata.nodeKey` can. Read from the audit trail rather than from
+      // `approval_assignments.is_active`: an inactive seat row with no decision is ALSO what a
+      // `transfer` or a `return` leaves behind, and those nodes are settled by whoever decided them
+      // afterwards — only the jump rows say the node was passed over.
+      const jumpRows = await client.query<{ old_assignees: unknown }>(
+        `SELECT r.metadata->'oldAssignees' AS old_assignees
+           FROM approval_records r
+          WHERE r.instance_id = $1
+            AND r.action = 'jump'
+            AND (r.metadata->>'adminJump' = 'true' OR r.metadata->>'timeoutEffect' = 'true')`,
+        [documentId],
+      )
+      const nodesSkippedByJump = new Set<string>()
+      for (const row of jumpRows.rows) {
+        if (!Array.isArray(row.old_assignees)) continue
+        for (const entry of row.old_assignees) {
+          const nodeKey = isRecord(entry) ? entry.nodeKey : null
+          if (typeof nodeKey === 'string' && nodeKey.length > 0) nodesSkippedByJump.add(nodeKey)
+        }
+      }
+      // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced
+      // SENTINEL actors are not people, and this was the ONE seat-derivation site in the repo that
+      // did not drop them. `insertAutoApprovalEvents` writes `action: skipped ? 'sign' : 'approve'`
+      // with `actorIdForAutoApprovalEvent(event)`, which returns the literal `'system:auto-approval'`
+      // whenever `metadata.actorMode !== 'original_approver'` — and `getAutoApprovalActorMode`
+      // DEFAULTS to `'system'` while the template-authoring UI never writes `actorMode` at all. So
+      // every document that passed through one `mergeWithRequester` auto-approval carried a sentinel
+      // row in this query's result, the seat gate below counted it as a person with no `users` row,
+      // and the document became PERMANENTLY un-cancellable behind a 409 telling the administrator to
+      // "restore" an account that does not and must not exist.
+      //
+      // The predicate is the shared `isSystemSentinelActor` (ApprovalAssigneeResolver.ts), the same
+      // one `loadPriorNodeApproverDeciders` — the sibling path that also derives seats from
+      // `approval_records(action='approve')`, Lock-1 §K3 — applies. Reused, not re-spelled: a second
+      // hand-rolled `startsWith` here would be exactly the "另造更窄/更宽同类物" this repo forbids.
+      // Under `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's
+      // real id, so that person IS kept and IS re-qualified — the drop is namespace-scoped, never
+      // "drop every auto-approved node's approver".
+      //
+      // The sentinel drop now runs BEFORE attribution rather than after it. That ordering is
+      // load-bearing, not cosmetic: a sentinel row is not a person, so it can never be somebody's
+      // delegate, and judging it 「无法可靠还原」 would turn every auto-approved legacy document into a
+      // 409 (正控 `P10(a)` / 负控 `N3` / `N6(a)` pin that it does not). It is applied to the RESTORED
+      // ids as well, because a `delegatedFrom` value is read out of free-form `metadata` and is not
+      // otherwise constrained to a real person id.
+      const seatIds: string[] = []
+      const unseatableReasons = new Set<CancelRoundSeatIneligibilityReason>()
+      let unseatableRowCount = 0
+      const asDelegatorList = (value: (string | null)[] | null): string[] =>
+        (value ?? []).filter((id): id is string => typeof id === 'string' && id.length > 0)
+      // OCCUPANCY pre-pass — ONE walk, TWO populations, and they are deliberately not the same one:
+      //   · `actorNodeApproveRowCounts` — how many HUMAN `approve` rows THIS ACTOR wrote at each node.
+      //     Conjunct (2)'s left-hand side. Taken here, in TypeScript and AFTER the same
+      //     `isSystemSentinelActor` drop the loop applies, so it shares the repo's ONE sentinel
+      //     predicate instead of re-spelling it in SQL (a SQL `COUNT(*)` would count
+      //     `system:auto-approval` rows into a person's capacity and re-open G6-1). Keyed per
+      //     (actor, node) — NOT per node — because a seat surplus another person's seat rows create
+      //     must not be spendable by this actor (gate round 4 §1, FORGERY3 / FORGERY4);
+      //   · `nodesWithDecisionRecord` — which nodes carry ANY `approve` record, SENTINELS INCLUDED.
+      //     Conjunct (3)'s right-hand side. An auto-approved node WAS decided; there is nothing left
+      //     to restore there, and dropping sentinels from this set would turn G6-1's corpus back into
+      //     permanently un-cancellable documents. `nodesSkippedByJump` (built above from the `jump`
+      //     audit rows) is the OTHER half of that right-hand side: a node the system passed over was
+      //     never decided by anybody and has nothing to restore either — owner ruling 2026-09-25.
+      // Rows with no `nodeKey` enter NEITHER: they are settled by the `delegate_not_seat` /
+      // `seat_unresolvable` arms above, which consult no node accounting at all (正控 `P19(a)`).
+      const actorNodeApproveRowCounts = new Map<string, number>()
+      const nodesWithDecisionRecord = new Set<string>()
+      const actorNodeKey = (actorId: string, nodeKey: string): string => `${actorId}\u0000${nodeKey}`
+      for (const row of approverRows.rows) {
+        const actorId = typeof row.actor_id === 'string' ? row.actor_id : ''
+        if (actorId.length === 0) continue
+        if (typeof row.node_key !== 'string' || row.node_key.length === 0) continue
+        nodesWithDecisionRecord.add(row.node_key)
+        if (isSystemSentinelActor(actorId)) continue
+        const key = actorNodeKey(actorId, row.node_key)
+        actorNodeApproveRowCounts.set(key, (actorNodeApproveRowCounts.get(key) ?? 0) + 1)
+      }
+      for (const row of approverRows.rows) {
+        const actorId = typeof row.actor_id === 'string' ? row.actor_id : ''
+        if (actorId.length === 0 || isSystemSentinelActor(actorId)) continue
+
+        // FIRST question, and it is deliberately about the ACTOR rather than about the row: did this
+        // person ever hold a DELEGATED seat on this instance at all? If not, no restore could apply to
+        // any of their rows whatever `nodeKey` says, so nothing about this row can be a 「回退给历史被
+        // 委托人」 and the actor is their own subject. This is the arm that keeps the entire
+        // pre-delegation corpus — every legacy-route document, every bridge/plugin writer that emits no
+        // `nodeKey` — cancellable (正控 `P19(a)`), and it is also why an unmatched `nodeKey` on such a
+        // document is harmless rather than blocking.
+        const instanceDelegators = asDelegatorList(row.instance_delegators)
+        if (instanceDelegators.length === 0) {
+          seatIds.push(actorId)
+          continue
+        }
+
+        if (row.node_key === null || row.node_key === undefined) {
+          // The row carries no node at all — the honest legacy corpus.
+          if (instanceDelegators.length > 1) {
+            // 多人委托同一人 (the counter-example the ruling asks for): the actor stood in for two
+            // different subjects on this instance and the row says nothing about which one this
+            // approval was. MEASURED by 负控 `N9(a)`.
+            unseatableRowCount += 1
+            unseatableReasons.add('seat_unresolvable')
+            continue
+          }
+          // Exactly one known delegation, but the row is not attributable to a node. Restoring anyway
+          // would be a guess — the same actor may also hold a seat of their OWN — and KEEPING the actor
+          // is the 「静默回退给历史被委托人」 the ruling forbids in as many words. Both answers are
+          // unsafe, so neither is chosen: BLOCK. (负控 `P12(a)` / `N7(a)` / `N8(a)` / `P13(a)`.)
+          unseatableRowCount += 1
+          unseatableReasons.add('delegate_not_seat')
+          continue
+        }
+
+        // The row names a node AND this actor held a delegated seat somewhere here, so the name must be
+        // CORROBORATED against the seats that actually exist (it may have come straight out of a
+        // request body).
+        const actorUserSeats = row.node_actor_user_seats ?? []
+        if (actorUserSeats.length > 1) {
+          // Two different `delegatedFrom` values for one (instance, node, assignee): no unique
+          // 原审批主体. Needs a node RE-ENTRY that rewrote the delegation between epochs
+          // (`idx_approval_assignments_active_unique` is partial on `is_active = true`). CONSTRUCTED
+          // as of gate round 3 P2-1 — 负控 `N17(a)` seeds that residue and measures the block; the
+          // seeding is FIXTURE-level, the end-to-end re-entry is still NOT walked. It shares this
+          // reason member rather than getting an untested one.
+          unseatableRowCount += 1
+          unseatableReasons.add('seat_unresolvable')
+          continue
+        }
+        if (actorUserSeats.length === 1) {
+          // A NULL element means the one matching seat is the actor's OWN, un-delegated user seat at
+          // this node — they are their own subject there (正控 `P11(a)` node 2, `P18(a)`).
+          const delegator = actorUserSeats[0]
+          seatIds.push(typeof delegator === 'string' && delegator.length > 0 ? delegator : actorId)
+          continue
+        }
+        // No USER seat of this actor's at that node. Distinguish the honest way that happens from
+        // the dishonest ones.
+        // A NON-USER (role / source_queue) seat is not delegation-substituted, so if this actor
+        // really occupied one here there is nothing to restore and seating them is the honest
+        // answer (正控 `P22(a)`). But 「really occupied one」 must come from SERVER-WRITTEN records,
+        // never from the row's own caller-supplied `nodeKey` — both halves, or BLOCK:
+        const actorSeatsAtNode = row.node_actor_role_seat_count ?? 0
+        const actorRowsAtNode = actorNodeApproveRowCounts.get(actorNodeKey(actorId, row.node_key)) ?? 0
+        // Conjunct (3)'s evaluation: the nodes this actor stood in for at which NOTHING was ever
+        // decided AND which no jump passed over. Non-empty means the DELEGATOR's seat has no record to
+        // be restored from, whatever this row says about itself. A node a server-written `jump` row
+        // skipped is not counted (owner ruling 2026-09-25; 正控 `P30(a)` admin jump, `P32(a)` timeout
+        // jump) — there the seat was never exercised by anyone, honestly, and the ruling's own
+        // question 「原审批主体还原得了吗」 has the same answer it has for a 或签 sibling: nothing
+        // to restore, nothing forged.
+        const unsettledDelegatedSeatNodes = (row.delegated_seat_nodes ?? []).filter(
+          (nodeKey): nodeKey is string =>
+            typeof nodeKey === 'string' &&
+            nodeKey.length > 0 &&
+            !nodesWithDecisionRecord.has(nodeKey) &&
+            !nodesSkippedByJump.has(nodeKey),
+        )
+        if (
+          actorSeatsAtNode > 0 &&
+          actorRowsAtNode <= actorSeatsAtNode &&
+          unsettledDelegatedSeatNodes.length === 0
+        ) {
+          // (1) MEMBERSHIP: one of that node's non-user seats names a role this actor holds per
+          //     `user_roles` / `users.role` (负控 `N15(a)` / `N16(a)`);
+          // (2) OCCUPANCY CAPACITY: this actor's own rows at that node fit the seats THIS ACTOR
+          //     could occupy there — a seat is filled once (负控 `N20(a)`, isolating);
+          // (3) SETTLEMENT: every node this actor held a DELEGATED seat at carries a decision of its
+          //     own or was passed over by a server-recorded jump (正控 `P30(a)` / `P32(a)`), so the
+          //     ruling's 原审批主体 is still restorable or was never owed (负控 `N19(a)`, isolating).
+          seatIds.push(actorId)
+          continue
+        }
+        // Everything else is a NAME WITHOUT EVIDENCE ⇒ BLOCK — one member, one reason value, no new
+        // error code. The ways to get here, each MEASURED by a leg of its own:
+        //   · the node does not exist on this instance at all (负控 `N11(a)`, the forged key, a live
+        //     bypass before corroboration existed);
+        //   · it is somebody ELSE's user node, which naming does not make this actor's (负控 `N13(a)`);
+        //   · it carries non-user seats but NONE of them names a role this actor holds per a
+        //     server-written record (负控 `N15(a)` — FORGERY2: a third person decided it; 负控
+        //     `N16(a)` — the same document with the membership record absent, the strictness cost);
+        //   · it carries such a seat, but this actor already spent it — more of their own rows name
+        //     the node than they could ever occupy there (负控 `N14(a)` / `N18(a)` — FORGERY /
+        //     FORGERY4, two rows folded onto one occupiable seat; 负控 `N20(a)` — the isolating
+        //     variant where only this conjunct blocks);
+        //   · the actor stood in for a node that NOTHING decided and NO jump skipped, so the
+        //     delegator's seat is gone whatever this row claims (负控 `N19(a)` — FORGERY3; also
+        //     `N14(a)` / `N18(a)`, which are over-determined and are recorded as such, not as
+        //     isolation). A skipped node is exempt (正控 `P30(a)` / `P32(a)`).
+        unseatableRowCount += 1
+        unseatableReasons.add('seat_unresolvable')
+      }
+      const approverIds = [...new Set(seatIds)].filter((id) => !isSystemSentinelActor(id))
+
+      // Zero HUMAN approvers (every `approve` row on the original was synthetic) is NOT
+      // `not_found` — there is nobody to restore. Lock §14.1 ratifies 席位 = 原单的原审批人 with
+      // N ≥ 1 (lock:335) and judgment I″ requires 「至少一个活动席位」 (lock:337); the fail-closed
+      // answer contract already registers for zero resolvable seats is `CANCEL_ROUND_NO_ELIGIBLE_
+      // APPROVER`, so this reuses that code rather than minting a fifth one.
+      //
+      // It is an EXPLICIT check, not a fall-through to the `initialAssignmentCount === 0` backstop
+      // below, because that backstop is NOT reachable for an empty seat set: the dedicated runtime
+      // graph deliberately omits `emptyAssigneePolicy`, so `ApprovalGraphExecutor.resolveInitialState`
+      // THROWS `400 APPROVAL_ASSIGNEE_EMPTY` (ApprovalGraphExecutor.ts, the `assignments.length === 0`
+      // arm of `resolveFromNode`) before `initialAssignmentCount` is ever evaluated. Without this
+      // line the fix would answer a bare generic 400 instead of a cancel-round contract code.
+      // `details.reason` is a category, never a person — the same values-free posture as
+      // `CANCEL_ROUND_SEAT_INELIGIBLE.details.reasons`.
+      //
+      // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
+      // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
+      // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
+      // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
+      // Sentinels are already gone by here, so every id this sees is a claimed PERSON.
+      //
+      // ORDER, owner ruling 2026-09-20: this now runs BEFORE the zero-human-seat answer, because the
+      // two are no longer independent. A document whose every `approve` row is UNATTRIBUTABLE resolves
+      // to zero seats, and answering `no_human_approver` there would be false (there were human
+      // approvers) and would re-open the fallback the ruling closes, just wearing another code. With
+      // `unseatableRowCount === 0` the gate's own early exit makes this reordering a no-op for every
+      // pre-existing corpus: the only call that reaches the zero-seat branch with the gate in front of
+      // it is one where the gate returned without throwing.
+      await assertCancelRoundSeatsEligibleInTxn(client, approverIds, {
+        count: unseatableRowCount,
+        reasons: unseatableReasons,
+      })
+
+      if (approverIds.length === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: this document was approved entirely by automation, so there is no original approver to re-convene',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+          { reason: 'no_human_approver' },
+        )
+      }
+
+      // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
+      // A4 branch above reads exactly this key); `requesterChoices[CANCEL_ROUND_APPROVAL_NODE_KEY]`
+      // is the `requester_choice` assignee source's ONLY input (module doc on the seed file).
+      const requesterSnapshot: ApprovalRequesterSnapshot & { requesterChoices: Record<string, string[]> } = {
+        id: originalRequesterId,
+        name:
+          typeof originalRequesterSnapshot?.name === 'string' ? originalRequesterSnapshot.name : originalRequesterId,
+        requesterChoices: { [CANCEL_ROUND_APPROVAL_NODE_KEY]: approverIds },
+      }
+
+      const runtimeGraph = buildCancelRoundRuntimeGraph()
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSchema: undefined,
+        formSnapshot: {},
+        requesterSnapshot: requesterSnapshot as unknown as Record<string, unknown>,
+      })
+      const executor = new ApprovalGraphExecutor(runtimeGraph, {}, { assignmentResolver })
+      const initial = executor.resolveInitialState()
+      initialAssignmentCount = initial.assignments.length
+
+      // Advisor note / I″ (lock §14.1): NEVER auto-approve and NEVER create with zero seats — the
+      // seed deliberately omits `emptyAssigneePolicy: 'auto-approve'`, and this is the explicit,
+      // fail-closed backstop in case a future edit to the seed graph ever introduced one.
+      //
+      // Gate round 6, G6-1 erratum — this comment used to also claim it covered "the original
+      // document's approver trail is empty". It does NOT, and never did: with zero seats the
+      // executor throws `400 APPROVAL_ASSIGNEE_EMPTY` from the `assignments.length === 0` arm of
+      // `resolveFromNode` before returning, so `initialAssignmentCount === 0` is UNREACHABLE while
+      // the seed omits `emptyAssigneePolicy`. The empty-seat case is answered by the explicit
+      // pre-check above instead. What this backstop really guards is `initial.status !== 'pending'`
+      // / a wrong `currentNodeKey` — i.e. a seed graph edited into auto-approving or re-routed.
+      // No `details` payload here deliberately: a payload no test can construct would be an
+      // assertion about an unreachable branch (the pre-check above carries the one that IS
+      // constructible, `reason: 'no_human_approver'`).
+      if (initial.status !== 'pending' || initial.currentNodeKey !== CANCEL_ROUND_APPROVAL_NODE_KEY || initialAssignmentCount === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
+      // 增补 P-11 (c), lock §14.1 seat-arm fence (RATIFY 追记 2026-09-28, owner 「Adopt all 3, split
+      // locks (Recommended)」): a cancel round's seats may only be `user` / `role` arms, never
+      // `source_queue`. The seed graph seats people by id, so this is a fail-closed trip-wire for a
+      // future graph / resolver edit, answered like the backstop above (same registered code, no new
+      // one) and BEFORE any write. This path is the only writer of a cancel round's seats: §9-9 /
+      // §14.3 refuse every verb or job that could change one afterwards.
+      if (!cancelRoundSeatArmsWithinFence(initial.assignments)) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
+
+      const requestNo = await this.allocateRequestNo()
+      const title = `撤销「${original.title ?? documentId}」`
+
+      await client.query(
+        `INSERT INTO approval_instances
+         (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, sync_error,
+          template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
+          created_at, updated_at, org_id)
+         VALUES
+         ($1, $2, 0, 'platform', NULL, $3, $4, $5,
+          $6, $7, $8, $9,
+          $10, $11, 'ok', NULL,
+          $12, $13, $14, $15, $16, $17,
+          now(), now(), $18)`,
+        [
+          instanceId,
+          initial.status,
+          APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+          documentId,
+          title,
+          JSON.stringify(requesterSnapshot),
+          JSON.stringify({}),
+          JSON.stringify({ allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          JSON.stringify({ cancelRoundDocumentId: documentId }),
+          initial.currentStep ?? 0,
+          initial.totalSteps,
+          CANCEL_ROUND_TEMPLATE_ID,
+          CANCEL_ROUND_TEMPLATE_VERSION_ID,
+          CANCEL_ROUND_PUBLISHED_DEFINITION_ID,
+          requestNo,
+          JSON.stringify({}),
+          initial.currentNodeKey,
+          original.org_id,
+        ],
+      )
+
+      const initialEntryEpoch = await this.bumpNodeActivationSeq(client, instanceId)
+      createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)))
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'created',
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        comment: options.reason ?? null,
+        fromStatus: null,
+        toStatus: initial.status,
+        fromVersion: null,
+        toVersion: 0,
+        metadata: { nodeKey: 'start', requestNo, cancelRoundDocumentId: documentId },
+      })
+
+      // §4 — one `approval_rounds` row, `kind = 'cancel'`, keyed to THIS instance as its engine
+      // instance; `policy_snapshot_at_create.definitionPolicy` freezes the ORIGINAL document's own
+      // policy object verbatim (lock:143 "所读…策略对象原样") — the object that actually governs
+      // whether/how this document may be cancelled, distinct from the cancel round's OWN
+      // `policy_snapshot` (`allowRevoke`) written above, which governs the ROUND's redemption
+      // mechanics, not the original document's cancellability.
+      await client.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, reason, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', $3, $4, $5, 'pending', $6)`,
+        [
+          roundId,
+          documentId,
+          instanceId,
+          actor.userId,
+          options.reason ?? null,
+          JSON.stringify({
+            definitionPolicy: original.policy_snapshot,
+            roundPolicy: { windowDays, suite },
+          }),
+        ],
+      )
+
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
+      await client.query('COMMIT')
+    } catch (error) {
+      await rollbackQuietly(client)
+      // The pre-check above cannot close a concurrent-insert race by itself — this is the
+      // authoritative backstop (I3, §5): translate the partial unique index's raw 23505 into the
+      // SAME named error the pre-check throws, rather than letting a constraint-name/SQLSTATE leak
+      // to the caller.
+      if (
+        isPostgresUniqueViolation(error)
+        && (error as { constraint?: unknown }).constraint === 'uq_approval_rounds_pending_document'
+      ) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
+      throw error
+    } finally {
+      client?.release()
+    }
+
+    await this.projectApprovalOnCreate(instanceId)
+    await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
+
+    const approval = await this.getApproval(instanceId, actor.userId, [])
+    if (!approval) {
+      throw new ServiceError('Cancel round approval not found after creation', 500, 'CANCEL_ROUND_CREATE_FAILED')
+    }
+    return approval
+  }
+
+  /**
+   * Lock §3 C-2 step ③ + §14.2 判据 IV — the IN-LOCK final evaluation, run inside the caller's
+   * `dispatchAction` transaction and BEFORE any terminal status write.
+   *
+   * Lock order (lock §3 C-2 全局顺序 + 「census 未做前不实现」). The engine instance is already held
+   * `FOR UPDATE` by `dispatchAction`'s entry read; this then takes ② the ORIGINAL document
+   * instance and ③ the round row, and takes the original instance's lock even on the branches that
+   * never write it — front-loading the order 判据 II's C-1 call needs.
+   *
+   * ⚠️ The {original document, round row} pair is a NEW lock pair this method introduces, and its
+   * order is NOT free: `createCancelRoundInstance` locks the original document first and only then
+   * INSERTs into `approval_rounds` (where the `WHERE outcome='pending'` partial unique index makes
+   * it wait on any uncommitted change to that document's pending round). A closer that took the
+   * round row first therefore closes a cycle. That was CONSTRUCTED, not reasoned about, and
+   * deadlocked deterministically — `40P01 deadlock detected`; the census leg is Q-D in
+   * `approval-cancel-round-lock-order-census.db.test.ts`, with the reversed order kept as the
+   * standing proof and this order as the positive control.
+   *
+   * ⚠️ Rollout/advisory lock (lock §3 C-2 「rollout/advisory 锁 → 轮次引擎实例 → …」): NOT taken
+   * here, and it cannot be taken here in the right order. `dispatchAction` opens `BEGIN` and
+   * immediately takes `approval_instances … FOR UPDATE` with no prior read, so any advisory lock
+   * acquired at this hook is acquired AFTER a row lock. That is invisible to the W4 entry's own
+   * check — `assertExternalTransactionRolloutLockHeldV1` queries `pg_locks` for held-ness only,
+   * never for acquisition order — so it would PASS while the global order is violated. The
+   * `expired` / `blocked` closures below never call W4 and so never need it; 判据 II does, and
+   * must restructure `dispatchAction`'s entry (a cheap non-locking pre-read to detect a cancel
+   * round, take the org's class-`00` shared rollout lock, and only then `FOR UPDATE`) plus a
+   * fail-closed re-assert after the row lock. Recorded here, not papered over.
+   */
+  private async evaluateCancelRoundFinalInLock(
+    client: ApprovalDbClient,
+    engineInstanceId: string,
+  ): Promise<{
+    readonly roundId: string
+    readonly documentId: string
+    readonly evaluation: CancelRoundFinalEvaluationV1
+    readonly policySnapshotAtDecision: string
+  }> {
+    // ② the ORIGINAL document instance, ③ the round row — IN THAT ORDER. The order is the whole
+    // point (see the lock-order note on this method): `createCancelRoundInstance` locks the
+    // original document FIRST and only then touches `approval_rounds`, so a closer that took the
+    // round row first would invert the pair. That inversion is not theoretical — it was CONSTRUCTED
+    // and deadlocked deterministically (see `approval-cancel-round-lock-order-census.db.test.ts`,
+    // Q-D). The `document_id` needed to get there is read WITHOUT a lock first, which is only sound
+    // because `document_id` is immutable on a round row — MEASURED, not assumed (an earlier version
+    // of this comment cited a grep it had never run): the repo has exactly THREE production
+    // `UPDATE approval_rounds` statements — this closure's and 判据 III's revoke/reject at `:10929`
+    // and `:11416` — all setting only `outcome`/`ended_at` (+ this one's `block_reason` and
+    // `policy_snapshot_at_decision`), and `git grep -nE "SET .*document_id|document_id *=" --
+    // packages/core-backend/src plugins` minus WHERE clauses returns ZERO. The locked re-read below
+    // is still the authority, and `round.document_id !== original.id` fails closed if that changes.
+    const roundProbe = await client.query<{ document_id: string }>(
+      `SELECT document_id FROM approval_rounds
+        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [engineInstanceId],
+    )
+    if (roundProbe.rows.length !== 1) {
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to evaluate',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+    const originalResult = await client.query<ApprovalInstanceRow>(
+      `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
+      [roundProbe.rows[0].document_id],
+    )
+    const original = originalResult.rows[0]
+    if (!original) {
+      throw new ServiceError(
+        'Cancel-round document instance not found at final evaluation',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+
+    const roundResult = await client.query<{ id: string; document_id: string }>(
+      `SELECT id, document_id FROM approval_rounds
+        WHERE engine_instance_id = $1 AND outcome = 'pending'
+        FOR UPDATE`,
+      [engineInstanceId],
+    )
+    const round = roundResult.rows[0]
+    if (!round || roundResult.rows.length !== 1 || round.document_id !== original.id) {
+      // Same fail-closed rationale as 判据 III's `rowCount !== 1`: a cancel-round engine instance
+      // reaching its terminal approve with no single pending round means WI-4's one-round-per-
+      // instance invariant is already broken. 基础设施异常 path (lock §3 C-3 row 5): throw ⇒ the
+      // caller's transaction rolls back ⇒ the round stays `pending` and keeps its seats.
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to evaluate',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+
+    // §2-G4 「双时点按当前策略评估」 — re-derive from the original document's CURRENT metadata, so a
+    // policy that changed between creation and decision is what this evaluation sees. §4: the
+    // decision snapshot is written 同形 with the creation snapshot, on BOTH branches.
+    //
+    // REBASE onto C-1 @`ba8a0133d` (Codex review 2026-09-19 finding 2): C-1 replaced the silently
+    // defaulting derivation this slice used with one that ENFORCES lock:143's two domains, and
+    // `deriveCancelRoundRoundPolicy`'s own doc comment prescribes THIS consumer's handling verbatim
+    // — 「the final in-transaction evaluation must call THIS function and treat a throw as `blocked`
+    // + the thrown code — never as a silent `expired`」. Followed literally; the phase-2 copy of the
+    // derivation (weaker, defaulting) was DELETED rather than renamed, because a second narrower
+    // same-kind artefact is contract narrowing and because §5 I4 / §2-G4's whole point is that the
+    // two time points evaluate ONE policy.
+    //
+    // Matched BY CODE, never by a bare `instanceof ServiceError`: the two sibling refusals a few
+    // statements below (`CANCEL_ROUND_INVARIANT_VIOLATION`, `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`)
+    // are deliberately throw ⇒ rollback ⇒ the round stays `pending`, seats kept, retryable. A
+    // class-level catch would convert either into an IRREVERSIBLE `blocked` close the day a
+    // statement moves inside this `try` — the judgment-predicate-is-itself-the-hole failure mode.
+    let policy: CancelRoundRoundPolicy
+    try {
+      policy = deriveCancelRoundRoundPolicy(toNullableRecord(original.metadata) ?? {})
+    } catch (error) {
+      if (
+        error instanceof ServiceError
+        && (error.code === 'CANCEL_ROUND_SUITE_UNKNOWN' || error.code === 'CANCEL_ROUND_WINDOW_OUT_OF_RANGE')
+      ) {
+        // Implementer choice, FLAGGED for owner registration — same treatment as
+        // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` below: there is NO policy to snapshot when the policy
+        // is itself what failed to evaluate, so the decision snapshot carries `roundPolicy: null`
+        // plus the blocking code. It deliberately does NOT fall back to the pre-C-1 defaulting to
+        // manufacture a suite/window pair — fabricating the very snapshot §5 I4 / §2-G4 designate as
+        // the audit basis is exactly the corruption finding 2 named.
+        return {
+          roundId: round.id,
+          documentId: round.document_id,
+          evaluation: { decision: 'blocked', code: error.code, detail: null },
+          policySnapshotAtDecision: JSON.stringify({
+            definitionPolicy: original.policy_snapshot,
+            roundPolicy: null,
+            roundPolicyError: error.code,
+          }),
+        }
+      }
+      throw error
+    }
+    const { suite, windowDays } = policy
+    const policySnapshotAtDecision = JSON.stringify({
+      definitionPolicy: original.policy_snapshot,
+      roundPolicy: { windowDays, suite },
+    })
+
+    // C-3 row 4 「最终评估:业务不可逆」 — the ORIGINAL document (held `FOR UPDATE` above) is no longer
+    // an approved document, so there is nothing left for this round to cancel. This is the creation
+    // path's own precondition (`createCancelRoundInstance`: `original.status !== 'approved'` ⇒ 409
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`) evaluated again at the decision point, which is what
+    // §2-G4 「双时点按当前策略评估」 asks of every creation-time predicate — and it answers with the
+    // SAME code, exactly as the two policy codes above do when re-derivation fails here.
+    //
+    // It closes as `blocked` (persisted in this transaction by the C-3 closer), NOT as a throw:
+    // falling through to redemption would hand C-1 a document it can no longer cancel, and the
+    // resulting error would roll the whole transaction back and leave the round `pending` with its
+    // seats — a state no retried approve can ever leave, because the document does not become
+    // approved again (only a reject or the requester's withdraw would end the round).
+    // It also must not be `expired`: the window is not why this round cannot proceed.
+    //
+    // Precedence, deliberately: after the policy derivation (so the decision snapshot is the normal
+    // one whenever the policy itself is readable; a policy that cannot be derived still reports its
+    // own code), and BEFORE the window query, so a document that is both no longer approved and past
+    // its window reports the reason that holds regardless of the clock, and the retryable
+    // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` throw below can never pre-empt a closure that no retry
+    // could change. `detail` carries the observed status beside the bounded reason (never projected
+    // to any read surface — see `projectCancelRoundCloseReasonForReadV1`).
+    //
+    // Implementer choice, FLAGGED for owner registration: the code is the existing
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`, reused in the open `business_blocked:<code>` domain
+    // (P-7) — no new code, and the P-8 registry is unchanged.
+    if (original.status !== 'approved') {
+      return {
+        roundId: round.id,
+        documentId: round.document_id,
+        evaluation: {
+          decision: 'blocked',
+          code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+          detail: typeof original.status === 'string' ? original.status : null,
+        },
+        policySnapshotAtDecision,
+      }
+    }
+
+    // §2-G2 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)」 — the FIRST approved transition
+    // on the original document, read off its own audit trail (`approval_instances` has no
+    // `approved_at` column); `MIN` is 「首次」 and is what makes the anchor 「不随修订滚动」.
+    // The window comparison runs on the DATABASE clock, the same `now()` every other write here
+    // uses, so a fixture moves the anchor rather than the clock.
+    const windowResult = await client.query<{ approved_at: Date | null; expired: boolean | null }>(
+      `SELECT anchor.approved_at,
+              now() > anchor.approved_at + make_interval(days => $2::int) AS expired
+         FROM (SELECT MIN(created_at) AS approved_at
+                 FROM approval_records
+                WHERE instance_id = $1 AND to_status = 'approved') AS anchor`,
+      [round.document_id, Math.trunc(windowDays)],
+    )
+    const window = windowResult.rows[0]
+    if (!window || window.approved_at === null || window.expired === null) {
+      // Implementer choice, FLAGGED for owner registration (the lock names the anchor but not its
+      // absence): an approved document with no `to_status='approved'` record — a legacy/bridge row
+      // — cannot be evaluated against G2's anchor. Refusing to decide (throw ⇒ rollback ⇒ round
+      // stays `pending`, seats kept, retryable) is preferred over closing the round as `expired`,
+      // which would be irreversible on the strength of missing evidence.
+      throw new ServiceError(
+        'Cancel-round document has no approved-at anchor for the window evaluation',
+        409,
+        'CANCEL_ROUND_WINDOW_ANCHOR_MISSING',
+      )
+    }
+
+    // C-3 row 3 「最终评估:窗口/策略已关」. `forbidden` is the policy half: the suite may have been
+    // re-tagged after creation, and §14.3 #14's creation gate cannot speak for the decision point.
+    const evaluation: CancelRoundFinalEvaluationV1 =
+      suite === 'forbidden' || windowDays <= 0 || window.expired
+        ? { decision: 'expired' }
+        : { decision: 'redeem' }
+
+    return {
+      roundId: round.id,
+      documentId: round.document_id,
+      evaluation,
+      policySnapshotAtDecision,
+    }
+  }
+
+  /**
+   * Lock §3 C-3 「持久化收口」 + §14.2 判据 IV — the C-3 SYSTEM-side close, shared by both of its
+   * causes (窗口/策略已关 ⇒ `expired`, 业务不可逆 ⇒ `blocked`). Writes inside the caller's
+   * transaction and does NOT commit; the caller commits and returns.
+   *
+   * What it deliberately does NOT do: build or enqueue a completion event. 判据 IV's 「零完成事件」
+   * is a property of this path having no such call at all, not of a flag being off — and the
+   * caller must `return` immediately afterwards, because falling through would let `:11070`'s
+   * status write overwrite `rejected` with `approved` and `:11172`'s enqueue fire the event.
+   */
+  private async closeCancelRoundSystemTerminalInTxn(
+    client: ApprovalDbClient,
+    params: {
+      readonly engineInstanceId: string
+      readonly instance: ApprovalInstanceRow
+      readonly nextVersion: number
+      readonly currentNodeKey: string | null
+      readonly evaluation: Exclude<CancelRoundFinalEvaluationV1, { decision: 'redeem' }>
+      readonly policySnapshotAtDecision: string
+    },
+  ): Promise<void> {
+    const { engineInstanceId, instance, nextVersion, currentNodeKey, evaluation } = params
+    const reason = cancelRoundCloseReason(evaluation)
+
+    // 席位失效 (判据 IV) — same helper the approver-reject terminal uses. MEASURED, not assumed:
+    // deleting this call leaves the 判据 IV acceptance case GREEN (mutation M-6), because every
+    // approve mode already deactivates the acting seat before the terminal advance is reached
+    // (`'all'`: `:11470`), and a terminal resolution means no later node's seats exist yet. So on
+    // the paths reachable today this is defence in depth, not the cause of the released seat — the
+    // acceptance assertion is an end-state check and is documented as such rather than as proof
+    // that this line is load-bearing. It stays because a mode that leaves a seat active would
+    // otherwise close a round with a live assignment, and because dropping it would make this
+    // closure differ from the approver-reject terminal it mirrors.
+    await this.deactivateAllActiveAssignments(client, engineInstanceId)
+
+    // 引擎 `status='rejected'` — C-3 「复用现有 `rejected`」, no new engine terminal state (§3 C-3
+    // last-but-one bullet). Statement shape copied from the `request.action === 'reject'` terminal.
+    await client.query(
+      `UPDATE approval_instances
+       SET status = 'rejected',
+           version = $2,
+           current_node_key = NULL,
+           current_step = total_steps,
+           metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
+           updated_at = now()
+       WHERE id = $1`,
+      [engineInstanceId, nextVersion],
+    )
+
+    // The audit row. Action verb is the EXISTING `reject` — a new verb would land on seven pinned
+    // copies of the action union across lines (attendance P26 among them); what distinguishes a
+    // system close from an approver's reject is the sentinel actor plus the reason, which is the
+    // lock's own criterion (「系统终结身份(非真人 actor)与专用 reason 是区分『审批人驳回』的唯一依据,
+    // 历史记录必须能查出来」). The reason therefore lives in a queryable metadata key, not in prose
+    // inside `comment`.
+    await this.insertApprovalRecord(client, engineInstanceId, {
+      action: 'reject',
+      actorId: APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR,
+      actorName: APPROVAL_CANCEL_ROUND_SYSTEM_ACTOR,
+      comment: null,
+      fromStatus: instance.status,
+      toStatus: 'rejected',
+      fromVersion: instance.version,
+      toVersion: nextVersion,
+      metadata: {
+        nodeKey: currentNodeKey,
+        cancelRoundSystemClose: true,
+        cancelRoundCloseReason: reason,
+        cancelRoundOutcome: evaluation.decision,
+        // The fine-grained business cause is persisted BESIDE the bounded reason token, never
+        // concatenated into it (the 判据 IV pin recorded in the phase-2 verification MD §2).
+        ...(evaluation.decision === 'blocked' ? { cancelRoundBlockDetail: evaluation.detail } : {}),
+      },
+    })
+
+    // 轮次 `expired`/`blocked` + `ended_at` (I3 「终结即释放」: the partial unique index is
+    // `WHERE outcome = 'pending'`, so this write is what frees the document for a next round) and
+    // §4's decision-time snapshot, written 同形 on this branch too.
+    const roundResult = await client.query(
+      `UPDATE approval_rounds
+          SET outcome = $2,
+              ended_at = now(),
+              block_reason = $3,
+              policy_snapshot_at_decision = $4
+        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [
+        engineInstanceId,
+        evaluation.decision,
+        evaluation.decision === 'blocked' ? reason : null,
+        params.policySnapshotAtDecision,
+      ],
+    )
+    if (roundResult.rowCount !== 1) {
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to close',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+  }
+
+  /**
+   * Lock §3 C-2 steps ④–⑤ + §14.2 判据 II — 兑现. Runs inside the caller's `dispatchAction`
+   * transaction, AFTER the in-lock final evaluation returned `redeem` and BEFORE any terminal
+   * status write, and performs exactly two things: C-1 through the W4 external transaction entry,
+   * then `approval_rounds.outcome = 'applied'`.
+   *
+   * What this deliberately does NOT write: the ORIGINAL document's `approved → cancelled`, its
+   * `approval_records(action='revoke', to_status='cancelled')`, the balance reversal. Both belong
+   * to C-1 and are performed by the adapter inside the entry — lock §3 C-1 (「`status` 只允许
+   * `approved → cancelled` 且只能经 C-1」) makes writing them here a contract violation, not a
+   * shortcut.
+   *
+   * ⚠️ RETRACTION (Codex 审阅第 3 条修复, 2026-09-19). This list used to include the
+   * `attendance.request.cancelled` EVENT, over the claim that it too is 「performed by the adapter
+   * inside the entry」. That was FALSE on every posture any org runs today, and the falsehood is
+   * what hid the defect. The adapter only RETURNS the lifecycle event; the boundary decides whether
+   * to persist it, and under `legacy` / `legacy_compat` it persists nothing
+   * (`w4c3b-request-operation-boundary.ts:903-916` skips the outbox enqueue; the pure-`legacy` kind
+   * returns before reaching it). On the HTTP path the compensating in-process emit lives in the
+   * ROUTE, not in the entry. So this path announced the cancellation zero times where HTTP
+   * announced it once — measured `{sendsAfterA: 0, sendsAfterB: 1}` on the twin fixture. The send
+   * is now made explicitly, AFTER the caller's COMMIT, through the delivery bound by the same
+   * plugin (see the post-commit call in `dispatchAction`). This method's own writes are the
+   * round row's, and the cancel round's OWN instance reaches `approved` by falling through to
+   * `dispatchAction`'s ordinary status write (lock §3 C-2 step ⑥), which is also what produces the
+   * 恰一个 completion event 判据 II names.
+   *
+   * ⚠️ The org key. `assertExternalTransactionRolloutLockHeldV1` probes `pg_locks` for the key built
+   * from `identityPrepared.orgId` — which the cancel adapter's `prepareIdentity` reads off the
+   * `attendance_requests` row it loads. `dispatchAction` took the lock on the key built from
+   * `rolloutLock.orgId`, resolved by `resolveCancelRoundRolloutLockRequirementV1` from the SAME
+   * column of the row `classifyAttendanceRequestForInstanceV1` resolved. Those are made the same row
+   * BY CONSTRUCTION rather than by hope: both `orgId` and `requestId` are passed through, so
+   * `loadRequestOperationIdentityRow`'s lookup is `WHERE id = $1 AND org_id = $2` and can only
+   * return a row whose `org_id` IS `rolloutLock.orgId`. A request whose org moved between the
+   * pre-read and here therefore 404s inside the entry instead of silently asserting a different
+   * advisory key (and `dispatchAction`'s own `CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED` re-assert
+   * already caught the case where it moved before the row lock).
+   */
+  private async redeemCancelRoundInTxn(
+    client: ApprovalDbClient,
+    params: {
+      readonly engineInstanceId: string
+      readonly instance: ApprovalInstanceRow
+      readonly rolloutLock: CancelRoundRolloutLockRequiredV1
+      readonly roundId: string
+      readonly policySnapshotAtDecision: string
+    },
+  ): Promise<
+    | {
+      readonly kind: 'applied'
+      readonly outcome: CancelRoundCancellationOutcomeV1
+      /**
+       * The W4 answer, carried out VERBATIM so the post-commit delivery can hand it back to the
+       * attendance plugin unchanged. This side deliberately does not inspect `w4Result.kind`:
+       * which kinds announce is the plugin's single gate, shared with the HTTP route.
+       */
+      readonly w4Result: AttendanceRequestOperationBoundaryResultV1
+    }
+    | { readonly kind: 'blocked'; readonly code: string; readonly detail: string | null }
+  > {
+    const { engineInstanceId, instance, rolloutLock, roundId } = params
+
+    // 基础设施异常 (lock §3 C-3 row 5), NOT 「nothing to cancel」. With no attendance plugin bound,
+    // falling through would mark the round `applied` and take its engine instance to `approved`
+    // having performed ZERO business cancellation — a round that claims the leave was cancelled
+    // when it was not. Throwing rolls the caller's transaction back, so the round stays `pending`
+    // with its seats and the action is retryable once the plugin is up: the same shape
+    // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` takes.
+    const port = getAttendanceCancellationExecutionPort()
+    if (!port) {
+      throw new ServiceError(
+        'Attendance cancellation execution provider is not registered',
+        409,
+        'CANCEL_ROUND_EXECUTION_PORT_UNAVAILABLE',
+      )
+    }
+
+    // The acting identity. NOT the approver: C-1 replays the EXISTING W4 cancellation path, whose
+    // actor is the person whose request it is (lock §8 期 1 「完整取消结果逐字节等价于现有 W4 路径」),
+    // and the boundary's own `resolveRequestCancellationActorPosture` resolves `'self'` for them
+    // exactly as it does over HTTP. Handing it the approver would make the call cross-user and
+    // demand `attendance_admin`, which an ordinary approver does not have. The cancel round's
+    // `requester_snapshot.id` IS the original requester — WI-16 (`createCancelRoundInstance`)
+    // refuses to create the round for anyone else. The posture itself is still resolved by the
+    // boundary inside the transaction and is NOT expressible in this input (lock §3 C-1: 「运行模式
+    // 与授权凭据由边界在锁内解析，不得由普通请求参数指定」).
+    //
+    // ⚠️ FLAGGED FOR OWNER REGISTRATION: the lock names the C-1 audit row's shape
+    // (`action='revoke', from_status='approved', to_status='cancelled'`) but never says WHOSE
+    // actor id it carries. This picks the cancel round's requester, with the reasoning above; an
+    // owner who wants the approver or a system sentinel there must say so.
+    const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+    const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
+    if (!requesterId) {
+      throw new ServiceError(
+        'Cancel-round instance has no requester identity to execute the cancellation as',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+    const requesterName =
+      typeof requesterSnapshot?.name === 'string' && requesterSnapshot.name.length > 0
+        ? requesterSnapshot.name
+        : requesterId
+
+    const result = await port.executeInExternalTransaction({
+      // The caller's transaction client, handed over whole. `ApprovalDbClient.query` is `pool.query`
+      // (pg's overloaded signature); the entry's client contract is the single-overload
+      // `query(text, params?) => Promise<{ rows }>`, which pg satisfies at runtime but TypeScript
+      // will not match structurally across the overload set.
+      client: client as unknown as AttendanceW4TransactionClientV1,
+      kind: 'request_cancel',
+      // Deterministic, and deterministic ON PURPOSE: a round passes outlet #5 at most once (the
+      // `WHERE outcome='pending'` partial unique index plus this method's own `applied` write), so
+      // a retry of the SAME round after a rolled-back attempt must replay under the same key
+      // rather than mint a second operation.
+      //
+      // ⛔ RETRACTION (this commit). An earlier revision passed `roundId` itself here, over a
+      // comment claiming the round id 「is exactly the right identity」. It is not: `operationId`
+      // must be UUID-shaped (`normalizeInput` → `uuidOrNull`) and `approval_rounds.id` is `text`,
+      // minted as `apr_${crypto.randomUUID()}`. Every redemption against the REAL boundary 500ed
+      // with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`; only the double-backed acceptance cases were
+      // green. The key is now DERIVED from the round id — same determinism, valid UUID. See
+      // `deriveCancelRoundW4OperationIdV1`.
+      operationId: deriveCancelRoundW4OperationIdV1(roundId),
+      correlationId: `approval-cancel-round:${roundId}`,
+      // The generic (non-specialized) cancellation route family — the same `null` the ordinary
+      // `POST /api/attendance/requests/:id/cancel` entry passes. `schedule_dispatch_cancel` /
+      // `shift_swap_cancel` are other request types; 首期 scope is 请假 (lock §8 期 1).
+      routeVariant: null,
+      routeInput: {
+        actorId: requesterId,
+        // `resolveRequestCancellationActorPosture` 403s unless these two are equal. There is no
+        // HTTP token on this path, so the only honest value is the acting identity itself.
+        tokenSubjectUserId: requesterId,
+        actorName: requesterName,
+        // See the org-key note on this method: passing BOTH pins the entry to the row the rollout
+        // lock was taken for.
+        orgId: rolloutLock.orgId,
+        requestId: rolloutLock.requestId,
+        // Every field of `requestCancellationActionSchema` is optional; an approval-side redemption
+        // carries no comment, no metadata, and no client-supplied snapshot expectation.
+        requestBody: {},
+        ipAddress: null,
+        userAgent: null,
+      },
+    })
+
+    // C-3 row 4 (业务不可逆). The attendance domain declined on business grounds and the entry has
+    // already rolled its own attempt back to a boundary-owned savepoint, so the caller's
+    // transaction is intact and can still persist the `blocked` closure and COMMIT — which is the
+    // whole reason §11-④'s `review_required` had to stop being a throw.
+    if (result.kind === 'business_refused') {
+      return { kind: 'blocked', code: result.code, detail: result.detail }
+    }
+
+    // lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,必须呈现)」 — the 呈现
+    // half, closed with the DEFAULT contract (owner 待裁, 按默认值; see the port module's type).
+    //
+    // Read from `result.response`, NOT from a read-back of the sealed row: the `legacy` kind
+    // returns BEFORE `sealAttendanceResultOperationV1` runs (`w4c3b-request-operation-boundary.ts`
+    // `:897-899` vs `:918`), so a seal-based read would be absent on it while the payload is right
+    // here. `business_refused` is narrowed out above — its type carries no `response` at all.
+    const outcome = classifyCancelRoundCancellationOutcomeV1(result.response)
+
+    // 轮次 `applied` (lock §3 C-2 step ⑤) + I3 「终结即释放」 + §4's decision-time snapshot, written
+    // 同形 with the C-3 closure's.
+    const roundResult = await client.query(
+      `UPDATE approval_rounds
+          SET outcome = 'applied',
+              ended_at = now(),
+              policy_snapshot_at_decision = $2
+        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [engineInstanceId, params.policySnapshotAtDecision],
+    )
+    if (roundResult.rowCount !== 1) {
+      throw new ServiceError(
+        'Cancel-round instance has no single matching pending round to redeem',
+        409,
+        'CANCEL_ROUND_INVARIANT_VIOLATION',
+      )
+    }
+    return { kind: 'applied', outcome, w4Result: result }
   }
 
   /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
@@ -4083,6 +10196,10 @@ export class ApprovalProductService {
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
       }
+      // P17/P26: admin jump mutates assignments — attendance fails closed before DML.
+      await guardAttendanceCentralMutationOrThrow(client, instance)
+      // Lock §14.3 outlet #2 — a cancel-round instance is never admin-jumped.
+      rejectIfCancelRound(instance, 'adminJump')
       if (instance.version !== request.version) {
         throw new ServiceError(
           'Approval instance version mismatch',
@@ -4161,11 +10278,32 @@ export class ApprovalProductService {
       const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: the jump (re)activates a node that may carry a `prior_node_approver` source —
+      // read the referenced nodes' persisted deciders (LATEST round, sentinels dropped) before
+      // resolution. No in-flight merge: the jumping admin is not a decider. A referenced node the
+      // jump SKIPPED OVER (never decided) yields an empty entry → emptyAssigneePolicy
+      // (OD-L1-4(a): the "node was skipped" arm). OPT-IN — undefined when the graph has no such
+      // source.
+      const jumpReferencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      const jumpPriorNodeApprovers = jumpReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, jumpReferencedPriorNodeKeys)
+        : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => jumpPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -4252,7 +10390,11 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actor.userName || actor.userId },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the jump→approved transition.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the txn (flag OFF no-op).
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
@@ -4271,7 +10413,7 @@ export class ApprovalProductService {
       }
 
       if (resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -4286,7 +10428,7 @@ export class ApprovalProductService {
     if (jumpEvent) {
       eventBus.emit('approval.admin_jumped', jumpEvent)
     }
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
@@ -4340,7 +10482,12 @@ export class ApprovalProductService {
           LIMIT 200`,
         [fromUserId],
       )
-      candidateIds = candidates.rows.map((row) => row.instance_id)
+      // P26: discovery excludes unauthorized attendance rows (published_definition_id is not a filter).
+      candidateIds = await filterBulkReassignDiscoveryForAttendance(
+        pool,
+        actor.userId,
+        candidates.rows.map((row) => row.instance_id),
+      )
     }
 
     const result: ApprovalBulkReassignResult = {
@@ -4376,6 +10523,52 @@ export class ApprovalProductService {
           continue
         }
 
+        // Holds instance FOR UPDATE — concurrent decision/reassign must wait here.
+        await awaitBulkReassignTestBarrier('after_instance_lock', instanceId)
+
+        // Lock §14.3 outlet #12 — a cancel-round instance's seat may never be reassigned through
+        // this admin path (§6 "仅原 requester"; §2-G3 re-qualification is the only thing allowed
+        // to touch its seat). Guard BEFORE `classifyAndLockAttendanceRequestForInstance` below, not
+        // after: rejecting here avoids taking the `attendance_requests` row lock that call acquires
+        // on a path that is about to abort — §11/§13 leave the cancel-round lock-order questions
+        // (Q-A/Q-B) undecided, so a rejected instance should touch as few locks as possible.
+        try {
+          rejectIfCancelRound(instance, 'bulkReassignApprovals')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
+        }
+
+        // P26: classify + lock request org before actor/target authorization (never trust JSON org).
+        let attendanceReassignAudit: AttendanceReassignAuditWitnessV1 | null = null
+        const attendanceClass = await classifyAndLockAttendanceRequestForInstance(client, instance)
+        if (attendanceClass.kind === 'attendance') {
+          const auth = await authorizeAttendanceCentralReassign(client, {
+            instance,
+            request: attendanceClass.request,
+            actorId: actor.userId,
+            targetUserId: toUserId,
+          })
+          if (auth.ok === false) {
+            await client.query('ROLLBACK')
+            skip(instanceId, auth.skipReason)
+            continue
+          }
+          attendanceReassignAudit = auth.auditWitness
+          // Target users + user_orgs are locked; concurrent deactivation/membership removal waits.
+          await awaitBulkReassignTestBarrier('after_attendance_auth', instanceId)
+        }
+
+        if (attendanceClass.kind === 'attendance' && !instance.current_node_key) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-assigned')
+          continue
+        }
+
         const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
         const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
         if (requesterId && requesterId === toUserId) {
@@ -4384,6 +10577,7 @@ export class ApprovalProductService {
           continue
         }
 
+        // Source seats: FOR UPDATE so concurrent reassign/decision cannot race seat deactivation.
         const sourceAssignments = await client.query<ApprovalAssignmentRow>(
           `SELECT *
              FROM approval_assignments
@@ -4401,19 +10595,48 @@ export class ApprovalProductService {
           continue
         }
 
-        const targetAssignments = await client.query<{ node_key: string | null }>(
-          `SELECT node_key
+        // Current-node validation: when the instance has a current node, at least one source seat
+        // must still sit on that node (stale/global seats alone cannot reassign).
+        if (attendanceClass.kind === 'attendance' && instance.current_node_key) {
+          const onCurrentNode = sourceAssignments.rows.some(
+            (assignment) => assignment.node_key === instance.current_node_key,
+          )
+          if (!onCurrentNode) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'not-assigned')
+            continue
+          }
+        }
+
+        // Lock existing target seats. A concurrent active insert is serialized by the
+        // existing idx_approval_assignments_active_unique partial index.
+        const targetAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
              FROM approval_assignments
             WHERE instance_id = $1
               AND assignment_type = 'user'
               AND assignee_id = $2
               AND is_active = TRUE
-            LIMIT 1`,
+            ORDER BY COALESCE(node_key, ''), created_at ASC
+            FOR UPDATE`,
           [instanceId, toUserId],
         )
         if (targetAssignments.rows.length > 0) {
           await client.query('ROLLBACK')
           skip(instanceId, 'target-already-assignee')
+          continue
+        }
+
+        // Version recheck under the same lock (decision race): a concurrent terminal body that
+        // already advanced version/status cannot both succeed with this reassign.
+        const versionRecheck = await client.query<{ version: number; status: string }>(
+          `SELECT version, status FROM approval_instances WHERE id = $1`,
+          [instanceId],
+        )
+        const live = versionRecheck.rows[0]
+        if (!live || live.status !== 'pending' || Number(live.version) !== Number(instance.version)) {
+          await client.query('ROLLBACK')
+          skip(instanceId, live?.status && live.status !== 'pending' ? 'not-pending' : 'error')
           continue
         }
 
@@ -4437,11 +10660,11 @@ export class ApprovalProductService {
             assigneeId: toUserId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               reassignedFrom: fromUserId,
               adminReassign: true,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -4459,12 +10682,19 @@ export class ApprovalProductService {
         for (const [epoch, bucket] of reassignmentsByEpoch) {
           createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, bucket, epoch)))
         }
-        await client.query(
+        // After seat DML, still holding instance FOR UPDATE; version predicate is the second gate.
+        await awaitBulkReassignTestBarrier('before_version_bump', instanceId)
+        const versionBump = await client.query(
           `UPDATE approval_instances
               SET version = $2, updated_at = now()
-            WHERE id = $1`,
-          [instanceId, nextVersion],
+            WHERE id = $1 AND version = $3 AND status = 'pending'`,
+          [instanceId, nextVersion, instance.version],
         )
+        if ((versionBump.rowCount ?? 0) !== 1) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-pending')
+          continue
+        }
 
         for (const assignment of sourceAssignments.rows) {
           await this.insertApprovalRecord(client, instanceId, {
@@ -4483,11 +10713,16 @@ export class ApprovalProductService {
               nodeKey: assignment.node_key,
               previousAssignmentId: assignment.id,
               reason,
+              ...(attendanceReassignAudit
+                ? { attendanceW4c3bReassign: attendanceReassignAudit }
+                : {}),
             },
             targetUserId: toUserId,
           }, actor)
         }
 
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of this instance's txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents) // A-2a
         result.succeeded.push(instanceId)
@@ -4514,6 +10749,424 @@ export class ApprovalProductService {
       skipped: result.skipped,
       affectedRequesterIds: result.affectedRequesterIds,
     })
+    return result
+  }
+
+  /**
+   * Lock-4 (docs/development/approval-lock4-flow-policies-20260817.md) F4-E — 离职自动转上级,
+   * OD-L4-9(a). OUT-OF-BAND, not in-resolver: "The departed person is an arbitrary approver, not
+   * the requester. Their manager is NOT in the frozen requester snapshot, and Lock-1 §2.1 forbids
+   * a database call inside the resolver." Modeled on the SHIPPED SLA timeout transfer's MUTATION
+   * posture (`applyNodeTimeoutEffect`'s `transfer` branch above): own transaction, instance
+   * `FOR UPDATE`, re-verify in-txn, single-shot per instance, preserve each moved seat's
+   * `entry_epoch` (NEVER bump `node_activation_seq`), and — matching that branch's own "an
+   * in-place handover does not bump the instance version" parity comment — this in-place seat
+   * swap does not bump `approval_instances.version` either. DML shape (per-assignee, epoch-bucketed
+   * inserts, audit rows) is modeled on `bulkReassignApprovals` above; unlike that admin path this
+   * is scoped to ONE departed user's own seats, not an admin-chosen (from, to) pair, and it does
+   * NOT go through `bulkReassignApprovals` (the lock: "does not duplicate `bulkReassignApprovals`,
+   * which stays the admin-driven path").
+   *
+   * Detection source (OD-L4-8a, disclosed here so the caller cannot silently drop it): the intended
+   * trigger is the directory deprovision `user_changed` effect (`deprovision-planner.ts`'s
+   * `mark_inactive` + `globallyClear` emit, consumed via `directory-sync.ts`'s
+   * `usersDeactivatedCount`), which is gated behind `DIRECTORY_DEPROVISION_ENABLED` —
+   * **default OFF per org** (`isDirectoryDeprovisionEnabled()`). 离职自动转上级 therefore does NOT
+   * fire for every org. `syncDirectoryIntegration` now consumes the committed `user_changed`
+   * evidence through the post-commit departure dispatcher; infrastructure failures remain
+   * values-free manual-recovery signals because automatic retry is outside this slice. Any
+   * authoring/disclosure copy describing this feature MUST carry those limits and MUST NOT claim
+   * universal coverage.
+   *
+   * Contract:
+   * - Sentinel actor `APPROVAL_DEPARTURE_SYSTEM_ACTOR` ('system:approval-departure').
+   * - Audit verb is `'reassign'`, NEVER `'transfer'` — `'transfer'` is one of the four actions the
+   *   revoke-window guard counts (`action IN ('approve','reject','transfer','handle')`, scoped to
+   *   `metadata->>'nodeKey'`); a departure writing `'transfer'` would silently close the
+   *   requester's revoke window as a side effect of an approver leaving. `'reassign'` is the verb
+   *   `bulkReassignApprovals` already uses and is already admitted by the CHECK constraint — no new
+   *   verb, no bootstrap bump, no migration.
+   * - Gate E-3 (delegation): a seat already substituted by delegation is NOT re-transferred on the
+   *   DELEGATOR's departure — `pushResolved` (ApprovalAssigneeResolver.ts) already rewrites the row's
+   *   `assignee_id` to the DELEGATEE, so a delegator's own `assignee_id` never appears among a
+   *   node's active rows once delegated; the `assignee_id = $departedUserId` filter below is
+   *   naturally exclusive for that case. The delegatee's OWN departure DOES transfer that seat (its
+   *   `assignee_id` IS the delegatee) — asserted on the seat's CURRENT assignee, not the departed id.
+   *   The extra `(metadata ->> 'delegatedFrom') IS DISTINCT FROM $departedUserId` predicate is
+   *   defense-in-depth (structurally redundant with the `assignee_id` filter today) so a future
+   *   resolver change cannot silently reopen this gate.
+   * - Fail-closed default (locked, not an enum): when no ACTIVE manager is resolvable, the
+   *   assignment is LEFT IN PLACE — an audit row (`outcome: 'no_manager_resolved'`) plus an operator
+   *   warning log are emitted. Never auto-approved, never dropped, never escalated to an admin seat.
+   * - P26 attendance boundary: an attendance-central instance is skipped (`attendance-central-
+   *   unsupported`), mirroring the identical `assertAttendanceCentralMutationFailClosed` guard the
+   *   SLA timeout transfer runs — both are SYSTEM-actor writers on this discovery shape
+   *   (`source_system='platform' AND status='pending'`, which cannot itself distinguish an
+   *   attendance-central row), unlike `bulkReassignApprovals`'s authorized-human-actor path.
+   * - Self-approval guard: mirrors `bulkReassignApprovals`'s `target-is-requester` skip — a
+   *   departed approver's manager can, in a small org chart, be the instance's own requester; that
+   *   case is skipped (`target-is-requester`) rather than seating the requester as their own
+   *   approver by substitution.
+   * - Collision guard: mirrors `bulkReassignApprovals`'s `target-already-assignee` skip — if the
+   *   resolved manager already holds an active seat on the instance, the departed user's seat is
+   *   skipped (`target-already-assignee`) rather than risk a collision with the active-assignment
+   *   unique index.
+   * - Evidence parity (P2, gate 20260819): of the THREE manager-RESOLUTION outcomes that leave the
+   *   seat in place — `no_manager_resolved`, `target-is-requester`, `target-already-assignee` — all
+   *   three now get the SAME evidence: an audit row per seat (`outcome: 'no_manager_resolved'` /
+   *   `'target_is_requester'` / `'target_already_assignee'`) plus an operator warning, committed.
+   *   Scope note: this parity is about manager-resolution outcomes specifically. It does NOT extend
+   *   to the P26 attendance-central boundary documented above (which runs AFTER the one-time
+   *   manager resolution above, per-instance, once the instance row is locked) — that branch
+   *   deliberately emits neither, because the fail-closed guard forbids this SYSTEM-actor writer
+   *   from mutating an attendance-central instance's assignments AT ALL on this discovery path, so
+   *   there is no seat-disposition outcome to record for it; the departed user's seat there is
+   *   asserted byte-identical by the P26 test, which also pins zero `reassign` rows on it.
+   * - NOT parallel-restricted: unlike the SLA transfer (which hands the WHOLE node over and must
+   *   therefore refuse an in-flight parallel region), this method only ever touches the departed
+   *   user's OWN seat rows by `assignee_id` — it never deactivates a node wholesale — so a departed
+   *   user's seat inside one branch of a parallel region is safe to move without disturbing sibling
+   *   branches.
+   * - Concurrency: the instance `FOR UPDATE` lock (same pattern as every other terminal/mutating
+   *   approval path in this file, including the `/approve` and `/actions` routes' own instance locks)
+   *   is the sole race guard — a concurrent decide on the same instance blocks until this transaction
+   *   commits or rolls back, then re-reads current (post-transfer) state. `awaitApprovalDepartureTransferBarrier`
+   *   is the test-only seam that pauses here, held-locked, so a test can construct that race for real
+   *   rather than argue it.
+   */
+  async applyApprovalDepartureTransfer(
+    departedUserId: string,
+    options?: ApprovalDepartureTransferOptions,
+  ): Promise<ApprovalDepartureTransferResult> {
+    if (!pool) throw new Error('Database not available')
+    const userId = departedUserId.trim()
+    if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
+
+    const result: ApprovalDepartureTransferResult = { transferred: [], noManagerResolved: [], skipped: [] }
+    const skipDepartureTransfer = (id: string, reasonCode: ApprovalDepartureTransferSkipReason): void => {
+      result.skipped.push({ id, reason: reasonCode })
+    }
+
+    // ONE manager resolution for this departure signal (not per-instance, not inside the pure
+    // resolver — Lock-1 §2.1). The production directory consumer supplies its post-commit live
+    // resolution because the departed source account is already inactive; the direct/test entry
+    // point keeps the legacy requester lookup. Both paths converge on the same active-user recheck.
+    // A routing ambiguity / transient read failure collapses to the SAME fail-closed outcome below.
+    let resolvedManagerId: string | null = null
+    try {
+      const candidate = options === undefined
+        ? (await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})).managerId?.trim() ?? ''
+        : options.resolvedManagerId?.trim() ?? ''
+      if (candidate && candidate !== userId) {
+        const activeManager = await pool.query<{ id: string }>(
+          `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
+          [candidate],
+        )
+        if (activeManager.rows.length > 0) resolvedManagerId = candidate
+      }
+    } catch {
+      approvalProductLogger.warn(
+        'approval departure transfer: manager resolution failed; using fail-closed no-manager outcome',
+        { reason: 'manager_resolution_failed' },
+      )
+    }
+
+    // Deliberately UNBOUNDED (bulkReassignApprovals caps admin-driven discovery at LIMIT 200,
+    // because that path is an interactive admin request). A departure is a one-time system-fired
+    // sweep of exactly one now-departed user's own pending seats — bounded by how many approvals a
+    // single person can hold, not by an admin's blast radius — so no cap is applied here.
+    const candidates = await pool.query<{ instance_id: string }>(
+      `SELECT DISTINCT a.instance_id
+         FROM approval_assignments a
+         JOIN approval_instances i ON i.id = a.instance_id
+        WHERE a.assignment_type = 'user'
+          AND a.assignee_id = $1
+          AND a.is_active = TRUE
+          AND i.status = 'pending'
+          AND COALESCE(i.source_system, 'platform') = 'platform'
+          AND (a.metadata ->> 'delegatedFrom') IS DISTINCT FROM $1
+        ORDER BY a.instance_id ASC`,
+      [userId],
+    )
+
+    for (const candidateRow of candidates.rows) {
+      const instanceId = candidateRow.instance_id
+      let client: ApprovalDbClient | null = null
+      try {
+        client = await pool.connect()
+        await client.query('BEGIN')
+
+        const instanceResult = await client.query<ApprovalInstanceRow>(
+          `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+          [instanceId],
+        )
+        const instance = instanceResult.rows[0]
+        if (!instance) {
+          await client.query('ROLLBACK')
+          skipDepartureTransfer(instanceId, 'not-found')
+          continue
+        }
+        if (instance.status !== 'pending') {
+          await client.query('ROLLBACK')
+          skipDepartureTransfer(instanceId, 'not-pending')
+          continue
+        }
+
+        // Lock §14.3 outlet #13 — same rule and same placement rationale as outlet #12 above: a
+        // cancel-round instance's seat may never move through this SYSTEM-actor departure path,
+        // and the guard runs before the attendance-central fail-closed check immediately below so
+        // a rejected instance never reaches that check's own DML.
+        try {
+          rejectIfCancelRound(instance, 'applyApprovalDepartureTransfer')
+        } catch (error) {
+          if (error instanceof CancelRoundOutletForbiddenError) {
+            await client.query('ROLLBACK')
+            skipDepartureTransfer(instanceId, 'cancel_round')
+            continue
+          }
+          throw error
+        }
+
+        // P26: attendance-central instances are not a departure-transfer target on this system
+        // writer path, mirroring the identical guard in `applyNodeTimeoutEffect` immediately above
+        // (both are SYSTEM-actor writers, not an authorized-human admin path like
+        // `bulkReassignApprovals`'s `classifyAndLockAttendanceRequestForInstance`) — this method's
+        // discovery filter (`source_system='platform' AND status='pending'`) alone cannot
+        // distinguish an attendance-central instance from any other, so the fail-closed check must
+        // run per-instance, after the row is locked.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          if (error instanceof AttendanceCentralApprovalError) {
+            await client.query('ROLLBACK')
+            skipDepartureTransfer(instanceId, 'attendance-central-unsupported')
+            continue
+          }
+          throw error
+        }
+
+        // Holds the instance FOR UPDATE — a concurrent decide/reassign on this instance blocks here
+        // until this transaction commits or rolls back (see the concurrency note above).
+        await awaitApprovalDepartureTransferBarrier('after_instance_lock', instanceId)
+
+        // Gate E-3: source seats are the departed user's CURRENT active assignments, excluding any
+        // row a future resolver change might leave carrying `delegatedFrom === userId` (see contract
+        // note above — structurally redundant with `assignee_id = $2` today).
+        const sourceAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+              AND (metadata ->> 'delegatedFrom') IS DISTINCT FROM $2
+            ORDER BY COALESCE(node_key, ''), created_at ASC
+            FOR UPDATE`,
+          [instanceId, userId],
+        )
+        if (sourceAssignments.rows.length === 0) {
+          await client.query('ROLLBACK')
+          skipDepartureTransfer(instanceId, 'no-active-seat')
+          continue
+        }
+
+        if (!resolvedManagerId) {
+          // OD-L4-9(a) fail-closed default: LEAVE the assignment(s) in place. One audit row per seat
+          // (`outcome: 'no_manager_resolved'`) + an operator warning; fromVersion === toVersion and
+          // fromStatus === toStatus record that nothing moved. Never auto-approve, drop, or escalate.
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'no_manager_resolved',
+                fromUserId: userId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: no manager resolved for departed user on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
+          result.noManagerResolved.push(instanceId)
+          continue
+        }
+
+        // Mirrors bulkReassignApprovals's `target-is-requester` skip: the resolved manager must not
+        // become an approver of their own request. A departed approver's manager CAN be the
+        // instance's requester (a small-team org chart), and nothing else in this method excludes
+        // that — self-approval-by-substitution is exactly the shape adversarial review looks for.
+        // P2 (gate 20260819): this is a "leave in place" outcome exactly like the no-manager
+        // fail-closed branch above (`if (!resolvedManagerId)`), so it gets the SAME evidence — one
+        // audit row per seat + an operator warning, COMMITted (not rolled back into silence).
+        // Without this, a departed user keeps an active seat with zero durable trace of why.
+        const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+        const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
+        if (requesterId && requesterId === resolvedManagerId) {
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'target_is_requester',
+                fromUserId: userId,
+                // Diagnostic-only, like `no_manager_resolved`'s own metadata above — the seat did
+                // NOT move to this user, so `targetUserId` (the `target_user_id` COLUMN, which the
+                // 'transferred' outcome uses to name the seat's actual new holder) is deliberately
+                // left unset here; a reader keying off that column alone must not conflate "who
+                // would have received it" with "who now holds it".
+                toUserId: resolvedManagerId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: resolved manager is the requester on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
+          skipDepartureTransfer(instanceId, 'target-is-requester')
+          continue
+        }
+
+        // Collision guard, mirroring bulkReassignApprovals's own `target-already-assignee` skip: if
+        // the resolved manager already holds ANY active seat on this instance, skip the whole
+        // instance rather than risk a partial-mutation collision with the active-assignment unique
+        // index (idx_approval_assignments_active_unique).
+        // P2 (gate 20260819): same "leave in place" evidence parity as above — audited + warned,
+        // never silent.
+        const targetAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT id
+             FROM approval_assignments
+            WHERE instance_id = $1 AND assignment_type = 'user' AND assignee_id = $2 AND is_active = TRUE
+            FOR UPDATE`,
+          [instanceId, resolvedManagerId],
+        )
+        if (targetAssignments.rows.length > 0) {
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'target_already_assignee',
+                fromUserId: userId,
+                // Diagnostic-only, same reasoning as target_is_requester above — the seat did NOT
+                // move, so target_user_id (the COLUMN) is deliberately left unset.
+                toUserId: resolvedManagerId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: resolved manager already holds a seat on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
+          skipDepartureTransfer(instanceId, 'target-already-assignee')
+          continue
+        }
+
+        // MUTATION (nodeEntryEpoch §4·B), same posture as the SLA timeout transfer and
+        // bulkReassignApprovals: preserve each seat's OWN entry_epoch (read off the still-active
+        // locked row, BEFORE the deactivate below) — NEVER bump node_activation_seq. Grouped by
+        // epoch so a departed user holding parallel-branch seats never creates a mixed-epoch node.
+        const reassignmentsByEpoch = new Map<
+          number | null,
+          Array<{ assignmentType: 'user'; assigneeId: string; sourceStep: number; nodeKey: string; metadata: Record<string, unknown> }>
+        >()
+        for (const assignment of sourceAssignments.rows) {
+          const epoch = assignment.entry_epoch ?? null
+          const bucket = reassignmentsByEpoch.get(epoch) ?? []
+          bucket.push({
+            assignmentType: 'user' as const,
+            assigneeId: resolvedManagerId,
+            sourceStep: assignment.source_step ?? 0,
+            nodeKey: assignment.node_key || '',
+            metadata: handoverAssignmentMetadata([assignment], {
+              departureTransfer: true,
+              reassignedFrom: userId,
+              previousAssignmentId: assignment.id,
+            }),
+          })
+          reassignmentsByEpoch.set(epoch, bucket)
+        }
+
+        await client.query(
+          `UPDATE approval_assignments
+              SET is_active = FALSE, updated_at = now()
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+              AND (metadata ->> 'delegatedFrom') IS DISTINCT FROM $2`,
+          [instanceId, userId],
+        )
+        const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
+        for (const [epoch, bucket] of reassignmentsByEpoch) {
+          createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, bucket, epoch)))
+        }
+
+        for (const assignment of sourceAssignments.rows) {
+          await this.insertApprovalRecord(client, instanceId, {
+            action: 'reassign',
+            actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+            actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+            comment: null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: instance.version,
+            metadata: {
+              departureTransfer: true,
+              outcome: 'transferred',
+              fromUserId: userId,
+              toUserId: resolvedManagerId,
+              nodeKey: assignment.node_key,
+              previousAssignmentId: assignment.id,
+            },
+            targetUserId: resolvedManagerId,
+          })
+        }
+
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
+        await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
+        result.transferred.push(instanceId)
+      } catch (error) {
+        await rollbackQuietly(client)
+        approvalProductLogger.warn(
+          'approval departure transfer failed; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
+        )
+        skipDepartureTransfer(instanceId, 'error')
+      } finally {
+        client?.release()
+      }
+    }
+
     return result
   }
 
@@ -4586,6 +11239,29 @@ export class ApprovalProductService {
         return 'skipped_stale'
       }
 
+      // Lock §14.3 outlet #3 — a cancel-round instance shares only the identity predicate
+      // `isCancelRoundInstance` here, not the throw-based `rejectIfCancelRound` used at the other
+      // chokepoints: this outlet's contract is a returned scanner outcome, not a rejected promise.
+      // Must consume the now-reverified deadline (not just skip) so the scanner does not re-pick up
+      // the same instance on the next tick.
+      if (isCancelRoundInstance(instance)) {
+        return await consumeAndSkip('skipped_cancel_round', 'cancel_round_instance')
+      }
+
+      // P26: attendance instances are not timeout-transfer/jump targets on the central path.
+      // Only consume a deadline after proving this scanner call still owns the exact armed row;
+      // stale calls must not clear a newer activation's deadline.
+      try {
+        await assertAttendanceCentralMutationFailClosed(client, instance)
+      } catch (error) {
+        if (error instanceof AttendanceCentralApprovalError) {
+          await consumeTimeout()
+          await client.query('COMMIT')
+          return 'skipped_stale'
+        }
+        throw error
+      }
+
       if (!instance.published_definition_id || !instance.current_node_key) {
         return await consumeAndSkip('skipped_invalid_config', 'instance_not_runtime_managed')
       }
@@ -4616,11 +11292,34 @@ export class ApprovalProductService {
 
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3: a timeout JUMP (re)activates a node that may carry a `prior_node_approver`
+      // source — read the referenced nodes' persisted deciders (LATEST round, sentinels dropped)
+      // before resolution. No in-flight merge: the timeout scanner is a system actor, never a
+      // decider. A referenced node the jump skips over yields an empty entry →
+      // emptyAssigneePolicy (OD-L1-4(a)). OPT-IN — undefined when the graph has no such source
+      // (the transfer effect re-resolves nothing, so the read is skipped for it too).
+      const timeoutReferencedPriorNodeKeys = scannedEffect === 'jump'
+        ? collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+        : new Set<string>()
+      const timeoutPriorNodeApprovers = timeoutReferencedPriorNodeKeys.size > 0
+        ? await this.loadPriorNodeApproverDeciders(client, id, timeoutReferencedPriorNodeKeys)
+        : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
           title: typeof t === 'string' && t ? t : null,
@@ -4637,6 +11336,15 @@ export class ApprovalProductService {
         // Read the current epoch BEFORE the node-wide deactivate below (afterwards the node is empty)
         // and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const timeoutTransferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const timeoutTransferSources = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE
+            ORDER BY created_at ASC
+            FOR UPDATE`,
+          [id, currentNodeKey],
+        )
+        const timeoutTransferMetadata = handoverAssignmentMetadata(timeoutTransferSources.rows, {})
         // Hand the WHOLE node over: every active assignment at the node is deactivated and the
         // static target takes it (mode semantics reset to the single handed-over approver).
         await client.query(
@@ -4645,7 +11353,9 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
+        const timeoutTransferAssignments = executor.buildTransferAssignments(currentNodeKey, targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: timeoutTransferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, timeoutTransferAssignments, timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -4660,6 +11370,8 @@ export class ApprovalProductService {
           targetUserId,
         })
         await consumeTimeout()
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the transfer txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return 'applied'
@@ -4671,8 +11383,28 @@ export class ApprovalProductService {
         return await consumeAndSkip('skipped_invalid_config', 'jump_target_invalid')
       }
 
+      // Lock-4 OD-L4-10(a) / Lock-6 L6-A — direction-aware re-entry (adversarial gate finding on
+      // #4965: a BACKWARD timeout-jump nullifies a send-back the same way a manual return does).
+      // Unlike `adminJump` (`:6202` area — `isReachableDownstream` REJECTS a non-forward target, so
+      // admin jump structurally cannot go backward and needs no such check), `assertNodeTimeoutConfig`
+      // (`:1676-1694`) places NO forward-only constraint on `timeout.jumpToNodeKey` — a template author
+      // may point it at any approval node, including one already passed. `resolveReturnToNode` (the
+      // SAME resolver the manual return action uses) does not itself distinguish direction either.
+      // Determine it here, where topology is available: `targetNodeKey` is BACKWARD iff it is among
+      // the approval nodes already visited on the STATIC path to `currentNodeKey` (excluding
+      // `currentNodeKey` itself) — the identical predicate the manual return action's own validation
+      // uses (`listVisitedApprovalNodeKeysUntil(currentNodeKey).slice(0, -1)`), so "backward" here
+      // means exactly what it means there. A FORWARD jump (not in that set) is legitimate progress —
+      // it must NOT re-floor (matches the preserved "compose after the jump" behavior for admin jump).
+      const timeoutJumpVisitedApprovalNodes = executor.listVisitedApprovalNodeKeysUntil(currentNodeKey)
+      const isBackwardReentryJump = timeoutJumpVisitedApprovalNodes.slice(0, -1).includes(targetNodeKey)
+
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
+      // A backward re-entry's OWN synchronous cascade must not see history that predates it — the
+      // same reason the manual return branch seeds `[]` instead of reading `loadApprovalHistory`
+      // (that call's `action:'jump'` row has not committed yet, so the durable to_version floor
+      // below cannot yet exclude what it surfaces). A forward jump keeps composing normally.
       const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
         ? this.applyAutoApprovalCascade(
             id,
@@ -4680,7 +11412,7 @@ export class ApprovalProductService {
             executor,
             jumpResolution,
             typeof requesterId === 'string' ? requesterId : null,
-            await this.loadApprovalHistory(client, id),
+            isBackwardReentryJump ? [] : await this.loadApprovalHistory(client, id),
           )
         : jumpResolution
       if (resolution.status !== 'pending' && !nodeTimeoutTerminalEffectsEnabled()) {
@@ -4737,6 +11469,12 @@ export class ApprovalProductService {
           nextNodeKey: resolution.currentNodeKey,
           oldAssignees,
           newAssignees,
+          // Lock-4 OD-L4-10(a) — the round-scoping floor in `loadApprovalHistory` keys on this flag
+          // (in addition to `action='return'`) so a BACKWARD timeout-jump re-floors the dedup
+          // cascade's history exactly like a manual return. Omitted (not `false`) for a forward
+          // jump, matching the omit-when-absent convention `insertApprovalRecord` metadata already
+          // uses elsewhere in this file.
+          ...(isBackwardReentryJump ? { backwardReentry: true } : {}),
         },
       })
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, timeoutJumpEntryEpoch)
@@ -4754,16 +11492,23 @@ export class ApprovalProductService {
           },
           { id: APPROVAL_TIMEOUT_SYSTEM_ACTOR, name: APPROVAL_TIMEOUT_SYSTEM_ACTOR },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the timeout jump→approved transition.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
       await consumeTimeout()
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the timeout-jump txn.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
       // Post-commit best-effort metrics, mirroring the return path: close the timed-out node's open
       // breakdown entry, then re-entry activation re-stamps the target node (incl. its own timeout).
-      this.emitNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
+      // H-1 P1-1: the close is AWAITED, not dispatched — a backward timeout-jump can resolve back to
+      // the node that just timed out (e.g. the jump target auto-approves), and then these two hooks
+      // contend for the same `approval_metrics` row. See `settleNodeDecisionMetric`.
+      await this.settleNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
       if (resolution.status === 'pending' && resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
       if (completionEvent) {
         emitApprovalCompletionEvent(completionEvent)
@@ -4785,9 +11530,47 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     let client: ApprovalDbClient | null = null
+    // Hoisted out of the `try` so the catch can tell the two error surfaces this method now has
+    // apart: only a dispatch that took this branch runs under SERIALIZABLE and holds an advisory
+    // lock, so only it can produce a serialization failure / advisory deadlock that did not exist
+    // before. Every other dispatch keeps its previous error behaviour byte for byte.
+    let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
+    // lock:86's 呈现 payload. Hoisted for the SAME structural reason as `rolloutLock`: it is
+    // produced deep inside the cancel-round branch of the `try` and consumed by the method's
+    // bottom `return`, which sits AFTER the `finally`. Stays `null` for every dispatch that is not
+    // a redeemed cancel round, so no other action's response shape changes by one byte.
+    let dispatchCancellationOutcome: CancelRoundCancellationOutcomeV1 | null = null
+    // Codex 审阅第 3 条修复 (2026-09-19). Set ONLY by a redemption that returned `applied`, and
+    // consumed ONLY after `COMMIT` — so C-3's early-return closures (`expired` / `blocked`), the
+    // fail-closed port-unavailable throw, and every rolled-back attempt announce nothing, exactly
+    // as the HTTP path announces nothing when its boundary call did not cancel anything.
+    let dispatchCancelledEventDelivery:
+      | { readonly result: AttendanceRequestOperationBoundaryResultV1; readonly requestId: string }
+      | null = null
     try {
       client = await pool.connect()
-      await client.query('BEGIN')
+
+      // ─── Lock §3 C-2 全局锁序 — the rollout lock must precede every row lock ────────────────────
+      // BEFORE `BEGIN`, by construction: PostgreSQL fixes a transaction's isolation level at its
+      // FIRST statement, so this read cannot live inside the transaction without foreclosing
+      // `BEGIN ISOLATION LEVEL SERIALIZABLE` (which the W4 external entry requires —
+      // `assertExternalTransactionIsolationV1`). It is advisory only: a stale answer is caught by
+      // the fail-closed re-assert under the row lock below, which is what makes it safe to read
+      // outside the transaction.
+      rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
+
+      if (rolloutLock.kind === 'required') {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        // FIRST lock of the transaction — before the instance row lock below, which is the whole
+        // point. Reuses the production acquirer (one key derivation, no local hash).
+        await acquireAttendanceCalculationRolloutLock(
+          client as unknown as AttendanceW4TransactionClientV1,
+          parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
+          'shared',
+        )
+      } else {
+        await client.query('BEGIN')
+      }
 
       const instanceResult = await client.query<ApprovalInstanceRow>(
         `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
@@ -4797,6 +11580,51 @@ export class ApprovalProductService {
       if (!instance) {
         throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
       }
+      // Fail-closed re-assert (lock §3 C-2). The SAME predicate, re-evaluated now that the
+      // instance row is locked. Refuses in BOTH directions, and the direction that matters is
+      // `none` → `required`: `attendance_requests.org_id` is NOT immutable (4 upsert writers set
+      // it from `EXCLUDED`), so a pre-read that resolved no org — or a different one — must never
+      // be allowed to proceed holding the wrong lock, or none. Placed before any DML on this path.
+      const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
+      if (!cancelRoundRolloutLockRequirementsEqual(rolloutLock, rolloutLockUnderRowLock)) {
+        throw new ServiceError(
+          'Cancel-round rollout lock scope changed between the pre-read and the instance row lock',
+          409,
+          'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
+        )
+      }
+      // P17/P22/P26: attendance instances fail closed before assignment/instance DML
+      // (including adversarial rows carrying published_definition_id).
+      await guardAttendanceCentralMutationOrThrow(client, instance)
+      // H-5 — OPTIONAL optimistic-lock precondition, placed exactly where `adminJump` places its
+      // own (same file, `if (instance.version !== request.version)`): AFTER the attendance
+      // fail-closed guard, so an attendance-sourced instance keeps answering with the attendance
+      // refusal it answers with today, and BEFORE any other verdict, so a stale caller is told
+      // their read is stale rather than being told something about a state they never saw.
+      //
+      // This is the half that makes the legacy doors' published `version` precondition REAL again
+      // after they hand their own row lock back (see `ApprovalActionRequest.expectedVersion`): the
+      // check below and the write at the end of this method are one transaction under one lock.
+      // Callers that do not set the rider (the `/actions` route, the card wrapper, the after-sales
+      // bridge) are unaffected — `undefined` skips the branch entirely.
+      if (request.expectedVersion !== undefined && instance.version !== request.expectedVersion) {
+        throw new ServiceError(
+          'Approval instance version mismatch',
+          409,
+          'APPROVAL_VERSION_CONFLICT',
+          { currentVersion: instance.version },
+        )
+      }
+      // ORDER (F4 (ii), owner-named 2026-09-25): the optional `expectedVersion` precondition above
+      // runs FIRST, the cancel-round action gate below SECOND — a stale caller is told their read is
+      // stale before anything is said about the instance's kind. Today the two cannot both fire on
+      // one call (`expectedVersion` is set only by the two legacy doors, and both refuse a
+      // cancel-round instance before dispatching here); the unit guard on the write points keeps
+      // that a tested property rather than a coincidence.
+      // Lock §14.3 outlets #4/#6 (and the allow-branch that becomes #5) — the single action-
+      // judgment call site for a cancel-round instance: `{approve,reject,revoke,comment}` pass,
+      // everything else (`handle`/`return`/`transfer`/`add_sign`/`reduce_sign`) is rejected here.
+      assertCancelRoundActionAllowed(instance, request.action)
       if (!instance.published_definition_id) {
         throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
       }
@@ -4818,11 +11646,28 @@ export class ApprovalProductService {
       const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
       const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
       const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      // Lock-1 §K3 — late-bound decider map for any `prior_node_approver` source in this graph.
+      // Populated ONCE below (after the actor's effective branch node + action authorization are
+      // resolved) and BEFORE any resolution entry point runs; the provider indirection exists
+      // because the executor is constructed here, earlier than that point. Stays undefined when
+      // the graph carries no such source (OPT-IN — zero extra reads for unrelated approvals).
+      let priorNodeApprovers: Record<string, string[]> | undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => priorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -4870,6 +11715,186 @@ export class ApprovalProductService {
       if (request.action !== 'revoke' && !actorCanAct) {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
       }
+
+      // Lock-1 §K3 — populate the prior-node decider map (declared beside the executor above)
+      // when this graph references any prior node. Read ONCE per dispatch from instance-internal
+      // audit rows, BEFORE any of this transaction's own writes, and AFTER the authorization
+      // guard above (so a 403 stays a 403). For an `approve`, the acting user IS a decider of
+      // the CURRENT node's round — their own approve record is inserted only after resolution —
+      // so they are merged in scoped to the current round's epoch (resolved from the node's
+      // still-active assignments, exactly like the threshold tally's own capture). Partial-vote
+      // paths (all-mode with siblings remaining / threshold unmet) commit before any resolution,
+      // so the merge is only ever consumed when the node actually completes. A node auto-approved
+      // by THIS transaction's cascade has no persisted round yet and resolves EMPTY →
+      // emptyAssigneePolicy (OD-L1-4(a)).
+      const referencedPriorNodeKeys = collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph)
+      if (referencedPriorNodeKeys.size > 0) {
+        const inFlightApprove = request.action === 'approve' && currentNodeKey && referencedPriorNodeKeys.has(currentNodeKey)
+          ? {
+              nodeKey: currentNodeKey,
+              actorId: actor.userId,
+              epoch: await this.currentNodeEntryEpoch(client, id, currentNodeKey),
+            }
+          : undefined
+        priorNodeApprovers = await this.loadPriorNodeApproverDeciders(client, id, referencedPriorNodeKeys, inFlightApprove)
+      }
+
+      // Lock-7 L7-C / OD-L7-3(a): `fieldWrites` is meaningful ONLY on a `handle` submission at a
+      // handler node (the sole ratified write surface). On any OTHER action a present `fieldWrites`
+      // key is a values-free 400 — fail-closed, never a silent ignore. The `handle` path below
+      // applies the masked, frozen-schema-validated write inside this transaction (P4-B replaces
+      // P4-A's blanket 422 APPROVAL_HANDLER_FIELD_WRITES_UNSUPPORTED). Detected by key PRESENCE.
+      if (request.action !== 'handle' && Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+        throw new ServiceError(
+          'Field writes are only permitted on a handler submission',
+          400,
+          'APPROVAL_FIELD_WRITE_ACTION_NOT_ALLOWED',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // Lock-9 OD-L9-10(a) §5.4: `attachmentIds` v1 ships the `comment` rider ONLY (`handle`/
+      // `approve` are DEFERRED — see the PR body). Mirrors the fieldWrites precedent immediately
+      // above: on any OTHER action a present `attachmentIds` key is a values-free 400, fail-closed,
+      // never a silent accept-and-ignore — but ONLY while the feature is actually on.
+      //
+      // P2-1 fix-round correction: this guard previously ran UNCONDITIONALLY (not flag-gated),
+      // reasoning that gating it here too would make G-12(b)'s positive control untestable through
+      // the route. That was wrong on both counts: (1) it broke G-12/§L9-D's own byte-for-byte-no-op
+      // requirement — a flag-OFF `approve`/`reject` carrying a stray `attachmentIds` key went from
+      // 200 (pre-Lock-9, key silently unread) to 400 here, a previously-succeeding action turned
+      // into a rejection with the flag OFF; (2) it was unnecessary — G-12(b)'s discriminating pair
+      // (`tests/integration/approval-lock9-process-attachments-realdb.db.test.ts`, "flag OFF: a
+      // comment with a BOGUS attachmentIds still succeeds") only ever exercises `action: 'comment'`,
+      // which this guard never touches (the `!== 'comment'` condition is already false there) — so
+      // gating on the flag does not affect that control's reachability at all. Gated now: an
+      // out-of-place rider is rejected only when APPROVAL_ATTACHMENTS_ENABLED is on; OFF, the key is
+      // silently ignored on every action exactly as it was before Lock-9 (true no-op, G-12/§L9-D).
+      if (
+        isApprovalAttachmentsEnabled() &&
+        request.action !== 'comment' &&
+        Object.prototype.hasOwnProperty.call(request, 'attachmentIds')
+      ) {
+        throw new ServiceError(
+          'Attachment ids are only permitted on a comment action (v1 scope)',
+          400,
+          'APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // Lock-3 §2.2 (G-10 action authorization): the ACTION VERBS legal at a handler node differ from an
+      // approval node. `handle` is meaningful ONLY at a handler; a handler has no decision to make, so
+      // approve/reject/return/add_sign/reduce_sign have no handler meaning (a blocked handler transfers,
+      // or an admin moves the instance). `transfer`/`comment`/`revoke` are node-type-agnostic and stay.
+      const currentNodeType: ApprovalNodeType | null = currentNodeKey
+        ? (runtimeGraph.nodes.find((entry) => entry.key === currentNodeKey)?.type ?? null)
+        : null
+      if (currentNodeType === 'handler') {
+        if (
+          request.action === 'approve'
+          || request.action === 'reject'
+          || request.action === 'return'
+          || request.action === 'add_sign'
+          || request.action === 'reduce_sign'
+        ) {
+          throw new ServiceError(
+            `Action ${request.action} is not permitted at a handler node`,
+            409,
+            'APPROVAL_HANDLER_ACTION_NOT_ALLOWED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+      } else if (request.action === 'handle') {
+        // `handle` was routed at a node that is not a handler — reject rather than misapply the verb.
+        throw new ServiceError(
+          'Handle is only permitted at a handler node',
+          409,
+          'APPROVAL_HANDLE_NODE_MISMATCH',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────────────────
+      // Lock-5 §2.1 / §1.4 — THE SINGLE PER-NODE OPERATION-POLICY CHOKE (gates A-1, D-1, X-1).
+      //
+      // WHY HERE, and nowhere else. Three placement facts, each load-bearing:
+      //  (1) AFTER the authorization gate (`APPROVAL_ASSIGNMENT_REQUIRED`, above): the actor must
+      //      already hold a seat, which is what makes the 409-not-403 choice right (§1.1: the actor
+      //      IS authorized; this is a template-configuration state, not a re-authenticate signal)
+      //      AND what makes the denial row safe (D-2: the denied actor is already a participant by
+      //      the assignment clause, so the four `actor_id`-keyed readers gain nothing from it).
+      //  (2) AFTER Lock-3's handler verb gate (immediately above): a handler node's
+      //      add_sign/reduce_sign/return keep returning `APPROVAL_HANDLER_ACTION_NOT_ALLOWED`. The
+      //      operation policy must never RESURRECT a verb Lock-3 §2.2 forbids, and no shipped
+      //      client's error handling for those verbs changes.
+      //  (3) BEFORE the card-delivery block below — NOT merely "before the first verb branch". That
+      //      block takes `FOR UPDATE` on `dingtalk_approval_card_deliveries` and CLAIMS the card
+      //      (`SET card_state='acted'`) inside this transaction. The records-only COMMIT below would
+      //      carry that claim with it and CONSUME a card for an operation that never happened. At
+      //      THIS point the transaction holds only `SELECT … FOR UPDATE` and has written nothing
+      //      (`guardAttendanceCentralMutationOrThrow` is SELECT-only), so committing the denial row
+      //      commits the denial row and nothing else.
+      //
+      // ONE gate, not one per verb branch: `comment`/`transfer`/`add_sign`/`reduce_sign`/`revoke`
+      // all `return` early BEFORE the reject-comment / pending checks further down, so a gate placed
+      // near those would silently miss four of the five. The gate iterates the exported
+      // `ACTION_POLICY_KEYS` table rather than naming verbs by hand (A-1).
+      const nodeOperationPolicyKey: NodeOperationPolicyActionKey | null = ACTION_POLICY_KEYS[request.action]
+      if (nodeOperationPolicyKey !== null && currentNodeKey) {
+        // §2.3 "one predicate, two doors": the choke calls the SAME `isOperationAllowedAtNode` the
+        // detail DTO's `resolveEffectiveNodeOperations` is built from, so the server refusal and the
+        // FE mirror cannot drift apart. (Gate finding P3-3 on #4983: this used to be an inline copy
+        // of the predicate, which made the "single predicate" claim false and left the shared helper
+        // dead. Behaviour is identical — the inline form was `policy?.[key] === false`.)
+        // Widen-only / OD-L5-3(a): ABSENT ≡ ALLOWED. Only an explicit `false` refuses, so every
+        // pre-Lock-5 stored graph — which carries no `nodeOperationPolicy` at all — behaves exactly
+        // as it does today, with no migration and no backfill.
+        if (!isOperationAllowedAtNode(
+          runtimeGraph as NodeOperationGraphView,
+          currentNodeKey,
+          nodeOperationPolicyKey,
+        )) {
+          // §1.4 fact 1 / OD-L5-9(a) — the DENIAL ROW, durable and isolated. Every other refusal in
+          // this method throws inside the transaction and is rolled back, so a denied click today
+          // survives nothing. Here the transaction has written nothing, so we INSERT the row, COMMIT
+          // that records-only transaction, and throw: one connection, atomic, no post-rollback second
+          // write. The outer `catch` still calls `rollbackQuietly`, which is a no-op once committed
+          // (it swallows "no transaction in progress"), so the row survives and the operation's own
+          // effects — assignment, epoch bump, version bump, status change — never happen (D-1).
+          const deniedNodeEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+          await this.insertApprovalRecord(client, id, {
+            action: APPROVAL_POLICY_DENIED_ACTION,
+            actorId: actor.userId,
+            actorName,
+            comment: null,
+            // from/to unchanged: a denial is not a transition. Version is NOT bumped either — the
+            // instance row is not touched at all by this path.
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: instance.version,
+            metadata: {
+              nodeKey: currentNodeKey,
+              ...(deniedNodeEntryEpoch !== null ? { nodeEntryEpoch: deniedNodeEntryEpoch } : {}),
+              operation: request.action,
+              policyKey: nodeOperationPolicyKey,
+            },
+          }, actor)
+          await client.query('COMMIT')
+          // §1.1: 409, not 403 — matches `APPROVAL_REVOKE_DISABLED` and the `*_UNSUPPORTED` refusals.
+          // §2.4 / X-1: `details` IS serialized to clients, so it carries `{ nodeKey, operation }`
+          // ONLY — never an actor id, target id, seat count, or form value — and the message is
+          // values-free too (the verb and node key are the same two facts `details` already carries).
+          throw new ServiceError(
+            `Operation ${request.action} is disabled at this node`,
+            409,
+            'APPROVAL_NODE_OPERATION_DISABLED',
+            { nodeKey: currentNodeKey, operation: request.action },
+          )
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────────────────────────
 
       // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
       // (ApprovalCardDeliveryAction.buildSummary) runs OUTSIDE this FOR UPDATE txn, so a concurrent
@@ -4987,7 +12012,45 @@ export class ApprovalProductService {
       }
 
       if (request.action === 'comment') {
-        await this.insertApprovalRecord(client, id, {
+        // Lock-9 OD-L9-10(a) / §5.4: the process-attachment bind rides the `comment` action ONLY
+        // in v1 (the `handle`/`approve` riders are DEFERRED — see the PR body). Flag-gated at the
+        // call site (P3-1): while APPROVAL_ATTACHMENTS_ENABLED is OFF, `attachmentIds` is never
+        // even read off `request` — a byte-for-byte no-op (G-12). NIT-1 (residual sweep): flag ON,
+        // a present-but-malformed rider (not an array, or every element unusable) is now a
+        // values-free 400 `APPROVAL_ATTACHMENT_IDS_INVALID` — never silently accepted and dropped.
+        // A mixed array (some usable, some blank) is NOT covered — that residual is disclosed in
+        // the PR body, not fixed here.
+        const attachmentsFlagOn = isApprovalAttachmentsEnabled()
+        if (attachmentsFlagOn && request.attachmentIds !== undefined) {
+          const rawIds = request.attachmentIds as unknown
+          const usable = Array.isArray(rawIds)
+            ? rawIds.filter((v): v is string => typeof v === 'string' && /[!-~]/.test(v))
+            : null
+          // NIT-1 (Lock-9 gate audit, residual sweep): a malformed rider on the ONE action that
+          // carries it must be a values-free 400, never accept-and-drop. `[]` stays a 200 no-op
+          // (unchanged) — the `(rawIds as unknown[]).length > 0` qualifier pins that. Guarded on
+          // `!== undefined`, NOT `hasOwnProperty`, so a direct service caller passing an explicit
+          // `undefined` keeps no-opping. Flag-gated: OFF this whole branch is unreachable, so
+          // G-12/§L9-D byte-for-byte no-op is preserved (MUT-NIT1-a proves this in the PR body).
+          if (usable === null || ((rawIds as unknown[]).length > 0 && usable.length === 0)) {
+            throw new ServiceError(
+              'Attachment ids must be a non-empty array of attachment identifiers',
+              400,
+              'APPROVAL_ATTACHMENT_IDS_INVALID',
+              { nodeKey: currentNodeKey },
+            )
+          }
+        }
+        const requestedAttachmentIds = attachmentsFlagOn && Array.isArray(request.attachmentIds)
+          ? [...new Set(request.attachmentIds.filter((v): v is string => typeof v === 'string' && /[!-~]/.test(v)))]
+          : []
+        // OD-L9-12 / G-11: the audit surface carries the attachment ID ONLY (an identifier, never a
+        // value) — recorded at INSERT time, inside the same transaction the bind below runs in. If
+        // the bind then throws, the whole transaction (including this INSERT) rolls back, so the
+        // metadata never reflects an unbound id — no follow-up UPDATE is ever needed or written
+        // (approval_records is a `shared_hook` DML bucket; a second raw write site would need its
+        // own curated census entry — D-4).
+        const actionRecordId = await this.insertApprovalRecord(client, id, {
           action: 'comment',
           actorId: actor.userId,
           actorName,
@@ -4996,10 +12059,32 @@ export class ApprovalProductService {
           toStatus: instance.status,
           fromVersion: instance.version,
           toVersion: instance.version,
-          metadata: { nodeKey: currentNodeKey },
+          metadata: {
+            nodeKey: currentNodeKey,
+            ...(requestedAttachmentIds.length > 0 ? { attachmentIds: requestedAttachmentIds } : {}),
+          },
         }, actor)
+        if (requestedAttachmentIds.length > 0) {
+          try {
+            await bindProcessAttachmentsOnAction(client, {
+              attachmentIds: requestedAttachmentIds,
+              instanceId: id,
+              nodeKey: currentNodeKey,
+              actionRecordId,
+              actorId: actor.userId,
+              orgId: actor.tenantId?.trim() || 'default',
+            })
+          } catch (error) {
+            const status = error instanceof ApprovalProcessAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval process attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_PROCESS_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_PROCESS_ATTACHMENT_BIND_FAILED',
+            )
+          }
+        }
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'transfer') {
@@ -5013,8 +12098,11 @@ export class ApprovalProductService {
         // current epoch BEFORE deactivating the actor's seat (a single-approver node would be EMPTY at
         // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const transferMetadata = handoverAssignmentMetadata(actorAssignments, {})
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
+        const transferAssignments = executor.buildTransferAssignments(currentNodeKey, request.targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: transferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, transferAssignments, transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,
@@ -5027,10 +12115,18 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
           targetUserId: request.targetUserId,
         }, actor)
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the transfer txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
+
+      // Lock-5 L5-B gate B-3 — the after-sign (后加签) plan. Set ONLY by an `add_sign` with
+      // `addSignMode:'after'` that passed the add-sign branch's own validation below; the branch then
+      // does NOT return, and the approve pipeline further down carries this plan through the node's
+      // own round-completion judgment (see the three partial-vote branches and the resolution site).
+      let afterSign: AfterSignPlan | null = null
 
       if (request.action === 'add_sign') {
         // P1-B 加签 — pull additional active co-signer(s) into the actor's
@@ -5039,7 +12135,21 @@ export class ApprovalProductService {
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
-        const addSignMode: 'before' | 'parallel' = request.addSignMode === 'before' ? 'before' : 'parallel'
+        // Lock-5 gate B-1 (SERVICE door): the mode is explicit here too. `undefined` keeps today's
+        // `parallel` default; `before` / `parallel` / `after` pass through unchanged; anything else
+        // is a values-free 400 — the old `=== 'before' ? 'before' : 'parallel'` coercion is what
+        // made `'after'` unreachable (§0.1) and is retired with the route filter in the same slice.
+        // Direct (non-HTTP) callers get the same refusal, so reverting the route door alone cannot
+        // reopen the flatten.
+        if (request.addSignMode !== undefined && !isApprovalAddSignMode(request.addSignMode)) {
+          throw new ServiceError(
+            'addSignMode must be before, parallel, or after',
+            400,
+            'APPROVAL_ADD_SIGN_MODE_INVALID',
+            { nodeKey: currentNodeKey, operation: request.action },
+          )
+        }
+        const addSignMode: ApprovalAddSignMode = request.addSignMode ?? 'parallel'
         const targetUserIds = (request.targetUserIds ?? [])
           .filter((value): value is string => typeof value === 'string')
           .map((value) => value.trim())
@@ -5052,42 +12162,75 @@ export class ApprovalProductService {
         // region rather than silently misrouting the new approver to the wrong
         // branch frontier. `parallel`-mode is scoped to the actor's resolved
         // branch node (`currentNodeKey`) and is allowed.
-        if (isInParallelRegion && addSignMode === 'before') {
+        // Lock-5 gate B-4: `after` is refused here too, reusing the SAME code — the appended round
+        // would have to be reconciled with the branch frontier and the join, which OD-L5-4(b)'s
+        // "existing machinery" does not cover. The `before` message is byte-identical to before.
+        if (isInParallelRegion && addSignMode !== 'parallel') {
           throw new ServiceError(
-            'before-mode add_sign is not supported inside a parallel branch',
+            `${addSignMode}-mode add_sign is not supported inside a parallel branch`,
             409,
             'APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED',
           )
         }
-        // MUTATION (nodeEntryEpoch §4·B): add-sign extends the CURRENT round — the added co-signer's
-        // approve must count toward the same quorum, so preserve the node's current epoch (its active
-        // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
-        const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
-        const createdTaskEvents = await this.insertAssignments(
-          client,
-          id,
-          executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
-          addSignEntryEpoch,
-        )
-        await client.query(
-          `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
-          [id, nextVersion],
-        )
-        await this.insertApprovalRecord(client, id, {
-          action: 'add_sign',
-          actorId: actor.userId,
-          actorName,
-          comment: request.comment || null,
-          fromStatus: instance.status,
-          toStatus: instance.status,
-          fromVersion: instance.version,
-          toVersion: nextVersion,
-          metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
-          targetUserId: targetUserIds[0],
-        }, actor)
-        await client.query('COMMIT')
-        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id))!
+        if (addSignMode === 'after') {
+          // Lock-5 OD-L5-5(a) / gate B-5: with two or more addees the appended round's aggregation
+          // MUST be chosen at action time — `all` (every addee) or `any` (the first). One addee needs
+          // no choice (one seat completes under either), so the key is optional there; when present
+          // it must still be one of the two values. `before` / `parallel` never read this key.
+          if (request.addSignAggregation !== undefined && !isApprovalAddSignAggregation(request.addSignAggregation)) {
+            throw new ServiceError('addSignAggregation must be all or any', 400, 'VALIDATION_ERROR')
+          }
+          if (targetUserIds.length >= 2 && request.addSignAggregation === undefined) {
+            throw new ServiceError(
+              'addSignAggregation is required when after-mode add_sign adds two or more approvers',
+              400,
+              'VALIDATION_ERROR',
+            )
+          }
+          // OD-L5-4(b), owner disposition (1) 2026-10-01: the actor's seat is consumed AS AN
+          // APPROVAL. That judgment — "does this approval complete the node's current round?" — is
+          // the engine's own, made in the approve pipeline below by the very branches that decide
+          // it for a plain approve (sequential queue head, 会签 siblings, threshold tally). This
+          // branch therefore does NOT return: it records the plan and falls through. Every
+          // pre-approve gate between here and there applies unchanged (`pending` status, the
+          // §1.3 comment requirement on the approve side, the active-node check).
+          afterSign = { targetUserIds, aggregation: request.addSignAggregation ?? 'all' }
+        } else {
+          // `before` / `parallel` — the pre-B-3 body, unchanged (gate B-1's positive control: "the
+          // change is value-selected"; gate B-2's identity pin still holds against it).
+          //
+          // MUTATION (nodeEntryEpoch §4·B): add-sign extends the CURRENT round — the added co-signer's
+          // approve must count toward the same quorum, so preserve the node's current epoch (its active
+          // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
+          const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+          const createdTaskEvents = await this.insertAssignments(
+            client,
+            id,
+            executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
+            addSignEntryEpoch,
+          )
+          await client.query(
+            `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'add_sign',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
+            targetUserId: targetUserIds[0],
+          }, actor)
+          // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the add_sign txn.
+          await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
+          await client.query('COMMIT')
+          await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
       }
 
       if (request.action === 'reduce_sign') {
@@ -5154,7 +12297,7 @@ export class ApprovalProductService {
           targetUserId: targetAssignmentUserId,
         }, actor)
         await client.query('COMMIT')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'revoke') {
@@ -5164,6 +12307,12 @@ export class ApprovalProductService {
         const requesterId = requesterSnapshot?.id
         if (requesterId !== actor.userId) {
           throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
+        }
+        // Status guard: some non-executor write paths do not clear `current_node_key` when
+        // moving an instance to a terminal status, so the node-key check below cannot be relied
+        // on alone to reject revoke on an already-terminal instance. Check status directly first.
+        if (APPROVAL_TERMINAL_STATUSES.includes(instance.status as typeof APPROVAL_TERMINAL_STATUSES[number])) {
+          throw new ServiceError('Approval is already in a terminal status', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
@@ -5178,7 +12327,7 @@ export class ApprovalProductService {
           `SELECT COUNT(*)::text AS count
            FROM approval_records
            WHERE instance_id = $1
-             AND action IN ('approve', 'reject', 'transfer')
+             AND action IN ('approve', 'reject', 'transfer', 'handle')
              AND metadata->>'nodeKey' = $2`,
           [id, currentNodeKey],
         )
@@ -5224,10 +12373,39 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actorName },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the revoke transition above.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A4) — a cancel-round instance's own revoke terminates its round
+        // row in the SAME transaction as the instance transition above (same `client`, one
+        // `COMMIT` below). `engine_instance_id` (not `document_id`) is this instance's own id —
+        // the round row it drives, per the migration header on `approval_rounds`. WI-4 writes the
+        // instance and its round row together, so exactly one `pending` round must exist here —
+        // this is NOT a re-entrancy guard (a second revoke on the same instance can never reach
+        // this branch: `APPROVAL_TERMINAL_STATUSES` above 409s first, and the instance is held
+        // FOR UPDATE with a version check). `rowCount !== 1` means the invariant is already
+        // broken (dangling/duplicate round row) and must fail closed rather than silently commit
+        // an orphaned `pending` round that would permanently block re-issuing one for this
+        // document (§5 I3, `uq_approval_rounds_pending_document`). The lock gives no error-code
+        // contract for this branch (only WI-16's create-time check has the same gap) — this code
+        // is an implementer choice, flagged for owner/gate registration, not a lock edit.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'withdrawn', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (instance.status !== 'pending') {
@@ -5238,12 +12416,318 @@ export class ApprovalProductService {
         )
       }
 
-      if (request.action === 'reject' && !request.comment?.trim()) {
-        throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+      // Lock-5 §1.3 (L5-C/L5-D) / OD-L5-7(a) / OD-L5-8(a) — the comment requirement is now a
+      // three-valued NODE policy with the instance snapshot as its fallback, not an unconditional
+      // literal. This is one of the TWO hardcodings §1.3 requires to move IN THE SAME SLICE; the
+      // other is the `policy_snapshot` literal at instance CREATE. Either alone is a defect: leaving
+      // this strict makes the switch inert on the platform path, and leaving the literal makes the
+      // bridge/card/FE readers disagree with the node.
+      //
+      // Three values, not two booleans: the corpus switch (C-10) has two states and NEITHER is our
+      // default — OFF ⇒ 'never', ON ⇒ 'always', and today's reject-only asymmetry is expressible in
+      // neither. Absent ⇒ the instance snapshot ⇒ `'reject_only'` for every instance created before
+      // this slice, i.e. today's behavior exactly, as ONE rule rather than a literal racing a
+      // fallback.
+      //
+      // ERROR-CODE CONTRACT (§1.3): the REJECT side keeps emitting `REJECT_COMMENT_REQUIRED` because
+      // existing clients key on it; the APPROVE side gets a NEW `APPROVAL_COMMENT_REQUIRED`, so no
+      // shipped client's error handling changes meaning.
+      //
+      // Lock-5 gate B-3: an after-sign consumes the actor's seat AS AN APPROVAL, so the approve-side
+      // rule (`'always'`) binds it too — otherwise 后加签 would be a comment-free approve at an
+      // `'always'` node, a bypass of the ratified switch. The reject side is untouched.
+      if (request.action === 'reject' || request.action === 'approve' || afterSign) {
+        const commentPolicy = effectiveCommentRequired(
+          nodeOperationPolicyAt(runtimeGraph as NodeOperationGraphView, currentNodeKey),
+          instance.policy_snapshot,
+        )
+        const hasComment = Boolean(request.comment?.trim())
+        if (request.action === 'reject' && !hasComment && commentPolicy !== 'never') {
+          throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+        }
+        if ((request.action === 'approve' || afterSign) && !hasComment && commentPolicy === 'always') {
+          // §2.4 / X-1 values-free: `{ nodeKey }` only — never the actor, the comment, or the form.
+          throw new ServiceError(
+            'An approval comment is required at this node',
+            400,
+            'APPROVAL_COMMENT_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
       }
 
       if (!currentNodeKey) {
         throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      }
+
+      if (request.action === 'handle') {
+        // Lock-3 §2.2 — a handler completes by SUBMITTING (submit-only, per corpus C-3/C-9; the
+        // handler-action guard above already rejected approve/reject/return/add_sign/reduce_sign). 会签
+        // 'all' completes when every resolved seat submits; 或签 'any' completes on the first. The tally
+        // is the LIVE active-seat count, which is epoch-safe by construction (§2.4): a re-entered handler
+        // node inserts a FRESH round of active seats, so prior-round (deactivated) seats never satisfy
+        // the new round's 'all' tally (G-12). Field writes are already rejected (§3 fail-closed) above.
+        const handlerConfig = executor.getHandlerNodeConfig(currentNodeKey)
+        const handlerMode = executor.getHandlerMode(currentNodeKey)
+        // §2.2: `opinionRequired: true` makes a blank 办理意见 a values-free 422.
+        if (handlerConfig.opinionRequired === true && !request.comment?.trim()) {
+          throw new ServiceError(
+            'Handler opinion is required',
+            422,
+            'APPROVAL_HANDLER_OPINION_REQUIRED',
+            { nodeKey: currentNodeKey },
+          )
+        }
+        // nodeEntryEpoch (§2.4): capture the node's current round epoch NOW, while the actor's seat is
+        // still active (the read fails closed on empty/mixed), and stamp the handle record with it so a
+        // later re-entry (a fresh epoch) never re-counts this submission.
+        const handlerNodeEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        // Lock-7 L7-C step (2) "apply" — the masked field write. `applyHandlerFieldWrites` masks each
+        // write at the actor's SINGLE claimed node, validates against the FROZEN version schema, and
+        // UPDATEs form_snapshot IN PLACE (OD-L7-6(a)); any refusal throws values-free and rolls the
+        // whole transaction back (G-3/G-7/G-15). The edit is a SAME-ROUND mutation: it does NOT bump
+        // node_activation_seq (no `bumpNodeActivationSeq` here), so `handlerNodeEpoch` and the current
+        // node's quorum tally (`:6981`, Lock-3 G-12) are unchanged by the edit (G-16 companion).
+        let handlerFieldWrite: { changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> } = { changedFieldIds: [], revisions: [] }
+        const hasFieldWrites = Object.prototype.hasOwnProperty.call(request, 'fieldWrites')
+        // Lock-7B §1.3 step 0 (OD-L7B-11) — the required-at-node candidate set is resolved from the
+        // RUNTIME graph alone (no formSchema needed yet), through the SAME `resolveFieldAccessAtNodes`
+        // the write mask / read DTO use (never a literal chain — G-3's second arm). This decides
+        // whether the frozen-schema SELECT below must run even when THIS submit carries no
+        // `fieldWrites` key at all — closing the one-key bypass (G-10c) without charging a legacy
+        // template (no `required` entry, no `fieldWrites` key) an extra read (G-13 byte-identity).
+        const requiredFieldIdsAtNode = [...resolveFieldAccessAtNodes(runtimeGraph, [currentNodeKey])]
+          .filter(([, access]) => access === 'required')
+          .map(([fieldId]) => fieldId)
+        if (hasFieldWrites || requiredFieldIdsAtNode.length > 0) {
+          const schemaResult = await client.query<{ form_schema: Record<string, unknown> }>(
+            `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+            [instance.template_version_id],
+          )
+          const frozenFormSchema = schemaResult.rows[0]?.form_schema as unknown as FormSchema | undefined
+          if (!frozenFormSchema) {
+            // §2.1 residual 2 / G-9b — `template_version_id` is NULLABLE (the runtime graph is read via
+            // the INDEPENDENT `published_definition_id` column), so an instance CAN carry a `required`
+            // entry with a NULL `template_version_id`. Fail-closed: a 409, never a silent discharge of
+            // the obligation (M8). Values-free — `{ nodeKey }` only.
+            throw new ServiceError('Frozen form schema not found', 409, 'APPROVAL_FROZEN_SCHEMA_NOT_FOUND', { nodeKey: currentNodeKey })
+          }
+          if (hasFieldWrites) {
+            handlerFieldWrite = await this.applyHandlerFieldWrites(client, id, currentNodeKey, request.fieldWrites, {
+              runtimeGraph,
+              formSchema: frozenFormSchema,
+              frozenSnapshot: formSnapshot,
+            })
+          }
+          // Lock-7B §1.3 step 3 (OD-L7B-5/12/13) — the required-at-node check, on the EFFECTIVE
+          // snapshot (this submit's writes merged over the frozen create snapshot). Runs BEFORE seat
+          // deactivation and the partial-handle branch below, so it fires on EVERY handle submit,
+          // including a partial 会签 one (OD-L7B-13) — the obligation binds the submit, not the node's
+          // completion.
+          if (requiredFieldIdsAtNode.length > 0) {
+            const requiredFieldIdSet = new Set(requiredFieldIdsAtNode)
+            // NIT-2 / G-9c — `applyHandlerFieldWrites` returns `{ changedFieldIds, revisions }`, no
+            // merged object (the merge itself is a server-side jsonb `||` inside its own UPDATE), so
+            // the effective snapshot is RECONSTRUCTED here rather than re-read inside this transaction.
+            const effectiveFormSnapshot: Record<string, unknown> = { ...formSnapshot }
+            for (const revision of handlerFieldWrite.revisions) {
+              effectiveFormSnapshot[revision.fieldId] = revision.after
+            }
+            // OD-L7B-12 — the UNION of pre-write and post-write visibility. A candidate invisible on
+            // BOTH is skipped (an author-configured, never-satisfied visibilityRule must not deadlock
+            // the node — G-12); a candidate visible on EITHER stays enforced, so the actor cannot
+            // discharge the obligation by writing its own driver to hide the field in the same submit
+            // (G-12b) — nor does making a previously-hidden field visible with this submit excuse it.
+            const preWriteVisibleFieldIds = getVisibleFormFieldIds(frozenFormSchema, formSnapshot)
+            const postWriteVisibleFieldIds = getVisibleFormFieldIds(frozenFormSchema, effectiveFormSnapshot)
+            // Declaration order (deterministic, mirrors pin 3's deterministic node key): the FIRST
+            // empty candidate in formSchema.fields order is the one named in the error.
+            for (const field of frozenFormSchema.fields) {
+              if (!requiredFieldIdSet.has(field.id)) continue
+              if (!preWriteVisibleFieldIds.has(field.id) && !postWriteVisibleFieldIds.has(field.id)) continue
+              // OD-L7B-5 — emptiness is `isEmptyValue` VERBATIM (holes and all, §0.2); a value already
+              // filled by the requester at create satisfies it, since the check reads the EFFECTIVE
+              // (post-write) snapshot regardless of who wrote it.
+              if (isEmptyValue(effectiveFormSnapshot[field.id])) {
+                throw new ServiceError(
+                  'Required field is empty at this node',
+                  422,
+                  'APPROVAL_HANDLER_REQUIRED_FIELD_EMPTY',
+                  { nodeKey: currentNodeKey, fieldId: field.id },
+                )
+              }
+            }
+          }
+        }
+        // Deactivate the actor's own seat first (会签/或签 both consume it).
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+
+        if (handlerMode === 'all' && remainingAssignments > 0) {
+          // 会签: not every seat has submitted — record this partial handle, keep the node pending.
+          await client.query(
+            `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+            [id, nextVersion],
+          )
+          const partialAuditId = await this.insertApprovalRecord(client, id, {
+            action: 'handle',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              handlerMode,
+              aggregateComplete: false,
+              remainingAssignments,
+              ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+              // Lock-7 OD-L7-7 — values-free: the changed field IDS only, never before/after values.
+              ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
+            },
+          }, actor)
+          if (handlerFieldWrite.revisions.length > 0) {
+            await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, partialAuditId, handlerFieldWrite.revisions)
+          }
+          await client.query('COMMIT')
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
+
+        // Completion. 或签 'any' first-wins: cancel the remaining pending sibling seats (audit-preserved).
+        let handlerCancelledAssigneeIds: string[] = []
+        if (handlerMode === 'any') {
+          const siblingAssignments = currentNodeAssignments.filter((assignment) =>
+            !assignmentMatchesActor(assignment, actor.userId, actorRoles))
+          handlerCancelledAssigneeIds = Array.from(
+            new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+          )
+          if (siblingAssignments.length > 0) {
+            await client.query(
+              `UPDATE approval_assignments
+               SET is_active = FALSE,
+                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                     'handlerCancelledBy', $3::text,
+                     'handlerCancelledAt', now()::text,
+                     'handlerMode', 'any'
+                   ),
+                   updated_at = now()
+               WHERE instance_id = $1
+                 AND node_key = $2
+                 AND is_active = TRUE
+                 AND id = ANY($4::uuid[])`,
+              [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
+            )
+          }
+        }
+
+        // Advance PAST the handler node. A handler carries no auto-approval policy of its own, but the
+        // NEXT node it advances into may be an approval node with one — run the same cascade the approve
+        // arm does so an empty-assignee/merge on the next node resolves identically.
+        let resolution = executor.resolveAfterHandle(currentNodeKey)
+        if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+          const requesterId = requesterSnapshot?.id
+          resolution = this.applyAutoApprovalCascade(
+            id,
+            runtimeGraph,
+            executor,
+            resolution,
+            typeof requesterId === 'string' ? requesterId : null,
+            // Lock-7 OD-L7-11(a) / G-16 — 内容变更 invalidation. THIS transaction's edit is not yet
+            // visible in the DB (the audit + revision rows are inserted below), so a single-call
+            // edit+complete would otherwise auto-approve the next node on a PRE-edit approval. When
+            // this submit edited a field, EVERY persisted approval necessarily precedes the edit ⇒
+            // drop the whole history. Prior-transaction edits are handled inside loadApprovalHistory
+            // (it excludes approvals whose audit ordinal precedes the latest content-edit revision).
+            handlerFieldWrite.changedFieldIds.length > 0 ? [] : await this.loadApprovalHistory(client, id),
+          )
+        }
+        await client.query(
+          `UPDATE approval_instances
+           SET status = $2,
+               version = $3,
+               current_node_key = $4,
+               current_step = $5,
+               total_steps = $6,
+               updated_at = now()
+           WHERE id = $1`,
+          [
+            id,
+            resolution.status,
+            nextVersion,
+            resolution.currentNodeKey,
+            resolution.currentStep ?? instance.total_steps,
+            resolution.totalSteps,
+          ],
+        )
+        // ACTIVATION (nodeEntryEpoch §4·A): completing the handler activates the NEXT node — a new epoch.
+        const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+        const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+        const completionAuditId = await this.insertApprovalRecord(client, id, {
+          action: 'handle',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            nextNodeKey: resolution.currentNodeKey,
+            handlerMode,
+            aggregateComplete: true,
+            ...(handlerCancelledAssigneeIds.length > 0 ? { handlerCancelledAssignees: handlerCancelledAssigneeIds } : {}),
+            ...(handlerNodeEpoch !== null ? { nodeEntryEpoch: handlerNodeEpoch } : {}),
+            // Lock-7 OD-L7-7 — values-free: changed field IDs only.
+            ...(handlerFieldWrite.changedFieldIds.length > 0 ? { changedFieldIds: handlerFieldWrite.changedFieldIds } : {}),
+          },
+        }, actor)
+        if (handlerFieldWrite.revisions.length > 0) {
+          await this.insertFormFieldRevisions(client, id, currentNodeKey, actor.userId, handlerNodeEpoch, completionAuditId, handlerFieldWrite.revisions)
+        }
+        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, advanceEntryEpoch)
+        await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        const completionEvent = resolution.status === 'approved'
+          ? this.buildCompletionEvent(
+              instance,
+              {
+                // Terminal transition to `approved` reached via a handler submission; the instance-level
+                // completion event marks the instance approved (the audit ROW above is `action:'handle'`).
+                action: 'approve',
+                fromStatus: instance.status,
+                toStatus: 'approved',
+                fromVersion: instance.version,
+                toVersion: nextVersion,
+                nodeKey: currentNodeKey,
+              },
+              { id: actor.userId, name: actorName },
+            )
+          : null
+        if (completionEvent) {
+          await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        }
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
+        await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents)
+        // Lock-3 §2.5 / OD-L3-4(a): handler wall-clock is EXCLUDED from the per-node breakdown — NO
+        // `emitNodeDecisionMetric` for the handler node (it is not approver latency). The instance-level
+        // `duration_seconds` (emitTerminalMetric) unavoidably includes it; the SLA view states the split.
+        if (completionEvent) {
+          emitApprovalCompletionEvent(completionEvent)
+          this.emitTerminalMetric(id, 'approved')
+        }
+        if (resolution.currentNodeKey) {
+          await this.emitNodeActivationMetric(
+            id,
+            resolution.currentNodeKey,
+            resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)),
+            nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey),
+          )
+        }
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'return') {
@@ -5273,6 +12757,16 @@ export class ApprovalProductService {
         await this.deactivateAllActiveAssignments(client, id)
         const returnResolution = executor.resolveReturnToNode(targetNodeKey)
         const requesterId = requesterSnapshot?.id
+        // Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 — this return's own `action:'return'` row has not
+        // committed yet, so `loadApprovalHistory`'s new `to_version >=` return-floor (above) cannot see
+        // it and would still surface every PRE-return approval (e.g. an adjacent node's stale approval
+        // by the same person the target node is re-assigned to). Seed this synchronous cascade with an
+        // EMPTY history instead — the same pattern the create-cascade already uses (`:5905` — a brand
+        // new instance starts empty too) — so mergeAdjacentApprover / dedupeHistoricalApprover cannot
+        // re-merge against anything that predates this return. Auto-approval events THIS cascade itself
+        // produces are still chained correctly: `applyAutoApprovalCascade` appends each event into this
+        // same array as it evaluates, and `insertAutoApprovalEvents` below persists them with the SAME
+        // `toVersion` as the `action:'return'` row, so later evaluations see them via the floor query.
         const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
           ? this.applyAutoApprovalCascade(
               id,
@@ -5280,7 +12774,7 @@ export class ApprovalProductService {
               executor,
               returnResolution,
               typeof requesterId === 'string' ? requesterId : null,
-              await this.loadApprovalHistory(client, id),
+              [],
             )
           : returnResolution
         await client.query(
@@ -5323,13 +12817,20 @@ export class ApprovalProductService {
         }, actor)
         await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, returnEntryEpoch)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the return txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+        // H-1 P1-1: AWAITED close — a return can resolve back to the node it was issued from when the
+        // target is skipped and the cascade lands here again (constructed and covered: an
+        // `approvalType:'auto_approve'` target, see the `H-1 P1-1 GATE (return branch)` case). This
+        // close and the activation below then contend for the same `approval_metrics` row. See
+        // `settleNodeDecisionMetric`.
+        await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+          await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
       if (request.action === 'reject') {
@@ -5350,6 +12851,11 @@ export class ApprovalProductService {
           actorId: actor.userId,
           actorName,
           comment: request.comment || null,
+          // H-5: the legacy `/reject` door's own `reason` column, carried through the SAME
+          // transaction as the transition above rather than backfilled after the commit (a
+          // post-commit second write could fail and leave the mandatory field NULL forever).
+          // `/actions` never sets this rider, so its rows keep writing NULL here.
+          reason: request.reason ?? null,
           fromStatus: instance.status,
           toStatus: 'rejected',
           fromVersion: instance.version,
@@ -5372,14 +12878,38 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actorName },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the reject transition above.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+        // Lock §14.2 判据 III (A7) — same mechanism, same fail-closed rationale, and same
+        // implementer-erratum error-code caveat as the revoke branch above: a cancel-round
+        // instance's own reject terminates its round row (`engine_instance_id = id`) in the SAME
+        // transaction as the instance transition, and `rowCount !== 1` means the one-round-per-
+        // instance invariant (WI-4) is already broken, not that this is a re-entrant call (a
+        // second reject can never reach this branch — `instance.status !== 'pending'` 409s first
+        // below, and the instance is held FOR UPDATE with a version check). The comment-required
+        // front gate above (§1.3, `REJECT_COMMENT_REQUIRED`) is unchanged — this only appends a
+        // write.
+        if (isCancelRoundInstance(instance)) {
+          const roundResult = await client.query(
+            `UPDATE approval_rounds SET outcome = 'rejected', ended_at = now()
+             WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [id],
+          )
+          if (roundResult.rowCount !== 1) {
+            throw new ServiceError(
+              'Cancel-round instance has no single matching pending round to terminate',
+              409,
+              'CANCEL_ROUND_INVARIANT_VIOLATION',
+            )
+          }
+        }
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'rejected')
-        return (await this.getApproval(id))!
+        return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
-      const approvalMode = executor.getApprovalMode(currentNodeKey)
       // nodeEntryEpoch (§5): capture the current node's entry epoch NOW — while the resolving
       // actor's assignment is still active (every mode below deactivates it) so the DISTINCT read
       // is authoritative and fails closed on empty/mixed. Reused by the threshold tally (null =>
@@ -5388,17 +12918,82 @@ export class ApprovalProductService {
       const currentNodeEpoch = currentNodeKey
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
+      // Lock-5 L5-B gate B-5: when THIS round is an appended (后加签) round — the instance carries an
+      // `addSignAppendedRound` entry whose node AND epoch match the live round — its action-time
+      // aggregation (`all` | `any`) governs completion instead of the node's authored mode. Keyed on
+      // the epoch, so an ordinary re-activation of the same node (return, jump) falls back to the
+      // authored mode by construction. Read off the already-loaded instance row: no extra query.
+      const appendedRound = readAddSignAppendedRound(instance.metadata, currentNodeKey, currentNodeEpoch)
+      const approvalMode: ApprovalMode = appendedRound ? appendedRound.aggregation : executor.getApprovalMode(currentNodeKey)
       // Approval aggregation semantics:
+      //   'sequential': complete only the active head and promote exactly one queued successor.
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
       //                    (aggregateCancelledBy/aggregateCancelledAt metadata) + one 'sign' record.
       //   'single' / default: exactly one assignee expected; blanket-deactivate all active rows.
       let aggregateCancelledAssigneeIds: string[] = []
       let parallelCancelledAssigneeIds: string[] = []
-      if (approvalMode === 'all') {
+      if (approvalMode === 'sequential') {
+        if (actorAssignments.length !== 1) {
+          throw new ServiceError(
+            'Sequential approval queue has no unique actor head',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        const queueAdvance = await this.advanceSequentialQueue(
+          client,
+          id,
+          currentNodeKey,
+          actorAssignments[0],
+          currentNodeEpoch,
+        )
+        if (queueAdvance.remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): the queue is not empty after this head, so an
+          // after-sign cannot open its round here — refuse (rolls back the head advance above).
+          if (afterSign) throw afterSignRoundIncomplete()
+          await client.query(
+            `UPDATE approval_instances
+             SET version = $2,
+                 updated_at = now()
+             WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'approve',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              approvalMode,
+              aggregateComplete: false,
+              remainingAssignments: queueAdvance.remainingAssignments,
+              ...(request.channelOrigin
+                ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId }
+                : {}),
+              ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+            },
+          }, actor)
+          await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, queueAdvance.createdTasks)
+          await client.query('COMMIT')
+          await this.emitApprovalTaskCreatedEventsPostCommit(id, queueAdvance.createdTasks)
+          this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
+      } else if (approvalMode === 'all') {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): undecided 会签 siblings remain, so this approval does
+          // not complete the round — an after-sign is refused here (the deactivation above rolls
+          // back with the transaction; no cross-epoch state is ever written).
+          if (afterSign) throw afterSignRoundIncomplete()
           await client.query(
             `UPDATE approval_instances
              SET version = $2,
@@ -5426,7 +13021,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
       } else if (approvalMode === 'any') {
         // Deactivate actor's own assignment first.
@@ -5540,6 +13135,9 @@ export class ApprovalProductService {
           )
         }
         if (distinctApproverCount < threshold && remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): the threshold is still short after this approval, so
+          // an after-sign is refused here (same rollback discipline as the 会签 branch).
+          if (afterSign) throw afterSignRoundIncomplete()
           // Threshold not yet reached and still-pending siblings remain — record this partial
           // approval and keep the node pending (mirrors 'all' short-circuit; siblings stay active).
           await client.query(
@@ -5572,7 +13170,7 @@ export class ApprovalProductService {
             },
           }, actor)
           await client.query('COMMIT')
-          return (await this.getApproval(id))!
+          return (await this.getApproval(id, actor.userId, actor.roles))!
         }
         // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
         // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
@@ -5610,10 +13208,35 @@ export class ApprovalProductService {
         }
       }
 
-      let resolution = isInParallelRegion && parallelState && actorBranchNodeKey
-        ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
-        : executor.resolveAfterApprove(currentNodeKey)
-      if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+      // Lock-5 L5-B gate B-3 — OD-L5-4(b)'s deferred same-node round. Reaching this line means the
+      // engine's own branches above judged the actor's approval to COMPLETE the current round (every
+      // partial-vote branch either returned or, for an after-sign, threw). An after-sign now stays at
+      // the SAME node instead of resolving forward: the addees are seated by the shipped
+      // `buildAddSignAssignments` (stamped `addSign:true`, so 减签 can still find them) under the
+      // FRESH epoch minted at the activation site below, and `current_step` / `total_steps` are
+      // unchanged. No auto-approval cascade runs on the appended round: the addees were chosen by
+      // name for this exact round, so merging or deduping them away would empty the round the actor
+      // just asked for. The node advances only when the appended round completes — through this
+      // same pipeline, under the appended round's own aggregation (`readAddSignAppendedRound`).
+      const appendedRoundAssignments = afterSign
+        ? executor.buildAddSignAssignments(currentNodeKey, afterSign.targetUserIds, actor.userId)
+        : []
+      let resolution: ApprovalGraphResolution = afterSign
+        ? {
+            status: 'pending',
+            currentNodeKey,
+            currentStep: instance.current_step,
+            totalSteps: instance.total_steps,
+            assignments: [],
+            ccEvents: [],
+            autoApprovalEvents: [],
+            aggregateMode: approvalMode,
+            aggregateComplete: true,
+          }
+        : isInParallelRegion && parallelState && actorBranchNodeKey
+          ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
+          : executor.resolveAfterApprove(currentNodeKey)
+      if (!afterSign && runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
         const approvalHistory = await this.loadApprovalHistory(client, id)
         approvalHistory.push({
           nodeKey: currentNodeKey,
@@ -5700,6 +13323,97 @@ export class ApprovalProductService {
         )
       }
 
+      // ─── Lock §14.3 outlet #5′ (new anchor; registered as #5′) ─────────────────────────────────
+      // Lock §3 C-2 「挂点位置」 + §14.2 判据 IV. This is census outlet #5 — `dispatchAction`'s
+      // approve fall-through, the ONE `approved` outlet a cancel round may pass through — and the
+      // anchor the lock fixes is 「先于任何终态状态写」, i.e. immediately before the
+      // `UPDATE approval_instances SET status = $2` below, NOT before the completion enqueue (a
+      // hook defined on the enqueue would silently miss the `return` branch, §11-③).
+      //
+      // Only a TERMINAL approve advance is in scope: `resolution.status === 'approved'` is exactly
+      // the condition under which the enqueue below builds a completion event.
+      if (resolution.status === 'approved' && isCancelRoundInstance(instance)) {
+        const { evaluation, policySnapshotAtDecision, roundId } =
+          await this.evaluateCancelRoundFinalInLock(client, id)
+        // The evaluation the C-3 closure below acts on. It starts as the in-lock evaluator's answer
+        // and is REPLACED by `blocked` when C-1 declines on business grounds — C-3's two causes
+        // (窗口/策略已关 ⇒ `expired`, 业务不可逆 ⇒ `blocked`) share one closure writer, and this is
+        // where the second cause enters.
+        let finalEvaluation: CancelRoundFinalEvaluationV1 = evaluation
+
+        if (finalEvaluation.decision === 'redeem') {
+          // Lock §3 C-2 steps ④–⑤ + §14.2 判据 II. Fail closed if the pre-read did not demand the
+          // rollout lock: 首期 scope is 请假撤销 (lock §8 期 1), so a cancel round whose original
+          // document has no attendance request behind it has no C-1 to run, and redeeming it would
+          // write `applied` over a business cancellation that never happened. The entry would
+          // refuse it anyway (`W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD`, 500);
+          // refusing here names the actual reason and keeps it a 409 the caller can act on.
+          if (rolloutLock.kind !== 'required') {
+            throw new ServiceError(
+              'Cancel round has no attendance request to cancel',
+              409,
+              'CANCEL_ROUND_BUSINESS_TARGET_MISSING',
+            )
+          }
+          const redemption = await this.redeemCancelRoundInTxn(client, {
+            engineInstanceId: id,
+            instance,
+            rolloutLock,
+            roundId,
+            policySnapshotAtDecision,
+          })
+          if (redemption.kind === 'blocked') {
+            finalEvaluation = {
+              decision: 'blocked',
+              code: redemption.code,
+              detail: redemption.detail,
+            }
+          } else {
+            dispatchCancellationOutcome = redemption.outcome
+            dispatchCancelledEventDelivery = {
+              result: redemption.w4Result,
+              // The id the entry was pinned to (`WHERE id = $1 AND org_id = $2`), used only as the
+              // fallback when the W4 response carries none — identical to what the HTTP route
+              // passes, which is its own `req.params.id`.
+              requestId: rolloutLock.requestId,
+            }
+          }
+        }
+        if (finalEvaluation.decision !== 'redeem') {
+          // C-3 持久化收口. Everything below — the status write, the approve record, the
+          // assignment inserts, the completion event, the post-commit emits — is skipped by the
+          // `return`, which is itself load-bearing (判据 IV's own mutation: remove it and the
+          // status is overwritten back to `approved` and a completion event appears).
+          await this.closeCancelRoundSystemTerminalInTxn(client, {
+            engineInstanceId: id,
+            instance,
+            nextVersion,
+            currentNodeKey,
+            evaluation: finalEvaluation,
+            policySnapshotAtDecision,
+          })
+          await client.query('COMMIT')
+          // Metrics only — `safeMetricsCall`-wrapped, and deliberately NOT
+          // `emitApprovalCompletionEvent` / `buildCompletionEvent`, which is what 判据 IV's
+          // 「零完成事件」 names. The terminal metric reports `rejected`, matching the engine row.
+          this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+          this.emitTerminalMetric(id, 'rejected')
+          // Same shape as `dispatchAction`'s own bottom return (lock §14.2 判据 IV 「return 一个与
+          // `:11227-11231` 同形的 `UnifiedApprovalDTO`」) — the read-back, the 404 on a missing
+          // row, the return; not the `!` non-null assertion the in-function branches above use.
+          const closedApproval = await this.getApproval(id, actor.userId, actor.roles)
+          if (!closedApproval) {
+            throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+          }
+          return closedApproval
+        }
+        // Redeemed. Lock §3 C-2 step ⑥ — 「才写 `approved` 审计与入队完成事件」: this branch
+        // deliberately does NOT return. Falling through is what gives the cancel round's own
+        // instance its `approved` status write, its approve audit row and the ONE completion event
+        // 判据 II names, all in this same transaction and all committed by the `COMMIT` below.
+        // The early `return` above is C-3-only.
+      }
+
       await client.query(
         `UPDATE approval_instances
          SET status = $2,
@@ -5722,8 +13436,18 @@ export class ApprovalProductService {
       // The resolving approve record below stays on the CURRENT node's epoch (`currentNodeEpoch`,
       // captured before any deactivation); only the newly-inserted assignments + the cascade at the
       // next node carry `advanceEntryEpoch`.
+      // For an after-sign the "next node" IS this node and the bump mints the appended round's epoch
+      // (OD-L5-4(b): "a fresh nodeEntryEpoch round at the SAME node"); the addees are inserted under
+      // it, and the actor's own approve record below keeps the OLD epoch, exactly as on a forward
+      // advance. The sibling seats of an `any`/threshold round were already cancelled above, so the
+      // node's live seats after this insert all carry the new epoch — the mixed-epoch invariant holds.
       const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-      const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+      const createdTaskEvents = await this.insertAssignments(
+        client,
+        id,
+        afterSign ? appendedRoundAssignments : resolution.assignments,
+        advanceEntryEpoch,
+      )
       const approveRecordMetadata: Record<string, unknown> = {
         nodeKey: currentNodeKey,
         nextNodeKey: resolution.currentNodeKey,
@@ -5732,6 +13456,9 @@ export class ApprovalProductService {
         // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
         ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
         ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+        // Lock-5 B-3: this approve closed the round but NOT the node — readers that infer "node
+        // decided" from `aggregateComplete` alone can tell the two apart by this marker.
+        ...(afterSign ? { addSignAfter: true, appendedNodeEntryEpoch: advanceEntryEpoch } : {}),
       }
       if (isInParallelRegion) {
         approveRecordMetadata.parallelNodeKey = parallelState?.parallelNodeKey
@@ -5744,6 +13471,24 @@ export class ApprovalProductService {
       }
       if (approvalMode === 'threshold') {
         approveRecordMetadata.approvalThreshold = executor.getApprovalThreshold(currentNodeKey)
+      }
+      if (dispatchCancellationOutcome) {
+        // The DURABLE half of lock:86's 呈现. Same audit-row family the lock already uses for
+        // `metadata.w4ActorPosture` (lock:94), written in the SAME transaction as the business
+        // cancellation and the round's `applied`, so it commits atomically with them.
+        //
+        // ⚠️ CORRECTED 2026-09-20 (owner ruling). This comment used to add 「and is readable
+        // afterwards through the existing history endpoint (`UnifiedApprovalHistoryDTO` carries
+        // `metadata` verbatim)」. That was measured FALSE for platform instances: the DTO does
+        // carry `metadata` verbatim, but it is only ever built inside `routes/approval-history.ts`'s
+        // `plm:` branch, which a bare-UUID cancel-round id never enters — so the row committed here
+        // was durable but UNREADABLE (`verify-c2-history-dto-cancellation-outcome-20260920.md`
+        // §3.1/§3.2, real HTTP as the requester: the `metadata` key was absent entirely). The read
+        // half now exists, and it is a per-key-path WHITELIST, not a verbatim `metadata` pass-through:
+        // `routes/approval-history.ts`'s platform SELECT + `getApproval` below both project exactly
+        // `cancellationOutcome` and `cancelRoundCloseReason` through
+        // `projectCancelRound*ForReadV1`. The DTO field on the action response is the immediate half.
+        approveRecordMetadata.cancellationOutcome = dispatchCancellationOutcome
       }
       if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
@@ -5759,6 +13504,49 @@ export class ApprovalProductService {
         toVersion: nextVersion,
         metadata: approveRecordMetadata,
       }, actor)
+      if (afterSign) {
+        // Lock-5 B-3: the `add_sign` audit row for the appended round — the SAME shape the
+        // `parallel`/`before` branch writes (`nodeKey`, `addSignMode`, `addedUserIds`, `targetUserId`)
+        // plus the round triple that makes the appended round reconstructible from audit rows alone:
+        // the epoch the actor decided in, the epoch the addees were seated under, and the
+        // aggregation that governs it. The instance's `addSignAppendedRound` carrier (read by the
+        // approve path's mode resolution) is merged in the same transaction — a jsonb `||`, never a
+        // rewrite, so `parallelBranchStates` and the designated-fallback snapshot are untouched.
+        await this.insertApprovalRecord(client, id, {
+          action: 'add_sign',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            addSignMode: 'after',
+            addedUserIds: afterSign.targetUserIds,
+            addSignAggregation: afterSign.aggregation,
+            ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+            appendedNodeEntryEpoch: advanceEntryEpoch,
+          },
+          targetUserId: afterSign.targetUserIds[0],
+        }, actor)
+        await client.query(
+          `UPDATE approval_instances
+              SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb),
+                  updated_at = now()
+            WHERE id = $1`,
+          [
+            id,
+            ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
+            JSON.stringify(buildAddSignAppendedRoundMetadata({
+              nodeKey: currentNodeKey,
+              entryEpoch: advanceEntryEpoch,
+              aggregation: afterSign.aggregation,
+            })),
+          ],
+        )
+      }
       if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         // One 'sign' audit row describing the aggregation cancellation — lets the timeline UI
         // render a muted "已被 {approver} 的决定覆盖" line without mining assignment metadata.
@@ -5817,6 +13605,14 @@ export class ApprovalProductService {
           )
         : null
 
+      // P1#2e REPLACE (family 1) — same-txn durable enqueue of the completion event (only when this advance is
+      // terminal), atomic with the approve→approved transition above. Flag OFF ⇒ no-op.
+      if (completionEvent) {
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+      }
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the advance txn (after
+      // every assignment write + same-txn auto-approval / parallel-cancel cascade). Flag OFF ⇒ no-op.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
       // P1-1 defense-in-depth: the node just advanced past `currentNodeKey`, so sweep every still-`sent`
@@ -5832,26 +13628,70 @@ export class ApprovalProductService {
       //     triggering card is excluded from the sweep below: it is already `acted`, not still `sent`.
       // Do NOT reintroduce a post-commit claim: a claim made after the decision is durable cannot gate it.
       await this.supersedeCardDeliveriesPostCommit(id, request.channelOrigin?.cardDeliveryId)
+      // Codex 审阅第 3 条修复 (2026-09-19) — 判据 II / lock §8 期 1 「完整取消结果逐字节等价于现有
+      // W4 路径」. AFTER the COMMIT above, never inside it: the business cancellation, the revoke
+      // audit row, the round's `applied` and the W4 seal are all durable by the time this runs, so
+      // a listener that throws cannot undo any of them (and a rolled-back attempt reaches this line
+      // not at all, because the `throw` skips straight to the outer catch). Best-effort, same
+      // family as the card sweep above.
+      this.deliverCancelRoundCancelledEventPostCommit(dispatchCancelledEventDelivery)
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
-      this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+      //
+      // Lock-5 B-3 metrics reading for an appended round: it is a NEW ACTIVATION of the same node
+      // (the epoch was bumped), so it is recorded exactly like the `return` branch's same-node
+      // re-entry — the decided round's breakdown entry is CLOSED (awaited, H-1 P1-1: close and
+      // re-activation contend for one `approval_metrics` row and the order must be a fact of the
+      // code path) and a fresh entry for the appended round is opened, which also re-arms the
+      // node's timeout from now. The node's wall-clock therefore reads as two entries under one
+      // `nodeKey`, one per round, never as one entry spanning both.
+      if (afterSign) await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
+      else this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
       if (completionEvent) {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
+      } else if (afterSign) {
+        await this.emitNodeActivationMetric(id, currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, currentNodeKey))
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
+      // Values-free mapping for the ONE new error surface this restructure opens. Scoped to the
+      // branch that created it: only a `required` dispatch runs under SERIALIZABLE and holds the
+      // org advisory lock, so only it can newly raise 40001 (serialization failure) or 40P01
+      // (deadlock) from these. A non-cancel-round dispatch keeps the bare rethrow it had, so this
+      // is not a repo-wide retry-semantics change smuggled in under a cancel-round commit.
+      // `isRetryableSqlState` is the repo's single predicate for the pair (exported by
+      // w4c0-operation-registry precisely so two layers cannot drift).
+      if (rolloutLock.kind === 'required' && isRetryableSqlState(error)) {
+        throw new ServiceError(
+          'Approval action hit transient transaction contention; retry the action',
+          503,
+          'CANCEL_ROUND_DISPATCH_CONTENDED',
+        )
+      }
       throw error
     } finally {
       client?.release()
     }
 
-    const approval = await this.getApproval(id)
+    const approval = await this.getApproval(id, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+    }
+    // The IMMEDIATE half of lock:86's 呈现 (default contract; owner 待裁). It is attached here from
+    // the value the redemption returned in-transaction rather than re-read, so the action response
+    // carries it even when the read-back below races the audit row's visibility.
+    // ⚠️ CORRECTED 2026-09-20 (owner ruling: 「呈现默认值不能替代持久读取能力」). This comment used to
+    // say 「A later `GET /approvals/:id` will not carry it」 and 「`getApproval` … does NOT join the
+    // audit rows」. Both were true when written and are false now: `getApproval` whitelist-projects
+    // `cancellationOutcome` (and `cancelRoundCloseReason`) off the audit row, which is the branch
+    // this comment had left as an open owner decision. The two halves agree on value — the audit
+    // row is written from this same `dispatchCancellationOutcome` inside the same transaction.
+    if (dispatchCancellationOutcome) {
+      return { ...approval, cancellationOutcome: dispatchCancellationOutcome }
     }
     return approval
   }
@@ -5861,22 +13701,64 @@ export class ApprovalProductService {
    * a metrics outage cannot fail the approval flow.
    */
   private emitNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): void {
-    safeMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, () =>
+    safeMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, this.nodeDecisionMetricWrite(instanceId, nodeKey, actorId))
+  }
+
+  /**
+   * H-1 P1-1 — AWAITED sibling of `emitNodeDecisionMetric`: identical write, identical
+   * log-and-swallow contract (the promise always resolves), the caller just waits for settlement.
+   *
+   * Used ONLY on the two post-commit paths that can re-activate the SAME node they just decided
+   * (`applyNodeTimeoutEffect`'s re-entry and `dispatchAction`'s `return` branch). There, this close
+   * and the following `emitNodeActivationMetric` are two transactions contending for the SAME
+   * `approval_metrics` row, and the outcome is not symmetric:
+   *   - close first  → `recordNodeActivation` sees no open entry for the node, so it appends the
+   *     re-activation entry AND re-arms `current_node_deadline_at` / `current_node_timeout_effect`;
+   *   - activation first → the still-open entry makes `recordNodeActivation` a no-op (`added=false`,
+   *     so its deadline UPDATE is skipped), and the close that lands afterwards NULLs both columns
+   *     (its scope guard `i.current_node_key = $2` is satisfied — the instance really is still at
+   *     that node) — the node is live again but its SLA is never re-armed and the breakdown entry
+   *     for the re-activation is lost.
+   * Dispatch order alone does not decide that race (both hooks queue, then two separate connections
+   * race their `SELECT … FOR UPDATE`); awaiting the close makes the order a fact of the code path.
+   *
+   * The remaining `emitNodeDecisionMetric` call sites stay fire-and-forget on purpose: reject /
+   * sequential-queue-advance emit no activation after them, and the approve path's activation is
+   * guarded by `resolution.currentNodeKey !== currentNodeKey`, so its close and its activation
+   * address different nodes and the close's scope guard is false whichever lands first.
+   */
+  private settleNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): Promise<void> {
+    return settleMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, this.nodeDecisionMetricWrite(instanceId, nodeKey, actorId))
+  }
+
+  /** Shared write body for both forms above — `decidedAt` is still taken when the hook RUNS. */
+  private nodeDecisionMetricWrite(instanceId: string, nodeKey: string, actorId: string): () => Promise<void> {
+    return () =>
       this.metrics.recordNodeDecision({
         instanceId,
         nodeKey,
         decidedAt: new Date(),
         approverIds: [actorId],
-      }),
-    )
+      })
   }
 
+  /**
+   * H-1 — AWAITED (not fire-and-forget). Returns a promise that always resolves: a metrics failure is
+   * logged and swallowed exactly as before, so this still cannot fail the approval flow. What changed is
+   * only WHEN the caller continues — after the stamp is durable, instead of after it is merely queued.
+   *
+   * Rationale: this write arms the SLA scanner. Left unsettled it can land after the caller's response
+   * has been observed and overwrite state written in between (a forced/consumed deadline), which surfaces as
+   * `applyNodeTimeoutEffect` returning 'skipped_stale' against a correctly-armed row, or as the scanner
+   * firing a stale node's effect. Every call site is POST-COMMIT — no approval lock is held while this
+   * awaits, so it can only add latency, never deadlock.
+   */
   private emitNodeActivationMetric(
     instanceId: string,
     nodeKey: string,
     calendarOrgId: string,
     timeout?: NodeTimeoutConfig,
-  ): void {
+  ): Promise<void> {
     const activatedAt = new Date()
     // T1-1: when the activating node declares a timeout, stamp its absolute deadline + effect so the
     // SLA scanner can fire on it. No timeout → recordNodeActivation clears the columns (so the prior
@@ -5887,7 +13769,7 @@ export class ApprovalProductService {
     const calendarSla = timeout?.unit === 'business'
       ? { afterMinutes: timeout.afterMinutes, orgId: calendarOrgId }
       : undefined
-    safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
+    return settleMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
       this.metrics.recordNodeActivation({
         instanceId,
         nodeKey,
@@ -5926,7 +13808,21 @@ export class ApprovalProductService {
     })
   }
 
-  async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
+  /**
+   * `viewerRoles` (Lock-5 §2.3 / gate A-2, adversarial-gate finding P2-R2 on PR #4983): this method
+   * builds the DTO EVERY dispatch verb branch returns, and the FE store overwrites `activeApproval`
+   * with it. It used to omit `nodeOperations` entirely, so the member bar's mirror EVAPORATED after
+   * the member's first successful action — post a 评论 at a node with `allowTransfer:false` and
+   * 转交/加签/减签/退回 all re-rendered, each click 409ing and minting another `policy_denied` row.
+   * That is the exact M7 exposure gate A-2 exists to close, surviving in the most routine sequence.
+   * The carrier is therefore populated HERE too, from the same frozen graph and the same shared seat
+   * predicate the detail read and the choke use — so a fresh GET and an action response agree.
+   */
+  async getApproval(
+    id: string,
+    viewerUserId?: string | null,
+    viewerRoles?: readonly string[] | null,
+  ): Promise<UnifiedApprovalDTO | null> {
     if (!pool) throw new Error('Database not available')
 
     const result = await pool.query<ApprovalInstanceRow>(
@@ -5952,7 +13848,7 @@ export class ApprovalProductService {
       if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
     }
 
-    return toUnifiedApprovalDTO(
+    const dto = toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
         id: assignment.id,
@@ -5965,6 +13861,85 @@ export class ApprovalProductService {
       })),
       frozenFormSchema,
     )
+
+    // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
+    // authenticated actor explicitly; making omission fail closed prevents a future call site from
+    // exposing stored linked ids by accidentally using the one-argument form.
+    if (dto.formSnapshot) {
+      const queryFn = (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params)
+      dto.formSnapshot = await projectRecordLinkFormSnapshotForViewer(
+        dto.formSnapshot,
+        frozenFormSchema,
+        viewerUserId ?? null,
+        queryFn,
+      )
+    }
+
+    // Lock-5 §2.3 / gate A-2 (finding P2-R2) — the SAME carrier the detail read ships, so an action
+    // response never silently un-hides a policy-forbidden verb. Resolved from the instance's OWN
+    // frozen `published_definition_id` (never the parent template) and scoped by the shared
+    // `seatNodeKeysForViewer`, which is the choke's predicate. When the actor no longer holds a seat
+    // after the action (they approved and the node advanced past them), the honest value is exactly
+    // what a fresh GET would now return: no carrier — there is no bar to mirror.
+    if (viewerUserId && row.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [row.published_definition_id],
+      )
+      const runtimeGraphView = (runtimeResult.rows[0]?.runtime_graph ?? null) as NodeOperationGraphView | null
+      if (runtimeGraphView) {
+        const nodeOperations = resolveEffectiveNodeOperations(
+          runtimeGraphView,
+          seatNodeKeysForViewer(assignmentsResult.rows, viewerUserId, viewerRoles),
+          row.policy_snapshot,
+        )
+        if (nodeOperations) dto.nodeOperations = nodeOperations
+      }
+    }
+
+    // Viewer-scoped decision affordance — the SAME predicate this service's own `dispatchAction`
+    // gate uses (`assignmentMatchesActor` over the door's decidable node keys), answered here so
+    // the client renders rather than re-derives. Shipped on the ACTION response too, not only the
+    // detail read: the FE store publishes an action response into the slot the detail read fills,
+    // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
+    // moment an approver acts.
+    const canDecideCurrentNode = resolveCanDecideCurrentNode({
+      instance: row,
+      assignments: assignmentsResult.rows,
+      viewerUserId: viewerUserId ?? null,
+      viewerRoles: viewerRoles ?? null,
+    })
+    dto.canDecideCurrentNode = canDecideCurrentNode
+    // Process-evidence (过程附件) uploader affordance — the identical expression
+    // `ApprovalBridgeService.getApproval` (the detail read) carries: the seat answer above,
+    // restricted to the seat-gated door. Filled HERE too for the same reason as the field above: the
+    // FE store publishes an action response into the slot the detail read fills, so a builder that
+    // omitted it would take the uploader away from a seated approver the moment they post a 评论.
+    dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
+
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a reader who reloads
+    // `GET /api/approvals/:id` after the decision AND clears that route's `rbacGuard('approvals',
+    // 'read')` plus the per-instance participant fence — today the admin bypass, or a holder of
+    // `approvals:read` (a code the permission catalogue does not list at this head, with zero
+    // grants) — reads the SAME two values the history surface whitelists, off the durable audit
+    // row that committed with the cancellation itself. A plain requester WITHOUT such a grant gets
+    // 403 at the guard today; whether that requester can ever read it is the owner-open mount-side /
+    // grant decision, not settled here. Before this, the numbers existed only on the one action
+    // response that produced them (F-5).
+    //
+    // ⚠️ THIS IS THE ACTION-RESPONSE BUILDER, NOT the `GET /api/approvals/:id` handler — that route
+    // calls `ApprovalBridgeService.getApproval`, a SECOND implementation (measured: patching only
+    // this one left the refresh path still returning `undefined`). Both call the SAME shared reader
+    // below for exactly that reason; see its docblock for the whitelist and the no-second-predicate
+    // argument. Here it matters because the FE store publishes an action response into the slot the
+    // detail read fills: a field the detail read carries and the action response drops would flip to
+    // `undefined` the moment an approver acts.
+    Object.assign(dto, await readCancelRoundDurableProjectionV1(
+      (text, values) => pool!.query(text, values),
+      id,
+    ))
+    return dto
   }
 
   async isTemplateRuntimeInstance(id: string): Promise<boolean> {
@@ -6002,6 +13977,31 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion, actor)
+  }
+
+  /**
+   * L6-P1 carrier fix — the template's ACTIVE published definition (keyed by
+   * `template.active_version_id`), independent of whichever version an in-flight edit is
+   * building. `updateTemplate` needs this: it may be returning a NEW (never-published) draft
+   * version, and the previously-active policy must still surface on that response so
+   * `persistDraft()` → `draftFromTemplate` does not clobber the FE draft's carried-forward
+   * policy with a hardcoded absence right before a republish reads it back off. Returns null for
+   * a template that has never been published (`active_version_id` absent).
+   */
+  private async loadActivePublishedDefinition(
+    client: { query: typeof pool.query },
+    template: TemplateRow,
+  ): Promise<PublishedDefinitionRow | null> {
+    if (!template.active_version_id) return null
+    const result = await client.query<PublishedDefinitionRow>(
+      `SELECT *
+       FROM approval_published_definitions
+       WHERE template_version_id = $1
+       ORDER BY is_active DESC, published_at DESC
+       LIMIT 1`,
+      [template.active_version_id],
+    )
+    return result.rows[0] || null
   }
 
   /**
@@ -6054,6 +14054,35 @@ export class ApprovalProductService {
     }
   }
 
+  /**
+   * Final create-boundary template visibility check. The actor and template row are both read on
+   * the approval transaction after actor authority locks, so a stale request manager grant or a
+   * concurrent visibility edit cannot authorize the instance insert.
+   */
+  private async templateVisibleAtCreateBoundary(
+    client: ApprovalDbClient,
+    templateId: string,
+    expectedActiveVersionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const queryFn = (sqlText: string, params?: unknown[]) => client.query(sqlText, params)
+    await lockRecordLinkActorAuthorityRowsOnQuery(queryFn, userId)
+    const visibilityActor = await loadApprovalTemplateVisibilityActorOnQuery(queryFn, userId)
+    if (!visibilityActor) return false
+
+    const conditions = ["id = $1", "status = 'published'", 'active_version_id = $2']
+    const params: unknown[] = [templateId, expectedActiveVersionId]
+    applyTemplateVisibilityFilter(conditions, params, 3, visibilityActor)
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+       FROM approval_templates
+       WHERE ${conditions.join(' AND ')}
+       FOR SHARE`,
+      params,
+    )
+    return Boolean(result.rows[0])
+  }
+
   private async deactivateAllActiveAssignments(
     client: { query: typeof pool.query },
     instanceId: string,
@@ -6099,27 +14128,60 @@ export class ApprovalProductService {
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
     entryEpoch: number | null,
   ): Promise<ApprovalTaskCreatedTaskSnapshot[]> {
-    await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
+    const preparedAssignments = assignments.map((assignment) => {
+      const queue = readSequentialQueueMetadata(assignment.metadata)
+      if (isRecord(assignment.metadata) && 'sequentialQueue' in assignment.metadata && !queue) {
+        throw new ServiceError(
+          'Sequential approval queue metadata is invalid',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { assignment, queue }
+    })
+    const activeAssignments = preparedAssignments
+      .filter(({ queue }) => queue ? queue.state === 'active' : true)
+      .map(({ assignment }) => assignment)
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, activeAssignments)
     // A-2a: every USER-typed row is one new actionable pending item — collected by the caller
     // (still inside its transaction) and emitted as approval.task_created AFTER commit, mirroring
     // the completion-event discipline. Role-typed rows do not fire v1 recipient events.
     const createdTasks: ApprovalTaskCreatedTaskSnapshot[] = []
-    for (const assignment of assignments) {
-      await client.query(
-        `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7::jsonb, now(), now())`,
-        [
-          instanceId,
-          assignment.assignmentType,
-          assignment.assigneeId,
-          assignment.sourceStep,
-          assignment.nodeKey,
-          entryEpoch,
-          JSON.stringify(assignment.metadata ?? {}),
-        ],
-      )
-      if (assignment.assignmentType === 'user') {
+    for (const { assignment, queue } of preparedAssignments) {
+      const isActive = queue ? queue.state === 'active' : true
+      if (queue) {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            isActive,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      } else {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      }
+      if (isActive && assignment.assignmentType === 'user') {
         createdTasks.push({
           nodeKey: assignment.nodeKey,
           entryEpoch,
@@ -6131,11 +14193,144 @@ export class ApprovalProductService {
     return createdTasks
   }
 
+  private async advanceSequentialQueue(
+    client: ApprovalDbClient,
+    instanceId: string,
+    nodeKey: string,
+    activeAssignment: ApprovalAssignmentRow,
+    entryEpoch: number | null,
+  ): Promise<{ createdTasks: ApprovalTaskCreatedTaskSnapshot[]; remainingAssignments: number }> {
+    const activeQueue = readSequentialQueueMetadata(activeAssignment.metadata)
+    if (!activeQueue || activeQueue.state !== 'active') {
+      throw new ServiceError(
+        'Sequential approval queue head metadata is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const completed = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = FALSE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('completed'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND instance_id = $2
+          AND node_key = $3
+          AND is_active = TRUE
+          AND entry_epoch IS NOT DISTINCT FROM $4
+        RETURNING id`,
+      [activeAssignment.id, instanceId, nodeKey, entryEpoch],
+    )
+    if (completed.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be completed',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+
+    const queued = await client.query<ApprovalAssignmentRow>(
+      `SELECT *
+         FROM approval_assignments
+        WHERE instance_id = $1
+          AND node_key = $2
+          AND is_active = FALSE
+          AND entry_epoch IS NOT DISTINCT FROM $3
+          AND metadata->'sequentialQueue'->>'state' = 'queued'
+        ORDER BY id ASC
+        FOR UPDATE`,
+      [instanceId, nodeKey, entryEpoch],
+    )
+    if (queued.rows.length === 0) {
+      if (activeQueue.position !== activeQueue.length) {
+        throw new ServiceError(
+          'Sequential approval queue ended before its declared length',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { createdTasks: [], remainingAssignments: 0 }
+    }
+
+    const parsedQueued = queued.rows.map((row) => ({
+      row,
+      queue: readSequentialQueueMetadata(row.metadata),
+    }))
+    if (parsedQueued.some(({ queue }) => queue === null)) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const orderedQueued = parsedQueued
+      .map(({ row, queue }) => ({ row, queue: queue! }))
+      .sort((left, right) => left.queue.position - right.queue.position)
+    const expectedRemaining = activeQueue.length - activeQueue.position
+    if (
+      orderedQueued.length !== expectedRemaining
+      || orderedQueued.some(({ queue }, index) => (
+        queue.state !== 'queued'
+        || queue.length !== activeQueue.length
+        || queue.position !== activeQueue.position + index + 1
+      ))
+    ) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const next = orderedQueued[0].row
+    if (next.assignment_type !== 'user' && next.assignment_type !== 'role') {
+      throw new ServiceError(
+        'Sequential approval queue assignment type is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, [{
+      assignmentType: next.assignment_type,
+      assigneeId: next.assignee_id,
+      nodeKey,
+      metadata: next.metadata,
+    }])
+    const activated = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = TRUE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('active'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND is_active = FALSE
+        RETURNING id`,
+      [next.id],
+    )
+    if (activated.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be activated',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    return {
+      createdTasks: next.assignment_type === 'user'
+        ? [{ nodeKey, entryEpoch, assigneeUserId: next.assignee_id, sourceStep: next.source_step }]
+        : [],
+      remainingAssignments: activeQueue.length - activeQueue.position,
+    }
+  }
+
   /**
    * A-2a: post-commit emission of approval.task_created — one event per user-typed assignment row
    * created by the just-committed operation. Best-effort by contract: a lookup/emit failure NEVER
    * fails the approval flow (the T2-6 dedupe ledger also absorbs any later re-emission), and the
    * instance snapshot is re-read AFTER commit so the event reflects durable state.
+   *
+   * P1#2e producer family 1 — flag-OFF delivery leg. The recheck+dedup+instance-read+build logic is now the
+   * SHARED `collectLiveApprovalTaskCreatedEvents` core (parameterized on the query fn); this leg passes
+   * `pool.query`, so it is BYTE-IDENTICAL to the pre-P1#2e inline logic. When the flag is ON, the individual
+   * `emitApprovalTaskCreatedEvent` is choke-suppressed (the in-txn `enqueueApprovalTaskCreatedEventsInTxn` leg
+   * is the delivery path); the post-commit collector read here is then harmless (read-only, values-free).
    */
   private async emitApprovalTaskCreatedEventsPostCommit(
     instanceId: string,
@@ -6143,42 +14338,48 @@ export class ApprovalProductService {
   ): Promise<void> {
     if (tasks.length === 0) return
     try {
-      // Same-transaction cascades (auto-approve at entry, immediate handover) can deactivate a row
-      // BEFORE commit — only still-active assignments are real pending items, so re-check against
-      // durable state and drop the rest (values-free: key fields only).
-      const activeResult = await pool.query(
-        `SELECT node_key, assignee_id, entry_epoch FROM approval_assignments
-          WHERE instance_id = $1 AND is_active = TRUE AND assignment_type = 'user'`,
-        [instanceId],
+      const events = await collectLiveApprovalTaskCreatedEvents(
+        (sql, params) => pool.query(sql, params),
+        instanceId,
+        tasks,
       )
-      const activeKeys = new Set(
-        (activeResult.rows as Array<{ node_key: string; assignee_id: string; entry_epoch: number | string | null }>).map(
-          (row) => `${row.node_key}:${row.entry_epoch === null ? 'null' : String(Number(row.entry_epoch))}:${row.assignee_id}`,
-        ),
-      )
-      const seen = new Set<string>()
-      const liveTasks = tasks.filter((task) => {
-        const key = `${task.nodeKey}:${task.entryEpoch === null ? 'null' : String(task.entryEpoch)}:${task.assigneeUserId}`
-        if (seen.has(key) || !activeKeys.has(key)) return false
-        seen.add(key)
-        return true
-      })
-      if (liveTasks.length === 0) return
-      const result = await pool.query(
-        `SELECT id, request_no, template_id, template_version_id, published_definition_id,
-                business_key, workflow_key, requester_snapshot
-           FROM approval_instances WHERE id = $1`,
-        [instanceId],
-      )
-      const instance = result.rows[0] as ApprovalTaskCreatedInstanceSnapshot | undefined
-      if (!instance) return
-      for (const task of liveTasks) {
-        emitApprovalTaskCreatedEvent(buildApprovalTaskCreatedEvent({ instance, task }))
+      for (const event of events) {
+        emitApprovalTaskCreatedEvent(event)
       }
     } catch (error) {
       approvalProductLogger.warn(
         `approval.task_created post-commit emission failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
       )
+    }
+  }
+
+  /**
+   * P1#2e producer family 1 — flag-ON delivery leg for approval.task_created. Runs at the END of a source txn
+   * (after every assignment write AND same-transaction cascade deactivation in that txn) with the SOURCE-TXN
+   * query fn, so the SHARED collector's `is_active` recheck observes the txn's own pre-commit view — identical
+   * filtering to the post-commit read of committed state (design §4a). Each surviving event is enqueued on the
+   * SAME transaction as the source writes, so the outbox rows commit or roll back atomically with them.
+   *
+   * NOT best-effort (unlike the post-commit leg): a failed enqueue THROWS and rolls back the whole transition —
+   * that atomicity is the entire point of durable delivery. Flag OFF ⇒ pure no-op (no extra txn reads), which
+   * keeps the flag-OFF path byte-identical. `client` MUST be the same in-transaction connection as the writes.
+   */
+  private async enqueueApprovalTaskCreatedEventsInTxn(
+    client: ApprovalDbClient,
+    instanceId: string,
+    tasks: ApprovalTaskCreatedTaskSnapshot[],
+  ): Promise<void> {
+    if (!isDurableDeliveryEnabled()) return
+    if (tasks.length === 0) return
+    const events = await collectLiveApprovalTaskCreatedEvents(
+      (sql, params) => client.query(sql, params),
+      instanceId,
+      tasks,
+    )
+    if (events.length === 0) return
+    const trx = approvalTxnHandle(client)
+    for (const event of events) {
+      await enqueueApprovalEventIfDurable(trx, event)
     }
   }
 
@@ -6199,6 +14400,49 @@ export class ApprovalProductService {
     } catch (error) {
       approvalProductLogger.warn(
         `approval card supersede sweep failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Codex 审阅第 3 条修复 (2026-09-19) — announce the redeemed cancellation on the SAME send site
+   * the HTTP cancel route uses.
+   *
+   * SYNCHRONOUS AND UNAWAITED BY CONTRACT. The bound delivery is the plugin's `emitEvent`, i.e.
+   * `eventBus.emit`, which is in-process and returns nothing. This method is deliberately not
+   * `async`: an `await` here would let a slow subscriber delay the HTTP response for a decision
+   * that is already durable, and per
+   * `feedback_persistent_transition_must_not_depend_on_network_call` nothing persistent may hang
+   * off this call at all.
+   *
+   * EVERY failure mode is a warning:
+   *   - `null` argument  ⇒ this dispatch performed no redemption. Silent, not warned: the ordinary
+   *     case for every non-cancel-round approve that flows through this same post-commit region.
+   *   - delivery unbound ⇒ warned. Fails OPEN on purpose (see the registry's own doc comment).
+   *   - delivery threw   ⇒ warned. The outer `catch` of `dispatchAction` must NEVER see this: it runs
+   *     `rollbackQuietly` on an already-COMMITTED transaction and rethrows, which would turn a successful,
+   *     durable business cancellation into a 500 over a failure in THIS delivery hop, not a listener's bug.
+   */
+  private deliverCancelRoundCancelledEventPostCommit(
+    delivery:
+      | { readonly result: AttendanceRequestOperationBoundaryResultV1; readonly requestId: string }
+      | null,
+  ): void {
+    if (!delivery) return
+    const deliver = getCancelRoundCancelledEventDelivery()
+    if (!deliver) {
+      approvalProductLogger.warn(
+        `cancel-round redemption for request ${delivery.requestId} committed, but no `
+          + `attendance.request.cancelled delivery is bound — the cancellation was NOT announced`,
+      )
+      return
+    }
+    try {
+      deliver(delivery.result, delivery.requestId)
+    } catch (error) {
+      approvalProductLogger.warn(
+        `attendance.request.cancelled delivery failed for request ${delivery.requestId} (the `
+          + `cancellation itself is committed): ${error instanceof Error ? error.message : String(error)}`,
       )
     }
   }
@@ -6238,7 +14482,14 @@ export class ApprovalProductService {
   //   - exactly one non-NULL epoch → return it → epoch tally.
   //   - mixed NULL/non-NULL, or >1 distinct non-NULL → a STRUCTURAL invariant violation (a single
   //     round must never span epochs) → fail closed. Never MAX()-collapse.
-  private async currentNodeEntryEpoch(
+  //
+  // VISIBILITY WIDENED (`private` -> public), body unchanged: the legacy decision endpoints in
+  // `routes/approvals.ts` stamp the ROUND half of a decision row's node attribution and must use
+  // THIS resolver, on their own transaction client, rather than a second hand-written copy of the
+  // `DISTINCT entry_epoch` query — a copy would have to re-derive the empty/mixed fail-closed
+  // branches below by hand, and a narrower re-derivation of a shared rule is the drift this whole
+  // module's docblocks keep warning about. No call site changed; no behaviour changed.
+  async currentNodeEntryEpoch(
     client: { query: typeof pool.query },
     instanceId: string,
     nodeKey: string,
@@ -6271,6 +14522,91 @@ export class ApprovalProductService {
     }
     const only = result.rows[0]?.entry_epoch
     return only === null || only === undefined ? null : Number(only)
+  }
+
+  // Lock-1 §K3 — the referenced prior nodes' ACTUAL deciders, read from instance-internal
+  // `approval_records` audit rows on the SAME transaction client (never a directory read;
+  // instance-internal reads are not directory reads — §2.1 keeps the resolver pure by having the
+  // CALLER read this at activation and pass it in alongside the snapshots).
+  //
+  // Round scoping (OD-L1-3(a), LATEST round only — matching the threshold tally's epoch-scoped
+  // posture): per referenced node, keep only the `action='approve'` rows whose
+  // `metadata.nodeEntryEpoch` equals the node's LATEST recorded epoch. Rows with NO epoch exist
+  // only on legacy pre-epoch instances — unreachable for K3 (the kind postdates epoch stamping,
+  // and an instance pins its published definition, which could not have carried the kind before
+  // this slice) — but are handled totally: they count only when NO epoched row exists.
+  //
+  // Sentinel actors (`system:auto-approval`, `system:approval-timeout` — the `system:` namespace,
+  // the repo-wide non-user actor convention) are DROPPED, never assigned (§K3); under
+  // `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's real id
+  // and is therefore kept. Deciders keep audit-row order (occurred_at, id), deduped.
+  //
+  // `inFlight` (approve path only): the acting user IS a decider of the CURRENT node's round, but
+  // their own approve record is inserted only AFTER resolution — so the caller passes them here,
+  // scoped to the current round's epoch (persisted partial votes of THIS round are kept; any
+  // PRIOR round's rows are excluded even when the current round has no rows yet).
+  private async loadPriorNodeApproverDeciders(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    referencedNodeKeys: ReadonlySet<string>,
+    inFlight?: { nodeKey: string; actorId: string; epoch: number | null },
+  ): Promise<Record<string, string[]>> {
+    const map: Record<string, string[]> = {}
+    if (referencedNodeKeys.size === 0) return map
+    const result = await client.query<{ actor_id: string; node_key: string; metadata: Record<string, unknown> | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key, metadata
+         FROM approval_records
+        WHERE instance_id = $1
+          AND action = 'approve'
+          AND metadata->>'nodeKey' = ANY($2::text[])
+        ORDER BY occurred_at ASC, id ASC`,
+      [instanceId, [...referencedNodeKeys]],
+    )
+    const rowsByNode = new Map<string, Array<{ actorId: string; epoch: number | null }>>()
+    for (const row of result.rows) {
+      const rawEpoch = toNullableRecord(row.metadata)?.nodeEntryEpoch
+      const epoch = typeof rawEpoch === 'number' && Number.isInteger(rawEpoch)
+        ? rawEpoch
+        : typeof rawEpoch === 'string' && /^\d+$/.test(rawEpoch)
+          ? Number.parseInt(rawEpoch, 10)
+          : null
+      const list = rowsByNode.get(row.node_key)
+      const entry = { actorId: row.actor_id, epoch }
+      if (list) list.push(entry)
+      else rowsByNode.set(row.node_key, [entry])
+    }
+    for (const nodeKey of referencedNodeKeys) {
+      const rows = rowsByNode.get(nodeKey) ?? []
+      let roundRows: Array<{ actorId: string; epoch: number | null }>
+      if (inFlight && inFlight.nodeKey === nodeKey) {
+        // The in-flight round is authoritative: keep only THIS round's persisted partial votes
+        // (epoch equality; a null in-flight epoch — legacy — keeps only epoch-less rows).
+        roundRows = rows.filter((row) => row.epoch === inFlight.epoch)
+      } else {
+        const epochs = rows.map((row) => row.epoch).filter((epoch): epoch is number => epoch !== null)
+        if (epochs.length > 0) {
+          const latest = Math.max(...epochs)
+          roundRows = rows.filter((row) => row.epoch === latest)
+        } else {
+          roundRows = rows
+        }
+      }
+      const deciders: string[] = []
+      const seen = new Set<string>()
+      const pushDecider = (actorId: string): void => {
+        const id = actorId.trim()
+        // Gate round 6, G6-1: was an inline `id.startsWith('system:')`. Behaviour-identical, but
+        // now the SAME exported predicate the cancel-round seat derivation calls — one definition
+        // of the non-user namespace instead of two copies that can drift.
+        if (!id || isSystemSentinelActor(id) || seen.has(id)) return
+        seen.add(id)
+        deciders.push(id)
+      }
+      for (const row of roundRows) pushDecider(row.actorId)
+      if (inFlight && inFlight.nodeKey === nodeKey) pushDecider(inFlight.actorId)
+      map[nodeKey] = deciders
+    }
+    return map
   }
 
   // Dynamic-source discriminator. `metadata.resolvedFrom` is written ONLY by
@@ -6415,16 +14751,247 @@ export class ApprovalProductService {
     }
   }
 
+  // Lock-7 L7-C / OD-L7-6(a) — the handler-node field write. Callable ONLY from step (2) of Lock-3
+  // §3's handle transaction (claim → apply → bump version → audit → resolve). The mask reads exactly
+  // `[nodeKey]` — the actor's SINGLE claimed seat, never a re-derivation (L7-A) — so `editable` ⇒
+  // writable and `readonly`/`hidden` ⇒ a values-free refusal that rolls back the whole transaction
+  // (G-3/G-15). Values are validated against the FROZEN version schema (create-path validators,
+  // G-6). Returns the changed field ids + before/after revisions so the caller writes the
+  // values-free `handle` audit row (changedFieldIds, no values — OD-L7-7) and the append-only
+  // revision rows. The `form_snapshot` UPDATE is IN PLACE (OD-L7-6(a)): every existing reader (DTO
+  // echo, FWB projection at `status='approved'`, condition routing) is then automatically correct
+  // with no composition step (G-17 — a delta table read-composed by each reader would be fail-OPEN
+  // by omission). Drivers can never be `editable` (publish pin 1 / OD-L7-8(a)), so the in-memory
+  // executor built from the pre-edit snapshot resolves the next node identically — an edit never
+  // re-routes.
+  private async applyHandlerFieldWrites(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    rawWrites: unknown,
+    context: {
+      runtimeGraph: RuntimeGraph
+      formSchema: FormSchema
+      frozenSnapshot: Record<string, unknown>
+    },
+  ): Promise<{ changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> }> {
+    // Payload must be a plain object of fieldId → value. `null` / array / scalar ⇒ values-free 400.
+    if (!isRecord(rawWrites)) {
+      throw new ServiceError('Field writes payload is invalid', 400, 'APPROVAL_FIELD_WRITE_PAYLOAD_INVALID', { nodeKey })
+    }
+    const writeEntries = Object.entries(rawWrites)
+    // An empty `{}` is an accepted payload with zero writes — the handle proceeds, no UPDATE, no rows.
+    if (writeEntries.length === 0) {
+      return { changedFieldIds: [], revisions: [] }
+    }
+    const schemaFields = new Map((context.formSchema.fields ?? []).map((field) => [field.id, field]))
+    const attachmentValueMode = isApprovalAttachmentsEnabled() ? 'ids' as const : 'legacy' as const
+    // Lock-7 OD-L7-8 RUNTIME driver guard (defense-in-depth, matrix-INDEPENDENT). The publish pin only
+    // rejects an EXPLICIT `editable` driver, but OD-L7-9's absent≡editable makes a driver simply OMITTED
+    // from this handler's matrix default-editable — and the mask below would then permit the write, so
+    // an approver could edit a `form_field_user` / `ConditionRule` / condition-formula field and choose
+    // their own downstream reviewer/branch (master §P4 exit: "cannot be bypassed by HTTP calls"). Refuse
+    // a write to ANY field in the instance's FROZEN-graph driver set regardless of its access
+    // (editable/readonly/hidden/required/absent), values-free. Same shared collection the pin uses
+    // (no drift).
+    // The collection re-parses each condition formula, but that cannot introduce a NEW in-flight break:
+    // the same dispatch already ran `asRuntimeGraph` (`:6794`) → `normalizeConditionFormulaPredicate`
+    // over the identical stored formulas, so an unparseable stored formula throws THERE first, before
+    // this guard is reached (§2.1 — no formula reaches here that has not already been re-parsed OK).
+    const routingDriverFieldIds = collectRoutingDriverFieldIds(context.runtimeGraph.nodes)
+    const revisions: Array<{ fieldId: string; before: unknown; after: unknown }> = []
+    const merge: Record<string, unknown> = {}
+    for (const [fieldId, value] of writeEntries) {
+      const field = schemaFields.get(fieldId)
+      // Unknown top-level field id. This is ALSO the OD-L7-12 detail sub-column case: a
+      // `fieldId.columnId` address is never a top-level schema id, so it lands here — v1 excludes
+      // per-sub-column access (the cross-reference set is top-level only). Fail-closed 400.
+      if (!field) {
+        throw new ServiceError('Field write references an unknown field', 400, 'APPROVAL_FIELD_WRITE_UNKNOWN_FIELD', { nodeKey, fieldId })
+      }
+      // Routing driver — never writable at any node, whatever the matrix says (see the guard note above).
+      if (routingDriverFieldIds.has(fieldId)) {
+        throw new ServiceError('Field write to a routing driver is not permitted', 403, 'APPROVAL_FIELD_WRITE_DRIVER_FORBIDDEN', { nodeKey, fieldId })
+      }
+      const access = fieldAccessAtNodes(context.runtimeGraph, [nodeKey], fieldId)
+      // Lock-7B §2.2 — WRITABLE is set membership over the shared `NODE_FIELD_ACCESS_WRITABLE_VALUES`
+      // (`editable` ∪ `required`), not a bare `!== 'editable'` equality: `required` is `editable` plus
+      // a submit-time obligation (OD-L7B-1), so the handler MUST be able to fill the field the author
+      // just made mandatory, or the node would deadlock on its own obligation.
+      if (!NODE_FIELD_ACCESS_WRITABLE_VALUES.has(access)) {
+        // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
+        throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
+      }
+      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` / `department` writes need binding+authz
+      // that Lock-7's named validators (validateFieldType/Constraints/Detail) do NOT cover —
+      // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
+      // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
+      // approval-node write surface (OD-L7-3's named next slice) carries the binding surfaces.
+      //
+      // Lock-8 L8-A (§1.1) gate P2-2 hardening: `explanation` joins this refusal for a DIFFERENT
+      // reason — it carries no value at ANY time (display-only, A-1). A handler node with NO matrix
+      // entry for it defaults to OD-L7-9 absent≡editable (`fieldAccessAtNodes` above), so the ONLY
+      // remaining backstop was `validateFieldType`'s explicit `case 'explanation'` arm
+      // (ApprovalGraphExecutor.ts) — which DOES refuse a non-null submitted value, but that function's
+      // own universal `value === undefined || value === null` early return (shared by every field
+      // type, not explanation-specific) lets a `null` write skip validation entirely. Without this
+      // arm, `fieldWrites: {<explanationId>: null}` would reach the `merge[fieldId] = value` in-place
+      // UPDATE below and add an `explanation` key to `form_snapshot` (plus a field-revision row) for a
+      // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
+      // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
+      // arm above, unaffected by this change.
+      if (
+        field.type === 'record-link'
+        || field.type === 'attachment'
+        || field.type === 'department'
+        || field.type === 'explanation'
+      ) {
+        throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
+      }
+      // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a
+      // field type with no explicit `validateFieldType` arm returns null ⇒ written unvalidated.
+      const errors = field.type === 'detail'
+        ? validateDetailFieldValue(field, value, { attachmentValueMode })
+        : [validateFieldType(field, value, { attachmentValueMode }), ...validateFieldConstraints(field, value)]
+            .filter((error): error is string => Boolean(error))
+      if (errors.length > 0) {
+        throw new ServiceError('Field write value is invalid', 400, 'APPROVAL_FIELD_WRITE_INVALID', { nodeKey, fieldId })
+      }
+      revisions.push({
+        fieldId,
+        before: Object.prototype.hasOwnProperty.call(context.frozenSnapshot, fieldId) ? context.frozenSnapshot[fieldId] : null,
+        after: value,
+      })
+      merge[fieldId] = value
+    }
+    // IN-PLACE UPDATE (OD-L7-6(a), R-10) — the first and only UPDATE of `form_snapshot`. `||` merges
+    // the written fields over the create-time snapshot, preserving untouched fields.
+    await client.query(
+      `UPDATE approval_instances
+          SET form_snapshot = COALESCE(form_snapshot, '{}'::jsonb) || $2::jsonb,
+              updated_at = now()
+        WHERE id = $1`,
+      [instanceId, JSON.stringify(merge)],
+    )
+    return { changedFieldIds: revisions.map((revision) => revision.fieldId), revisions }
+  }
+
+  // Lock-7 OD-L7-6(a) — append the per-field revision rows, each stamped with the `handle` audit
+  // row's id (`auditRecordId`) so `MAX(audit_record_id)` is the 内容变更 dedup ordinal (G-16). Values
+  // (before/after) live ONLY here, behind the mask-aware read — never on the broadly-scoped audit
+  // surface (OD-L7-7).
+  private async insertFormFieldRevisions(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    actorId: string,
+    nodeEntryEpoch: number | null,
+    auditRecordId: string,
+    revisions: Array<{ fieldId: string; before: unknown; after: unknown }>,
+  ): Promise<void> {
+    for (const revision of revisions) {
+      await client.query(
+        `INSERT INTO approval_form_field_revisions
+         (instance_id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)`,
+        [
+          instanceId,
+          nodeKey,
+          revision.fieldId,
+          revision.before === undefined ? null : JSON.stringify(revision.before),
+          revision.after === undefined ? null : JSON.stringify(revision.after),
+          actorId,
+          nodeEntryEpoch,
+          auditRecordId,
+        ],
+      )
+    }
+  }
+
+  /**
+   * Lock-7 OD-L7-7 / G-8 — the mask-aware revision read surface. Before/after VALUES live here (never
+   * on the broadly-scoped audit/history surface), and a field currently `hidden` at the instance's
+   * active node(s) has its before/after REDACTED (fail-closed), so a hidden field's value cannot leak
+   * through the revision surface either. WHO may call this at all (instance-detail read scope) is the
+   * OPEN owner question D-5 — Lock-7 deliberately does NOT settle it and adds no HTTP route here; the
+   * `actor` parameter is reserved for a later actor-scoped read once D-5 resolves.
+   */
+  async getFormFieldRevisions(
+    instanceId: string,
+    _actor?: { userId: string; roles?: string[] } | null,
+  ): Promise<Array<{ id: string; nodeKey: string; fieldId: string; before: unknown; after: unknown; actorId: string; nodeEntryEpoch: number | null; auditRecordId: string; redacted: boolean }>> {
+    if (!pool) throw new Error('Database not available')
+    const instanceResult = await pool.query<{ current_node_key: string | null; metadata: Record<string, unknown> | null; published_definition_id: string | null }>(
+      `SELECT current_node_key, metadata, published_definition_id FROM approval_instances WHERE id = $1`,
+      [instanceId],
+    )
+    const instance = instanceResult.rows[0]
+    let hiddenFieldIds = new Set<string>()
+    if (instance?.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: Record<string, unknown> }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtimeGraph = runtimeResult.rows[0]?.runtime_graph
+      if (runtimeGraph) {
+        hiddenFieldIds = collectHiddenFieldIds(
+          runtimeGraph as unknown as { nodes?: Array<{ key?: unknown; type?: unknown; config?: unknown } | null> },
+          collectActiveNodeKeys(instance.current_node_key, instance.metadata),
+        )
+      }
+    }
+    const revisionsResult = await pool.query<{
+      id: string | number
+      node_key: string
+      field_id: string
+      before_value: unknown
+      after_value: unknown
+      actor_id: string
+      node_entry_epoch: number | null
+      audit_record_id: string | number
+    }>(
+      `SELECT id, node_key, field_id, before_value, after_value, actor_id, node_entry_epoch, audit_record_id
+         FROM approval_form_field_revisions
+        WHERE instance_id = $1
+        ORDER BY id ASC`,
+      [instanceId],
+    )
+    return revisionsResult.rows.map((row) => {
+      const redacted = hiddenFieldIds.has(row.field_id)
+      return {
+        id: String(row.id),
+        nodeKey: row.node_key,
+        fieldId: row.field_id,
+        before: redacted ? null : row.before_value,
+        after: redacted ? null : row.after_value,
+        actorId: row.actor_id,
+        nodeEntryEpoch: row.node_entry_epoch,
+        auditRecordId: String(row.audit_record_id),
+        redacted,
+      }
+    })
+  }
+
+  // Returns the inserted `approval_records.id` (decimal string). Lock-7 OD-L7-6(a) needs the `handle`
+  // row's id as the per-field revision rows' `audit_record_id` (the 内容变更 dedup ordinal, G-16) —
+  // callers that ignore the return value are unaffected (pure widening; RETURNING adds no round-trip).
   private async insertApprovalRecord(
     client: { query: typeof pool.query },
     instanceId: string,
     record: ApprovalRecordInsert,
     actor?: { ip?: string | null; userAgent?: string | null },
-  ): Promise<void> {
-    await client.query(
+  ): Promise<string> {
+    // H-5: `reason` is APPENDED as the LAST column/placeholder rather than slotted next to
+    // `comment`, deliberately. Every existing positional index ($1..$13) therefore keeps its
+    // meaning, including for the unit suites that assert on this statement's params BY INDEX
+    // (e.g. `params[9]` = metadata, `params[2]` = actor_id in approval-product-service.test.ts).
+    // A caller that does not set `reason` writes NULL, which is what the column already held for
+    // every row this writer has ever produced.
+    const result = await client.query<{ id: string | number }>(
       `INSERT INTO approval_records
-       (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+       (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING id`,
       [
         instanceId,
         record.action,
@@ -6439,8 +15006,15 @@ export class ApprovalProductService {
         record.targetUserId || null,
         actor?.ip || null,
         actor?.userAgent || null,
+        record.reason ?? null,
       ],
     )
+    // Production: `RETURNING id` on a successful single-row INSERT always yields exactly one row, so
+    // this is the `handle` row's id (the revision rows' audit_record_id, OD-L7-6(a)). The `?? ''`
+    // guard covers ONLY unit mocks whose fake query returns an empty `rows` for this INSERT — those
+    // paths never insert revision rows (no field writes), so the empty id is never consumed.
+    const insertedId = result?.rows?.[0]?.id
+    return insertedId != null ? String(insertedId) : ''
   }
 }
 

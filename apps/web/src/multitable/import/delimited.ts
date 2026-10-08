@@ -1,6 +1,7 @@
 import type { MetaField } from '../types'
-import { importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
+import { importCancelled, importDateTimeInvalid, importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
+import { calendarDayFromText, parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 
 export type DelimitedParseResult = {
   delimiter: ',' | '\t'
@@ -15,7 +16,22 @@ export type ImportBuildFailure = {
   fieldName?: string
 }
 
-export type ImportValueResolver = (rawValue: string, field: MetaField) => Promise<unknown | null> | unknown
+/**
+ * #5809 — per-build context handed to a resolver. `signal` aborts when the user cancels the import
+ * while the records are still being built, so a resolver can drop lookups it has only queued.
+ */
+export type ImportResolveContext = { signal?: AbortSignal }
+
+export type ImportValueResolver = ((rawValue: string, field: MetaField, context?: ImportResolveContext) => Promise<unknown | null> | unknown) & {
+  /**
+   * #5809 — optional look-ahead. Called once per build, BEFORE the row loop, with every non-empty raw
+   * value of the field's column (row order, overridden cells left out), so a resolver can queue its
+   * bounded per-token lookups for the whole import instead of one row at a time. Fire-and-forget: it
+   * decides nothing — every cell is still resolved (and fails) through the resolver call itself — and
+   * anything it throws is ignored.
+   */
+  prime?: (rawValues: string[], field: MetaField, context?: ImportResolveContext) => void
+}
 
 export type ImportBuildResult = {
   records: Array<Record<string, unknown>>
@@ -52,6 +68,13 @@ function detectDelimiter(text: string): ',' | '\t' {
 
 function normalizeLookupKey(value: string): string {
   return value.trim().toLowerCase()
+}
+
+/** #5809 — the rejection a cancelled build ends with (same shape bulk-import uses: name `AbortError`). */
+export function createImportAbortError(isZh = false): Error {
+  const error = new Error(importCancelled(isZh))
+  error.name = 'AbortError'
+  return error
 }
 
 export function extractImportTokens(rawValue: string): string[] {
@@ -127,13 +150,26 @@ export async function buildImportedRecords(params: {
   fieldResolvers?: Record<string, ImportValueResolver>
   fieldOverrides?: ImportFieldOverrides
   isZh?: boolean
+  /**
+   * #5809 — aborting it stops the build: no further row is resolved, resolvers receive it (so queued
+   * lookups can be dropped), and the promise rejects with an `AbortError` instead of returning records.
+   */
+  signal?: AbortSignal
 }): Promise<ImportBuildResult> {
-  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {}, isZh = false } = params
+  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {}, isZh = false, signal } = params
   const records: Array<Record<string, unknown>> = []
   const rowIndexes: number[] = []
   const failures: ImportBuildFailure[] = []
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw createImportAbortError(isZh)
+  }
+  const resolveContext: ImportResolveContext | undefined = signal ? { signal } : undefined
+
+  throwIfAborted()
+  primeFieldResolvers({ parsedRows, fieldMapping, fields, fieldResolvers, fieldOverrides, context: resolveContext })
 
   for (const [rowIndex, row] of parsedRows.entries()) {
+    throwIfAborted()
     const data: Record<string, unknown> = {}
     let rowFailure: string | null = null
     let failingField: MetaField | null = null
@@ -149,8 +185,29 @@ export async function buildImportedRecords(params: {
       if (field?.type === 'number' && val !== '') data[fieldId] = Number(val)
       else if (field?.type === 'boolean') data[fieldId] = val.toLowerCase() === 'true' || val === '1'
       else if (field?.type === 'date' && val !== '') {
-        const d = new Date(val)
-        data[fieldId] = !Number.isNaN(d.getTime()) ? d.toISOString().split('T')[0] : val
+        // A date-only field is a floating calendar day (#3417): the day AS WRITTEN, no timezone math. The
+        // former `new Date(val).toISOString().split('T')[0]` moved a locally-parsed `9/24/26` (an Excel
+        // date cell's text) to the previous day on every UTC+ browser (PR #6083 review item 2).
+        data[fieldId] = calendarDayFromText(val) ?? val
+      } else if (field?.type === 'dateTime') {
+        // 客户反馈 2026-09-24 #4c (B1): a dateTime cell is the SAME `YYYY-MM-DD HH:mm` business wall clock the
+        // export writes (zone rule: explicit non-UTC field zone, else the business zone); an absolute ISO
+        // string keeps its instant. Parsed HERE (not left to the server) so the row failure names the field
+        // in the import preview instead of a generic 400, and so a zone-less string is never read in the
+        // browser's zone. Unparseable non-empty text fails the ROW (values-free message) — never dropped,
+        // never stored as raw text.
+        const rawValue = val.trim()
+        if (!rawValue) {
+          data[fieldId] = null
+          continue
+        }
+        const ms = parseDateTimeTextToUtcMs(rawValue, resolveDateTimeTimezone(field.property))
+        if (ms === null) {
+          rowFailure = importDateTimeInvalid(field.name, isZh)
+          failingField = field
+          break
+        }
+        data[fieldId] = new Date(ms).toISOString()
       } else if (field && (isLinkField(field) || isNativePersonField(field))) {
         // Link, legacy link-backed person (isLinkField), OR native person (isNativePersonField).
         // All three resolve a delimited token to an id[] via the injected resolver; the resolver
@@ -169,7 +226,7 @@ export async function buildImportedRecords(params: {
         }
         let resolved: unknown | null
         try {
-          resolved = await resolver(rawValue, field)
+          resolved = await (resolveContext ? resolver(rawValue, field, resolveContext) : resolver(rawValue, field))
         } catch (error: any) {
           rowFailure = error?.message ?? importValueResolveFailed(field.name, rawValue, isPersonField(field) ? 'person' : 'link', isZh)
           failingField = field
@@ -198,5 +255,36 @@ export async function buildImportedRecords(params: {
     }
   }
 
+  // A cancel during the last row (even one whose resolver ignored the signal) still rejects.
+  throwIfAborted()
   return { records, rowIndexes, failures }
+}
+
+function primeFieldResolvers(params: {
+  parsedRows: string[][]
+  fieldMapping: Record<number, string>
+  fields: MetaField[]
+  fieldResolvers: Record<string, ImportValueResolver>
+  fieldOverrides: ImportFieldOverrides
+  context?: ImportResolveContext
+}) {
+  const { parsedRows, fieldMapping, fields, fieldResolvers, fieldOverrides, context } = params
+  for (const [colIdx, fieldId] of Object.entries(fieldMapping)) {
+    if (!fieldId) continue
+    const prime = fieldResolvers[fieldId]?.prime
+    const field = fields.find((candidate) => candidate.id === fieldId)
+    if (!prime || !field || !(isLinkField(field) || isNativePersonField(field))) continue
+    const rawValues: string[] = []
+    for (const [rowIndex, row] of parsedRows.entries()) {
+      if (fieldOverrides[rowIndex]?.[fieldId] !== undefined) continue
+      const rawValue = (row[Number(colIdx)] ?? '').trim()
+      if (rawValue) rawValues.push(rawValue)
+    }
+    if (!rawValues.length) continue
+    try {
+      prime(rawValues, field, context)
+    } catch {
+      // Look-ahead only: the row loop resolves every cell itself.
+    }
+  }
 }

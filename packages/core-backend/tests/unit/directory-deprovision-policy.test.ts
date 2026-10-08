@@ -24,18 +24,86 @@ import {
  * policy dispatch; the write-shape of each policy; the circuit breaker; the env gate; and the
  * fail-safe direction of policy resolution.
  */
-function stubClient(candidates: Array<{ directory_account_id: string; local_user_id: string; deprovision_policy_override: string | null }>) {
+// W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22): `applyDirectoryDeprovisionPolicies`
+// now ALSO resolves the run's org (`SELECT org_id FROM directory_integrations ...`) and — for a
+// policy that actually executed a write — attempts a same-transaction `user_orgs` deactivation
+// via `deactivateUserOrgMembershipIfNoOtherActiveBinding` (a row lock SELECT, then a conditional
+// UPDATE). This stub answers all three shapes the same "does not evaluate the predicate" way the
+// pre-existing shapes do — the org-scoped sibling predicate itself is proved against real
+// Postgres in the real-DB suites (this file's own scope note), same discipline extended to the
+// new queries.
+//
+// W4-PRE-1d (owner P2, #4530 review, issuecomment-5043752399, 2026-07-22): the candidate
+// SELECT is now itself org-scoped (org resolved EAGERLY, no longer lazily — the org id is a
+// WHERE parameter) and a SECOND query decides the GLOBAL candidate set (no other active binding
+// ANYWHERE) that gates grant/platform-user actions. This stub answers the global-clear query
+// with "every requested user IS globally clear" by default — same "does not evaluate the
+// predicate" discipline — unless a test opts a user OUT via `notGloballyClear`, which is how
+// the new item-2 dispatch tests below exercise the "org-membership candidate but NOT globally
+// clear" branch without a real database.
+const STUB_ORG_ID = 'org-1'
+
+function stubClient(
+  candidates: Array<{ directory_account_id: string; local_user_id: string; deprovision_policy_override: string | null }>,
+  options: { notGloballyClear?: string[] } = {},
+) {
+  const notGloballyClear = new Set(options.notGloballyClear ?? [])
   const queries: string[] = []
   return {
     queries,
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
       if (/FROM directory_accounts a/i.test(sql) && /JOIN directory_account_links/i.test(sql)) {
         // The stub answers the selection query with whatever the test asked for. It does NOT
         // evaluate the predicate — see the scope note.
         return { rows: candidates }
       }
-      if (/INSERT INTO user_external_auth_grants/i.test(sql) || /UPDATE users SET is_active = FALSE/i.test(sql)) {
+      if (/INSERT INTO user_external_auth_grants/i.test(sql)) {
+        return { rows: [] }
+      }
+      // Rev 4.4: the grant flip is now a plain effect-driven UPDATE (RETURNING is its
+      // fail-closed "row was still enabled" witness — answer it, don't just silence it).
+      if (/UPDATE user_external_auth_grants/i.test(sql)) {
+        return { rows: [{ local_user_id: String(params?.[0] ?? '') }] }
+      }
+      if (/SELECT org_id\s+FROM directory_integrations/i.test(sql)) {
+        return { rows: [{ org_id: STUB_ORG_ID }] }
+      }
+      // Delta re-review P1-D: the write-mode mutex is its own statement now (lock FIRST, then
+      // the candidacy read as a separate post-lock snapshot). The stub answers the lock with the
+      // row's existence; the ordering itself is asserted by the write-mode tests below.
+      if (/SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/i.test(sql)) {
+        return { rows: [{ id: String(params?.[0] ?? '') }] }
+      }
+      if (/FROM users candidate_user/i.test(sql)) {
+        const userId = String(params?.[0] ?? '')
+        return {
+          rows: [{
+            activation_status: 'activated',
+            is_active: true,
+            access_generation: 0,
+            linked_at_apply: true,
+            org_membership_active: true,
+            org_candidacy_clear: true,
+            globally_clear: !notGloballyClear.has(userId),
+            dingtalk_grant_enabled: true,
+            dingtalk_grant_row_exists: true,
+          }],
+        }
+      }
+      if (/UPDATE user_orgs\s+SET is_active = FALSE/i.test(sql)) {
+        return { rows: [{ user_id: String(params?.[0] ?? '') }] }
+      }
+      if (/UPDATE users\s+SET access_generation/i.test(sql)) {
+        return { rows: [{ access_generation: 1 }] }
+      }
+      if (/INSERT INTO directory_deprovision_events/i.test(sql)) {
+        return { rows: [{ id: 'event-1' }] }
+      }
+      if (
+        /directory_deprovision_(?:events|effects)/i.test(sql)
+        || /INSERT INTO directory_deprovision_effects/i.test(sql)
+      ) {
         return { rows: [] }
       }
       // Anything else is drift: a new query appeared that no test has reasoned about.
@@ -45,14 +113,20 @@ function stubClient(candidates: Array<{ directory_account_id: string; local_user
 }
 
 const wrote = (queries: string[], pattern: RegExp) => queries.some((sql) => pattern.test(sql))
-const DEACTIVATES_USER = /UPDATE users SET is_active = FALSE/i
-const DISABLES_GRANT = /INSERT INTO user_external_auth_grants/i
+const DEACTIVATES_USER = /UPDATE users[\s\S]*is_active = FALSE/i
+const DEACTIVATES_USER_ORG = /UPDATE user_orgs\s+SET is_active = FALSE/i
+// Rev 4.4: an ENABLED grant is closed by an effect-driven UPDATE … SET enabled = FALSE; the
+// INSERT shape is the deny-row CREATION for a person with no row (also matched so the
+// default-off test proves NEITHER write happens in preview).
+const DISABLES_GRANT = /(?:UPDATE user_external_auth_grants[\s\S]*SET enabled = FALSE|INSERT INTO user_external_auth_grants)/i
 
 const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null }
 
 describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', () => {
   const baseOptions = {
     integrationId: 'dir-1',
+    runId: 'run-1',
+    triggeredBy: 'unit-test',
     deactivatedAccountIds: ['acct-1'],
     syncedAccountCount: 100,
     integrationDefaultPolicy: 'mark_inactive',
@@ -65,28 +139,79 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     // The load-bearing safety property: merging this cannot deactivate anyone.
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    // P1-D: preview writes nothing, so it must lock nothing.
+    expect(wrote(client.queries, /FOR UPDATE/i)).toBe(false)
+    // W4-PRE-1c (owner 裁决②): disabled must ALSO never attempt the user_orgs deactivation —
+    // this is the unit-level half of mutation ①/② (moving the write before the enabled gate,
+    // or dropping the gate); the real-DB half lives in the W4-PRE-1c real-DB suite.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
 
     // …but the operator gets the preview.
     expect(outcome).toMatchObject({
       applied: false,
       candidateCount: 1,
+      globalCandidateCount: 1,
       usersDeactivatedCount: 1,
       grantsDisabledCount: 1,
+      // Preview mode reports what WOULD be attempted too — same construction as
+      // grantsDisabledCount (review-finding observability fix).
+      membershipDeactivationAttemptedCount: 1,
       abortedReason: null,
     })
   })
 
-  it('enabled + mark_inactive: disables the grant AND deactivates the local user', async () => {
+  it('enabled + mark_inactive: disables the grant, deactivates the local user, AND attempts the user_orgs deactivation', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, { ...baseOptions, enabled: true })
 
+    // P1-D ordering guard (answers the stub, not just silences it): write mode must take the
+    // users FOR UPDATE mutex BEFORE the candidacy read — the two sharing a statement (or the
+    // read coming first) is the exact stale-snapshot P1 the race golden kills on real PG.
+    const lockIndex = client.queries.findIndex((sql) => /FOR UPDATE/i.test(sql))
+    const stateIndex = client.queries.findIndex((sql) => /FROM users candidate_user/i.test(sql))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(stateIndex).toBeGreaterThan(lockIndex)
+    expect(client.queries[stateIndex]).not.toMatch(/FOR UPDATE/i)
+
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(true)
+    // W4-PRE-1c (owner 裁决②): mark_inactive is a policy that "actually executes" — the
+    // user_orgs deactivation attempt must fire in the same run. Whether it actually FLIPS the
+    // row depends on the org-scoped sibling check (real-DB suites); this stub cannot evaluate
+    // that predicate, only that the write was attempted.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
     expect(outcome.applied).toBe(true)
-    expect(outcome.affected).toEqual([{ directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'mark_inactive' }])
+    expect(outcome.affected).toEqual([
+      { directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'mark_inactive', globallyClear: true },
+    ])
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(1)
+    expect(outcome.globalCandidateCount).toBe(1)
   })
 
-  it('enabled + disable_grant_only: revokes DingTalk login but leaves the local user active', async () => {
+  // W4-PRE-1d item 1 vs item 2 (owner P2, #4530 review): the P1 defect this PR fixes — a person
+  // whose org-membership candidacy is real (org A has no other active binding) but who is NOT
+  // globally clear (still actively employed via a DIFFERENT org's directory) must have org A's
+  // `user_orgs` deactivated while their grant and platform account survive untouched.
+  it('enabled + mark_inactive + NOT globally clear: attempts the user_orgs deactivation but leaves the grant and platform user alone', async () => {
+    const client = stubClient([CANDIDATE], { notGloballyClear: ['user-1'] })
+    const outcome = await applyDirectoryDeprovisionPolicies(client, { ...baseOptions, enabled: true })
+
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
+    expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
+    expect(outcome).toMatchObject({
+      candidateCount: 1,
+      globalCandidateCount: 0,
+      grantsDisabledCount: 0,
+      usersDeactivatedCount: 0,
+      membershipDeactivationAttemptedCount: 1,
+    })
+    expect(outcome.affected).toEqual([
+      { directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'mark_inactive', globallyClear: false },
+    ])
+  })
+
+  it('enabled + disable_grant_only: revokes DingTalk login, leaves the local user active, but STILL attempts the user_orgs deactivation', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,
@@ -96,10 +221,39 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(true)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
-    expect(outcome).toMatchObject({ grantsDisabledCount: 1, usersDeactivatedCount: 0 })
+    // W4-PRE-1c (owner 裁决②, #4522 rev3 review, phrase "策略实际执行" per issuecomment-5042388830):
+    // disable_grant_only is NOT manual_review —
+    // it revokes real access (the grant) — so per the owner's own carve-out (only
+    // manual_review is excluded), this branch ALSO attempts the user_orgs deactivation, even
+    // though it leaves `users.is_active` untouched. Flagged for owner confirmation in the PR
+    // body's combination-semantics section: this is a genuinely NEW consequence of
+    // disable_grant_only that did not exist before this PR.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
+    expect(outcome).toMatchObject({
+      grantsDisabledCount: 1,
+      globalCandidateCount: 1,
+      usersDeactivatedCount: 0,
+      membershipDeactivationAttemptedCount: 1,
+    })
   })
 
-  it('enabled + manual_review: touches nothing, but the offboarding is counted', async () => {
+  it('enabled + disable_grant_only + NOT globally clear: attempts the user_orgs deactivation but the grant survives (owner P2 item 2: grant closure stays global-guarded)', async () => {
+    const client = stubClient([CANDIDATE], { notGloballyClear: ['user-1'] })
+    const outcome = await applyDirectoryDeprovisionPolicies(client, {
+      ...baseOptions,
+      integrationDefaultPolicy: 'disable_grant_only',
+      enabled: true,
+    })
+
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(true)
+    expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    expect(outcome).toMatchObject({ grantsDisabledCount: 0, globalCandidateCount: 0, membershipDeactivationAttemptedCount: 1 })
+    expect(outcome.affected).toEqual([
+      { directoryAccountId: 'acct-1', localUserId: 'user-1', policy: 'disable_grant_only', globallyClear: false },
+    ])
+  })
+
+  it('enabled + manual_review: touches nothing (including user_orgs), but the offboarding is counted and exposed as pending', async () => {
     const client = stubClient([CANDIDATE])
     const outcome = await applyDirectoryDeprovisionPolicies(client, {
       ...baseOptions,
@@ -109,7 +263,14 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
 
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
-    expect(outcome).toMatchObject({ candidateCount: 1, manualReviewCount: 1, affected: [] })
+    // W4-PRE-1c (owner 裁决②, #4522 rev3 review — issuecomment-5042388830: "manual_review 保持
+    // active 并暴露待人工确认状态"): the
+    // unique carve-out — no write attempted at all, including user_orgs.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    expect(outcome).toMatchObject({ candidateCount: 1, manualReviewCount: 1, affected: [], membershipDeactivationAttemptedCount: 0 })
+    expect(outcome.manualReviewPending).toEqual([
+      { directoryAccountId: 'acct-1', localUserId: 'user-1', orgId: STUB_ORG_ID },
+    ])
   })
 
   it('honours a per-account override inside a batch', async () => {
@@ -171,6 +332,13 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(outcome.applied).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
     expect(wrote(client.queries, DISABLES_GRANT)).toBe(false)
+    // Review finding: the circuit-breaker's negative — "not passed ⇒ user_orgs is NEVER
+    // touched" — had no test anywhere in the repo. Without this, a future edit that moved the
+    // W4-PRE-1c deactivation call ahead of the abort-and-return (e.g. into the candidate
+    // dedup loop) would abort correctly for grants/users but still flip user_orgs, and every
+    // existing test (including the two in this describe block) would stay green.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(0)
   })
 
   it('an oversized batch aborts before any write', async () => {
@@ -188,6 +356,38 @@ describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', (
     expect(outcome.abortedReason).toBe('batch_exceeds_max')
     expect(outcome.applied).toBe(false)
     expect(wrote(client.queries, DEACTIVATES_USER)).toBe(false)
+    // Same breaker-negative coverage as the empty-fetch abort test above.
+    expect(wrote(client.queries, DEACTIVATES_USER_ORG)).toBe(false)
+    expect(outcome.membershipDeactivationAttemptedCount).toBe(0)
+  })
+
+  // W4-PRE-1d item 3 (owner P2, #4530 review — "breaker 改用组织成员候选数（防大批跨组织失活绕
+  // 上限）"): the breaker must trip on the ORG-MEMBERSHIP candidate count even when NEITHER
+  // candidate is globally clear (globalCandidateCount would be 0) — proving the breaker's input
+  // is `candidateCount`, not a globally-filtered count that could stay under the cap while a
+  // large cross-org membership batch slips through. The global-clear query is never even
+  // reached: the abort-and-return happens before it runs.
+  it('the breaker trips on org-membership candidateCount even when globalCandidateCount would be zero (owner P2 item 3)', async () => {
+    const client = stubClient(
+      [
+        { directory_account_id: 'acct-1', local_user_id: 'user-1', deprovision_policy_override: null },
+        { directory_account_id: 'acct-2', local_user_id: 'user-2', deprovision_policy_override: null },
+      ],
+      { notGloballyClear: ['user-1', 'user-2'] },
+    )
+    const outcome = await applyDirectoryDeprovisionPolicies(client, {
+      ...baseOptions,
+      deactivatedAccountIds: ['acct-1', 'acct-2'],
+      maxBatch: 1,
+      enabled: true,
+    })
+
+    expect(outcome.candidateCount).toBe(2)
+    expect(outcome.abortedReason).toBe('batch_exceeds_max')
+    expect(outcome.applied).toBe(false)
+    expect(outcome.globalCandidateCount).toBe(0)
+    // The global-clear query never ran — the abort happened before it was reached.
+    expect(client.queries.some((sql) => /FROM UNNEST\(\$1::text\[\]\) AS candidate_user/i.test(sql))).toBe(false)
   })
 })
 

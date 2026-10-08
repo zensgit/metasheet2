@@ -44,6 +44,10 @@
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 export interface ApprovalRequesterOrgRelations {
+  /** Internal Lock-2 L2-A anchor. Never serialize this directory integration id. */
+  canonicalIntegrationId?: string
+  /** The requester's primary LOCAL department id, used only for same-user form prefills. */
+  primaryDepartmentId?: string
   /** RA-1a: the requester's directory-resolved primary department NAME (directory_departments.name) —
    *  the tamper-resistant source for `requester.department`. Omitted when unresolvable. */
   primaryDepartmentName?: string
@@ -70,6 +74,109 @@ export interface ApprovalRequesterOrgRelations {
    * `manager_at_level` (picks the single id at `level - 1`). Omitted when empty.
    */
   managerChainIds?: string[]
+  /**
+   * Lock-1 §K4 — ordered local user ids of the requester's DEPARTMENT-HEAD chain, level 1 first
+   * (the requester's own department head). A DIFFERENT pointer from `managerChainIds`: that chain
+   * walks the `leader_in_dept` LEADER pointer (`resolveManagerChain` below); this one walks the
+   * DEPARTMENT PARENT tree (`directory_departments.external_parent_department_id`), reading
+   * `dept_manager_userid_list` at each level (`resolveDeptHeadChain` below). The two coincide only
+   * where every department's leader is also its listed manager. Only populated when the caller
+   * opts in via `includeDeptHeadChain` (i.e. a published graph uses `continuous_dept_heads`).
+   * Cycle-guarded (visited set of external DEPARTMENT ids) + capped at `MAX_MANAGER_CHAIN_LEVELS`.
+   * RATIFIED continue-past-empty-level posture (Lock-1 §K4): a level whose manager list is empty
+   * or resolves to no linked local user contributes nothing to the chain, but the walk CONTINUES
+   * to that department's parent — the next hop is the department's OWN parent pointer, independent
+   * of whether a head resolves at this level. This is the one place this chain's termination
+   * differs from `managerChainIds`, whose next hop IS the resolved leader (so it DOES stop when
+   * none is found). Read by `continuous_dept_heads` (slices it to its own `levels`). Omitted when
+   * empty.
+   */
+  deptHeadChainIds?: string[]
+}
+
+/**
+ * F4-E — the last authoritative directory position of an account that just departed.
+ * `syncDirectoryIntegration` captures this before it rebuilds account-department memberships;
+ * the post-commit departure consumer then resolves the manager from current active accounts.
+ */
+export interface ApprovalDepartureManagerContext {
+  integrationId: string
+  requesterExternalId: string
+  primaryDepartmentExternalId: string | null
+}
+
+type ApprovalDepartureManagerContextRow = {
+  directory_account_id: string
+  integration_id: string
+  requester_external_id: string
+  primary_department_external_id: string | null
+  primary_department_count: number
+}
+
+/**
+ * Capture only source identity + primary-department identity. No manager id is frozen here: the
+ * manager must be a live post-signal read. A malformed account with zero or multiple primary
+ * memberships fails closed to a null department rather than electing one arbitrarily.
+ */
+export async function captureApprovalDepartureManagerContexts(
+  directoryAccountIds: readonly string[],
+  query: QueryFn,
+): Promise<Map<string, ApprovalDepartureManagerContext>> {
+  const ids = [...new Set(directoryAccountIds.map((id) => id.trim()).filter(Boolean))]
+  const contexts = new Map<string, ApprovalDepartureManagerContext>()
+  if (ids.length === 0) return contexts
+
+  const rows = await query<ApprovalDepartureManagerContextRow>(
+    `SELECT a.id::text AS directory_account_id,
+            a.integration_id::text AS integration_id,
+            a.external_user_id AS requester_external_id,
+            MIN(d.external_department_id) AS primary_department_external_id,
+            COUNT(d.id)::int AS primary_department_count
+       FROM directory_accounts a
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+        AND d.integration_id = a.integration_id
+      WHERE a.id = ANY($1::uuid[])
+      GROUP BY a.id, a.integration_id, a.external_user_id
+      ORDER BY a.id ASC`,
+    [ids],
+  )
+
+  for (const row of rows.rows) {
+    const accountId = row.directory_account_id?.trim()
+    const integrationId = row.integration_id?.trim()
+    const requesterExternalId = row.requester_external_id?.trim()
+    if (!accountId || !integrationId || !requesterExternalId) continue
+    contexts.set(accountId, {
+      integrationId,
+      requesterExternalId,
+      primaryDepartmentExternalId:
+        Number(row.primary_department_count) === 1
+          ? normalizeExternalId(row.primary_department_external_id)
+          : null,
+    })
+  }
+  return contexts
+}
+
+/** Resolve a departed account's direct manager from current active directory state. */
+export async function resolveApprovalDepartureManagerFromContext(
+  context: ApprovalDepartureManagerContext,
+  query: QueryFn,
+): Promise<string | undefined> {
+  const integrationId = context.integrationId.trim()
+  const requesterExternalId = context.requesterExternalId.trim()
+  const primaryDepartmentExternalId = normalizeExternalId(context.primaryDepartmentExternalId)
+  if (!integrationId || !requesterExternalId || !primaryDepartmentExternalId) return undefined
+  return resolveDirectManager(
+    integrationId,
+    primaryDepartmentExternalId,
+    requesterExternalId,
+    query,
+  )
 }
 
 /** Default cap on how far up the org tree the bake-time walk climbs when unconfigured. */
@@ -152,9 +259,32 @@ interface RequesterDirectoryRow {
   external_user_id: string
   raw: unknown
   title: string | null
+  primary_department_id: string | null
+  primary_department_active: boolean | null
   primary_external_department_id: string | null
   primary_department_raw: unknown
   primary_department_name: string | null
+}
+
+interface RoutingPolicyProbeRow {
+  org_id: string
+  canonical_integration_id: string
+  canonical_status: string | null
+}
+
+/**
+ * B5-b fail-closed CONFIG error (design lock Lock 2): thrown when an `approval_routing` policy
+ * exists but cannot be honored — its canonical integration is missing/not-active, or the requester
+ * is linked in MORE THAN ONE policy-governed org. Deliberately a distinct type so the create-time
+ * caller can surface "routing policy misconfigured — contact an administrator" instead of the
+ * generic transient "please retry": retrying never fixes a broken policy. NOT thrown for data
+ * absence (a requester simply missing from the canonical directory resolves to `{}`).
+ */
+export class ApprovalRoutingPolicyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ApprovalRoutingPolicyError'
+  }
 }
 
 /**
@@ -164,22 +294,223 @@ interface RequesterDirectoryRow {
  *
  * `query` is injected (defaults to the shared pool) so the unit path can drive it
  * against an in-memory fixture without a database.
+ *
+ * `options.orgId` (S7 §3.3, optional / backward compatible) is a TENANT BOUNDARY:
+ * when supplied, every step of resolution is confined to that org — including the
+ * B5-b `approval_routing` policy probe (foreign-org policies must neither steer the
+ * pick nor trigger multi-org ambiguity). Within that org:
+ *   - a same-org policy is AUTHORITATIVE (canonical-integration pick);
+ *   - no same-org policy → org-anchored requester SELECT (`directory_integrations.org_id`
+ *     before ORDER BY/LIMIT 1) so a local user linked into two orgs cannot have the
+ *     wrong org's account selected.
+ * Callers that omit `orgId` retain the unscoped kernel path (B5-b Q4 across all
+ * linked orgs) — kernel `ApprovalProductService` callers included. Attendance-facing
+ * paths MUST pass `orgId`.
  */
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
   query: QueryFn,
-  options: { includeManagerChain?: boolean; maxLevels?: number } = {},
+  options: {
+    includeManagerChain?: boolean
+    /** Lock-2 L2-A internal-only form-field context. Keeps the new directory anchor/id out of
+     * every pre-existing caller's result shape unless that caller is resolving a department field. */
+    includeDepartmentFieldContext?: boolean
+    /** Lock-1 §K4 — walk the department-head chain (`deptHeadChainIds`) into the result. Opt-in
+     *  like `includeManagerChain`: gated on the published graph using `continuous_dept_heads`
+     *  (`runtimeGraphUsesDeptHeadChain`), so the extra per-hop queries stay off every other
+     *  approval. */
+    includeDeptHeadChain?: boolean
+    maxLevels?: number
+    orgId?: string
+    /**
+     * B5-c read-only PREVIEW hook: `undefined` (default) = run the real policy probe;
+     * `null` = force the LEGACY path; a string = resolve AS IF that integration were the policy's
+     * canonical — WITHOUT reading or writing any policy row. Only the admin preview route passes
+     * this (it validates the candidate is same-org + active first); production approval creation
+     * never sets it, so the probe stays the sole authority there. Using the same resolver for both
+     * preview legs is deliberate: a separate preview resolution would drift from the real one.
+     */
+    overrideCanonicalIntegrationId?: string | null
+  } = {},
 ): Promise<ApprovalRequesterOrgRelations> {
   const userId = localUserId.trim()
   if (!userId) return {}
 
+  // Optional org anchor (S7 §3.3). Trim + non-empty only — an empty string must NOT
+  // accidentally join against `org_id = ''` and force every row out of scope.
+  // When present this is a tenant boundary: it SCOPES the B5-b policy probe first,
+  // then (if no same-org policy) the requester-account pick.
+  const orgId =
+    typeof options.orgId === 'string' && options.orgId.trim().length > 0
+      ? options.orgId.trim()
+      : null
+
+  // 0) B5-b (design lock Lock 2 + Q4): explicit `(org, purpose='approval_routing')` routing policy.
+  //    Since B1 an org can hold MULTIPLE directory integrations (DingTalk + local), and the legacy
+  //    requester pick below guesses among them by `ORDER BY a.updated_at DESC` — the exact
+  //    "latest integration wins" behavior the §6 owner ruling forbids.
+  //
+  //    TENANT BOUNDARY: when `orgId` is set, the probe is restricted to
+  //    `p.org_id = $2` for that exact org. A foreign-org policy is invisible here —
+  //    it must neither select a canonical integration nor inflate multi-org ambiguity.
+  //
+  //    When `orgId` is OMITTED (kernel path), the probe considers every org the user
+  //    is linked in (B5-b Q4, unchanged):
+  //      - NO policy row  → LEGACY unscoped pick below (Q1: zero behavior change until a
+  //        policy is explicitly set — staged opt-in).
+  //      - ONE policy     → the policy is AUTHORITATIVE: the requester pick is restricted to the
+  //        canonical integration. A policy whose canonical target is missing or not 'active' is a
+  //        CONFIG error → fail-closed typed throw (operator must fix the policy; silently falling
+  //        back to guessing would defeat the policy's purpose). A requester with no active account
+  //        in the canonical integration is DATA absence, not a config error → `{}` (same semantics
+  //        as "no linked directory account", e.g. a not-yet-synced employee).
+  //      - POLICIES IN >1 ORG the user is linked in → ambiguity is real and policy-managed →
+  //        fail-closed typed throw (multi-org users need explicit resolution, Q4). A user linked in
+  //        one policy-governed org AND one policy-less org follows the single governed policy —
+  //        deterministic, never a guess.
+  //
+  //    When `orgId` IS set:
+  //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT.
+  //      - ONE same-org policy → AUTHORITATIVE canonical-integration pick (within the tenant).
+  //      - (multi-org ambiguity cannot fire: foreign policies are filtered out by p.org_id = $2.)
+  //
+  //    B5-c PREVIEW: when overrideCanonicalIntegrationId is defined, skip the probe entirely and
+  //    resolve AS-IF that integration were canonical (or force legacy when null). Production never
+  //    sets this option — the real policy row remains the sole authority there.
+  let canonicalIntegrationId: string | null = null
+  const policyRows =
+    options.overrideCanonicalIntegrationId !== undefined
+      ? { rows: [] as RoutingPolicyProbeRow[] }
+      : await query<RoutingPolicyProbeRow>(
+          orgId
+            ? `SELECT DISTINCT p.org_id                            AS org_id,
+            p.canonical_integration_id::text             AS canonical_integration_id,
+            ci.status                                    AS canonical_status
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       JOIN directory_integrations ai
+         ON ai.id = a.integration_id
+       JOIN org_directory_routing_policy p
+         ON p.org_id = ai.org_id
+        AND p.purpose = 'approval_routing'
+       LEFT JOIN directory_integrations ci
+         ON ci.id = p.canonical_integration_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+        AND p.org_id = $2`
+            : `SELECT DISTINCT p.org_id                            AS org_id,
+            p.canonical_integration_id::text             AS canonical_integration_id,
+            ci.status                                    AS canonical_status
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+       JOIN directory_integrations ai
+         ON ai.id = a.integration_id
+       JOIN org_directory_routing_policy p
+         ON p.org_id = ai.org_id
+        AND p.purpose = 'approval_routing'
+       LEFT JOIN directory_integrations ci
+         ON ci.id = p.canonical_integration_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'`,
+          orgId ? [userId, orgId] : [userId],
+        )
+  if (options.overrideCanonicalIntegrationId !== undefined) {
+    canonicalIntegrationId = options.overrideCanonicalIntegrationId
+  }
+  if (policyRows.rows.length > 0) {
+    const orgs = new Set(policyRows.rows.map((r) => r.org_id))
+    if (orgs.size > 1) {
+      // Only reachable on the no-orgId (kernel) path: org-scoped probe binds p.org_id = $2.
+      throw new ApprovalRoutingPolicyError(
+        `approval routing is policy-managed in ${orgs.size} orgs this user is linked in; multi-org routing requires explicit resolution`,
+      )
+    }
+    const policy = policyRows.rows[0]
+    if (policy.canonical_status !== 'active') {
+      throw new ApprovalRoutingPolicyError(
+        `the approval_routing policy for org "${policy.org_id}" points at a ${policy.canonical_status === null ? 'missing' : `'${policy.canonical_status}'`} integration; fix the routing policy`,
+      )
+    }
+    canonicalIntegrationId = policy.canonical_integration_id
+  }
+
   // 1) Requester's linked directory account + its primary department's raw.
-  const requesterRows = await query<RequesterDirectoryRow>(
-    `SELECT a.integration_id::text       AS integration_id,
+  //    Precedence (tenant-scoped policy first, then S7 org anchor, then legacy):
+  //      a) POLICY-SCOPED when a (tenant-visible) policy governs — restricted to the
+  //         canonical integration (identical projection; consumers below are source-agnostic).
+  //      b) ORG-ANCHORED when no same-org/no-orgId policy and `orgId` is set — join
+  //         directory_integrations so ORDER BY/LIMIT 1 only competes inside the calling org (S7).
+  //      c) LEGACY unscoped otherwise — byte-identical pre-B5/pre-S7 pick (no-orgId + no policy).
+  const requesterRows = canonicalIntegrationId
+    ? await query<RequesterDirectoryRow>(
+        `SELECT a.integration_id::text       AS integration_id,
             a.id::text                   AS account_id,
             a.external_user_id           AS external_user_id,
             a.raw                        AS raw,
             a.title                      AS title,
+            d.id::text                   AS primary_department_id,
+            d.is_active                  AS primary_department_active,
+            d.external_department_id     AS primary_external_department_id,
+            d.raw                        AS primary_department_raw,
+            d.name                       AS primary_department_name
+       FROM directory_account_links l
+       JOIN directory_accounts a
+         ON a.id = l.directory_account_id
+        AND a.is_active = true
+        AND a.integration_id = $2::uuid
+       LEFT JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+        AND ad.is_primary = true
+       LEFT JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE l.local_user_id = $1
+        AND l.link_status = 'linked'
+      ORDER BY a.updated_at DESC, a.id ASC
+      LIMIT 1`,
+        [userId, canonicalIntegrationId],
+      )
+    : orgId
+      ? await query<RequesterDirectoryRow>(
+          `SELECT a.integration_id::text       AS integration_id,
+                a.id::text                   AS account_id,
+                a.external_user_id           AS external_user_id,
+                a.raw                        AS raw,
+                a.title                      AS title,
+                d.id::text                   AS primary_department_id,
+                d.is_active                  AS primary_department_active,
+                d.external_department_id     AS primary_external_department_id,
+                d.raw                        AS primary_department_raw,
+                d.name                       AS primary_department_name
+           FROM directory_account_links l
+           JOIN directory_accounts a
+             ON a.id = l.directory_account_id
+            AND a.is_active = true
+           JOIN directory_integrations di
+             ON di.id = a.integration_id
+            AND di.org_id = $2
+           LEFT JOIN directory_account_departments ad
+             ON ad.directory_account_id = a.id
+            AND ad.is_primary = true
+           LEFT JOIN directory_departments d
+             ON d.id = ad.directory_department_id
+          WHERE l.local_user_id = $1
+            AND l.link_status = 'linked'
+          ORDER BY a.updated_at DESC, a.id ASC
+          LIMIT 1`,
+          [userId, orgId],
+        )
+      : await query<RequesterDirectoryRow>(
+          `SELECT a.integration_id::text       AS integration_id,
+            a.id::text                   AS account_id,
+            a.external_user_id           AS external_user_id,
+            a.raw                        AS raw,
+            a.title                      AS title,
+            d.id::text                   AS primary_department_id,
+            d.is_active                  AS primary_department_active,
             d.external_department_id     AS primary_external_department_id,
             d.raw                        AS primary_department_raw,
             d.name                       AS primary_department_name
@@ -196,8 +527,8 @@ export async function resolveApprovalRequesterOrgRelations(
         AND l.link_status = 'linked'
       ORDER BY a.updated_at DESC, a.id ASC
       LIMIT 1`,
-    [userId],
-  )
+          [userId],
+        )
   const requester = requesterRows.rows[0]
   if (!requester) return {}
 
@@ -219,42 +550,9 @@ export async function resolveApprovalRequesterOrgRelations(
   //    seam for the DIRECT manager here. The manager CHAIN (step 4) and the department HEAD
   //    (step 3, a distinct `dept_manager_userid_list` source) are intentionally left on their
   //    legacy sources in this increment.
-  let managerId: string | undefined
-  if (requesterDeptId) {
-    const normalized = await resolveNormalizedDeptManager(
-      integrationId,
-      requesterDeptId,
-      requester.external_user_id,
-      query,
-    )
-    if (normalized.present) {
-      // The dept is normalized-managed: the normalized relation is authoritative even when it
-      // resolves to no LINKED local user (e.g. the flagged manager is unlinked) — we never blend
-      // back into the provider raw for a dept an admin explicitly manages.
-      managerId = normalized.managerId
-    } else {
-      // LEGACY (unchanged): the account flagged leader for the requester's primary
-      // department in its own `leader_in_dept`. Exclude the requester themselves.
-      const candidateRows = await query<{ account_id: string; raw: unknown }>(
-        `SELECT a.id::text AS account_id, a.raw AS raw
-           FROM directory_accounts a
-           JOIN directory_account_departments ad
-             ON ad.directory_account_id = a.id
-           JOIN directory_departments d
-             ON d.id = ad.directory_department_id
-          WHERE a.integration_id = $1::uuid
-            AND a.is_active = true
-            AND d.external_department_id = $2
-            AND a.external_user_id <> $3`,
-        [integrationId, requesterDeptId, requester.external_user_id],
-      )
-      const managerAccountId = candidateRows.rows.find((row) =>
-        parseLeaderDeptIds(asRecord(row.raw)).includes(requesterDeptId))?.account_id
-      if (managerAccountId) {
-        managerId = await resolveLinkedLocalUserId(managerAccountId, query)
-      }
-    }
-  }
+  const managerId = requesterDeptId
+    ? await resolveDirectManager(integrationId, requesterDeptId, requester.external_user_id, query)
+    : undefined
 
   // 3) Department head: first manager external id on the primary department's raw
   //    that resolves to a linked local user (and is not the requester).
@@ -270,6 +568,12 @@ export async function resolveApprovalRequesterOrgRelations(
   }
 
   const relations: ApprovalRequesterOrgRelations = {}
+  if (options.includeDepartmentFieldContext) {
+    relations.canonicalIntegrationId = integrationId
+    if (requester.primary_department_active && requester.primary_department_id) {
+      relations.primaryDepartmentId = requester.primary_department_id
+    }
+  }
   if (managerId) relations.managerId = managerId
   if (deptHeadId) relations.deptHeadId = deptHeadId
   const primaryDepartmentName = requester.primary_department_name?.trim()
@@ -292,6 +596,23 @@ export async function resolveApprovalRequesterOrgRelations(
       query,
     )
     if (chain.length > 0) relations.managerChainIds = chain
+  }
+
+  // 5) Department-head chain (Lock-1 §K4, opt-in): walk the department PARENT tree up from the
+  //    requester's primary department, reading dept_manager_userid_list at each level. Only runs
+  //    when the caller opts in — i.e. a published graph uses continuous_dept_heads — so the extra
+  //    per-hop queries are NOT added to every approval. requesterDeptId may be null (requester has
+  //    no primary department); resolveDeptHeadChain handles that as an immediate empty chain.
+  if (options.includeDeptHeadChain) {
+    const deptHeadChain = await resolveDeptHeadChain(
+      integrationId,
+      requesterDeptId,
+      requester.external_user_id,
+      userId,
+      clampChainLevels(options.maxLevels),
+      query,
+    )
+    if (deptHeadChain.length > 0) relations.deptHeadChainIds = deptHeadChain
   }
 
   return relations
@@ -406,6 +727,103 @@ async function resolveManagerChain(
   return chain
 }
 
+interface DeptHop {
+  raw: unknown
+  parentExternalId: string | null
+}
+
+/**
+ * One hop: the department identified by `(integrationId, deptExternalId)`, returning its `raw`
+ * payload (source of `dept_manager_userid_list` for THIS level) and its parent's external id (to
+ * continue the walk). Returns `undefined` when the department itself cannot be found — top of the
+ * REACHABLE tree, covering both a genuine root department (no `external_parent_department_id`)
+ * and a dangling/missing parent reference from a partially-synced org.
+ */
+async function fetchDeptHop(
+  integrationId: string,
+  deptExternalId: string,
+  query: QueryFn,
+): Promise<DeptHop | undefined> {
+  const rows = await query<{ raw: unknown; external_parent_department_id: string | null }>(
+    `SELECT raw                          AS raw,
+            external_parent_department_id AS external_parent_department_id
+       FROM directory_departments
+      WHERE integration_id = $1::uuid
+        AND external_department_id = $2
+      LIMIT 1`,
+    [integrationId, deptExternalId],
+  )
+  const row = rows.rows[0]
+  if (!row) return undefined
+  return { raw: row.raw, parentExternalId: normalizeExternalId(row.external_parent_department_id) }
+}
+
+/**
+ * Lock-1 §K4 — walk the department PARENT tree up from the requester's primary department,
+ * collecting each level's head. A DIFFERENT pointer from `resolveManagerChain` above: that walk
+ * follows the `leader_in_dept` LEADER pointer (the next hop IS the resolved leader's own primary
+ * department); this walk follows `directory_departments.external_parent_department_id` — a
+ * property of the DEPARTMENT itself, independent of whether any head resolves at this level.
+ *
+ * "Primary" head selection is byte-identical to the shipped single-level `dept_head` (step 3
+ * above): the FIRST external id in `dept_manager_userid_list` order — excluding the requester's
+ * own EXTERNAL id — that resolves to a LINKED local user. The inner loop breaks on that first
+ * resolution exactly like the single-level computation; a SEPARATE local-id self-exclusion then
+ * decides whether the resolved head enters the CHAIN (mirroring how `managerChainIds` differs
+ * from `managerId` — see that field's doc comment).
+ *
+ * RATIFIED continue-past-empty-level posture (confirmed BINDING by Lock-2): a level whose manager
+ * list is empty, OR whose ids all resolve to no linked local user, contributes NOTHING to the
+ * chain — but the walk CONTINUES to that department's parent regardless, because the next hop
+ * (`hop.parentExternalId`) is read from THIS department's own row, never from a resolved manager.
+ * This is the exact way K4 differs from `resolveManagerChain`, whose next hop DOES depend on a
+ * resolved leader and therefore DOES stop when none is found.
+ *
+ * Termination is bounded three ways, mirroring `resolveManagerChain`:
+ *   - a visited-set of external DEPARTMENT ids stops cycles (dept A's parent is dept B, B's is A);
+ *   - a hop whose department cannot be found at all stops the walk (top of the reachable tree);
+ *   - at most `maxLevels` hops are taken.
+ * Self-exclusion is on the requester's LOCAL id (an alt-account of the requester listed as a
+ * manager of some ancestor department must not enter the chain — same rationale as
+ * `resolveManagerChain`'s local-id exclusion); duplicates are collapsed.
+ */
+async function resolveDeptHeadChain(
+  integrationId: string,
+  requesterDeptExternalId: string | null,
+  requesterExternalId: string,
+  requesterLocalId: string,
+  maxLevels: number,
+  query: QueryFn,
+): Promise<string[]> {
+  const chain: string[] = []
+  const visited = new Set<string>()
+  let currentDeptExternalId = requesterDeptExternalId
+
+  for (let level = 0; level < maxLevels; level += 1) {
+    if (!currentDeptExternalId || visited.has(currentDeptExternalId)) break
+    visited.add(currentDeptExternalId)
+
+    const hop = await fetchDeptHop(integrationId, currentDeptExternalId, query)
+    if (!hop) break
+
+    // Continue-past-empty-level: resolve THIS level's head without letting the outcome gate the
+    // next hop (set below, from `hop.parentExternalId`).
+    const managerExternalIds = parseDeptManagerExternalIds(asRecord(hop.raw))
+      .filter((external) => external !== requesterExternalId)
+    for (const external of managerExternalIds) {
+      const localId = await resolveLinkedLocalUserIdByExternal(integrationId, external, query)
+      if (localId) {
+        if (localId !== requesterLocalId && !chain.includes(localId)) chain.push(localId)
+        break
+      }
+    }
+
+    currentDeptExternalId = hop.parentExternalId
+  }
+
+  return chain
+}
+
 /**
  * B3 (design-lock §5.4) — resolve the requester's direct manager from the NORMALIZED relation:
  * the `directory_account_departments.is_manager` flag on a membership of the requester's primary
@@ -454,6 +872,45 @@ async function resolveNormalizedDeptManager(
   const manager = rows.rows.find((row) => row.external_user_id !== requesterExternalId)
   if (!manager) return { present: true }
   return { present: true, managerId: await resolveLinkedLocalUserId(manager.account_id, query) }
+}
+
+async function resolveDirectManager(
+  integrationId: string,
+  deptExternalId: string,
+  requesterExternalId: string,
+  query: QueryFn,
+): Promise<string | undefined> {
+  const normalized = await resolveNormalizedDeptManager(
+    integrationId,
+    deptExternalId,
+    requesterExternalId,
+    query,
+  )
+  if (normalized.present) {
+    // An explicitly normalized-managed department is authoritative even when its manager is not
+    // linked to a local user. Never blend back into provider raw in that case.
+    return normalized.managerId
+  }
+
+  const candidateRows = await query<{ account_id: string; raw: unknown }>(
+    `SELECT a.id::text AS account_id, a.raw AS raw
+       FROM directory_accounts a
+       JOIN directory_account_departments ad
+         ON ad.directory_account_id = a.id
+       JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE a.integration_id = $1::uuid
+        AND a.is_active = true
+        AND d.integration_id = $1::uuid
+        AND d.external_department_id = $2
+        AND a.external_user_id <> $3`,
+    [integrationId, deptExternalId, requesterExternalId],
+  )
+  const managerAccountId = candidateRows.rows.find((row) =>
+    parseLeaderDeptIds(asRecord(row.raw)).includes(deptExternalId))?.account_id
+  return managerAccountId
+    ? resolveLinkedLocalUserId(managerAccountId, query)
+    : undefined
 }
 
 async function resolveLinkedLocalUserId(accountId: string, query: QueryFn): Promise<string | undefined> {

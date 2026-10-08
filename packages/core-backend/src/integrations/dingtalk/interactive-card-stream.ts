@@ -208,6 +208,8 @@ export class DingTalkInteractiveCardStreamWorker {
   private client: DingTalkInteractiveCardStreamClient | null = null
   private initializing: Promise<DingTalkInteractiveCardStreamWorkerStatus> | null = null
   private status: DingTalkInteractiveCardStreamWorkerStatus = { state: 'disabled', reason: 'env_disabled' }
+  private readonly callbacksInFlight = new Set<Promise<void>>()
+  private shutdownPromise: Promise<DingTalkInteractiveCardStreamWorkerStatus> | null = null
   /**
    * Shutdown latch (B-2 review P3-1, W1b-confirmed race): shutdown() sets this even when
    * `this.client` is still null — exactly the state while initializeOnce() is awaiting the client
@@ -238,6 +240,7 @@ export class DingTalkInteractiveCardStreamWorker {
     // A fresh initialize (not piggybacking on an in-flight one) starts a new lifecycle: clear any
     // latch left behind by an earlier shutdown so the worker can be deliberately restarted.
     this.shutdownRequested = false
+    this.shutdownPromise = null
     this.initializing = this.initializeOnce(env).finally(() => {
       this.initializing = null
     })
@@ -255,9 +258,7 @@ export class DingTalkInteractiveCardStreamWorker {
     let createdClient: DingTalkInteractiveCardStreamClient | null = null
     try {
       createdClient = await this.clientFactory(config, {
-        onEvent: async (event) => {
-          await this.handleEvent(event)
-        },
+        onEvent: (event) => this.dispatchEvent(event),
       })
       // Shutdown latch re-check after every await (B-2 review P3-1): a shutdown() that landed
       // while this initialize was in flight must win — close what we created, never go active.
@@ -274,17 +275,21 @@ export class DingTalkInteractiveCardStreamWorker {
       this.logger.info('DingTalk interactive-card Stream worker started')
       return this.status
     } catch (error) {
+      let halfStartedClientStopFailed = false
       if (createdClient) {
         try {
           await createdClient.close()
         } catch {
-          this.logger.warn('DingTalk interactive-card Stream worker failed to close half-started client (client_start_failed)')
+          halfStartedClientStopFailed = true
+          this.logger.warn('DingTalk interactive-card Stream worker failed to close half-started client (client_stop_failed)')
         }
       }
       this.client = null
-      const reason = error instanceof Error && error.message === 'DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED'
-        ? 'sdk_unwired'
-        : 'client_start_failed'
+      const reason = halfStartedClientStopFailed
+        ? 'client_stop_failed'
+        : error instanceof Error && error.message === 'DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED'
+          ? 'sdk_unwired'
+          : 'client_start_failed'
       this.status = { state: 'failed', reason }
       // Values-free: do not log SDK error messages because they may include transport payloads or credentials.
       this.logger.warn(`DingTalk interactive-card Stream worker failed to start (${reason})`)
@@ -311,26 +316,52 @@ export class DingTalkInteractiveCardStreamWorker {
     return this.status
   }
 
-  async shutdown(): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
+  shutdown(): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
     this.shutdownRequested = true
+    this.shutdownPromise ??= this.shutdownOnce()
+    return this.shutdownPromise
+  }
+
+  private async shutdownOnce(): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
+    this.shutdownRequested = true
+    if (this.initializing) await this.initializing
     if (!this.client) {
-      if (this.initializing) {
-        // In-flight initialize observes the latch after its awaited factory/start() and closes the
-        // client it created (abortInFlightInitialize); there is nothing to close from here yet.
-        this.logger.info('DingTalk interactive-card Stream worker shutdown latched during in-flight initialize')
+      await this.drainCallbacks()
+      if (this.status.state === 'failed' && this.status.reason === 'client_stop_failed') {
+        return this.status
       }
+      this.status = { state: 'disabled', reason: 'env_disabled' }
       return this.status
     }
     try {
       await this.client.close()
       this.client = null
+      await this.drainCallbacks()
       this.status = { state: 'disabled', reason: 'env_disabled' }
       this.logger.info('DingTalk interactive-card Stream worker shut down')
       return this.status
     } catch {
+      await this.drainCallbacks()
       this.status = { state: 'failed', reason: 'client_stop_failed' }
       this.logger.warn('DingTalk interactive-card Stream worker failed to stop (client_stop_failed)')
       return this.status
+    }
+  }
+
+  private dispatchEvent(event: DingTalkInteractiveCardStreamEvent): Promise<void> {
+    if (this.shutdownRequested) return Promise.resolve()
+    const task = this.handleEvent(event)
+    this.callbacksInFlight.add(task)
+    void task.then(
+      () => this.callbacksInFlight.delete(task),
+      () => this.callbacksInFlight.delete(task),
+    )
+    return task
+  }
+
+  private async drainCallbacks(): Promise<void> {
+    while (this.callbacksInFlight.size > 0) {
+      await Promise.allSettled([...this.callbacksInFlight])
     }
   }
 

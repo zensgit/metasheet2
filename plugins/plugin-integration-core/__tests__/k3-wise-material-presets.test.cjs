@@ -66,10 +66,14 @@ function testCustomerProfileOmitsFBaseUnitID() {
   }
 }
 
-// Scope-creep guard: the preset must not grow operations beyond upsert.
+// Scope-creep guard, DELIBERATELY UPDATED (K3WriteDecision, owner 20260805): the guard's
+// intent is that the preset must never grow WRITE scope beyond upsert (no Submit/Audit/delete
+// creep). 'read' was added intentionally — it makes the profile's own GetDetail readPath
+// reachable, required by BOTH the C6 lookup and the ruled chain's post-save read-back. The
+// assertion below stays exact-equal so ANY further growth is still a red.
 function testOperationsStayUpsertOnly() {
   const profile = getK3WiseMaterialProfile(MATERIAL_CUSTOMER_PROFILE_ID)
-  assert.deepEqual(profile.operations, ['upsert'], 'preset operations stay [upsert]')
+  assert.deepEqual(profile.operations, ['upsert', 'read'], 'write scope stays exactly upsert; read is the deliberate K3WriteDecision addition')
   // Save-only by construction: no submit/audit endpoints on the profile.
   assert.equal(profile.submitPath, undefined, 'preset has no submitPath')
   assert.equal(profile.auditPath, undefined, 'preset has no auditPath')

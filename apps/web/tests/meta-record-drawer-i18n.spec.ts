@@ -1,8 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { createApp, h, type App } from 'vue'
+import { createApp, h, nextTick, type App } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
+
+async function flushUi(cycles = 4) {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+// Record inspector v3 (2026-09-05, PR-A §1.2): Delete moved from a standalone header button into an
+// `<MtMenuItem>` row inside the new kebab menu, which Teleports its open content to `document.body`
+// — NOT a descendant of the mounted `root` container — so the "删除"/"Delete" checks below open the
+// kebab first and read `document.body`'s textContent for that one assertion, not `root`'s.
+async function openKebabMenu(root: HTMLElement) {
+  const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+  trigger?.click()
+  await flushUi()
+}
 
 // Canonical mount/teardown shape per meta-cell-editor-i18n.spec.ts:
 //   createApp + container + app?.unmount() + container?.remove() + locale reset.
@@ -52,30 +68,36 @@ function mountDrawer(extraProps: Record<string, unknown> = {}) {
 }
 
 describe('MetaRecordDrawer i18n — header / actions / tabs chrome', () => {
-  it('renders zh-CN header chrome (title, close, tabsAria, tabs, delete)', () => {
+  it('renders zh-CN header chrome (title, close, tabsAria, tabs, delete)', async () => {
     useLocale().setLocale('zh-CN')
-    const root = mountDrawer()
+    const root = mountDrawer({ canDelete: true })
     const text = root.textContent ?? ''
-    expect(text).toContain('记录详情')   // record.title
+    expect(text).toContain('记录详情')   // record.title (Row B eyebrow — PR-A moved the pre-existing
+    // <h3> to an eyebrow line above the primary-field value; the SAME i18n key, so this pin stays
+    // honest with no visually-hidden trick, per the design's own P3 graft)
     expect(text).toContain('详情')       // record.details tab
     expect(text).toContain('历史')       // record.history tab
-    expect(text).toContain('删除')       // record.delete
     expect(text).not.toContain('Record Detail')
     expect(text).not.toContain('>Details<')
+    // Record inspector v3 (2026-09-05, PR-A §1.2): "删除" moved into the kebab menu, which Teleports
+    // its open content to `document.body` — open it and read the live-region-free body text.
+    await openKebabMenu(root)
+    expect(document.body.textContent ?? '').toContain('删除')   // record.delete
     // attribute-level
     expect(root.querySelector('.meta-record-drawer__close')?.getAttribute('aria-label')).toBe('关闭记录抽屉')
     expect(root.querySelector('[role="tablist"]')?.getAttribute('aria-label')).toBe('记录抽屉分区')
   })
 
-  it('renders English header chrome when locale is en (regression)', () => {
+  it('renders English header chrome when locale is en (regression)', async () => {
     useLocale().setLocale('en')
-    const root = mountDrawer()
+    const root = mountDrawer({ canDelete: true })
     const text = root.textContent ?? ''
     expect(text).toContain('Record Detail')
     expect(text).toContain('Details')
     expect(text).toContain('History')
-    expect(text).toContain('Delete')
     expect(text).not.toContain('记录详情')
+    await openKebabMenu(root)
+    expect(document.body.textContent ?? '').toContain('Delete')
     expect(root.querySelector('.meta-record-drawer__close')?.getAttribute('aria-label')).toBe('Close record drawer')
     expect(root.querySelector('[role="tablist"]')?.getAttribute('aria-label')).toBe('Record drawer sections')
   })

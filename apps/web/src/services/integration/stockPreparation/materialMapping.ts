@@ -29,16 +29,21 @@ export type StockPreparationMatchStatus =
   | 'not_found'
   | 'version_conflict'
 
+// OD2 round-1 hardening: `category_rule` was REMOVED from this union and the whitelist below — it
+// remains a reserved enum name server-side (stock-preparation-mvp-generation.cjs VERSION_POLICIES)
+// with NO implementation branch, and the server now refuses it fail-closed (422
+// STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED). Legacy stored rows carrying it never auto-match
+// (they degrade to the visible missing_mapping path); on the read side such a stored value can
+// still cross the wire as a plain string (versionPolicyCounts keys / candidate row versionPolicy).
 export type StockPreparationVersionPolicy =
   | 'drawing_and_version'
   | 'drawing_only'
-  | 'category_rule'
   | 'manual'
 
 // Fixed FE whitelists mirroring the server's frozen vocabularies (stock-preparation-material-match /
 // -mvp-generation .cjs). The candidates read zero-fills byMatchStatus over exactly the five statuses
 // (+ an optional `unknown` fold), and the sync route validates defaultVersionPolicy against exactly
-// these four policies (OD2: required per request, no server default).
+// these three IMPLEMENTED policies (OD2: required per request, no server default).
 export const STOCK_PREPARATION_MATCH_STATUSES: readonly StockPreparationMatchStatus[] = [
   'matched',
   'pending_confirm',
@@ -50,7 +55,6 @@ export const STOCK_PREPARATION_MATCH_STATUSES: readonly StockPreparationMatchSta
 export const STOCK_PREPARATION_VERSION_POLICIES: readonly StockPreparationVersionPolicy[] = [
   'drawing_and_version',
   'drawing_only',
-  'category_rule',
   'manual',
 ]
 
@@ -98,7 +102,8 @@ export interface StockPreparationMaterialMappingCandidateRow {
   matchStatus: StockPreparationMatchStatus | 'unknown'
   /** Absent when the stored row carries no method; junk stored values fold to `unknown`. */
   matchMethod?: StockPreparationMatchMethod | 'unknown'
-  versionPolicy: StockPreparationVersionPolicy | 'unknown'
+  // READ vocabulary ≠ write whitelist: confirm-reads still projects a legacy stored 'category_rule' verbatim.
+  versionPolicy: StockPreparationVersionPolicy | 'category_rule' | 'unknown'
   confidence: number | null
   isActive: boolean
   confirmed: boolean

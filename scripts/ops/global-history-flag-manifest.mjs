@@ -14,8 +14,8 @@
  *
  * ## Activation semantics (the operator footgun, R4/R12-C)
  *
- * `activationValue` is the EXACT string the flag must equal (after `.trim()`, and after `.toLowerCase()`
- * only when `caseInsensitive: true`) for the gated code path to treat it as ON. Two families exist:
+ * `activationValue` is the source-accurate string the flag must equal. Normalization happens ONLY when
+ * `caseInsensitive: true`; every other boolean comparison is byte-exact. Two families exist:
  *   - capture/replay/revert flags compare with `=== 'true'` (case-SENSITIVE, no trim in most call sites,
  *     except PIT_RESET/PIT_UNDELETE/SHEET_REVERT which use `.trim().toLowerCase() === 'true'`)
  *   - the retention flag compares with `=== '1'` (NOT `'true'`) — `meta-revision-retention.ts:60`
@@ -24,15 +24,17 @@
 
 /**
  * @typedef {Object} FlagRule
- * @property {string} kind - 'requires' (dependsOn must ALSO be active) | 'conflicts' (dependsOn/target must NOT be active together)
- * @property {string} id - stable violation id, printed by --strict
+ * @property {string} kind - 'requires' (dependsOn active) | 'requires-exact' (dependsOn equals its activationValue byte-for-byte) | 'conflicts' (target active)
+ * @property {string} id - stable violation id reported by flag status
  * @property {string} description
  */
 
 /**
  * @typedef {Object} FlagSpec
  * @property {string} key
- * @property {'boolean'|'numeric'|'enum'} type
+ * @property {'boolean'|'numeric'|'enum'|'list'} type - 'list' = comma-separated allowlist; like 'numeric'/'enum'
+ *   it is NOT a boolean, so isActivated()/isMisconfiguredTruthy() return false for it by construction and it
+ *   can never participate in a dependsOn/conflicts rule (those evaluate activation).
  * @property {string} activationValue - exact string that activates a boolean flag (ignored for numeric/enum)
  * @property {boolean} [caseInsensitive] - true only for the three flags (PIT_RESET/PIT_UNDELETE/SHEET_REVERT) whose source call site lowercases+trims
  * @property {string[]} dependsOn - other flag keys that MUST also be active for this flag's gated effect to be safe/whole
@@ -45,6 +47,36 @@
 
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
+  {
+    key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'TRANSITION ONLY, and a REGRESSION while on. Schema management (rename/retype/delete a field, 11 gated routes) was split out of multitable:write into multitable:manage-schema, because an operator who may fill a cell must not be able to delete the column. With this flag true, multitable:write is ALSO accepted for canManageFields -- the old fused behaviour returns. Default OFF is the intended end state; the flag exists only so a deployment can stage granting the new code before tightening.',
+    source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
+  },
+  {
+    key: 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
+    danger: 'high',
+    purpose:
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md, addenda B and C). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview and the execute / undo endpoints. Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. TWO-FLAG GATE for everything this feature does to OTHER writers (slice 3a, Decision Register R-22): it runs only while this flag AND the canonical writer fence MULTITABLE_ENABLE_WRITER_FENCE are BOTH on. (1) Post-fence field-schema re-check (ADR §3.11): every record writer that validated a write against a field snapshot taken before the canonical sheet fence re-reads the touched fields FOR SHARE after the fence and refuses 409 FIELD_SCHEMA_CHANGED if a field's type or option set changed while it waited (automation step fails; approval write-back throws; an AI bulk-commit row comes back stale_reprev; a realtime edit has its record document invalidated so its editors are told), and a non-scoped derived-value merge whose target is no longer formula/lookup/rollup is skipped. (2) Automation option validation (ADR §3.12): update_record / create_record check select / multiSelect values against the field's options. EFFECT ON EXISTING AUTOMATION RULES once both flags are on: a rule that writes a value outside the options, a non-string (null included) into a single select, or a malformed multi-select value turns from 'the value lands' into 'the step fails' — on EVERY select / multiSelect column, converted or not. Count the affected rules before switching on (runbook). Either flag off: none of (1) or (2) runs and every writer issues exactly its pre-existing statements. EVERY BACKEND PROCESS that writes records (API, automation and scheduler workers, realtime) must carry the SAME values of BOTH flags: the gate is read from each process's own environment, so a process started without them does not re-check while another process converts. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview,retype-execute,retype-undo; packages/core-backend/src/multitable/field-schema-fence-recheck.ts#isFieldSchemaFenceRecheckEnabled (two-flag gate: writer re-check and automation option validation); packages/core-backend/src/collab/yjs-invalidation.ts#createFieldSchemaRefusalHandler (realtime)',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'field-retype-convert-with-legacy-manage-schema',
+        description:
+          'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT is active while MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA is active — the legacy switch lets multitable:write hold schema authority, below the gate field type conversion requires, so every conversion endpoint refuses 409 FIELD_RETYPE_TRUST_REQUIRED. Field type conversion cannot function in this state.',
+      },
+    ],
+  },
   {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
@@ -131,18 +163,61 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
+    key: 'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // `.trim().toLowerCase() === 'true'`, same resolution family as SHEET_REVERT/PIT_RESET
+    // Gate P2 (2026-07-17): a checkpoint minted without the canonical fence is a DURABLE untrustworthy
+    // artifact (torn baseline vs the allocated trusted_since_seq). The route ALSO fails closed at runtime
+    // (409 TRUST_CHECKPOINT_FENCE_REQUIRED when the fence flag is off) — this dep is the operator-facing
+    // declaration of the same invariant.
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'W0-1 L5-wire (owner review 2026-07-17): the production caller for activateCheckpoint — POST /sheets/:sheetId/trust-checkpoint-activate provisions a trust checkpoint for one sheet in ONE fenced transaction (canonical fence first, then the design-lock §3 cutover: allocate trusted_since_seq, snapshot live + attributable-trash baselines, supersede the prior active checkpoint, activate). ADDITIVE-ONLY trust provisioning: no destructive write, and activating a checkpoint enables NOTHING by itself — strict mode and Revert/Reset stay behind their own default-OFF flags; a checkpoint is merely the (a)-half of the strict-enablement precondition. Fail-closed: an unattributable trashed-only record aborts the whole activation (409 HISTORY_INCOMPLETE, values-free). Sheet-admin (canManageSheetAccess, D2) floor — provisioning the trust floor for destructive recovery is an admin capability. danger=medium (not high): it writes only checkpoint/baseline rows, never live record data, but it moves the sheet\'s trust floor that later destructive recoveries anchor on, so it is not a plain ops convenience either.',
+    source: 'packages/core-backend/src/routes/univer-meta.ts#TRUST_CHECKPOINT_ACTIVATION_ENABLED,/trust-checkpoint-activate',
+  },
+  {
+    key: 'MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST',
+    type: 'list',
+    // Kept SHORT on purpose: this string is rendered inline on the operator's per-flag status line
+    // (multitable-global-history-flag-status.mjs non-boolean branch). The full rationale is in `purpose`.
+    activationValue:
+      "comma-separated sheet ids (trimmed, EXACT match); UNSET/EMPTY ⇒ refused for EVERY sheet, fail-closed",
+    // NOT modeled as a dependsOn of MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: isActivated() is false for
+    // every non-boolean spec (see :414), so a `requires` rule keyed off this list would fire on EVERY posture
+    // that has activation on — including the ladder's legitimate `l2-checkpoint` posture — and permanently red
+    // the --strict status. The precondition is enforced in-process by the route and documented here instead.
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "SCOPE gate for trust-checkpoint activation (P2 fix, 2026-08-25). The O-2 enablement ladder's L2-C rung provisions a checkpoint for a NAMED synthetic canary sheet only and explicitly forbids bulk-provisioning customer sheets — before this flag that was CONVENTION and the route accepted any sheet id. Now the route refuses unless the requested sheet id appears verbatim in this list, so owner designation is a precondition by construction. Fail-closed in the operator-relevant direction: leaving it unset does not 'disable the restriction', it disables ACTIVATION ENTIRELY. Danger=medium rather than low because a too-wide value (e.g. pasting customer sheet ids) is what the L2-C rung forbids, and a checkpoint is a durable trust anchor for later destructive recovery. The refusal is values-free: it names the env var and the required action, never the requested sheet id and never the list contents.",
+    source:
+      'packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts#TRUST_CHECKPOINT_SHEET_ALLOWLIST_ENV,resolveTrustCheckpointSheetAllowlist,isTrustCheckpointSheetAllowlisted; packages/core-backend/src/routes/univer-meta.ts#/trust-checkpoint-activate',
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_REVERT',
     type: 'boolean',
     activationValue: 'true',
     caseInsensitive: true,
     dependsOn: [],
-    conflictsWith: [],
+    conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'Interim revert-execute master gate (current-risk mitigation, owner-directed): first-cut generation-aware integrity checks (#4269) improve the older live-vs-latest precheck, but exact committed-event anchoring, the all-writer fence, trust checkpoints, target-generation validation, and Revert outer-transaction atomicity remain required before destructive recovery is enablement-ready. Therefore revert-execute (bulk-overwrites live record field values back to an anchored state across up to MULTITABLE_SHEET_REVERT_MAX_RECORDS records, and resurrects records deleted after that anchor — that resurrect sub-path additionally requires MULTITABLE_ENABLE_PIT_UNDELETE) stays closed by DEFAULT until the complete W0 trust correction lands and passes staging. Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive here too, unlike the config-revert family above which compares case-sensitively), same canManageSheetAccess (D2) floor. danger=high for the same reason as PIT_RESET, not the medium config-revert flags above: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED (read-only; the FE preview UI still needs to render even while the button that would call execute is hidden — capabilities.sheetRevertEnabled controls that visibility, same flag-derived-capability pattern as pitResetEnabled).',
+      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. Both preview and execute refuse 409 REVERT_RETENTION_CONFLICT whenever meta revision retention is active, matching PIT Reset until recovery-aware retention exists; the conflict is emitted only after authentication, existence hiding, and conservative full-read, but before trust/anchor/reconstruction work. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without retention, the trust pair, or an executable plan before minting any token.',
     // Source symbols (line numbers intentionally omitted because this route is edited frequently):
-    // SHEET_REVERT_ENABLED, the /revert-execute REVERT_DISABLED guard, and capabilities.sheetRevertEnabled.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,/revert-execute,capabilities.sheetRevertEnabled',
+    // SHEET_REVERT_ENABLED, the handleExactAnchorExecute REVERT_DISABLED guard, capabilities.sheetRevertEnabled.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'sheet-revert-intent-with-retention-on',
+        description:
+          "MULTITABLE_ENABLE_SHEET_REVERT is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — exact-anchor Revert refuses every revert-preview and revert-execute call with 409 REVERT_RETENTION_CONFLICT. Revert-to-T cannot function in this state.",
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
@@ -153,19 +228,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 Reset-to-T (destructive whole-sheet PIT restore). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10275 (PIT_RESET_ENABLED),
-    //         :10276 (PIT_RESET_RETENTION_BLOCKED — compares MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'),
-    //         :10287,:10328 (both preview and execute call the blocked-check)
-    // NOTE: the task brief cited univer-meta.ts:10264 for this; the verified line in this checkout is 10276
-    // (small file drift since the brief was written) — same function, same rule, confirmed by symbol name.
-    source: 'packages/core-backend/src/routes/univer-meta.ts:10275-10276,10287,10328',
+      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call isMetaRevisionRetentionEnabled() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
+    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + isMetaRevisionRetentionEnabled (compares
+    // MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'); both handleExactAnchorPreview('reset') and
+    // handleExactAnchorExecute('reset') call the shared blocked-check.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute',
     rules: [
       {
         kind: 'conflicts',
         id: 'pit-reset-intent-with-retention-on',
         description:
-          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — PIT_RESET_RETENTION_BLOCKED() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
+          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — isMetaRevisionRetentionEnabled() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
       },
     ],
   },
@@ -178,10 +251,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer. The undelete face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is checked FIRST — so undelete requires BOTH gates.',
-    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the undelete
-    // sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute.
-    source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undelete sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute)',
+      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. On the exact-anchor surfaces (W0 L8) resurrection is currently FAIL-CLOSED regardless of this flag: at-anchor inbound link state cannot be proven, so the L8 apply whole-refuses resurrect-bearing plans (409 INBOUND_UNPROVABLE) and a resurrect-bearing preview never mints an executable token — the preview\'s undeleteBlockedReason merely distinguishes flag-off (UNDELETE_DISABLED) from flag-on-but-authority-missing (INBOUND_UNPROVABLE). Legacy terminal-vintage inbound replay remains under MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for non-exact-anchor surfaces (record-level restore) only. The undelete face still conceptually rides INSIDE revert-execute, whose SHEET_REVERT master gate is checked FIRST — so undelete requires BOTH gates (and, today, an inbound authority that does not yet exist).',
+    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the
+    // undeleteBlockedReason disclosure inside handleExactAnchorPreview.
+    source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undeleteBlockedReason disclosure in handleExactAnchorPreview; the SHEET_REVERT master gate lives in handleExactAnchorExecute)',
     rules: [
       {
         kind: 'requires',
@@ -204,6 +277,24 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // source: packages/core-backend/src/multitable/canonical-sheet-fence.ts:137 (isWriterFenceEnabled) — read by
     //         record-service/record-write-service/records/auto-number-service/univer-meta writer entry points.
     source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
+  },
+  {
+    key: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Time Machine archive runtime gate: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. The dedicated local launcher requires this flag and MULTITABLE_ENABLE_WRITER_FENCE both exact ON, admitted local configuration and FD3 custody unlock before listening. Ordinary server startup without an injected archive composition refuses ON; manual capture also requires explicit policy. This flag has no retention conflict and does not enable prune or retention.",
+    source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    rules: [
+      {
+        kind: 'requires-exact',
+        id: 'archive-without-exact-writer-fence',
+        description: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED is active but MULTITABLE_ENABLE_WRITER_FENCE is not exactly true; the archive worker and local launcher refuse this combination.',
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
@@ -282,10 +373,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     type: 'boolean',
     activationValue: '1',
     dependsOn: [],
-    conflictsWith: ['MULTITABLE_ENABLE_PIT_RESET'],
+    conflictsWith: ['MULTITABLE_ENABLE_SHEET_REVERT', 'MULTITABLE_ENABLE_PIT_RESET'],
     danger: 'high',
     purpose:
-      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and is read by PIT_RESET_RETENTION_BLOCKED() to refuse PIT reset (see MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
+      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and makes both exact-anchor Revert and PIT Reset refuse after auth/full-read but before trust/anchor/reconstruction work (see MULTITABLE_ENABLE_SHEET_REVERT and MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
     // source: packages/core-backend/src/multitable/meta-revision-retention.ts:60
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:60',
   },
@@ -350,6 +441,32 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342',
   },
   {
+    key: 'MULTITABLE_NOTIFICATION_RETENTION_DAYS',
+    type: 'numeric',
+    activationValue: 'numeric days (UNSET = OFF; 1..3650 turns it on)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Retention window (days) for the notification-centre sweep on meta_record_subscription_notifications. DEFAULT OFF: unset / empty / blank / a string that Number() cannot parse into a finite value / <=0 (and anything below 1 whole day) resolves to null and the janitor never starts (zero SQL) — this flag is the ON switch. Parsing is Number(), NOT a decimal-only parse, so JS numeric literals count as numeric and DO turn it on: "0x1e" reads as 30 days and "1e3" as 1000 days. Set to N (clamped to 3650) and rows older than N days are DELETEd, READ AND UNREAD ALIKE (owner default; a "read-only" variant would need an extra read_at predicate in the delete SQL). Deletion is permanent and there is no leader lock, so every instance sweeps.',
+    // source: packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS (resolveNotificationRetentionDays + the null ⇒ no-op early return in startNotificationRetention)
+    source:
+      'packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS',
+  },
+  {
+    key: 'MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 86400000 = 24h; clamped to [10000, 604800000])',
+    dependsOn: ['MULTITABLE_NOTIFICATION_RETENTION_DAYS'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Tick cadence for the notification-centre retention janitor. Default 24h; an in-range value is clamped to [10s, 7d]; unset / empty / blank / non-numeric / <=0 falls back to the 24h default (it is NOT clamped up to the 10s floor). Inert unless MULTITABLE_NOTIFICATION_RETENTION_DAYS turns the janitor on.',
+    // source: packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS (resolveNotificationRetentionIntervalMs)
+    source:
+      'packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS',
+  },
+  {
     key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
     type: 'boolean',
     activationValue: 'true',
@@ -363,24 +480,217 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
     // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
     // NOT be relied upon for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
-    // (b) reconstruction causality is satisfied. Condition (b) is NOT yet satisfiable: the reconstructor still
-    // selects by created_at<=T (non-causal) until Lane L6 lands the exact event-anchor resolver, so this
-    // precondition CURRENTLY FAILS CLOSED for every checkpoint-bearing sheet — which is CORRECT ("migration/
-    // backfill presence alone never enables recovery"). WIRED (L5 P2): enforced by
-    // checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's strict branch (the
-    // authoritative strict-mode entry the Revert/Reset routes traverse). A checkpoint-bearing sheet with the
-    // strict flag on is refused fail-closed (`strict_enablement_unmet`) until L6; the single L6 seam is the
-    // RECONSTRUCTION_CAUSALITY_LANDED constant. The refusal is UNCONDITIONAL on !canEnable (owner P2,
-    // 2026-07-16 — an earlier scope-seam exemption for no-checkpoint sheets was a production bypass and is
-    // REMOVED); goldens that need the comparator call the exported precheckSheetHistoryIntegrityStrict
-    // directly. Do not weaken it to pass. (Not modeled as a cross-flag rule: conditions (a)/(b) are runtime
-    // STATE, not other flag env values.)
+    // (b) reconstruction causality is satisfied. The MECHANISM for (b) landed with Lane L6-b (the causal
+    // reconstructRecordsAtSeq, seq-anchored), and RECONSTRUCTION_CAUSALITY_LANDED flips true in W2's SAME
+    // reviewable change that wires legacy Revert/Reset onto the L8 exact-anchor apply (owner ruling
+    // 2026-07-17). A checkpoint-bearing sheet can therefore pass this code precondition; gating the strict
+    // flag ON remains the operator's separate default-OFF decision ("migration/backfill presence alone never
+    // enables recovery"). WIRED
+    // (L5 P2): enforced by checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's
+    // strict branch (the authoritative strict-mode entry the Revert/Reset routes traverse). The refusal is
+    // UNCONDITIONAL on !canEnable (owner P2, 2026-07-16 — an earlier scope-seam exemption for no-checkpoint
+    // sheets was a production bypass and is REMOVED); goldens that need the comparator call the exported
+    // precheckSheetHistoryIntegrityStrict directly. Do not weaken it to pass. (Not modeled as a cross-flag
+    // rule: conditions (a)/(b) are runtime STATE, not other flag env values.)
     enablementPrecondition:
-      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED (L6). Fails closed until L6.',
+      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED. W2 flips the seam true in the same reviewable change that wires legacy Revert/Reset onto the L8 exact-anchor apply (owner ruling 2026-07-17). Checkpoint-less sheets still refuse; checkpoint-bearing sheets can pass this code precondition. The flag itself stays the operator decision (default OFF).',
     enablementPreconditionSource:
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
     enablementEnforcedVia:
       'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet UNCONDITIONALLY when canEnable is false (no no-checkpoint exemption)',
+  },
+  {
+    key: 'ELEARNING_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Master gate for the elearning V0.1 named pilot (video upload → viewing verification → objective exam → automatic grading). Default OFF; exact literal \'true\' only. Session feature `elearning` is this flag and is never inferred from admin role, product mode, or plugin state.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:28-30',
+  },
+  {
+    key: 'ELEARNING_NOTIFICATIONS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED', 'ELEARNING_CONTENT_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose: 'Opt-in personal learning reminders. Default OFF; exact true only. Unknown external outcomes are fenced, never blindly retried.',
+    source: 'packages/core-backend/src/services/elearning-notification-dispatch.ts#isElearningNotificationDispatchEnabled',
+  },
+  {
+    key: 'ELEARNING_CONTENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning content capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSIGNMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assignment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSESSMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assessment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_INCENTIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning incentive capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ANALYTICS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning analytics capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_MEDIA_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_WATCH_CHALLENGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+      'ELEARNING_MEDIA_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'L6 watch-challenge gate. Default OFF; exact literal \'true\' only. The route and runtime additionally require the master, content, and media gates, and disabled mode remains byte-compatible with ordinary verified watch progress.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_ENABLED',
+  },
+  {
+    key: 'ELEARNING_ENROLLMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Online self-study enrollment gate. Default OFF; exact literal \'true\' only. Enrollment records learner intent but never grants course access or creates assignment effects.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
+  },
+  {
+    key: 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 5000; unset / blank / anything but a plain integer 0..2147483647 after trimming = 5000; 0 = no scan timeout; any other value is clamped to DB_QUERY_TIMEOUT (pool client-side query timeout, default 30000) minus 1000 ms, so the server cancels before the pg client timer does)',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Issue #6175: statement timeout for the e-learning audience catalog scan (listElearningAudienceCourseMatches, the self-study half of GET /api/elearning/me/courses). The scan reads every active scope rule of the org before the 10,000-rule cap applies, and stale planner statistics right after a bulk import can make one scan take tens of seconds. Applied as a transaction-local setting (set_config(..., true), the function form of SET LOCAL) for that one statement inside the learner-list transaction, and put back right after the scan; it never stays on the pooled connection. Read on every scan: a plain integer of milliseconds from 0 to 2147483647 after trimming; unset, blank, negative, decimal, exponent, hex or signed values fall back to 5000. 0 = no scan timeout: no statement is issued and the connection's own statement_timeout (DB_STATEMENT_TIMEOUT for the main pool) applies as before. On query_canceled (SQLSTATE 57014) the scan is not retried, one values-free warn line `elearning_audience_scan_canceled` {orgId, scanTimeoutMs} is logged, and the route answers 503 {error: 'unavailable'} like every other audience failure. Not a gate: nothing turns on or off, and the default is the intended state. danger=low: too low a value makes the learner course list answer 503 on large catalogs; a value above the connection's own statement_timeout raises the server-side bound for this one statement. No-op unless the e-learning surface is mounted (ELEARNING_ENABLED).",
+    source: 'packages/core-backend/src/services/elearning-audience-resolver.ts#resolveElearningAudienceScanTimeoutMs',
+  },
+  {
+    key: 'DINGTALK_TODO_MIRROR_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Master gate for the DingTalk approval-todo ONE-WAY mirror (plan B, #5772/#5768). Default OFF; exact literal \'true\' only (isDingTalkTodoMirrorEnabled: String(env).trim().toLowerCase() === \'true\'). The sink (both the live eventBus leg and the durable consumer leg) checks this flag FIRST and writes nothing to dingtalk_todo_mirrors when it is off — both legs stay inert. The delivery WORKER (the only code that talks to the DingTalk API) is additionally gated: it is only ever constructed/started in index.ts when this flag is on AND NODE_ENV!==\'test\' AND !VITEST. Danger=medium, not high: an outbound convenience with its own idempotent ledger (ON CONFLICT DO NOTHING on org_id+source_key) — a missing/misconfigured mirror loses no platform state (the durable consumer keeps ACKing regardless).',
+    source: 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts:20,23; packages/core-backend/src/services/dingtalk-todo-mirror-service.ts:15; packages/core-backend/src/services/dingtalk-todo-mirror-worker.ts:25; packages/core-backend/src/index.ts:3924,3943,3959',
+  },
+  {
+    key: 'DINGTALK_TODO_MIRROR_INTERVAL_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 30000 = 30s; floored at 5000 = 5s via Math.max)',
+    dependsOn: ['DINGTALK_TODO_MIRROR_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
+    source: 'packages/core-backend/src/index.ts:3948',
+  },
+  {
+    key: 'MULTITABLE_BUSINESS_TIMEZONE',
+    type: 'enum',
+    activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "客户反馈 2026-09-24 #4c (ruling PR #6074): the instance business timezone multitable date-times are DISPLAYED and PARSED in on the web — never the browser's local zone. Storage is unchanged (UTC instants); only the wall clock a person sees/types changes. Echoed as `businessTimezone` on GET /api/multitable/context and /form-context; a dateTime field's own non-UTC property.timezone still wins. Not a gate: nothing turns on or off, and the default (Asia/Shanghai) is the intended state for a China deployment, so leaving it unset needs no action. An invalid value is logged once (without echoing it) and falls back to the default.",
+    source: 'packages/core-backend/src/multitable/business-timezone.ts#resolveMultitableBusinessTimezone',
+  },
+  {
+    key: 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "客户反馈 2026-09-24 #4a: operator switch for the WRITE leg of the managed-table display-name relabel (「把系统表的英文表头改成中文」, stock-prep 数据来源与体检). Default OFF; exact literal 'true' only (no trim, no case folding). Off: the dry run still works (it writes nothing), the plugin route answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED, and the host primitive itself refuses the write leg (409 MULTITABLE_RELABEL_APPLY_DISABLED) before any statement — enforced at the one place that writes, not only in the route. On: stock-prep:admin (or platform admin) may rename still-English managed-table columns and sheet names to their template Chinese names, compare-and-set, only after a preview whose planDigest the apply must match. Danger=medium: it renames the customer's production managed tables (field renames are revertible from the config history; sheet renames are recorded but not revertible there), and while an apply runs, record inserts to that sheet wait for it to commit.",
+    source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
+  },
+  {
+    key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
+    type: 'numeric',
+    activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
+    source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
+  },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds).',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
 ])
 
@@ -418,22 +728,76 @@ export function isMisconfiguredTruthy(spec, rawValue) {
 }
 
 /**
- * Evaluate every `requires`/`conflicts` rule in the manifest against a flat env-like flag map
+ * Parse a `list`-typed flag value into its ENTRY COUNT — never into the entries themselves.
+ *
+ * Semantics are deliberately identical to the in-process parser these flags are read by:
+ * `resolveTrustCheckpointSheetAllowlist` (packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts)
+ * — split on `,`, trim each entry, drop empty entries. So `''`, `','`, `' , , '` and an absent
+ * variable all count 0 (the fail-closed "nothing designated" state), while `'a,,b'` and `' a , b '`
+ * both count 2. `countListEntries` is exported so a test can pin those cases against the same table
+ * the TypeScript parser's unit suite uses; if the two ever diverge, the operator's count would stop
+ * describing what the route actually honours.
+ */
+export function countListEntries(rawValue) {
+  if (typeof rawValue !== 'string') return 0
+  return rawValue
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0).length
+}
+
+/**
+ * The operator-visible rendering of a flag's observed value — the ONLY form that may be printed or
+ * serialized by the status helper.
+ *
+ * Keyed off `spec.type`, never off a flag NAME: a `list` flag's value is a set of IDENTIFIERS (today,
+ * the designated trust-checkpoint canary sheet ids), and broadcasting designated-canary identity is
+ * not an ops status tool's job — the ladder's L2-C rung designates a named synthetic sheet precisely
+ * so that scope stays owner-held. A count-only form still answers the operator's actual question,
+ * "is a canary DESIGNATED or not" (0 vs N), and it is what the fail-closed refusal keys off.
+ *
+ * All of unset / '' / ',' / '   ' collapse to `set(count=0)` on purpose: they are behaviourally
+ * IDENTICAL (every one of them refuses activation for every sheet), so distinguishing them on the
+ * status line would invite reading "(absent)" as "the restriction is not in force".
+ *
+ * Every other type keeps its raw value verbatim — boolean/numeric/enum values ARE the operator's
+ * signal ('true' / '1' / a row cap) and carry no identifiers. Unobserved non-list flags keep the
+ * pre-existing `(absent)` marker.
+ */
+export function renderFlagValueForOperator(spec, rawValue) {
+  if (isValueRedactedType(spec)) return `set(count=${countListEntries(rawValue)})`
+  return rawValue ?? '(absent)'
+}
+
+/**
+ * The SINGLE definition of "this flag's observed value may not be printed verbatim", stated over the
+ * manifest's TYPE taxonomy rather than over a name list. Today that is exactly `list`; registering a
+ * second list-typed flag inherits the redaction with no further edit, and a name-keyed guard (the
+ * #1882 failure class — "redaction that matches key names only") is structurally impossible here.
+ */
+export function isValueRedactedType(spec) {
+  return Boolean(spec) && spec.type === 'list'
+}
+
+/**
+ * Evaluate every `requires`/`requires-exact`/`conflicts` rule in the manifest against a flat env-like flag map
  * (`{ [key]: string | null | undefined }`). Returns a list of violations; empty = no illegal
- * combination present. Uses EXACT per-flag activation (via `isActivated`), never the loose
- * "looks truthy" heuristic, so it cannot be fooled by the R4 footgun in either direction.
+ * combination present. `requires-exact` compares the dependency's raw value with its
+ * activationValue; other rules use per-flag activation via `isActivated`.
  */
 export function evaluateFlagRules(flags) {
   const violations = []
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
     const rules = spec.rules || []
     for (const rule of rules) {
-      if (rule.kind === 'requires') {
+      if (rule.kind === 'requires' || rule.kind === 'requires-exact') {
         const selfOn = isActivated(spec, flags[spec.key])
         if (!selfOn) continue
         const unmet = spec.dependsOn.filter((depKey) => {
           const depSpec = GLOBAL_HISTORY_FLAG_BY_KEY[depKey]
-          return depSpec && !isActivated(depSpec, flags[depKey])
+          return depSpec && (rule.kind === 'requires-exact'
+            ? flags[depKey] !== depSpec.activationValue
+            : !isActivated(depSpec, flags[depKey]))
         })
         if (unmet.length > 0) {
           violations.push({

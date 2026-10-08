@@ -12,11 +12,14 @@ import { getUserSession, listUserSessions, revokeUserSession } from '../auth/ses
 import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
   deriveDelegatedAdminNamespace,
+  deriveGrantNamespaces,
   disableNamespaceAdmissionsWithoutRoles,
+  grantNamespaceAdmissions,
   isNamespaceAdmissionControlledResource,
   listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots,
@@ -24,9 +27,127 @@ import {
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
+import {
+  assignUserRoles,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  assertPendingUserCannotBeActivatedViaGenericStatusApi,
+  PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+} from '../auth/user-activation'
+import { activatePendingUser, isActivateMode } from '../auth/user-activate'
+import type {
+  ActivateErrorCode,
+  ActivateMode,
+  ActivateUserInput,
+  ActivateUserResult,
+} from '../auth/user-activate'
+import {
+  applyMobileLoginAliasChangeOrThrow,
+  assertAliasCutoverAllowed,
+  backfillUserLoginAliases,
+  claimNonEmptyLoginAliasesOrThrow,
+  isAuthLoginAliasCutoverEnabled,
+  LoginAliasClaimError,
+} from '../auth/login-alias-service'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+  type AccessGraphTransactionClient,
+} from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  classifyRecoveryConflict,
+  RECOVERY_CONFLICT_HTTP_CODE,
+  RECOVERY_CONFLICT_HTTP_MESSAGE,
+  RECOVERY_CONFLICT_HTTP_STATUS,
+  sendIfRecoveryConflict,
+} from '../db/recovery-conflict'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+import {
+  acquireAttendanceCalculationRolloutLock,
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  resolveSegmentCalculationPosture,
+} from '../attendance/w4c0-identity'
+import { Logger } from '../core/logger'
+import { getCorrelationId } from '../context/request-context'
+import { isValidCorrelationId } from '../middleware/correlation'
+
+const logger = new Logger('AdminUsersRoutes')
+
+/**
+ * #6163 — how a 500 branch of this router answers.
+ *
+ * The RESPONSE keeps the router's jsonError shape `{ ok: false, error: { code, message } }` with the
+ * branch's own error code and a FIXED sentence written here, plus one additional field,
+ * `error.correlationId`: the id the correlation middleware gave this request (the same value it
+ * returns in the X-Correlation-ID response header and writes on every log line). Once the raw text
+ * is gone, that id is the one thing an administrator can hand to support.
+ *
+ * The LOG gets exactly one line per failed request: a fixed event name, the response's error code,
+ * the class name of the caught value, and the correlation id. The caught value itself is never
+ * handed to the logger (the repo logger copies `error.message` and `error.stack` into the line when
+ * it is given an error object), and nothing read from it but its class name is written anywhere: a
+ * crypto, driver or library message can carry a host, a role or a stored value (the demo-server
+ * fault behind #6163 put Node's GCM text on /admin/users).
+ */
+const ADMIN_USERS_FAILURE_EVENT = 'admin-users.server-failure'
+const SAFE_ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+
+function describeCaughtClass(error: unknown): string {
+  try {
+    if (error === null) return 'null'
+    if (typeof error !== 'object' && typeof error !== 'function') return typeof error
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name
+    return typeof name === 'string' && SAFE_ERROR_CLASS.test(name) ? name : 'unknown'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+/**
+ * The request's correlation id, only when it has the shape the correlation middleware gives it: the
+ * value on `req`, else the one in the request context. Anything else (e.g. a raw header another
+ * middleware copied onto `req`) is never echoed into a body.
+ */
+function readFailureCorrelationId(req: Request): string | undefined {
+  for (const candidate of [req.correlationId, getCorrelationId()]) {
+    if (isValidCorrelationId(candidate)) return candidate
+  }
+  return undefined
+}
+
+function sendAdminUsersServerFailure(
+  req: Request,
+  res: Response,
+  code: string,
+  message: string,
+  error: unknown,
+): void {
+  const correlationId = readFailureCorrelationId(req)
+  try {
+    logger.error(
+      `${ADMIN_USERS_FAILURE_EVENT} code=${code} errorClass=${describeCaughtClass(error)}`
+      + (correlationId ? ` correlationId=${correlationId}` : ''),
+    )
+  } catch {
+    // Logging must never keep the fixed 500 from being sent.
+  }
+  res.status(500).json({
+    ok: false,
+    error: correlationId ? { code, message, correlationId } : { code, message },
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:userId/dingtalk-grant can fail AFTER its transaction committed and its
+ * audit row was written (the snapshot read that builds the reply comes last), so its 500 must not
+ * claim the change failed. The page shows this sentence verbatim in its (Chinese) status banner.
+ */
+const DINGTALK_GRANT_UNCONFIRMED_MESSAGE = '钉钉扫码登录的更新结果未能确认，请刷新页面后查看当前状态'
 
 type AdminUserProfile = {
   id: string
@@ -41,6 +162,8 @@ type AdminUserProfile = {
   role: string
   is_active: boolean
   is_admin: boolean
+  activationStatus?: string
+  localPasswordSet?: boolean
   last_login_at: string | null
   created_at: string
   updated_at?: string
@@ -51,6 +174,8 @@ type AdminRoleCatalogRow = {
   name: string
   permissions: string[] | null
   member_count: number | string
+  /** Optimistic-concurrency token for PUT /api/roles/:id (`expectedUpdatedAt`). */
+  updated_at: string | Date | null
 }
 
 type AdminAuditLogRow = {
@@ -268,6 +393,13 @@ type CreateUserRequestBody = {
   position?: string
   hireDate?: string
   orgId?: string
+  /**
+   * W4-PRE-1b item D: independent explicit org-admission param. Unlike `orgId` above (consumed
+   * only by `resolveAttendanceOnboardingOrgId`'s group/shift-derivation fallback chain), this
+   * one alone is sufficient to onboard `user_orgs` membership with NO attendanceGroupId/
+   * defaultShiftId required — see the resolution block below.
+   */
+  attendanceOrgId?: string
   attendanceGroupId?: string
   defaultShiftId?: string
   defaultShiftStartDate?: string
@@ -301,7 +433,43 @@ const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DEFAULT_ATTENDANCE_ORG_ID = 'default'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+/**
+ * Attendance role ids, derived from the exported access-preset table.
+ *
+ * Deriving keeps this set and the preset table as one registry: an attendance preset added to
+ * the table is in this set on the same commit, with nothing to update by hand. It is also why
+ * the boundary in `rbac/role-assignment.ts` constrains by namespace derivation rather than by a
+ * set like this one — the boundary must admit every attendance role id, present and future,
+ * without depending on any registry staying in step.
+ *
+ * Cross-checked against the router's own template registry by
+ * `tests/unit/role-assignment-boundary.test.ts`.
+ */
+export const ATTENDANCE_ROLE_IDS = new Set(
+  listAccessPresets()
+    .filter((preset) => preset.productMode === 'attendance' && Boolean(preset.roleId))
+    .map((preset) => String(preset.roleId)),
+)
+const ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED =
+  'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
+
+class AttendanceShiftReferenceUnavailableError extends Error {
+  readonly status = 422
+  readonly code = ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED
+  readonly details: Array<{ field: string; message: string }>
+
+  constructor(segmentCount: number) {
+    super(
+      `Shift has ${segmentCount} segments; authoritative segment calculation is disabled for this org, ` +
+      'so default user onboarding cannot reference a multi-segment shift',
+    )
+    this.name = 'AttendanceShiftReferenceUnavailableError'
+    this.details = [{
+      field: 'defaultShiftId',
+      message: 'Multi-segment shift is authoring preview-only while segment calculation is disabled',
+    }]
+  }
+}
 const ADMIN_USER_PROFILE_SELECT = `
   id,
   email,
@@ -315,10 +483,32 @@ const ADMIN_USER_PROFILE_SELECT = `
   role,
   is_active,
   is_admin,
+  COALESCE(activation_status, 'activated') AS "activationStatus",
+  COALESCE(local_password_set, TRUE) AS "localPasswordSet",
   last_login_at,
   created_at,
   updated_at
 `
+
+// P23: exact-anchor recovery holds a per-subject advisory lease across the eight
+// recovery-authority tables (users, user_roles, user_permissions, role_permissions,
+// field_permissions, record_permissions, spreadsheet_permissions,
+// platform_member_group_members) while it stabilizes permissions. A write against one of
+// those tables that lands under a held lease fails fast with Postgres SQLSTATE 40001 and
+// message RECOVERY_AUTHORITY_BUSY_MARKER (see recovery-authorization-stability.ts). That is
+// a transient, retryable condition — the multitable permission routes in univer-meta.ts
+// already map it to 409 RECOVERY_AUTHORITY_BUSY. This helper gives the platform admin routes
+// in this file the same mapping instead of letting it fall through to an unclassified 500.
+// Reuses the SAME discriminator (isRecoveryAuthorityBusyError) and error code
+// (RECOVERY_AUTHORITY_BUSY) as univer-meta.ts — no new marker/constant is introduced.
+// Body is values-free: fixed code/message/retryable flag, no user- or request-derived data.
+// O2-S2: now delegates to the ONE shared classifier/adapter (db/recovery-conflict.ts).
+// Status/code/message/details are byte-identical to the previous inline body; the
+// discriminator is additive-only (it also recognises the named retryable service errors
+// of the same family — RecoveryConflictError / UserRoleAssignmentRecoveryBusyError).
+function sendIfRecoveryAuthorityBusy(res: Response, error: unknown): boolean {
+  return sendIfRecoveryConflict(res, error)
+}
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -326,21 +516,19 @@ function getRequestUserId(req: Request): string {
   return typeof userId === 'string' ? userId.trim() : ''
 }
 
-function hasLegacyAdminClaim(req: Request): boolean {
-  const raw = req.user as Record<string, unknown> | undefined
-  if (!raw) return false
-  if (raw.role === 'admin') return true
-  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
-  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
-  return false
-}
+// `hasLegacyAdminClaim` used to be a private copy right here. It moved VERBATIM to
+// ../rbac/platform-admin.ts (and is imported above) when routes/roles.ts needed the same
+// question answered on its write path: a second, independently drifting admin predicate is an
+// auth bug, and the roles editor would have refused a principal that THIS file's
+// `GET /api/admin/roles` serves as an administrator. Behaviour here is unchanged — same
+// function body, same call sites.
 
-// Exported IN PLACE (not extracted to a shared guard module — there is no such module today;
-// the sibling `requireOrgMemberAccess` is itself a local function in routes/api-tokens.ts) so the
-// attendance-admin redelivery route can reuse the SAME platform-admin check rather than
-// reimplementing it. Two drifting admin checks would be an auth bug. Behavior and the ~20 existing
-// in-file call sites are unchanged. Contract: returns the userId on success, or null AFTER already
-// writing the 401/403 response — callers MUST return early on null.
+// Exported IN PLACE (the sibling `requireOrgMemberAccess` is itself a local function in
+// routes/api-tokens.ts) so the attendance-admin redelivery route can reuse the SAME
+// platform-admin check rather than reimplementing it. Two drifting admin checks would be an auth
+// bug. Behavior and the ~20 existing in-file call sites are unchanged. Contract: returns the
+// userId on success, or null AFTER already writing the 401/403 response — callers MUST return
+// early on null.
 export async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
   const userId = getRequestUserId(req)
   if (!userId) {
@@ -383,12 +571,13 @@ async function fetchRoleCatalog() {
     `SELECT
         r.id,
         r.name,
+        r.updated_at,
         COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions,
         COUNT(DISTINCT ur.user_id)::int AS member_count
      FROM roles r
      LEFT JOIN role_permissions rp ON rp.role_id = r.id
      LEFT JOIN user_roles ur ON ur.role_id = r.id
-     GROUP BY r.id, r.name
+     GROUP BY r.id, r.name, r.updated_at
      ORDER BY r.id ASC`,
   )
 
@@ -397,6 +586,11 @@ async function fetchRoleCatalog() {
     name: row.name,
     permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
     memberCount: Number(row.member_count || 0),
+    // Additive field: the role editor echoes it back as `expectedUpdatedAt` so a stale tab
+    // cannot silently replay a grid that has since been revoked (routes/roles.ts).
+    updatedAt: row.updated_at instanceof Date
+      ? row.updated_at.toISOString()
+      : (row.updated_at ?? null),
   }))
 }
 
@@ -415,6 +609,16 @@ async function fetchUserAccessSnapshot(userId: string) {
     roles,
     permissions,
     isAdmin,
+  }
+}
+
+class AttendanceDefaultShiftNotFoundError extends Error {
+  readonly status = 404
+  readonly code = 'DEFAULT_SHIFT_NOT_FOUND'
+
+  constructor() {
+    super('Default shift not found')
+    this.name = 'AttendanceDefaultShiftNotFoundError'
   }
 }
 
@@ -463,6 +667,21 @@ function sanitizeOptionalUuid(value: unknown): string | null | undefined {
   const normalized = value.trim()
   if (!normalized) return null
   return UUID_PATTERN.test(normalized) ? normalized : undefined
+}
+
+/**
+ * W4-PRE-1b item D. `org_id` is a free-form TEXT identifier across this codebase (no formal
+ * `organizations` table, no UUID shape requirement — `'default'` itself is not a UUID), so this
+ * mirrors `sanitizeOptionalUuid`'s ABSENT/INVALID split without the UUID regex: absent (undefined/
+ * null/blank-after-trim) → `null`, wrong TYPE → `undefined` (400). Length-capped as basic input
+ * hygiene only, matching the other free-text sanitizers in this file.
+ */
+function sanitizeOptionalOrgId(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  if (!normalized) return null
+  return normalized.slice(0, 200)
 }
 
 function resolveAttendanceOnboardingOrgId(req: Request): string {
@@ -597,14 +816,13 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
   }
 }
 
-async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<void> {
+async function assertUsersCanEnableDingTalkGrant(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+): Promise<void> {
   if (userIds.length === 0) return
 
-  const identityResult = await query<{
-    local_user_id: string
-    corp_id: string | null
-    provider_open_id: string | null
-  }>(
+  const identityResult = await client.query(
     `SELECT local_user_id, corp_id, provider_open_id
      FROM user_external_identities
      WHERE provider = $1
@@ -613,7 +831,11 @@ async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<voi
   )
 
   const blockedUserIds = new Set<string>()
-  for (const row of identityResult.rows) {
+  for (const row of identityResult.rows as Array<{
+    local_user_id: string
+    corp_id: string | null
+    provider_open_id: string | null
+  }>) {
     if (row.corp_id && !row.provider_open_id) {
       blockedUserIds.add(row.local_user_id)
     }
@@ -716,10 +938,31 @@ function normalizeUserIdList(value: unknown): string[] {
   return Array.from(unique)
 }
 
-async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUserId: string): Promise<void> {
-  if (userIds.length === 0) return
+async function upsertDingTalkGrants(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+  enabled: boolean,
+  adminUserId: string,
+): Promise<string[]> {
+  if (userIds.length === 0) return []
 
-  await query(
+  const current = await client.query(
+    `SELECT local_user_id, enabled
+       FROM user_external_auth_grants
+      WHERE provider = $1
+        AND local_user_id = ANY($2::text[])`,
+    [DINGTALK_PROVIDER, userIds],
+  )
+  const currentByUserId = new Map(
+    (current.rows as Array<{ local_user_id: string; enabled: boolean }>).map(
+      (row) => [row.local_user_id, row.enabled],
+    ),
+  )
+  const changedUserIds = userIds.filter(
+    (userId) => currentByUserId.get(userId) !== enabled,
+  )
+
+  await client.query(
     `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
      SELECT $1, target_user_id, $2, $3, NOW(), NOW()
      FROM unnest($4::text[]) AS target(target_user_id)
@@ -727,6 +970,14 @@ async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUs
      DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
     [DINGTALK_PROVIDER, enabled, adminUserId, userIds],
   )
+  if (changedUserIds.length > 0) {
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: changedUserIds,
+      actorId: adminUserId,
+      reason: 'superseded by administrator DingTalk grant update',
+    })
+  }
+  return changedUserIds
 }
 
 function deriveDelegableNamespaces(roleIds: string[]): string[] {
@@ -1677,6 +1928,294 @@ async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise
   )
 }
 
+/**
+ * Fallback for every failure whose reason is not an authored `ActivateErrorCode`.
+ *
+ * Kept as its own constant, deliberately NOT a row of `ACTIVATE_ERROR_POLICY`: the closure test
+ * asserts set equality between the reasons thrown at `throwCoded` call sites and the policy
+ * table's keys, and folding the fallback into the table would make that equality vacuous.
+ */
+export const ACTIVATE_ERROR_FALLBACK = Object.freeze({
+  status: 500,
+  code: 'ACTIVATE_FAILED',
+  message: 'Activation failed',
+} as const)
+
+/**
+ * Closed policy table: every authored activation reason → the status and the message we publish.
+ *
+ * Typed `Record<ActivateErrorCode, …>`, so adding a reason in `auth/user-activate.ts` without
+ * adding a row here is a compile error, and a row here whose key is not an authored reason is a
+ * compile error too.
+ *
+ * Statuses per owner ruling 2026-07-27 (RULED, not proposed):
+ *   ACTIVATE_INTEGRATION_INACTIVE → 409, ACTIVATE_RACE → 409, ACTIVATE_SOURCE_MISSING → 409.
+ *
+ * Messages are authored HERE, not inherited from the thrown Error. The thrown message stays
+ * useful for server-side logs; it is simply never part of the response.
+ */
+const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; message: string }> = {
+  ACTIVATE_USER_REQUIRED: { status: 400, message: 'A target user id is required to activate' },
+  ACTIVATE_USER_NOT_FOUND: { status: 404, message: 'User not found' },
+  ACTIVATE_NOT_PENDING: { status: 409, message: 'User is not pending activation' },
+  // RULED 409: a lost race means another actor already moved the user out of pending — the
+  // caller's view of the world is stale, which is a client-visible conflict, not an outage.
+  ACTIVATE_RACE: { status: 409, message: 'User is no longer pending activation' },
+  ACTIVATE_ALIAS_CONFLICT: { status: 409, message: 'A login identifier is already claimed by another account' },
+  ACTIVATE_ALIAS_REQUIRED: { status: 409, message: 'Activation requires at least one usable login identifier' },
+  // Infrastructure (a failed durable write), never a client conflict.
+  ACTIVATE_ALIAS_FAILED: { status: 500, message: 'Failed to claim login alias during activation' },
+  // RULED 409: no linked directory account is a configuration state the caller can fix.
+  ACTIVATE_SOURCE_MISSING: { status: 409, message: 'No linked active directory account for activation' },
+  ACTIVATE_SOURCE_INACTIVE: { status: 409, message: 'Directory account is inactive; cannot activate' },
+  // RULED 409: an inactive integration is likewise configuration, not an outage.
+  ACTIVATE_INTEGRATION_INACTIVE: { status: 409, message: 'Directory integration is not active; cannot activate' },
+  ACTIVATE_LINK_MISMATCH: { status: 409, message: 'Directory link points to a different user' },
+  ACTIVATE_SOURCE_INELIGIBLE: {
+    status: 409,
+    message: 'Directory source is not eligible for DingTalk SSO activation',
+  },
+  // 409: membership org is DERIVED from the directory-source integration for every activation
+  // mode; a caller-supplied orgId is only ever match-validated, never trusted (closeout review
+  // P1 — non-SSO admin activation previously wrote the client's orgId unchecked).
+  ACTIVATE_ORG_MISMATCH: {
+    status: 409,
+    message: 'orgId does not match the directory source integration for this user',
+  },
+  // 409 (#4833): several ACTIVE sources in different orgs — "derive" has no unique answer, so
+  // the caller must name one; refusing beats silently picking the lowest account id.
+  ACTIVATE_ORG_AMBIGUOUS: {
+    status: 409,
+    message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
+  },
+}
+
+type ActivatePolicyRow = Readonly<{ status: number; message: string }>
+
+/** A row the holder owns: a fresh frozen copy, never the source object. */
+function frozenPolicyRow(row: { status: number; message: string }): ActivatePolicyRow {
+  return Object.freeze({ status: row.status, message: row.message })
+}
+
+/**
+ * Lookup view of the table above. A `Map` rather than an object index: a Map has no prototype
+ * chain to borrow from, so a thrown `.code` of `'constructor'` / `'toString'` / `'__proto__'`
+ * cannot resolve to a row, and the response path needs no computed property access at all
+ * (which keeps the AST scan's "no computed read on the response path" rule strict).
+ *
+ * OWNER POST-MERGE FINDING (P2, 2026-07-27): this was `new Map(Object.entries(ACTIVATE_ERROR_POLICY))`
+ * over an EXPORTED, non-frozen table — so the Map held the very row objects any importer could
+ * reach. Owner's executed repro: setting `ACTIVATE_RACE` to 200 plus database text through the
+ * public export made `mapActivateError()` return it verbatim, defeating the closure this table
+ * exists to build. The source table is now module-private, the Map holds its own frozen copies,
+ * and the export is a frozen projection.
+ */
+const ACTIVATE_ERROR_POLICY_LOOKUP: ReadonlyMap<string, ActivatePolicyRow> = new Map(
+  Object.entries(ACTIVATE_ERROR_POLICY_SOURCE).map(([code, row]) => [code, frozenPolicyRow(row)]),
+)
+
+/**
+ * The published, DEEP-FROZEN projection. Exported only because the closure and mapping tests
+ * need to read the table's keys and rows; it is not the object the response path reads, and
+ * mutating it changes nothing.
+ */
+export const ACTIVATE_ERROR_POLICY: Readonly<Record<ActivateErrorCode, ActivatePolicyRow>> =
+  Object.freeze(
+    Object.fromEntries(
+      Object.entries(ACTIVATE_ERROR_POLICY_SOURCE).map(([code, row]) => [code, frozenPolicyRow(row)]),
+    ),
+  ) as Readonly<Record<ActivateErrorCode, ActivatePolicyRow>>
+
+/**
+ * Error surface for `POST /api/admin/users/:id/activate`.
+ *
+ * Exported so the contract is testable: before this existed, the mapping lived inline in the
+ * handler and nothing asserted it, so re-classifying an infrastructure failure as a client 409
+ * was a silent one-line regression.
+ *
+ * RETRACTION (2026-07-27) — the previous version of this comment claimed two rules, and the
+ * second one was false as written:
+ *
+ *   Old text: "The message is ours too, whenever the code is not. `ACTIVATE_*` messages are
+ *   authored in `throwCoded`; everything else is driver text … and is replaced wholesale."
+ *
+ *   Why it did not hold: the code selecting branch was a PREFIX test
+ *   (`rawCode.startsWith('ACTIVATE_')`), not a membership test. So "the code is ours" was only
+ *   ever "the code LOOKS like ours". Any thrown or propagated error carrying an
+ *   `ACTIVATE_`-shaped string in `.code` — including one that `throwCoded` never authored —
+ *   satisfied the prefix, fell past both message special-cases, and reached
+ *   `(error as Error)?.message`, publishing raw driver text. Owner's executed repro:
+ *   `ACTIVATE_DB_FAILURE -> 500 / ACTIVATE_DB_FAILURE / column "secret_col" does not exist`.
+ *   The status branch had the same defect independently: `code.startsWith('ACTIVATE_SOURCE')`
+ *   handed 409 to any unauthored `ACTIVATE_SOURCE*` string.
+ *
+ *   What is true now: the response never reads `error.message` at all — not for authored
+ *   reasons, not for unauthored ones. `.code` is the ONLY property read off the thrown value,
+ *   and it is matched by exact membership via `ACTIVATE_ERROR_POLICY_LOOKUP.get()` — a `Map`,
+ *   which has no prototype chain to borrow from, so `constructor` / `toString` / `__proto__`
+ *   resolve to nothing. Everything else, including a well-formed `ACTIVATE_`-looking string,
+ *   collapses to `ACTIVATE_ERROR_FALLBACK` — 500 / `ACTIVATE_FAILED` / a fixed generic message.
+ *
+ * Three layers close this, and each is a different kind of evidence (see
+ * `tests/unit/admin-users-activate-error-closure.test.ts` for the standing caveat that the
+ * static layers are not behaviour proofs):
+ *   1. this exact-membership table at runtime;
+ *   2. `ActivateErrorCode` constraining `throwCoded`, so an unauthored reason cannot be thrown;
+ *   3. a TypeScript-AST scan of the `throwCoded` call sites, set-equal against this table's keys.
+ */
+export function mapActivateError(error: unknown): { status: number; code: string; message: string } {
+  // O2-S2: activation writes users (a recovery-authority table). A recovery conflict —
+  // the marker 40001, re-raised by activatePendingUser as the named retryable
+  // RecoveryConflictError — is a retryable 409, not the ACTIVATE_FAILED 500 fallback.
+  // The classifier reads nothing that is published: status/code/message here are fixed
+  // constants, so the "never echo driver text" contract holds on this branch too.
+  if (classifyRecoveryConflict(error) === 'recovery_conflict') {
+    return {
+      status: RECOVERY_CONFLICT_HTTP_STATUS,
+      code: RECOVERY_CONFLICT_HTTP_CODE,
+      message: RECOVERY_CONFLICT_HTTP_MESSAGE,
+    }
+  }
+  const rawCode = (error as { code?: unknown } | null)?.code
+  // Exact membership, never a prefix. `.code` is the only property read off the thrown value.
+  if (typeof rawCode === 'string') {
+    const policy = ACTIVATE_ERROR_POLICY_LOOKUP.get(rawCode)
+    // Spread, not `policy.message`: the response path reads no `message` property anywhere.
+    if (policy) return { code: rawCode, ...policy }
+  }
+  return { ...ACTIVATE_ERROR_FALLBACK }
+}
+
+const MAX_BULK_ACTIVATE_ITEMS = 100
+
+type ParsedActivateRequest = Omit<ActivateUserInput, 'adminUserId'>
+
+type BulkActivateResult =
+  | {
+      userId: string
+      ok: true
+      result: ActivateUserResult
+    }
+  | {
+      userId: string
+      ok: false
+      error: { code: string; message: string; status: number }
+    }
+
+function parseOptionalNonEmptyString(
+  value: unknown,
+  fieldName: string,
+): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string' || !value.trim()) {
+    throw Object.assign(new Error(`${fieldName} must be a non-empty string or null`), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  return value.trim()
+}
+
+function parseActivateRequest(
+  raw: unknown,
+  routeUserId?: string,
+): ParsedActivateRequest {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw Object.assign(new Error('Activation request must be an object'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const body = raw as Record<string, unknown>
+  const rawUserId = routeUserId ?? body.userId
+  if (typeof rawUserId !== 'string' || !rawUserId.trim()) {
+    throw Object.assign(new Error('userId must be a non-empty string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  const rawMode = body.mode === undefined ? 'temp_password' : body.mode
+  if (!isActivateMode(rawMode)) {
+    throw Object.assign(new Error('mode must be temp_password, sso, or admin_no_password'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  const mode: ActivateMode = rawMode
+
+  if (body.temporaryPassword !== undefined && typeof body.temporaryPassword !== 'string') {
+    throw Object.assign(new Error('temporaryPassword must be a string'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (mode !== 'temp_password' && body.temporaryPassword !== undefined) {
+    throw Object.assign(new Error('temporaryPassword is only valid for temp_password mode'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+  if (
+    body.enableDingTalkGrant !== undefined
+    && typeof body.enableDingTalkGrant !== 'boolean'
+  ) {
+    throw Object.assign(new Error('enableDingTalkGrant must be a boolean'), {
+      code: 'ACTIVATE_REQUEST_INVALID',
+    })
+  }
+
+  return {
+    userId: rawUserId.trim(),
+    mode,
+    temporaryPassword: typeof body.temporaryPassword === 'string'
+      ? body.temporaryPassword
+      : undefined,
+    orgId: parseOptionalNonEmptyString(body.orgId, 'orgId'),
+    directoryAccountId: parseOptionalNonEmptyString(
+      body.directoryAccountId,
+      'directoryAccountId',
+    ),
+    enableDingTalkGrant: body.enableDingTalkGrant === true,
+  }
+}
+
+function mapActivateRequestError(error: unknown): {
+  status: number
+  code: string
+  message: string
+} {
+  if ((error as { code?: unknown } | null)?.code === 'ACTIVATE_REQUEST_INVALID') {
+    return {
+      status: 400,
+      code: 'ACTIVATE_REQUEST_INVALID',
+      message: (error as Error).message,
+    }
+  }
+  return mapActivateError(error)
+}
+
+async function auditActivateSuccess(
+  adminUserId: string,
+  result: ActivateUserResult,
+  mode: ActivateMode,
+  source: 'admin_activate' | 'admin_activate_bulk',
+): Promise<void> {
+  await auditLog({
+    actorId: adminUserId,
+    actorType: 'user',
+    action: 'update',
+    resourceType: 'user',
+    resourceId: result.userId,
+    meta: {
+      source,
+      mode,
+      localPasswordSet: result.localPasswordSet,
+      // Boolean only: plaintext passwords and provider identity values are forbidden in audit.
+      temporaryPasswordIssued: Boolean(result.temporaryPassword),
+      // #4833: with several ACTIVE sources the admin's orgId CHOOSES among orgs — the audit row
+      // must record which org the membership actually landed in, or the forensic question
+      // "who placed this user in org B" has no answer. An org id is placement, not identity.
+      membershipOrgId: result.membershipOrgId,
+    },
+  })
+}
+
 export function adminUsersRouter(): Router {
   const r = Router()
 
@@ -1705,7 +2244,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SUMMARY_FAILED', 'Failed to load delegated role summary', error)
     }
   })
 
@@ -1722,7 +2261,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', 'Failed to list delegation departments', error)
     }
   })
 
@@ -1739,7 +2278,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', (error as Error)?.message || 'Failed to list platform member groups')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', 'Failed to list platform member groups', error)
     }
   })
 
@@ -1781,7 +2320,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'PLATFORM_MEMBER_GROUP_NAME_CONFLICT', 'Platform member group name already exists')
       }
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', (error as Error)?.message || 'Failed to create platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', 'Failed to create platform member group', error)
     }
   })
 
@@ -1801,7 +2340,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_READ_FAILED', (error as Error)?.message || 'Failed to load platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_READ_FAILED', 'Failed to load platform member group', error)
     }
   })
 
@@ -1818,7 +2357,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', (error as Error)?.message || 'Failed to list scope templates')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', 'Failed to list scope templates', error)
     }
   })
 
@@ -1860,7 +2399,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT', 'Scope template name already exists')
       }
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', (error as Error)?.message || 'Failed to create scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', 'Failed to create scope template', error)
     }
   })
 
@@ -1880,7 +2419,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', (error as Error)?.message || 'Failed to load scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', 'Failed to load scope template', error)
     }
   })
 
@@ -1958,7 +2497,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', 'Failed to update scope template departments', error)
     }
   })
 
@@ -2034,7 +2573,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template member groups')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', 'Failed to update scope template member groups', error)
     }
   })
 
@@ -2064,7 +2603,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_READ_FAILED', (error as Error)?.message || 'Failed to load delegated admin scopes')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_READ_FAILED', 'Failed to load delegated admin scopes', error)
     }
   })
 
@@ -2150,7 +2689,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin scope', error)
     }
   })
 
@@ -2228,7 +2767,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin member-group scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin member-group scope', error)
     }
   })
 
@@ -2292,7 +2831,8 @@ export function adminUsersRouter(): Router {
         memberGroups,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', (error as Error)?.message || 'Failed to update platform member group membership')
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', 'Failed to update platform member group membership', error)
     }
   })
 
@@ -2399,7 +2939,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', (error as Error)?.message || 'Failed to apply scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', 'Failed to apply scope template', error)
     }
   })
 
@@ -2457,7 +2997,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_USER_LIST_FAILED', 'Failed to list delegation users', error)
     }
   })
 
@@ -2518,7 +3058,7 @@ export function adminUsersRouter(): Router {
           : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ACCESS_FAILED', (error as Error)?.message || 'Failed to load delegated user access')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACCESS_FAILED', 'Failed to load delegated user access', error)
     }
   })
 
@@ -2596,7 +3136,7 @@ export function adminUsersRouter(): Router {
           : namespaceAdmissions.filter((admission) => delegation.delegableNamespaces.includes(admission.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update delegated namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ADMISSION_FAILED', 'Failed to update delegated namespace admission', error)
     }
   })
 
@@ -2638,19 +3178,18 @@ export function adminUsersRouter(): Router {
         }
       }
 
+      // The authority is the delegation this actor holds. A platform admin is unbounded here,
+      // matching the `delegation.isPlatformAdmin` short-circuit on the `roleIdMatchesNamespaces`
+      // check above; a delegated admin is bounded by the namespaces that check already computed,
+      // so the boundary re-states the route's own rule at the write rather than adding a
+      // second, separately-maintained one.
+      const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
+        ? { kind: 'platform-admin' }
+        : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
       if (action === 'assign') {
-        await query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId],
-        )
+        await assignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
       } else {
-        await query(
-          `DELETE FROM user_roles
-           WHERE user_id = $1 AND role_id = $2`,
-          [userId, roleId],
-        )
+        await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
       }
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
@@ -2709,7 +3248,13 @@ export function adminUsersRouter(): Router {
           : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
+      // A boundary refusal is a permission outcome, so it answers with its own status and code
+      // rather than reaching the generic handler below. The route's pre-check and the boundary
+      // do not compute the same set — the boundary drops namespaces that are not
+      // admission-controlled — so this arm is reachable and is the seam's real answer for it.
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_UPDATE_FAILED', 'Failed to update delegated role', error)
     }
   })
 
@@ -2788,7 +3333,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_LIST_FAILED', (error as Error)?.message || 'Failed to list users')
+      return sendAdminUsersServerFailure(req, res, 'USER_LIST_FAILED', 'Failed to list users', error)
     }
   })
 
@@ -2898,7 +3443,7 @@ export function adminUsersRouter(): Router {
           degraded: true,
         })
       }
-      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', (error as Error)?.message || 'Failed to load invite ledger')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_LEDGER_LIST_FAILED', 'Failed to load invite ledger', error)
     }
   })
 
@@ -2952,7 +3497,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_REVOKE_FAILED', 'Failed to revoke invite', error)
     }
   })
 
@@ -3065,7 +3610,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_RESEND_FAILED', (error as Error)?.message || 'Failed to resend invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_RESEND_FAILED', 'Failed to resend invite', error)
     }
   })
 
@@ -3084,6 +3629,7 @@ export function adminUsersRouter(): Router {
       const cleanHireDate = typeof body.hireDate === 'string' ? sanitizeHireDate(body.hireDate) : null
       const cleanAttendanceGroupId = sanitizeOptionalUuid(body.attendanceGroupId)
       const cleanDefaultShiftId = sanitizeOptionalUuid(body.defaultShiftId)
+      const cleanExplicitAttendanceOrgId = sanitizeOptionalOrgId(body.attendanceOrgId)
       const cleanDefaultShiftStartDate = typeof body.defaultShiftStartDate === 'string' ? sanitizeHireDate(body.defaultShiftStartDate) : null
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
@@ -3124,6 +3670,9 @@ export function adminUsersRouter(): Router {
       }
       if (cleanDefaultShiftId === undefined) {
         return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_ID', 'defaultShiftId must be a UUID or blank')
+      }
+      if (cleanExplicitAttendanceOrgId === undefined) {
+        return jsonError(res, 400, 'INVALID_ATTENDANCE_ORG_ID', 'attendanceOrgId must be a string or blank')
       }
       if (cleanDefaultShiftStartDate === undefined) {
         return jsonError(res, 400, 'INVALID_DEFAULT_SHIFT_START_DATE', 'defaultShiftStartDate must be YYYY-MM-DD or blank')
@@ -3169,9 +3718,45 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      const attendanceOrgId = cleanAttendanceGroupId || cleanDefaultShiftId
+      // W4-PRE-1b item D: the group/shift-derived resolution below is UNCHANGED — every
+      // existing caller that never sends `attendanceOrgId` gets byte-identical behavior. The
+      // new explicit param is evaluated independently and merged in afterward, so it can also
+      // stand alone (no group/shift required) — closing the circular dependency the owner named
+      // (the ONLY prior way to write `user_orgs` from this route required a group/shift ID,
+      // which itself needs a pre-existing org to belong to).
+      const derivedAttendanceOrgId = cleanAttendanceGroupId || cleanDefaultShiftId
         ? resolveAttendanceOnboardingOrgId(req)
         : null
+
+      let attendanceOrgId = derivedAttendanceOrgId
+      if (cleanExplicitAttendanceOrgId) {
+        // The owner's item-D text is "支持显式 attendanceOrgId（不依赖考勤组/班次）⇒ canonical
+        // surface 变为真无条件" — it does not itself say how an unrecognized org id should be
+        // handled, which is this PR's own open adjudication point (see the PR body's
+        // explicit-org-path deviation note). Validated here against `directory_integrations` —
+        // the org anchor every org acquires today (a `provider='local'` row via
+        // `getOrCreateLocalIntegration`, or a `provider='dingtalk'` integration). Deliberately
+        // does NOT auto-create an anchor for an unrecognized org id — that is the alternate
+        // (auto-vivify) reading the PR body flags as NOT shipped; this one ships fail-closed
+        // ("静默 fallback = 契约 bug").
+        const orgAnchor = await query<{ found: number }>(
+          'SELECT 1 AS found FROM directory_integrations WHERE org_id = $1 LIMIT 1',
+          [cleanExplicitAttendanceOrgId],
+        )
+        if (orgAnchor.rows.length === 0) {
+          return jsonError(res, 404, 'ATTENDANCE_ORG_NOT_FOUND', 'attendanceOrgId does not match a known org')
+        }
+        if (derivedAttendanceOrgId && derivedAttendanceOrgId !== cleanExplicitAttendanceOrgId) {
+          return jsonError(
+            res,
+            400,
+            'ATTENDANCE_ORG_CONFLICT',
+            'attendanceOrgId conflicts with the org resolved from attendanceGroupId/defaultShiftId',
+          )
+        }
+        attendanceOrgId = cleanExplicitAttendanceOrgId
+      }
+
       const defaultShiftStartDate = cleanDefaultShiftId
         ? (cleanDefaultShiftStartDate || cleanHireDate || todayUtcDate())
         : null
@@ -3211,52 +3796,6 @@ export function adminUsersRouter(): Router {
         userId,
       })
 
-      await query(
-        `INSERT INTO users (
-           id, email, username, name, mobile, employee_no, department, position, hire_date,
-           password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15, NOW(), NOW())`,
-        [
-          userId,
-          cleanEmail || null,
-          cleanUsername,
-          cleanName,
-          cleanMobile,
-          cleanEmployeeNo,
-          cleanDepartment,
-          cleanPosition,
-          cleanHireDate,
-          passwordHash,
-          mustChangePassword,
-          effectiveRole,
-          JSON.stringify(directPermissions),
-          isActive,
-          effectiveRole === 'admin',
-        ],
-      )
-
-      if (roleId) {
-        await query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId],
-        )
-        invalidateUserPerms(userId)
-      }
-
-      if (directPermissions.length > 0) {
-        const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-        await query(
-          `INSERT INTO user_permissions (user_id, permission_code)
-           VALUES ${values}
-           ON CONFLICT DO NOTHING`,
-          [userId, ...directPermissions],
-        )
-        invalidateUserPerms(userId)
-      }
-
       const attendanceOnboarding: AttendanceOnboardingResponse | null = attendanceOrgId
         ? {
             orgId: attendanceOrgId,
@@ -3264,36 +3803,200 @@ export function adminUsersRouter(): Router {
             defaultShift: null,
           }
         : null
-      if (attendanceOnboarding && cleanAttendanceGroupId) {
-        const memberResult = await query<{ memberId: string }>(
-          `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
-           VALUES ($1, $2, $3, NOW(), NOW())
-           ON CONFLICT (org_id, group_id, user_id) DO NOTHING
-           RETURNING id AS "memberId"`,
-          [attendanceOrgId, cleanAttendanceGroupId, userId],
-        )
-        attendanceOnboarding.group = {
-          id: cleanAttendanceGroupId,
-          name: attendanceGroupName,
-          memberCreated: memberResult.rows.length > 0,
+
+      // W4-PRE-1 (§3.3 of the Wave-4 onboarding design lock): this route is the first-priority
+      // user_orgs write site — it already resolves and validates a KNOWN AUTHORITATIVE org
+      // (attendanceOrgId — set either from the group/shift-derivation fallback, matched against
+      // attendance_groups/attendance_shifts.org_id above, OR from W4-PRE-1b's explicit
+      // `attendanceOrgId` body param, validated against `directory_integrations` above — see
+      // that block's comment) but historically wrote
+      // users/user_roles/user_permissions/attendance_group_members/attendance_shift_assignments
+      // as independent auto-commit statements with no shared transaction boundary. The W4-PRE-1
+      // atomicity requirement (a user_orgs write failure must roll back the whole admission —
+      // never a `users` row with no membership row) cannot be met without a transaction, and none
+      // existed to reuse, so this establishes the single boundary for the whole write sequence
+      // (not a second/competing one — every write below moved from `query()` to `client.query()`
+      // inside this one call).
+      await transaction(async (client) => {
+        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
+          // W3 safety erratum: this core route is a reference producer outside the
+          // attendance plugin. Lock the same parent row that canonical shift delete
+          // locks FOR UPDATE, and reject preview-only multi-segment shifts before any
+          // user/onboarding write. W4 must replace this hard block only in the same
+          // reviewed change that adds authoritative segment calculation.
+          const lockedShift = await client.query(
+            `SELECT s.id,
+                    (
+                      SELECT COUNT(*)::int
+                        FROM attendance_shift_segments seg
+                       WHERE seg.org_id = s.org_id
+                         AND seg.shift_id = s.id
+                    ) AS segment_count
+               FROM attendance_shifts s
+              WHERE s.id = $1 AND s.org_id = $2
+              FOR SHARE`,
+            [cleanDefaultShiftId, attendanceOrgId],
+          )
+          if (!lockedShift.rows.length) {
+            throw new AttendanceDefaultShiftNotFoundError()
+          }
+          const segmentCount = Number(lockedShift.rows[0]?.segment_count ?? 0)
+          if (segmentCount > 1) {
+            let rolloutOrg: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+            try {
+              rolloutOrg = parseCanonicalAttendanceRolloutOrgKeyV1(attendanceOrgId)
+            } catch {
+              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+            }
+            await acquireAttendanceCalculationRolloutLock(client, rolloutOrg, 'shared')
+            const posture = await resolveSegmentCalculationPosture(client, rolloutOrg)
+            if (!posture.referenceSegments) {
+              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
+            }
+          }
         }
-      }
-      if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
-        const assignmentId = crypto.randomUUID()
-        const assignmentResult = await query<{ assignmentId: string }>(
-          `INSERT INTO attendance_shift_assignments
-             (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
-           RETURNING id AS "assignmentId"`,
-          [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
+
+        await client.query(
+          `INSERT INTO users (
+             id, email, username, name, mobile, employee_no, department, position, hire_date,
+             password_hash, must_change_password, role, permissions, is_active, is_admin,
+             activation_status, local_password_set,
+             created_at, updated_at
+           )
+           VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15,
+             'activated', TRUE,
+             NOW(), NOW()
+           )`,
+          [
+            userId,
+            cleanEmail || null,
+            cleanUsername,
+            cleanName,
+            cleanMobile,
+            cleanEmployeeNo,
+            cleanDepartment,
+            cleanPosition,
+            cleanHireDate,
+            passwordHash,
+            mustChangePassword,
+            effectiveRole,
+            JSON.stringify(directPermissions),
+            isActive,
+            effectiveRole === 'admin',
+          ],
         )
-        attendanceOnboarding.defaultShift = {
-          id: cleanDefaultShiftId,
-          name: defaultShiftName,
-          startDate: defaultShiftStartDate,
-          assignmentId: assignmentResult.rows[0]?.assignmentId ?? assignmentId,
+
+        // Load-bearing alias writer hook: admin create always inserts activation_status=activated.
+        // Removing claimNonEmptyLoginAliasesOrThrow must fail the admin_create writer tests.
+        await claimNonEmptyLoginAliasesOrThrow({
+          userId,
+          email: cleanEmail || null,
+          username: cleanUsername,
+          mobile: cleanMobile,
+          source: 'admin_create',
+          client,
+        })
+
+        if (roleId) {
+          await assignUserRoles({
+            userIds: [userId],
+            roleId,
+            // This route is behind `ensurePlatformAdmin`; creating administrators is one of
+            // the things it exists to do, so the scope is unbounded — and stated, not implied.
+            scope: { kind: 'platform-admin' },
+            executor: client,
+          })
         }
-      }
+
+        // Namespace admission is the second half of a namespace-scoped grant: without an
+        // enabled row the permission codes written just below are filtered out of every
+        // effective-permission read, so a delegated role provisioned here would carry a role
+        // id and permission rows that resolve to nothing. Enable exactly the namespaces the
+        // grant derives, in this same transaction, so the two halves cannot diverge.
+        //
+        // Derived from the role id and the permission codes actually being granted — not
+        // from a list of namespaces to special-case. Grants that touch no
+        // admission-controlled resource derive an empty list and write nothing.
+        const grantedNamespaces = deriveGrantNamespaces({ roleId, permissionCodes: directPermissions })
+        if (grantedNamespaces.length > 0) {
+          await grantNamespaceAdmissions(client, {
+            userId,
+            namespaces: grantedNamespaces,
+            actorId: adminUserId,
+            source: 'admin_create',
+          })
+        }
+
+        if (directPermissions.length > 0) {
+          const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+          await client.query(
+            `INSERT INTO user_permissions (user_id, permission_code)
+             VALUES ${values}
+             ON CONFLICT DO NOTHING`,
+            [userId, ...directPermissions],
+          )
+        }
+
+        if (attendanceOrgId) {
+          // W4-PRE-1 item 1 (first-priority site, §3.3): maintain user_orgs in the SAME
+          // transaction as the users row whenever the org is known-authoritative.
+          //
+          // user_orgs.is_active is hardcoded TRUE (mirrors directory-sync.ts's own admission
+          // write, ~L5097) — it deliberately does NOT mirror the created user's `isActive` flag.
+          // The RD-3 dual-is_active count (§3.3 item 4: user_orgs.is_active=true AND
+          // users.is_active=true) already excludes an admin-created-inactive user via
+          // users.is_active=false, so mirroring `isActive` here would add nothing to that count
+          // — but it WOULD create an unrecoverable stuck-false membership row: no production
+          // write path ever updates user_orgs.is_active after admission (PATCH
+          // /api/admin/users/:userId/status only touches users.is_active), so an
+          // admin-created-inactive user later reactivated via that endpoint would stay
+          // permanently excluded from the ① count with no repair surface. Hardcoding TRUE avoids
+          // the absorbing state entirely: membership existence is TRUE the moment it is known,
+          // and users.is_active alone gates the active-member-count filter.
+          await client.query(
+            `INSERT INTO user_orgs (user_id, org_id, is_active)
+             VALUES ($1, $2, TRUE)
+             ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+            [userId, attendanceOrgId],
+          )
+        }
+
+        if (attendanceOnboarding && cleanAttendanceGroupId) {
+          const memberResult = await client.query(
+            `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())
+             ON CONFLICT (org_id, group_id, user_id) DO NOTHING
+             RETURNING id AS "memberId"`,
+            [attendanceOrgId, cleanAttendanceGroupId, userId],
+          )
+          attendanceOnboarding.group = {
+            id: cleanAttendanceGroupId,
+            name: attendanceGroupName,
+            memberCreated: (memberResult.rows as Array<{ memberId: string }>).length > 0,
+          }
+        }
+        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
+          const assignmentId = crypto.randomUUID()
+          const assignmentResult = await client.query(
+            `INSERT INTO attendance_shift_assignments
+               (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
+             RETURNING id AS "assignmentId"`,
+            [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
+          )
+          attendanceOnboarding.defaultShift = {
+            id: cleanDefaultShiftId,
+            name: defaultShiftName,
+            startDate: defaultShiftStartDate,
+            assignmentId: (assignmentResult.rows as Array<{ assignmentId: string }>)[0]?.assignmentId ?? assignmentId,
+          }
+        }
+      })
+
+      // Cache invalidation is a post-commit side effect, not part of the atomic write set.
+      if (roleId) invalidateUserPerms(userId)
+      if (directPermissions.length > 0) invalidateUserPerms(userId)
 
       await auditLog({
         actorId: adminUserId,
@@ -3358,10 +4061,24 @@ export function adminUsersRouter(): Router {
         attendanceOnboarding,
       })
     } catch (error) {
+      if (error instanceof AttendanceShiftReferenceUnavailableError) {
+        return jsonError(res, error.status, error.code, error.message, error.details)
+      }
+      if (error instanceof AttendanceDefaultShiftNotFoundError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
+      if (error instanceof LoginAliasClaimError) {
+        // Fixed safe messages only — never echo error.stack / PG detail from nested drivers.
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
-      return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'USER_CREATE_FAILED', 'Failed to create user', error)
     }
   })
 
@@ -3415,37 +4132,172 @@ export function adminUsersRouter(): Router {
       // (strip all whitespace, map empty to NULL) before comparison so legacy
       // rows like "138 0013 8000" don't spuriously fail CAS when the client
       // sends the already-sanitised "13800138000" witness.
-      const updateResult = await query<{ id: string }>(
-        `UPDATE users
-         SET name = $1,
-             mobile = $2,
-             employee_no = $3,
-             department = $4,
-             position = $5,
-             hire_date = $6::date,
-             updated_at = NOW()
-         WHERE id = $7
-           AND (
-             $8::boolean = FALSE
-             OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
-                IS NOT DISTINCT FROM
-                NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
-           )
-         RETURNING id`,
-        [
-          nextName,
-          nextMobile,
-          nextEmployeeNo,
-          nextDepartment,
-          nextPosition,
-          nextHireDate,
-          userId,
-          hasExpectedMobile,
-          expectedMobile ?? null,
-        ],
-      )
-      if (updateResult.rows.length === 0) {
-        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      //
+      // Mobile path TOCTOU fix: do NOT retire aliases from the pre-transaction
+      // profile.mobile snapshot. Lock the users row FOR UPDATE, derive the
+      // authoritative previous mobile from that locked row, then claim → update
+      // → retire in the same transaction. A concurrent mobile writer cannot make
+      // this route delete a stale prior alias.
+      // Load-bearing alias writer hook: removing applyMobileLoginAliasChangeOrThrow
+      // or the FOR UPDATE load must fail the admin_profile_mobile route/unit tests.
+      type ProfileTxnClient = {
+        query: <T extends Record<string, unknown> = Record<string, unknown>>(
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: T[] }>
+      }
+
+      const runProfileUpdate = async (
+        client: ProfileTxnClient,
+        fields: {
+          name: string
+          mobile: string | null
+          employeeNo: string | null
+          department: string | null
+          position: string | null
+          hireDate: string | null
+        },
+      ) => {
+        const updateResult = await client.query<{ id: string }>(
+          `UPDATE users
+           SET name = $1,
+               mobile = $2,
+               employee_no = $3,
+               department = $4,
+               position = $5,
+               hire_date = $6::date,
+               updated_at = NOW()
+           WHERE id = $7
+             AND (
+               $8::boolean = FALSE
+               OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
+                  IS NOT DISTINCT FROM
+                  NULLIF(regexp_replace(COALESCE($9::text, ''), '\\s+', '', 'g'), '')
+             )
+           RETURNING id`,
+          [
+            fields.name,
+            fields.mobile,
+            fields.employeeNo,
+            fields.department,
+            fields.position,
+            fields.hireDate,
+            userId,
+            hasExpectedMobile,
+            expectedMobile ?? null,
+          ],
+        )
+        if (updateResult.rows.length === 0) {
+          const err = new Error('User mobile changed before update was applied') as Error & {
+            code?: string
+          }
+          err.code = 'PROFILE_MOBILE_CONFLICT'
+          throw err
+        }
+      }
+
+      // Authoritative before/after values for audit — mobile path refreshes from the locked row.
+      let auditBefore = {
+        name: profile.name,
+        mobile: profile.mobile,
+        employeeNo: profile.employeeNo,
+        department: profile.department,
+        position: profile.position,
+        hireDate: profile.hireDate,
+      }
+      let auditAfter = {
+        name: nextName,
+        mobile: nextMobile,
+        employeeNo: nextEmployeeNo,
+        department: nextDepartment,
+        position: nextPosition,
+        hireDate: nextHireDate,
+      }
+
+      if (hasMobile) {
+        await transaction(async (client) => {
+          type LockedProfileRow = {
+            id: string
+            name: string
+            mobile: string | null
+            employeeNo: string | null
+            department: string | null
+            position: string | null
+            hireDate: string | null
+          }
+          const locked = await client.query(
+            `SELECT ${ADMIN_USER_PROFILE_SELECT}
+             FROM users
+             WHERE id = $1
+             FOR UPDATE`,
+            [userId],
+          )
+          const lockedRow = locked.rows[0] as LockedProfileRow | undefined
+          if (!lockedRow) {
+            const err = new Error('User not found') as Error & { code?: string }
+            err.code = 'NOT_FOUND'
+            throw err
+          }
+
+          // Authoritative previous mobile comes from the locked row only — never the
+          // pre-transaction snapshot (stale profile.mobile would retire the wrong alias).
+          const previousMobileFromLock = lockedRow.mobile
+          const effectiveNextName = hasName ? nextName : lockedRow.name
+          const effectiveNextMobile = nextMobile
+          const effectiveNextEmployeeNo = hasEmployeeNo ? nextEmployeeNo : lockedRow.employeeNo
+          const effectiveNextDepartment = hasDepartment ? nextDepartment : lockedRow.department
+          const effectiveNextPosition = hasPosition ? nextPosition : lockedRow.position
+          const effectiveNextHireDate = hasHireDate ? nextHireDate : lockedRow.hireDate
+
+          auditBefore = {
+            name: lockedRow.name,
+            mobile: lockedRow.mobile,
+            employeeNo: lockedRow.employeeNo,
+            department: lockedRow.department,
+            position: lockedRow.position,
+            hireDate: lockedRow.hireDate,
+          }
+          auditAfter = {
+            name: effectiveNextName,
+            mobile: effectiveNextMobile,
+            employeeNo: effectiveNextEmployeeNo,
+            department: effectiveNextDepartment,
+            position: effectiveNextPosition,
+            hireDate: effectiveNextHireDate,
+          }
+
+          await applyMobileLoginAliasChangeOrThrow({
+            userId,
+            previousMobile: previousMobileFromLock,
+            nextMobile: effectiveNextMobile,
+            source: 'admin_profile_mobile',
+            client,
+            afterNewClaim: async () => {
+              await runProfileUpdate(client, {
+                name: effectiveNextName,
+                mobile: effectiveNextMobile,
+                employeeNo: effectiveNextEmployeeNo,
+                department: effectiveNextDepartment,
+                position: effectiveNextPosition,
+                hireDate: effectiveNextHireDate,
+              })
+            },
+          })
+        })
+      } else {
+        await runProfileUpdate(
+          {
+            query: async (sql, params) => query(sql, params),
+          },
+          {
+            name: nextName,
+            mobile: nextMobile,
+            employeeNo: nextEmployeeNo,
+            department: nextDepartment,
+            position: nextPosition,
+            hireDate: nextHireDate,
+          },
+        )
       }
 
       await auditLog({
@@ -3456,22 +4308,8 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: {
-            name: profile.name,
-            mobile: profile.mobile,
-            employeeNo: profile.employeeNo,
-            department: profile.department,
-            position: profile.position,
-            hireDate: profile.hireDate,
-          },
-          after: {
-            name: nextName,
-            mobile: nextMobile,
-            employeeNo: nextEmployeeNo,
-            department: nextDepartment,
-            position: nextPosition,
-            hireDate: nextHireDate,
-          },
+          before: auditBefore,
+          after: auditAfter,
         },
       })
 
@@ -3481,7 +4319,20 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
+      const code = (error as { code?: string } | null)?.code
+      if (code === 'NOT_FOUND') {
+        return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      }
+      if (code === 'PROFILE_MOBILE_CONFLICT') {
+        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      }
+      if (error instanceof LoginAliasClaimError) {
+        if (error.code === 'ALIAS_CONFLICT') {
+          return jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+        }
+        return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
+      }
+      return sendAdminUsersServerFailure(req, res, 'USER_PROFILE_UPDATE_FAILED', 'Failed to update user profile', error)
     }
   })
 
@@ -3498,7 +4349,7 @@ export function adminUsersRouter(): Router {
 
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
-      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+      return sendAdminUsersServerFailure(req, res, 'USER_ACCESS_FAILED', 'Failed to load user access', error)
     }
   })
 
@@ -3519,7 +4370,7 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_ACCESS_FAILED', 'Failed to load DingTalk access', error)
     }
   })
 
@@ -3539,7 +4390,7 @@ export function adminUsersRouter(): Router {
         ...snapshot,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_ADMISSION_FAILED', (error as Error)?.message || 'Failed to load member admission snapshot')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_ADMISSION_FAILED', 'Failed to load member admission snapshot', error)
     }
   })
 
@@ -3590,7 +4441,7 @@ export function adminUsersRouter(): Router {
         namespaceAdmissions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_FAILED', 'Failed to update namespace admission', error)
     }
   })
 
@@ -3655,7 +4506,7 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', (error as Error)?.message || 'Failed to update namespace admission in bulk')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', 'Failed to update namespace admission in bulk', error)
     }
   })
 
@@ -3669,11 +4520,14 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-      if (enabled) await assertUsersCanEnableDingTalkGrant([userId])
-
-      await upsertDingTalkGrants([userId], enabled, adminUserId)
+      const found = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, [userId])
+        if (!locked.has(userId)) return false
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, [userId])
+        await upsertDingTalkGrants(client, [userId], enabled, adminUserId)
+        return true
+      })
+      if (!found) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
       await auditLog({
         actorId: adminUserId,
@@ -3699,7 +4553,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_GRANT_UPDATE_FAILED', DINGTALK_GRANT_UNCONFIRMED_MESSAGE, error)
     }
   })
 
@@ -3713,20 +4567,17 @@ export function adminUsersRouter(): Router {
       if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
       if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds array is required')
 
-      const existingResult = await query<{ id: string }>(
-        `SELECT id
-         FROM users
-         WHERE id = ANY($1::text[])`,
-        [userIds],
-      )
-      const existingIds = new Set(existingResult.rows.map((row) => row.id).filter(Boolean))
-      const missingUserIds = userIds.filter((userId) => !existingIds.has(userId))
+      const missingUserIds = await transaction(async (client) => {
+        const locked = await lockUsersForAccessGraphWrite(client, userIds)
+        const missing = userIds.filter((userId) => !locked.has(userId))
+        if (missing.length > 0) return missing
+        if (enabled) await assertUsersCanEnableDingTalkGrant(client, userIds)
+        await upsertDingTalkGrants(client, userIds, enabled, adminUserId)
+        return []
+      })
       if (missingUserIds.length > 0) {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
-      if (enabled) await assertUsersCanEnableDingTalkGrant(userIds)
-
-      await upsertDingTalkGrants(userIds, enabled, adminUserId)
 
       await Promise.all(userIds.map((userId) => auditLog({
         actorId: adminUserId,
@@ -3755,7 +4606,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', 'Failed to update DingTalk access in bulk', error)
     }
   })
 
@@ -3776,12 +4627,7 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, roleId],
-      )
+      await assignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, true)
       }
@@ -3809,7 +4655,8 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'ROLE_ASSIGN_FAILED', 'Failed to assign role', error)
     }
   })
 
@@ -3826,11 +4673,7 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, roleId],
-      )
+      await unassignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }
@@ -3863,7 +4706,8 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'ROLE_UNASSIGN_FAILED', 'Failed to unassign role', error)
     }
   })
 
@@ -3880,15 +4724,48 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 400, 'SELF_DISABLE_FORBIDDEN', 'Cannot disable your own account')
       }
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      const updateResult = await transaction(async (client) => {
+        const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
+        const lockedUser = lockedUsers.get(userId)
+        if (!lockedUser) return null
 
-      await query(
-        `UPDATE users
-         SET is_active = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [isActive, userId],
-      )
+        assertPendingUserCannotBeActivatedViaGenericStatusApi(
+          lockedUser.activationStatus ?? '',
+          isActive,
+        )
+
+        if (lockedUser.isActive !== isActive) {
+          await client.query(
+            `UPDATE users
+             SET is_active = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [isActive, userId],
+          )
+          await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+            userIds: [userId],
+            actorId: adminUserId,
+            reason: 'superseded by administrator user-status update',
+          })
+        }
+        return { beforeIsActive: lockedUser.isActive }
+      }).catch((error) => {
+        const code = (error as Error & { code?: string }).code
+        if (code === PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) {
+          return {
+            pendingActivationError: error as Error,
+          }
+        }
+        throw error
+      })
+      if (!updateResult) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if ('pendingActivationError' in updateResult) {
+        return jsonError(
+          res,
+          400,
+          PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
+          updateResult.pendingActivationError.message,
+        )
+      }
 
       const revocation = !isActive
         ? await revokeUserSessions(userId, {
@@ -3905,7 +4782,7 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           adminUserId,
-          before: { is_active: profile.is_active },
+          before: { is_active: updateResult.beforeIsActive },
           after: { is_active: isActive },
           revokedAfter: revocation?.revokedAfter || null,
         },
@@ -3917,7 +4794,8 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      return sendAdminUsersServerFailure(req, res, 'USER_STATUS_FAILED', 'Failed to update user status', error)
     }
   })
 
@@ -3941,7 +4819,10 @@ export function adminUsersRouter(): Router {
       const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
       await query(
         `UPDATE users
-         SET password_hash = $1, must_change_password = TRUE, updated_at = NOW()
+         SET password_hash = $1,
+             must_change_password = TRUE,
+             local_password_set = TRUE,
+             updated_at = NOW()
          WHERE id = $2`,
         [passwordHash, userId],
       )
@@ -3970,7 +4851,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', (error as Error)?.message || 'Failed to reset password')
+      return sendAdminUsersServerFailure(req, res, 'PASSWORD_RESET_FAILED', 'Failed to reset password', error)
     }
   })
 
@@ -4014,7 +4895,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke user sessions', error)
     }
   })
 
@@ -4030,7 +4911,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_LIST_FAILED', (error as Error)?.message || 'Failed to list roles')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_LIST_FAILED', 'Failed to list roles', error)
     }
   })
 
@@ -4123,7 +5004,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', (error as Error)?.message || 'Failed to load admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_LIST_FAILED', 'Failed to load admin audit activity', error)
     }
   })
 
@@ -4219,7 +5100,7 @@ export function adminUsersRouter(): Router {
 
       return res.end()
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', (error as Error)?.message || 'Failed to export admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_EXPORT_FAILED', 'Failed to export admin audit activity', error)
     }
   })
 
@@ -4240,7 +5121,7 @@ export function adminUsersRouter(): Router {
         items: sessions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_LIST_FAILED', (error as Error)?.message || 'Failed to load user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_LIST_FAILED', 'Failed to load user sessions', error)
     }
   })
 
@@ -4298,7 +5179,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke session')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke session', error)
     }
   })
 
@@ -4383,7 +5264,175 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOCATION_LIST_FAILED', 'Failed to load session revocations', error)
+    }
+  })
+
+  // T3 — promote pending_activation → activated (temp password / SSO-shaped source check).
+  r.post('/api/admin/users/activate/bulk', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    const rawItems = req.body?.items
+    if (
+      !Array.isArray(rawItems)
+      || rawItems.length === 0
+      || rawItems.length > MAX_BULK_ACTIVATE_ITEMS
+    ) {
+      return jsonError(
+        res,
+        400,
+        'ACTIVATE_BULK_INVALID',
+        `items must contain between 1 and ${MAX_BULK_ACTIVATE_ITEMS} activation requests`,
+      )
+    }
+
+    let items: ParsedActivateRequest[]
+    try {
+      items = rawItems.map((item) => parseActivateRequest(item))
+      const seenUserIds = new Set<string>()
+      for (const item of items) {
+        if (seenUserIds.has(item.userId)) {
+          return jsonError(
+            res,
+            400,
+            'ACTIVATE_BULK_DUPLICATE_USER',
+            'Each userId may appear only once in a bulk activation request',
+          )
+        }
+        seenUserIds.add(item.userId)
+      }
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+
+    const results: BulkActivateResult[] = []
+    for (const item of items) {
+      try {
+        const result = await activatePendingUser({
+          ...item,
+          adminUserId,
+        })
+        await auditActivateSuccess(adminUserId, result, item.mode, 'admin_activate_bulk')
+        results.push({ userId: item.userId, ok: true, result })
+      } catch (error) {
+        const mapped = mapActivateError(error)
+        results.push({
+          userId: item.userId,
+          ok: false,
+          error: {
+            status: mapped.status,
+            code: mapped.code,
+            message: mapped.message,
+          },
+        })
+      }
+    }
+
+    const successCount = results.filter((item) => item.ok).length
+    const failureCount = results.length - successCount
+    await auditLog({
+      actorId: adminUserId,
+      actorType: 'user',
+      action: 'update',
+      resourceType: 'user',
+      resourceId: 'bulk-activate',
+      meta: {
+        source: 'admin_activate_bulk',
+        requestedCount: results.length,
+        successCount,
+        failureCount,
+      },
+    })
+    return jsonOk(res, {
+      items: results,
+      successCount,
+      failureCount,
+    })
+  })
+
+  r.post('/api/admin/users/:id/activate', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    let input: ParsedActivateRequest
+    try {
+      input = parseActivateRequest(req.body ?? {}, String(req.params.id || ''))
+    } catch (error) {
+      const mapped = mapActivateRequestError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+    try {
+      // claimAliases is NOT client-controllable: production activate always claims
+      // email/username/mobile aliases inside the activation transaction.
+      const result = await activatePendingUser({
+        ...input,
+        adminUserId,
+      })
+      await auditActivateSuccess(adminUserId, result, input.mode, 'admin_activate')
+      return jsonOk(res, result)
+    } catch (error) {
+      const mapped = mapActivateError(error)
+      return jsonError(res, mapped.status, mapped.code, mapped.message)
+    }
+  })
+
+  // T2a — backfill aliases + collision report (does not switch Auth read path).
+  r.post('/api/admin/login-aliases/backfill', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const result = await backfillUserLoginAliases()
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user_login_aliases',
+        resourceId: 'backfill',
+        meta: { ...result, cutoverEnabled: isAuthLoginAliasCutoverEnabled() },
+      })
+      return jsonOk(res, {
+        ...result,
+        cutoverEnabled: isAuthLoginAliasCutoverEnabled(),
+      })
+    } catch (error) {
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_BACKFILL_FAILED', 'Backfill failed', error)
+    }
+  })
+
+  // T2b readiness probe (does not flip the env flag).
+  // When the env switch is OFF, report ready based on admin-alias gate only — never
+  // ready:true merely because cutover is disabled (that misled ops into flipping env).
+  r.get('/api/admin/login-aliases/cutover-status', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const enabled = isAuthLoginAliasCutoverEnabled()
+      const { hasActiveAdminWithPasswordAlias } = await import('../auth/login-alias-service')
+      const adminAliasReady = await hasActiveAdminWithPasswordAlias()
+      if (enabled) {
+        await assertAliasCutoverAllowed()
+      }
+      return jsonOk(res, {
+        enabled,
+        ready: adminAliasReady,
+        adminAliasReady,
+        // Explicit: operators must not flip AUTH_LOGIN_USE_ALIASES until ready===true
+        canEnableCutover: adminAliasReady,
+      })
+    } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (code === 'ALIAS_CUTOVER_BLOCKED') {
+        return jsonOk(res, {
+          enabled: isAuthLoginAliasCutoverEnabled(),
+          ready: false,
+          adminAliasReady: false,
+          canEnableCutover: false,
+          code,
+          message: (error as Error).message,
+        })
+      }
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_CUTOVER_STATUS_FAILED', 'Status failed', error)
     }
   })
 

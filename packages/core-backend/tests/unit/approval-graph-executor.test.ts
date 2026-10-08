@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { ApprovalGraphExecutor, validateApprovalFormData, pruneHiddenFormData } from '../../src/services/ApprovalGraphExecutor'
+import {
+  ApprovalGraphExecutor,
+  canonicalizeRecordLinkFormData,
+  isEmptyValue,
+  pruneHiddenFormData,
+  validateApprovalFormData,
+} from '../../src/services/ApprovalGraphExecutor'
+import { resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -134,6 +141,122 @@ describe('ApprovalGraphExecutor', () => {
     }
 
     expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 0 }).resolveInitialState()).toThrow(/division by zero/)
+  })
+
+  it('skips a LEGACY empty-rules branch instead of match-all (defense-in-depth for stored graphs)', () => {
+    // A rules-mode branch with `rules: []` is rejected at authoring/create/update/publish
+    // (validateConditionBranchRules), but a graph STORED before that gate may still carry one.
+    // `[].every(...)` is vacuously true — without the runtime guard the empty branch would capture
+    // EVERY request (first-match-wins) and dead-code both the later branch and the default edge.
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-empty', rules: [] }, // legacy vacuous branch — must never match
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'empty-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-empty', source: 'route', target: 'empty-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-empty-end', source: 'empty-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // A matching request routes via the LATER, real branch — not the empty one.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
+    // A non-matching request falls through to the default edge — the intended "else" mechanism.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+  })
+
+  it('rejects a LEGACY literal-only formula instead of silently taking another route', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-static', rules: [], formula: { expression: '1 == 1' } },
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'static-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-static', source: 'route', target: 'static-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-static-end', source: 'static-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
+  })
+
+  it('rejects a LEGACY identity formula instead of masking missing data with the default route', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-identity', rules: [], formula: { expression: '{amount} == {amount}' } },
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'identity-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-identity', source: 'route', target: 'identity-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-identity-end', source: 'identity-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}).resolveInitialState()).toThrowError(
+      expect.objectContaining({ code: 'APPROVAL_CONDITION_FORMULA_CAPTURE_PRONE', statusCode: 409 }),
+    )
   })
 
   it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {
@@ -472,6 +595,331 @@ describe('ApprovalGraphExecutor', () => {
       code: 'APPROVAL_ASSIGNEE_EMPTY',
       statusCode: 400,
     }))
+  })
+
+  // Lock-1 §K5-b: this is the REAL resolveApprovalAssignees wired into the REAL executor (not a
+  // fake resolver returning `[]`) — the exact integration point the real-DB acceptance suite
+  // exercises over real SQL (approval-dept-head-at-level.db.test.ts's out-of-range leg), run here
+  // as a local, no-DB oracle for the SAME assertion: a `level` valid in contract but past the end
+  // of the frozen deptHeadChainIds resolves EMPTY via the resolver's own positional slice, and the
+  // executor's existing (unmodified) empty-assignee branching decides what happens next — never a
+  // crash, never a silently-materialized assignee. Positive control pair, per §K5's own text
+  // ("resolves EMPTY and falls to emptyAssigneePolicy, which is the shipped manager_at_level
+  // behavior, unchanged"): 'error' throws APPROVAL_ASSIGNEE_EMPTY; 'auto-approve' auto-approves —
+  // both are the SAME shipped emptyAssigneePolicy branch every other kind already goes through.
+  it('Lock-1 §K5-b: dept_head_at_level level past the end of the frozen deptHeadChainIds resolves EMPTY through the REAL resolver, and the executor applies the node emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve auto-approves) — never a crash, never a silent assignee', () => {
+    const requesterSnapshot = { id: 'requester-1', deptHeadChainIds: ['head-1', 'head-2'] }
+    const realResolver = ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: any }) =>
+      resolveApprovalAssignees({ nodeKey, sourceStep, config, formSnapshot: {}, requesterSnapshot })
+
+    const outOfRangeGraph = (emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'dhal-oor',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'dept_head_at_level', level: 5 }],
+            emptyAssigneePolicy,
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-oor', source: 'start', target: 'dhal-oor' },
+        { key: 'edge-oor-final', source: 'dhal-oor', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Positive control FIRST: an IN-RANGE level resolves a real assignee through the SAME real
+    // resolver + executor wiring (proves the fixture itself is capable of a non-empty result —
+    // the out-of-range legs below are not vacuously empty because of a broken fixture).
+    const inRangeExecutor = new ApprovalGraphExecutor(
+      { ...outOfRangeGraph('error'), nodes: outOfRangeGraph('error').nodes.map((n) => n.key === 'dhal-oor' ? { ...n, config: { assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }], emptyAssigneePolicy: 'error' } } : n) },
+      {},
+      { assignmentResolver: realResolver },
+    )
+    expect(inRangeExecutor.resolveInitialState().assignments).toEqual([
+      { assignmentType: 'user', assigneeId: 'head-1', nodeKey: 'dhal-oor', sourceStep: 1, metadata: { resolvedFrom: { kind: 'dept_head_at_level', sourceIndex: 0 } } },
+    ])
+
+    // 'error': out-of-range level (5) against a 2-entry chain -> empty resolution -> throws.
+    const errorExecutor = new ApprovalGraphExecutor(outOfRangeGraph('error'), {}, { assignmentResolver: realResolver })
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve': the SAME empty resolution, but the node's own policy governs — the shipped,
+    // unmodified `emptyAssigneePolicy: 'auto-approve'` branch fires (never a silent NOBODY: it is
+    // an EXPLICIT, audited autoApprovalEvents entry, not an unassigned pending node).
+    const autoExecutor = new ApprovalGraphExecutor(outOfRangeGraph('auto-approve'), {}, { assignmentResolver: realResolver })
+    const autoInitial = autoExecutor.resolveInitialState()
+    expect(autoInitial.currentNodeKey).toBe('final-review')
+    expect(autoInitial.autoApprovalEvents).toEqual([
+      { nodeKey: 'dhal-oor', sourceStep: 1, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
+  })
+
+  it('Lock-2 §L2-C: a form-field contact extension whose FROZEN entry is empty resolves EMPTY through the REAL resolver, and the executor applies the node emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve fires an AUDITED auto-approval) — never a crash, never a silent assignee', () => {
+    // Frozen map: level 1 resolved a manager; level 5 ran at create and resolved NOBODY (chain
+    // shorter than the level) — frozen as an EMPTY entry, the §2.6 empty-resolution shape.
+    const requesterSnapshot = {
+      id: 'requester-1',
+      fieldDerivedAssigneeIds: {
+        'form_field_user_manager:contact:1': ['contact-mgr-1'],
+        'form_field_user_manager:contact:5': [],
+      },
+    }
+    const realResolver = ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: any }) =>
+      resolveApprovalAssignees({ nodeKey, sourceStep, config, formSnapshot: { contact: 'contact-1' }, requesterSnapshot })
+
+    const contactGraph = (level: number, emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'ffum-node',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level }],
+            emptyAssigneePolicy,
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-ffum', source: 'start', target: 'ffum-node' },
+        { key: 'edge-ffum-final', source: 'ffum-node', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Positive control FIRST: the frozen level-1 entry resolves a real assignee through the SAME
+    // real resolver + executor wiring, with the Lock-2 §2.6 audit metadata (fieldId + level).
+    const okExecutor = new ApprovalGraphExecutor(contactGraph(1, 'error'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    expect(okExecutor.resolveInitialState().assignments).toEqual([
+      { assignmentType: 'user', assigneeId: 'contact-mgr-1', nodeKey: 'ffum-node', sourceStep: 1, metadata: { resolvedFrom: { kind: 'form_field_user_manager', sourceIndex: 0, fieldId: 'contact', level: 1 } } },
+    ])
+
+    // 'error' (the absent default): the frozen-empty entry -> empty resolution -> fail-closed 400.
+    const errorExecutor = new ApprovalGraphExecutor(contactGraph(5, 'error'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve': the SAME empty resolution under the author-selected policy — an EXPLICIT,
+    // audited autoApprovalEvents entry (NEVER-NOBODY: no unassigned pending node, no silent skip).
+    const autoExecutor = new ApprovalGraphExecutor(contactGraph(5, 'auto-approve'), { contact: 'contact-1' }, { assignmentResolver: realResolver })
+    const autoInitial = autoExecutor.resolveInitialState()
+    expect(autoInitial.currentNodeKey).toBe('final-review')
+    expect(autoInitial.autoApprovalEvents).toEqual([
+      { nodeKey: 'ffum-node', sourceStep: 1, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
+  })
+
+  // ── Lock-1 §K6 precondition (landed by the K3 slice): normalizeApprovalMode fails CLOSED ──
+  // The executor's mode normalizer previously mapped ANY unrecognized mode silently to 'single'
+  // (fail-open). Contract-valid data never reached that arm (the authoring choke + the stored-graph
+  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode would
+  // degrade it silently to first-approver-wins. These tests pin the closure:
+  // the MUTATION "revert normalizeApprovalMode to fail-open" must red the first test below.
+  it('fails CLOSED: an unrecognized approvalMode reaching the executor throws APPROVAL_MODE_UNSUPPORTED instead of running as single (G-14 arm; mutation: revert to fail-open reds THIS test)', () => {
+    const unknownModeGraph = (approvalMode: unknown): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'skewed',
+          type: 'approval',
+          // Hand-crafted config — the exact deploy-skew shape: a graph published by NEWER code
+          // carrying a mode THIS executor does not know. Bypasses the authoring choke on purpose.
+          config: { assigneeType: 'user', assigneeIds: ['approver-a', 'approver-b'], approvalMode: approvalMode as never },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-skewed', source: 'start', target: 'skewed' },
+        { key: 'edge-skewed-end', source: 'skewed', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    for (const unknown of ['SINGLE', 'or_sign', null, 42]) {
+      const executor = new ApprovalGraphExecutor(unknownModeGraph(unknown), {})
+      // Accessor path (getApprovalMode) and resolution path (resolveInitialState) both fail
+      // closed — under the OLD fail-open arm both would have run the node as 'single'.
+      expect(() => executor.getApprovalMode('skewed'), JSON.stringify(unknown)).toThrowError(expect.objectContaining({
+        code: 'APPROVAL_MODE_UNSUPPORTED',
+        statusCode: 400,
+      }))
+      expect(() => executor.resolveInitialState(), JSON.stringify(unknown)).toThrowError(expect.objectContaining({
+        code: 'APPROVAL_MODE_UNSUPPORTED',
+      }))
+    }
+    // Values-free: the error names the node key (template-authored — permitted), never the raw
+    // unknown value (which could be arbitrary junk).
+    try {
+      new ApprovalGraphExecutor(unknownModeGraph('or_sign'), {}).getApprovalMode('skewed')
+      expect.unreachable('getApprovalMode must throw for an unknown mode')
+    } catch (error) {
+      expect((error as Error).message).toContain('skewed')
+      expect((error as Error).message).not.toContain('or_sign')
+    }
+  })
+
+  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold, sequential — still executes (G-14)', () => {
+    const modeGraph = (config: Record<string, unknown>): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'node-m', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['approver-a', 'approver-b'], ...config } as never },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-m', source: 'start', target: 'node-m' },
+        { key: 'edge-m-end', source: 'node-m', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    // Absent → the documented 'single' default (the ONE legitimate non-member input).
+    const absentExecutor = new ApprovalGraphExecutor(modeGraph({}), {})
+    expect(absentExecutor.getApprovalMode('node-m')).toBe('single')
+    expect(absentExecutor.resolveInitialState().assignments).toHaveLength(2)
+
+    for (const mode of ['single', 'all', 'any'] as const) {
+      const executor = new ApprovalGraphExecutor(modeGraph({ approvalMode: mode }), {})
+      expect(executor.getApprovalMode('node-m')).toBe(mode)
+      expect(executor.resolveInitialState().assignments).toHaveLength(2)
+    }
+    // threshold needs its approvalThreshold to pass assertThresholdReachable.
+    const thresholdExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'threshold', approvalThreshold: 2 }), {})
+    expect(thresholdExecutor.getApprovalMode('node-m')).toBe('threshold')
+    expect(thresholdExecutor.resolveInitialState().assignments).toHaveLength(2)
+
+    const sequentialExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'sequential' }), {})
+    expect(sequentialExecutor.getApprovalMode('node-m')).toBe('sequential')
+    expect(sequentialExecutor.resolveInitialState().assignments).toEqual([
+      expect.objectContaining({
+        assigneeId: 'approver-a',
+        metadata: { sequentialQueue: { position: 1, length: 2, state: 'active' } },
+      }),
+      expect.objectContaining({
+        assigneeId: 'approver-b',
+        metadata: { sequentialQueue: { position: 2, length: 2, state: 'queued' } },
+      }),
+    ])
+  })
+
+  it('sequential order follows assigneeSources order, resolver emission order, and first-occurrence dedup', () => {
+    const graph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'ordered',
+          type: 'approval',
+          config: {
+            assigneeSources: [
+              { kind: 'static_user', userIds: ['u-b', 'u-a'] },
+              { kind: 'static_user', userIds: ['u-a', 'u-c'] },
+            ],
+            approvalMode: 'sequential',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'start-ordered', source: 'start', target: 'ordered' },
+        { key: 'ordered-end', source: 'ordered', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    const executor = new ApprovalGraphExecutor(graph, {}, {
+      assignmentResolver: ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
+        nodeKey,
+        sourceStep,
+        config,
+        formSnapshot: {},
+        requesterSnapshot: { id: 'requester' },
+      }),
+    })
+    expect(executor.resolveInitialState().assignments.map((assignment) => ({
+      id: assignment.assigneeId,
+      queue: assignment.metadata?.sequentialQueue,
+    }))).toEqual([
+      { id: 'u-b', queue: { position: 1, length: 3, state: 'active' } },
+      { id: 'u-a', queue: { position: 2, length: 3, state: 'queued' } },
+      { id: 'u-c', queue: { position: 3, length: 3, state: 'queued' } },
+    ])
+  })
+
+  // ── Lock-1 §K3 prior_node_approver — REAL resolver + REAL executor oracle ──
+  // The same no-DB wiring precedent as the §K5-b test above: the REAL resolveApprovalAssignees
+  // (not a fake returning []) inside the REAL executor, the exact integration point the real-DB
+  // suite drives over SQL. The map is CALLER-supplied (the §2.1 contract): the test plays the
+  // caller's role exactly as dispatchAction does after reading audit rows.
+  it('Lock-1 §K3: a prior_node_approver node activated after the referenced node resolves that node ACTUAL deciders from the caller-supplied map; an absent/empty map falls to emptyAssigneePolicy (error throws APPROVAL_ASSIGNEE_EMPTY; auto-approve is an explicit audited event — never a silent nobody)', () => {
+    const k3Graph = (emptyAssigneePolicy: 'error' | 'auto-approve'): RuntimeGraph => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'gate', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['approver-1'] }] } },
+        { key: 'again', type: 'approval', config: { assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }], emptyAssigneePolicy } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'gate' },
+        { key: 'edge-gate-again', source: 'gate', target: 'again' },
+        { key: 'edge-again-end', source: 'again', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+    const resolverWith = (priorNodeApprovers?: Record<string, string[]>) =>
+      ({ nodeKey, sourceStep, config }: { nodeKey: string; sourceStep: number; config: never }) =>
+        resolveApprovalAssignees({
+          nodeKey,
+          sourceStep,
+          config,
+          formSnapshot: {},
+          requesterSnapshot: { id: 'requester-1' },
+          ...(priorNodeApprovers !== undefined ? { priorNodeApprovers } : {}),
+        })
+
+    // Happy path (positive control FIRST): gate approved by approver-1 → the caller (playing
+    // dispatchAction's role) supplies { gate: ['approver-1'] } → 'again' assigns approver-1 with
+    // the §2.6 audit trail (resolvedFrom.priorNodeKey).
+    const happyExecutor = new ApprovalGraphExecutor(k3Graph('error'), {}, { assignmentResolver: resolverWith({ gate: ['approver-1'] }) as never })
+    const advanced = happyExecutor.resolveAfterApprove('gate')
+    expect(advanced.currentNodeKey).toBe('again')
+    expect(advanced.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'approver-1',
+        nodeKey: 'again',
+        sourceStep: 2,
+        metadata: { resolvedFrom: { kind: 'prior_node_approver', sourceIndex: 0, priorNodeKey: 'gate' } },
+      },
+    ])
+
+    // 'error' + no map (skipped/unreached/sentinel-only referenced round): fail-closed throw.
+    const errorExecutor = new ApprovalGraphExecutor(k3Graph('error'), {}, { assignmentResolver: resolverWith(undefined) as never })
+    expect(() => errorExecutor.resolveAfterApprove('gate')).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+
+    // 'auto-approve' + sentinel-only map: the drop leaves nothing and the node's OWN policy fires
+    // an EXPLICIT audited auto-approval event (OD-L1-4(a)) — never a silently-materialized
+    // assignee, never an unassigned pending node.
+    const autoExecutor = new ApprovalGraphExecutor(k3Graph('auto-approve'), {}, { assignmentResolver: resolverWith({ gate: ['system:auto-approval'] }) as never })
+    const autoAdvanced = autoExecutor.resolveAfterApprove('gate')
+    expect(autoAdvanced.status).toBe('approved')
+    expect(autoAdvanced.autoApprovalEvents).toEqual([
+      { nodeKey: 'again', sourceStep: 2, approvalMode: 'single', reason: 'empty-assignee' },
+    ])
   })
 
   it('tags resolveAfterApprove resolutions with the resolved-away node aggregate mode', () => {
@@ -915,7 +1363,93 @@ describe('ApprovalGraphExecutor', () => {
   })
 })
 
+// Lock-7B §0.2 / G-11 (docs/development/approval-lock7b-required-at-node-20260820.md) — the ONE
+// type-agnostic emptiness predicate `isEmptyValue`, exported so the required-at-node handler-submit
+// check (ApprovalProductService.ts) reuses it VERBATIM rather than minting a second definition. Each
+// EMPTY arm is asserted individually (per-arm mutation target: deleting any ONE disjunct from
+// `isEmptyValue`'s source must red exactly the matching `it` below and no other EMPTY-arm test) and
+// each disclosed NON-empty hole is asserted individually too, so an arm's own positive/negative pair
+// discriminates it from every other arm.
+describe('isEmptyValue (Lock-7B §0.2 / G-11) — the create-time definition, reused verbatim at the node', () => {
+  it('EMPTY arm: the empty string', () => {
+    expect(isEmptyValue('')).toBe(true)
+  })
+  it('EMPTY arm: null', () => {
+    expect(isEmptyValue(null)).toBe(true)
+  })
+  it('EMPTY arm: undefined (the absent-key case at both create and the node)', () => {
+    expect(isEmptyValue(undefined)).toBe(true)
+  })
+  it('EMPTY arm: an empty array', () => {
+    expect(isEmptyValue([])).toBe(true)
+  })
+  it('disclosed NON-empty hole: the number 0', () => {
+    expect(isEmptyValue(0)).toBe(false)
+  })
+  it('disclosed NON-empty hole: the boolean false', () => {
+    expect(isEmptyValue(false)).toBe(false)
+  })
+  it('disclosed NON-empty hole: a whitespace-only string', () => {
+    expect(isEmptyValue('   ')).toBe(false)
+  })
+  it('disclosed NON-empty hole: an empty object {}', () => {
+    expect(isEmptyValue({})).toBe(false)
+  })
+  it('disclosed NON-empty hole: a NON-empty array', () => {
+    expect(isEmptyValue(['x'])).toBe(false)
+  })
+  it('disclosed NON-empty hole: a non-blank string', () => {
+    expect(isEmptyValue('x')).toBe(false)
+  })
+})
+
 describe('validateApprovalFormData', () => {
+  test('number fields reject unsafe integers instead of freezing a rounded snapshot value', () => {
+    const schema = { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] } as never
+    expect(validateApprovalFormData(schema, { amount: 9007199254740993 }))
+      .toEqual(['amount must be a lossless number'])
+    expect(validateApprovalFormData(schema, { amount: Number.MAX_SAFE_INTEGER })).toEqual([])
+  })
+
+  it('keeps the pre-feature attachment contract while the runtime flag is OFF', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' })).toEqual([])
+    expect(validateApprovalFormData(schema, { files: ['att_new'] }))
+      .toEqual(['files must be a string'])
+  })
+
+  it('accepts only staged attachment-id arrays in the enabled attachment mode', () => {
+    const schema: FormSchema = { fields: [{ id: 'files', type: 'attachment', label: 'Files' }] }
+    expect(validateApprovalFormData(schema, { files: ['att_a', 'att_b'] }, { attachmentValueMode: 'ids' }))
+      .toEqual([])
+    expect(validateApprovalFormData(schema, { files: 'legacy-file-reference' }, { attachmentValueMode: 'ids' }))
+      .toEqual(['files must be an array of attachment ids'])
+  })
+
+  it('detail-leaf attachment: legacy-valid while OFF; top-level-only enforced when ON (both controls)', () => {
+    // A historical/frozen schema that somehow carries attachment inside a detail group.
+    const schema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '明细',
+        columns: [
+          { id: 'name', type: 'text', label: 'name' },
+          { id: 'proof', type: 'attachment', label: 'proof' },
+        ],
+      }],
+    }
+    // Flag OFF / legacy: detail-leaf attachment values remain legacy-valid (string/record).
+    expect(validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: 'legacy-file-reference' }],
+    })).toEqual([])
+    // Flag ON / ids: top-level-only control rejects attachment leaves inside detail.
+    const on = validateApprovalFormData(schema, {
+      items: [{ name: 'row', proof: ['att_1'] }],
+    }, { attachmentValueMode: 'ids' })
+    expect(on).toContain('items.proof attachment fields are not allowed inside detail rows')
+  })
+
   it('reports required, type, and option errors', () => {
     const formSchema: FormSchema = {
       fields: [
@@ -1077,6 +1611,85 @@ describe('validateApprovalFormData', () => {
     ])
   })
 
+  it('date fields accept ONLY a strict real-calendar YYYY-MM-DD string (floating civil date)', () => {
+    const schema: FormSchema = { fields: [{ id: 'due', type: 'date', label: 'Due' }] }
+    // Accepts real calendar dates, leap-year validated — never via Date.parse.
+    expect(validateApprovalFormData(schema, { due: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2024-02-29' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2000-02-29' })).toEqual([])
+    // Rejects impossible dates, datetime strings, locale strings, epoch numbers, Date
+    // objects, and surrounding-whitespace variants (the form transport does not trim).
+    const rejected: Array<[string, unknown]> = [
+      ['non-leap Feb 29', '2026-02-29'],
+      ['century non-leap Feb 29', '1900-02-29'],
+      ['April 31', '2026-04-31'],
+      ['month 13', '2026-13-01'],
+      ['ISO datetime', '2026-07-15T10:00:00Z'],
+      ['datetime with offset', '2026-07-15T23:30:00+08:00'],
+      ['space-separated datetime', '2026-07-15 10:00:00'],
+      ['locale string', '7/15/2026'],
+      ['epoch-ms number', Date.UTC(2026, 6, 15)],
+      ['Date object', new Date(Date.UTC(2026, 6, 15))],
+      ['left whitespace', ' 2026-07-15'],
+      ['right whitespace', '2026-07-15 '],
+      ['single-digit month', '2026-7-15'],
+      ['year zero', '0000-01-01'],
+    ]
+    for (const [label, value] of rejected) {
+      expect(validateApprovalFormData(schema, { due: value }), label)
+        .toEqual(['due must be a date value'])
+    }
+  })
+
+  it('datetime fields keep instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = { fields: [{ id: 'meet', type: 'datetime', label: 'Meet' }] }
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15T10:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15 10:00:00' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-07-15' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: new Date(Date.UTC(2026, 6, 15)) })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: 'not-a-date' }))
+      .toEqual(['meet must be a date value'])
+    expect(validateApprovalFormData(schema, { meet: 1752573600000 }))
+      .toEqual(['meet must be a date value'])
+  })
+
+  it('date min/max compares validated YYYY-MM-DD calendar strings directly (timezone-stable)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'due',
+        type: 'date',
+        label: 'Due',
+        props: { min: '2026-04-10', max: '2026-04-12' },
+      }],
+    }
+    // Boundaries are inclusive and identical in every timezone (pure string comparison —
+    // an epoch-converting mutation reds this under TZ=America/Los_Angeles / Asia/Taipei).
+    expect(validateApprovalFormData(schema, { due: '2026-04-10' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-12' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-11' })).toEqual([])
+    expect(validateApprovalFormData(schema, { due: '2026-04-09' }))
+      .toEqual(['due must be on or after 2026-04-10'])
+    expect(validateApprovalFormData(schema, { due: '2026-04-13' }))
+      .toEqual(['due must be on or before 2026-04-12'])
+  })
+
+  it('datetime min/max keeps instant semantics (positive control — unchanged behavior)', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'meet',
+        type: 'datetime',
+        label: 'Meet',
+        props: { min: '2026-04-10T00:00:00Z', max: '2026-04-12T00:00:00Z' },
+      }],
+    }
+    expect(validateApprovalFormData(schema, { meet: '2026-04-10T00:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-11T12:00:00Z' })).toEqual([])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-09T23:59:59Z' }))
+      .toEqual(['meet must be on or after 2026-04-10T00:00:00Z'])
+    expect(validateApprovalFormData(schema, { meet: '2026-04-12T00:00:01Z' }))
+      .toEqual(['meet must be on or before 2026-04-12T00:00:00Z'])
+  })
+
   // P1-B 加签 — buildAddSignAssignments returns one active user row per target
   // id at the current node, stamped {addedBy, addSign:true} and deliberately
   // carrying NO resolvedFrom (so it reads as a static, non-resolver assignment).
@@ -1188,6 +1801,171 @@ describe('validateApprovalFormData — detail (明细) rows (C-2)', () => {
   it('applies per-row visibility: a hidden required sub-field is not required, but required when visible', () => {
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 1 }] })).toEqual([])
     expect(validateApprovalFormData(detailSchema, { items: [{ product: 'special', qty: 1 }] })).toEqual(['items[0].note is required'])
+  })
+})
+
+describe('validateApprovalFormData — record-link value shape (FWB-0 Layer 2)', () => {
+  const schema: FormSchema = {
+    fields: [{
+      id: 'linked',
+      type: 'record-link',
+      label: '关联记录',
+      required: true,
+      props: { baseId: 'base_a', sheetId: 'sheet_a' },
+    }],
+  }
+
+  it('accepts exactly one { recordId: non-blank string }', () => {
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'rec_1' } })).toEqual([])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '  rec_2  ' } })).toEqual([])
+  })
+
+  it('rejects arrays, free-text, empty id, and extra target overrides (fail-closed)', () => {
+    expect(validateApprovalFormData(schema, { linked: 'rec_1' })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: ['rec_1'] })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: '' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordId: 'a', sheetId: 'override' } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+    expect(validateApprovalFormData(schema, { linked: { recordIds: ['a', 'b'] } })).toEqual([
+      'linked must be exactly { recordId } (single non-blank string; no free-text id, no multi-value)',
+    ])
+  })
+
+  it('required empty still surfaces required (not a type error)', () => {
+    expect(validateApprovalFormData(schema, {})).toEqual(['linked is required'])
+  })
+})
+
+describe('validateApprovalFormData — department value shape (Lock-2 L2-A)', () => {
+  const single: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      required: true,
+      props: { selection: 'single', display: 'full_path' },
+    }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      props: { selection: 'multi', display: 'leaf_only', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts exact local-id objects and preserves required handling', () => {
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }] })).toEqual([])
+    expect(validateApprovalFormData(single, {})).toEqual(['dept is required'])
+    expect(validateApprovalFormData(single, { dept: [] })).toEqual(['dept is required'])
+    expect(validateApprovalFormData(multi, { dept: [] })).toEqual([])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([])
+  })
+
+  it('rejects free text, extra keys, duplicates, single overflow, and maxSelections overflow', () => {
+    expect(validateApprovalFormData(single, { dept: ['d1'] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1', name: 'spoof' }] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd1' }] })).toEqual([
+      'dept must not contain duplicate departments',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([
+      'dept must contain exactly one department',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }] })).toEqual([
+      'dept exceeds the configured department selection limit',
+    ])
+  })
+})
+
+describe('validateApprovalFormData — contact value shape (Lock-2 L2-B)', () => {
+  const single: FormSchema = {
+    fields: [{ id: 'contact', type: 'user', label: '联系人', required: true }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'contacts',
+      type: 'user',
+      label: '联系人',
+      props: { selection: 'multi', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts legacy single values and capped multi values', () => {
+    expect(validateApprovalFormData(single, { contact: 'u1' })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1', name: 'display-only' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: '   ' })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', { id: 'u2' }] })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: [] })).toEqual([])
+  })
+
+  it('rejects malformed, duplicate, wrong-cardinality, and over-limit values', () => {
+    expect(validateApprovalFormData(multi, { contacts: 'u1' })).toEqual([
+      'contacts must be an array of users',
+    ])
+    expect(validateApprovalFormData(single, { contact: ['u1', 'u2'] })).toEqual([
+      'contact must contain exactly one user',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: [{ name: 'missing-id' }] })).toEqual([
+      'contacts must contain only user ids or objects with an id',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u1'] })).toEqual([
+      'contacts must not contain duplicate users',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u2', 'u3'] })).toEqual([
+      'contacts exceeds the configured user selection limit',
+    ])
+  })
+})
+
+describe('canonicalizeRecordLinkFormData — FWB-0 Layer 2', () => {
+  it('rewrites padded recordId to the exact trimmed canonical object in-place', () => {
+    const schema: FormSchema = {
+      fields: [
+        {
+          id: 'linked',
+          type: 'record-link',
+          label: '关联',
+          props: { baseId: 'b', sheetId: 's' },
+        },
+        { id: 'reason', type: 'text', label: '事由' },
+      ],
+    }
+    const formData: Record<string, unknown> = {
+      linked: { recordId: '  rec-1  ' },
+      reason: 'keep',
+    }
+    canonicalizeRecordLinkFormData(schema, formData)
+    expect(formData.linked).toEqual({ recordId: 'rec-1' })
+    expect(formData.reason).toBe('keep')
+  })
+
+  it('does not loosen structural validation — invalid shapes stay untouched', () => {
+    const schema: FormSchema = {
+      fields: [{
+        id: 'linked',
+        type: 'record-link',
+        label: '关联',
+        props: { baseId: 'b', sheetId: 's' },
+      }],
+    }
+    const invalid: Record<string, unknown> = {
+      linked: { recordId: 'a', sheetId: 'smuggle' },
+    }
+    canonicalizeRecordLinkFormData(schema, invalid)
+    expect(invalid.linked).toEqual({ recordId: 'a', sheetId: 'smuggle' })
   })
 })
 

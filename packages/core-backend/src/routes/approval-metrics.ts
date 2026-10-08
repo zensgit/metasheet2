@@ -1,10 +1,10 @@
 /**
  * Wave 2 WP5 slice 1 — approval metrics / SLA routes.
  *
- * Summary and breach endpoints are admin-only; per-instance metrics are
- * visible to any authenticated caller that the main approval detail
- * endpoint would show (no extra scoping here — the metrics row is keyed
- * by instance_id and inherits the instance's own ACL).
+ * Summary and breach endpoints are admin-only; per-instance metrics gate on Lock-10 (S1)'s unified
+ * `canReadApprovalInstance` predicate (replaces the C-2 inline ACL — see the route handler for the
+ * exact widen/narrow deltas). The metrics row is keyed by instance_id and inherits the instance's
+ * own admission decision, not a separate ACL.
  */
 
 import { Router } from 'express'
@@ -13,6 +13,7 @@ import { authenticate } from '../middleware/auth'
 import { rbacGuard } from '../rbac/rbac'
 import { Logger } from '../core/logger'
 import { pool } from '../db/pg'
+import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import {
   ApprovalMetricsService,
   getApprovalMetricsService,
@@ -29,17 +30,13 @@ function resolveTenantId(req: Request): string {
   return 'default'
 }
 
-function isAdminActor(req: Request): boolean {
-  if (req.user?.role === 'admin') return true
-  const roles = Array.isArray(req.user?.roles)
-    ? req.user!.roles.filter((r): r is string => typeof r === 'string')
-    : []
-  if (roles.includes('admin')) return true
-  const permissions = Array.isArray(req.user?.permissions)
-    ? req.user!.permissions.filter((p): p is string => typeof p === 'string')
-    : []
-  return permissions.includes('*:*')
-}
+// RETIRED (Lock-10 S1, §5.3): `isAdminActor` was a JWT-claims admin check
+// (`req.user.role === 'admin'`, `roles` claim, or the `*:*` permission claim) with exactly one
+// call site, immediately below. `canReadApprovalInstance`'s admin arm (OD-S1-8) replaces it with a
+// DB-backed check (`users.is_active AND (is_admin OR role='admin')`) — a JWT-only admin claim with
+// no matching `users` row no longer bypasses the per-instance check (OD-S1-17(a): "roles derived
+// from the DB, never from token claims", generalized here to the admin arm the lock itself names
+// as the same trust-model question).
 
 function parseDate(value: unknown): Date | undefined {
   if (typeof value !== 'string' || value.trim().length === 0) return undefined
@@ -167,53 +164,27 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
         if (!instanceId) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'instanceId is required' } })
         }
-        // Wave 2 WP5 slice 1 — participant-or-admin ACL. Admins see every
-        // instance's metrics. Non-admin callers must already be a requester,
-        // an active/historical assignee, or a recorded actor on the instance.
-        // We check both approval_assignments (role + user) and approval_records
-        // so transferred / returned participants are covered.
-        const isAdmin = isAdminActor(req)
-        if (!isAdmin) {
-          const actorId = typeof req.user?.id === 'string' ? req.user.id
-            : typeof req.user?.userId === 'string' ? req.user.userId
-            : typeof req.user?.sub === 'string' ? req.user.sub
-            : null
-          if (!actorId) {
-            return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Actor required' } })
-          }
-          if (!pool) {
-            return res.status(503).json({ ok: false, error: { code: 'DB_UNAVAILABLE', message: 'Database not available' } })
-          }
-          const actorRoles = Array.isArray(req.user?.roles)
-            ? req.user!.roles.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
-            : []
-          if (typeof req.user?.role === 'string' && req.user.role.trim().length > 0) {
-            actorRoles.push(req.user.role.trim())
-          }
-          const participantCheck = await pool.query<{ exists: boolean }>(
-            `SELECT EXISTS(
-              SELECT 1 FROM approval_instances i
-              WHERE i.id = $1 AND (
-                COALESCE(i.requester_snapshot->>'id', '') = $2
-                OR EXISTS(
-                  SELECT 1 FROM approval_assignments a
-                  WHERE a.instance_id = i.id
-                    AND (
-                      (a.assignment_type = 'user' AND a.assignee_id = $2)
-                      OR (a.assignment_type = 'role' AND a.assignee_id = ANY($3::text[]))
-                    )
-                )
-                OR EXISTS(
-                  SELECT 1 FROM approval_records r
-                  WHERE r.instance_id = i.id AND r.actor_id = $2
-                )
-              )
-            ) AS exists`,
-            [instanceId, actorId, actorRoles.length > 0 ? actorRoles : ['__none__']],
-          )
-          if (!participantCheck.rows[0]?.exists) {
-            return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not a participant of this approval' } })
-          }
+        // Lock-10 (S1) OD-S1-7/OD-S1-1 — canReadApprovalInstance replaces the inline ACL (C-2,
+        // §5.3). WIDENS vs. the deleted inline SQL by admitting CC targets (OD-S1-7, CONFIRMED
+        // §5.1.1 — absent from the old query). NARROWS three ways: the admin arm is DB-backed
+        // (OD-S1-8, not the deleted `isAdminActor` JWT claim), roles are DB-backed (OD-S1-17(a) —
+        // a JWT-only role claim with no `user_roles`/`users.role` row no longer matches a
+        // role-typed seat), and the org pin is now part of the predicate (currently dormant by
+        // default — see the predicate module's docblock). The 403 CODE/SHAPE is UNCHANGED
+        // (OD-S1-11: metrics keeps 403 FORBIDDEN; only detail/history switch to 404).
+        const actorId = typeof req.user?.id === 'string' ? req.user.id
+          : typeof req.user?.userId === 'string' ? req.user.userId
+          : typeof req.user?.sub === 'string' ? req.user.sub
+          : null
+        if (!actorId) {
+          return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Actor required' } })
+        }
+        if (!pool) {
+          return res.status(503).json({ ok: false, error: { code: 'DB_UNAVAILABLE', message: 'Database not available' } })
+        }
+        const readable = await canReadApprovalInstance(pool, actorId, instanceId)
+        if (!readable) {
+          return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not a participant of this approval' } })
         }
 
         const metrics = await metricsService.getInstanceMetrics(instanceId)

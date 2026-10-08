@@ -161,8 +161,9 @@ describeIfDatabase('Attendance approval action authorization — S7-0 (approve +
 
     await client.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, $5::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, CURRENT_DATE, 'missed_check_in', 'pending', $3, $4, 'attendance_request_approval', $5::jsonb)`,
       [
         requestId,
         requesterUserId,
@@ -223,6 +224,24 @@ describeIfDatabase('Attendance approval action authorization — S7-0 (approve +
 
     pool = new Pool({ connectionString: dbUrl })
     await pool.query('SELECT 1')
+
+    // Seed the durable identity and org-membership substrate before the RBAC rows. The
+    // W4C-3b decision boundary fails closed when the authenticated subject has no active
+    // user/user_orgs proof; JWT claims alone are deliberately insufficient.
+    await pool.query(
+      `INSERT INTO users
+         (id, email, name, password_hash, role, permissions, is_active, is_admin, activation_status)
+       SELECT actor_id, actor_id || '@example.test', actor_id, 'x', 'user', '[]'::jsonb,
+              TRUE, FALSE, 'activated'
+         FROM unnest($1::text[]) AS actor(actor_id)`,
+      [allActorIds]
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active)
+       SELECT actor_id, $2, TRUE
+         FROM unnest($1::text[]) AS actor(actor_id)`,
+      [allActorIds, orgId]
+    )
 
     // Seed the RBAC substrate the plugin's checks read (DB tables, NOT the JWT claims).
     await pool.query(
@@ -298,6 +317,12 @@ describeIfDatabase('Attendance approval action authorization — S7-0 (approve +
           .catch(() => undefined)
         await pool
           .query('DELETE FROM user_permissions WHERE user_id = ANY($1::varchar[])', [allActorIds])
+          .catch(() => undefined)
+        await pool
+          .query('DELETE FROM user_orgs WHERE user_id = ANY($1::varchar[])', [allActorIds])
+          .catch(() => undefined)
+        await pool
+          .query('DELETE FROM users WHERE id = ANY($1::varchar[])', [allActorIds])
           .catch(() => undefined)
         await pool
           .query('DELETE FROM permissions WHERE code = $1', [queuePermission])

@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('../../src/rbac/service', () => ({ isAdmin: vi.fn(), listUserPermissions: vi.fn() }))
 
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
+import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
 
 const mkQuery = (isProjectionSheet: boolean) =>
@@ -31,8 +32,12 @@ describe('A — resolveSheetCapabilitiesForUser projection guard (collab/Yjs/api
   it('ALLOWS the same non-admin on an ordinary (non-projection) sheet — canRead=true', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
-    const res = await resolveSheetCapabilitiesForUser(mkQuery(false), 'S', 'u1')
+    const query = mkQuery(false)
+    const res = await resolveSheetCapabilitiesForUser(query, 'S', 'u1')
     expect(res.capabilities.canRead).toBe(true)
+    expect(query.mock.calls.some(([sql]) => (
+      String(sql).includes('FROM elearning_stats_multitable_sheets')
+    ))).toBe(false)
   })
 
   it('ALLOWS an admin on a projection sheet — canRead=true', async () => {
@@ -53,5 +58,104 @@ describe('A — resolveSheetCapabilitiesForUser projection guard (collab/Yjs/api
     const ok = await resolveSheetCapabilitiesForUser(mkQuery(false), 'S', 'u1')
     expect(ok.capabilities.canEditRecord).toBe(true)
     expect(ok.capabilities.canManageAutomation).toBe(true)
+  })
+})
+
+describe('e-learning aggregate projection capability guard', () => {
+  const orgId = 'org-elearning-stats'
+  const sheetId = deriveElearningProjectionSheetId(orgId)
+
+  function projectionQuery(validSystemKind = true) {
+    return vi.fn(async (sql: string) => {
+      if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+        return { rows: validSystemKind ? [{ id: sheetId }] : [] }
+      }
+      if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+        return { rows: [{ org_id: orgId, sheet_id: sheetId }] }
+      }
+      return { rows: [] }
+    }) as never
+  }
+
+  it('gives a same-org e-learning admin read/export/view access but no write surface', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
+    const result = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
+      sheetId,
+      'elearning-admin',
+      orgId,
+    )
+    expect(result.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canManageViews: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canComment: false,
+      canManageAutomation: false,
+      canSendNotification: false,
+    })
+  })
+
+  it('requires authenticated tenant context and clamps platform admins to read-only', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
+    const missingContext = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
+      sheetId,
+      'contextless-admin',
+    )
+    expect(missingContext.capabilities.canRead).toBe(false)
+    expect(missingContext.capabilities.canManageViews).toBe(false)
+
+    const crossOrg = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
+      sheetId,
+      'cross-org-admin',
+      'another-org',
+    )
+    expect(crossOrg.capabilities.canRead).toBe(false)
+    expect(crossOrg.capabilities.canManageViews).toBe(false)
+
+    vi.mocked(isAdmin).mockResolvedValue(true)
+    vi.mocked(listUserPermissions).mockResolvedValue([])
+    const platformAdmin = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
+      sheetId,
+      'platform-admin',
+    )
+    expect(platformAdmin.capabilities.canRead).toBe(true)
+    expect(platformAdmin.capabilities.canExport).toBe(true)
+    expect(platformAdmin.capabilities.canManageViews).toBe(true)
+    expect(platformAdmin.capabilities.canEditRecord).toBe(false)
+    expect(platformAdmin.capabilities.canManageFields).toBe(false)
+
+    const drifted = await resolveSheetCapabilitiesForUser(
+      projectionQuery(false),
+      sheetId,
+      'platform-admin',
+    )
+    expect(drifted.capabilities.canRead).toBe(false)
+    expect(drifted.capabilities.canManageViews).toBe(false)
+  })
+
+  it('reserves projection-shaped sheet ids and denies an unmapped candidate without treating ordinary ids as candidates', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin', 'multitable:read'])
+    const query = vi.fn(async () => ({ rows: [] }))
+    const result = await resolveSheetCapabilitiesForUser(
+      query as never,
+      sheetId,
+      'elearning-admin',
+    )
+    expect(result.capabilities.canRead).toBe(false)
+    expect(result.capabilities.canExport).toBe(false)
+    expect(query.mock.calls.some(([sql]) => (
+      String(sql).includes('FROM elearning_stats_multitable_sheets')
+    ))).toBe(true)
   })
 })

@@ -7,12 +7,14 @@ import type { AutomationLabelKey } from './utils/meta-automation-labels'
  * plus a little editing instead of a blank form.
  *
  * Each recipe uses ONLY trigger/action values the quick form actually offers (record.created /
- * record.updated / field.changed × notify / update_field), so applying one always yields a draft
+ * record.updated / field.changed × send_notification / update_record), so applying one always yields a draft
  * the existing form can render and save. Kept as a pure data table + a pure applier so the mapping
  * is unit-testable without mounting the 2200-line manager. No external product names.
  */
 export type RecipeTriggerType = 'record.created' | 'record.updated' | 'field.changed'
-export type RecipeActionType = 'notify' | 'update_field'
+// F9: canonical action types only. The cards used to seed the v0 aliases (notify / update_field),
+// which the executor has no dispatch case for — every rule created from a card failed at run time.
+export type RecipeActionType = 'send_notification' | 'update_record'
 
 export interface AutomationRecipe {
   /** Stable key → `data-automation-recipe="<key>"` and the label lookups. */
@@ -27,21 +29,21 @@ export const AUTOMATION_RECIPES: readonly AutomationRecipe[] = [
   {
     key: 'created-notify',
     triggerType: 'record.created',
-    actionType: 'notify',
+    actionType: 'send_notification',
     titleKey: 'recipe.createdNotifyTitle',
     descriptionKey: 'recipe.createdNotifyDesc',
   },
   {
     key: 'updated-notify',
     triggerType: 'record.updated',
-    actionType: 'notify',
+    actionType: 'send_notification',
     titleKey: 'recipe.updatedNotifyTitle',
     descriptionKey: 'recipe.updatedNotifyDesc',
   },
   {
     key: 'field-changed-update',
     triggerType: 'field.changed',
-    actionType: 'update_field',
+    actionType: 'update_record',
     titleKey: 'recipe.fieldChangedUpdateTitle',
     descriptionKey: 'recipe.fieldChangedUpdateDesc',
   },

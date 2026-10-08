@@ -155,6 +155,45 @@ function main() {
     ],
   }), EXCEPTION_TYPES.VERSION_CONFLICT)
 
+  // OD2 round-1 fail-closed (#4391 doctrine: stored approved rows are not trusted): a stored
+  // mapping row carrying an UNIMPLEMENTED versionPolicy — the reserved CATEGORY_RULE and junk
+  // alike, the guard is allowlist-shaped — NEVER auto-matches. The OLD tail heuristic matched it
+  // on drawing alone whenever a version was absent (silently generating a draft line); now the
+  // line degrades to the visible missing_mapping (HELD) exception, and a version mismatch under
+  // such a policy is missing_mapping too — never version_conflict.
+  for (const unimplementedPolicy of [VERSION_POLICIES.CATEGORY_RULE, 'totally_bogus']) {
+    assertSingleException(generate({
+      materialMappings: [
+        {
+          ...clone(baseInput().materialMappings[0]),
+          plmVersion: undefined,
+          versionPolicy: unimplementedPolicy,
+        },
+      ],
+    }), EXCEPTION_TYPES.MISSING_MAPPING)
+    assertSingleException(generate({
+      materialMappings: [
+        {
+          ...clone(baseInput().materialMappings[0]),
+          plmVersion: 'B',
+          versionPolicy: unimplementedPolicy,
+        },
+      ],
+    }), EXCEPTION_TYPES.MISSING_MAPPING)
+    // Round 2 (guard ordering): a stored matchStatus='version_conflict' must not FORCE the
+    // version_conflict exception either — the policy guard runs BEFORE the stored-status
+    // short-circuit, so the row never participates and the line degrades to missing_mapping.
+    assertSingleException(generate({
+      materialMappings: [
+        {
+          ...clone(baseInput().materialMappings[0]),
+          versionPolicy: unimplementedPolicy,
+          matchStatus: MATERIAL_MATCH_STATUSES.VERSION_CONFLICT,
+        },
+      ],
+    }), EXCEPTION_TYPES.MISSING_MAPPING)
+  }
+
   assertSingleException(generate({ erpMaterials: [] }), EXCEPTION_TYPES.MISSING_MATERIAL_MASTER)
 
   assertSingleException(generate({ unitConversionRules: [] }), EXCEPTION_TYPES.UNIT_MISSING)

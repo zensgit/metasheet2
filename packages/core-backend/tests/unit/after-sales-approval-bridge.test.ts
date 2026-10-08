@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   AfterSalesApprovalBridgeService,
+  AFTER_SALES_NO_VIEWER,
   REFUND_WORKFLOW_KEY,
+  toAfterSalesApprovalSummary,
   type AfterSalesRefundApprovalCommand,
   type AfterSalesRefundApprovalCallbacks,
   type AfterSalesRefundApprovalDecisionInput,
 } from '../../src/services/AfterSalesApprovalBridgeService'
+import type { UnifiedApprovalDTO } from '../../src/services/approval-bridge-types'
 
 type ApprovalInstanceRow = {
   id: string
@@ -257,7 +260,17 @@ describe('AfterSalesApprovalBridgeService', () => {
 
     expect(result.created).toBe(true)
     expect(result.approvalId).toMatch(/^afs:/)
-    expect(getApproval).toHaveBeenCalledWith(result.approvalId)
+    // Explicit no-viewer sentinel — never omit viewerUserId (would be ambiguous).
+    expect(getApproval).toHaveBeenCalledWith(result.approvalId, AFTER_SALES_NO_VIEWER)
+    expect(result.approval).toMatchObject({
+      id: result.approvalId,
+      status: 'pending',
+      subject: expect.objectContaining({ ticketId: 'ticket_001' }),
+    })
+    // Plugin return is the narrow summary — no form surface.
+    expect(result.approval).not.toHaveProperty('formSnapshot')
+    expect(result.approval).not.toHaveProperty('formSchema')
+    expect(JSON.stringify(result.approval)).not.toContain('formSnapshot')
     expect(fixture.instances).toHaveLength(1)
     expect(fixture.instances[0]).toMatchObject({
       source_system: 'after-sales',
@@ -357,7 +370,189 @@ describe('AfterSalesApprovalBridgeService', () => {
       status: 'pending',
       businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
     })
-    expect(getApproval).toHaveBeenCalledWith('afs:lookup')
+    expect(getApproval).toHaveBeenCalledWith('afs:lookup', AFTER_SALES_NO_VIEWER)
+    expect(approval).not.toHaveProperty('formSnapshot')
+    expect(approval).not.toHaveProperty('formSchema')
+  })
+
+  it('P2: plugin/callback summary never serializes recordId / formSnapshot / formSchema', async () => {
+    // Construct a full UnifiedApprovalDTO as if the instance already used a record-link form
+    // AND a legacy/malformed subject_snapshot carrying leak keys. Plugin only gets the closed
+    // AfterSalesRefundSubjectSummary — prove leak fields cannot appear even on subject.
+    const fullDto: UnifiedApprovalDTO = {
+      id: 'afs:leak-probe',
+      sourceSystem: 'after-sales',
+      externalApprovalId: null,
+      workflowKey: REFUND_WORKFLOW_KEY,
+      businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      title: 'Refund with linked record',
+      status: 'approved',
+      requester: { id: 'user_42', name: 'Alice' },
+      subject: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+        // Malformed extras that a wholesale subject spread would leak:
+        recordId: 'rec-secret-in-subject',
+        formSnapshot: { nested: { recordId: 'nested-secret' } },
+        extraNested: { formSchema: { fields: [] }, recordId: 'extra-secret' },
+      } as UnifiedApprovalDTO['subject'],
+      policy: { sourceOfTruth: 'after-sales' },
+      currentStep: 2,
+      totalSteps: 2,
+      formSnapshot: {
+        linked: { recordId: 'rec-secret-should-not-leak' },
+        note: 'ok',
+      },
+      formSchema: {
+        fields: [{
+          id: 'linked',
+          type: 'record-link',
+          label: '关联',
+          props: { baseId: 'base-1', sheetId: 'sheet-1' },
+        }],
+      },
+      assignments: [{
+        id: 'asg-1',
+        type: 'role',
+        assigneeId: 'finance',
+        sourceStep: 1,
+        isActive: true,
+        metadata: {},
+      }],
+      createdAt: '2026-04-07T00:00:00.000Z',
+      updatedAt: '2026-04-07T01:00:00.000Z',
+    }
+
+    const summary = toAfterSalesApprovalSummary(fullDto)
+    const summaryJson = JSON.stringify(summary)
+
+    expect(summary).toEqual({
+      id: 'afs:leak-probe',
+      sourceSystem: 'after-sales',
+      workflowKey: REFUND_WORKFLOW_KEY,
+      businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      title: 'Refund with linked record',
+      status: 'approved',
+      subject: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+      },
+      currentStep: 2,
+      totalSteps: 2,
+      updatedAt: '2026-04-07T01:00:00.000Z',
+    })
+    // Closed subject: exactly the six named fields — no open index / spread residue.
+    expect(Object.keys(summary.subject ?? {}).sort()).toEqual([
+      'currency',
+      'projectId',
+      'refundAmount',
+      'ticketId',
+      'ticketNo',
+      'title',
+    ])
+    expect(summaryJson).not.toContain('recordId')
+    expect(summaryJson).not.toContain('rec-secret-should-not-leak')
+    expect(summaryJson).not.toContain('rec-secret-in-subject')
+    expect(summaryJson).not.toContain('nested-secret')
+    expect(summaryJson).not.toContain('extra-secret')
+    expect(summaryJson).not.toContain('formSnapshot')
+    expect(summaryJson).not.toContain('formSchema')
+    expect(summaryJson).not.toContain('extraNested')
+    expect(summary).not.toHaveProperty('formSnapshot')
+    expect(summary).not.toHaveProperty('formSchema')
+    expect(summary).not.toHaveProperty('requester')
+    expect(summary).not.toHaveProperty('assignments')
+    expect(summary).not.toHaveProperty('policy')
+
+    // End-to-end: getRefundApproval / decision callbacks receive only the summary.
+    const fixture = createDbFixture()
+    fixture.instances.push({
+      id: 'afs:leak-probe',
+      status: 'pending',
+      source_system: 'after-sales',
+      workflow_key: REFUND_WORKFLOW_KEY,
+      business_key: fullDto.businessKey!,
+      title: fullDto.title!,
+      requester_snapshot: { id: 'user_42' },
+      subject_snapshot: fullDto.subject as Record<string, unknown>,
+      policy_snapshot: {},
+      metadata: { ticketId: 'ticket_001' },
+      current_step: 1,
+      total_steps: 2,
+    })
+
+    const getApproval = vi.fn(async () => fullDto)
+    const dispatchAction = vi.fn(async () => fullDto)
+    const onDecision = vi.fn(async () => undefined)
+    const onApproved = vi.fn(async () => undefined)
+
+    const service = new AfterSalesApprovalBridgeService(
+      fixture.db as never,
+      { getApproval, dispatchAction } as never,
+      { onDecision, onApproved },
+    )
+
+    const loaded = await service.getRefundApproval({ approvalId: 'afs:leak-probe' })
+    expect(getApproval).toHaveBeenCalledWith('afs:leak-probe', AFTER_SALES_NO_VIEWER)
+    const loadedJson = JSON.stringify(loaded)
+    expect(loadedJson).not.toContain('recordId')
+    expect(loadedJson).not.toContain('rec-secret-should-not-leak')
+    expect(loadedJson).not.toContain('rec-secret-in-subject')
+    expect(loadedJson).not.toContain('formSnapshot')
+    expect(loadedJson).not.toContain('formSchema')
+    expect(loadedJson).not.toContain('extraNested')
+    expect(loaded?.subject).toEqual({
+      projectId: 'tenant_42:after-sales',
+      ticketId: 'ticket_001',
+      ticketNo: 'TK-1001',
+      title: 'Refund request',
+      refundAmount: 99,
+      currency: 'CNY',
+    })
+
+    await service.submitRefundApprovalDecision({
+      approvalId: 'afs:leak-probe',
+      action: 'approve',
+      actorId: 'finance_1',
+    })
+    expect(onDecision).toHaveBeenCalledTimes(1)
+    expect(onApproved).toHaveBeenCalledTimes(1)
+    const cbApproval = onDecision.mock.calls[0][0]
+    const cbJson = JSON.stringify(cbApproval)
+    expect(cbJson).not.toContain('recordId')
+    expect(cbJson).not.toContain('rec-secret-should-not-leak')
+    expect(cbJson).not.toContain('rec-secret-in-subject')
+    expect(cbJson).not.toContain('formSnapshot')
+    expect(cbJson).not.toContain('formSchema')
+    expect(cbJson).not.toContain('extraNested')
+    expect(cbApproval).toMatchObject({
+      id: 'afs:leak-probe',
+      status: 'approved',
+      subject: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+      },
+    })
+    expect(Object.keys(cbApproval.subject ?? {}).sort()).toEqual([
+      'currency',
+      'projectId',
+      'refundAmount',
+      'ticketId',
+      'ticketNo',
+      'title',
+    ])
   })
 
   it('dispatches an approved refund decision and invokes the approved callback', async () => {
@@ -422,8 +617,9 @@ describe('AfterSalesApprovalBridgeService', () => {
         userName: 'Finance One',
       }),
     )
+    const expectedSummary = toAfterSalesApprovalSummary(approval as never)
     expect(onDecision).toHaveBeenCalledWith(
-      approval,
+      expectedSummary,
       expect.objectContaining({
         ticketId: 'ticket_001',
         action: 'approve',
@@ -431,7 +627,7 @@ describe('AfterSalesApprovalBridgeService', () => {
       }),
     )
     expect(onApproved).toHaveBeenCalledWith(
-      approval,
+      expectedSummary,
       expect.objectContaining({
         ticketId: 'ticket_001',
         action: 'approve',
@@ -442,7 +638,9 @@ describe('AfterSalesApprovalBridgeService', () => {
     expect(result).toMatchObject({
       approvalId: 'afs:decision',
       decision: 'approved',
+      approval: expectedSummary,
     })
+    expect(JSON.stringify(result.approval)).not.toContain('formSnapshot')
   })
 
   it('dispatches a rejected refund decision and invokes the rejected callback', async () => {
@@ -506,8 +704,9 @@ describe('AfterSalesApprovalBridgeService', () => {
         userName: undefined,
       }),
     )
+    const expectedRejectSummary = toAfterSalesApprovalSummary(approval as never)
     expect(onDecision).toHaveBeenCalledWith(
-      approval,
+      expectedRejectSummary,
       expect.objectContaining({
         businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
         action: 'reject',
@@ -515,7 +714,7 @@ describe('AfterSalesApprovalBridgeService', () => {
       }),
     )
     expect(onRejected).toHaveBeenCalledWith(
-      approval,
+      expectedRejectSummary,
       expect.objectContaining({
         businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
         action: 'reject',
@@ -526,6 +725,7 @@ describe('AfterSalesApprovalBridgeService', () => {
     expect(result).toMatchObject({
       approvalId: 'afs:decision-reject',
       decision: 'rejected',
+      approval: expectedRejectSummary,
     })
   })
 })

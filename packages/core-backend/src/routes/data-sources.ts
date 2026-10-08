@@ -16,15 +16,76 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
+  DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
   isGenericQueryDisabledConfig,
   SUPPORTED_DATA_SOURCE_TYPES
 } from '../data-adapters/DataSourceManager'
+import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import {
+  attemptsToClearK3Marker,
+  K3_DESTINATION_MARKER_IMMUTABLE,
+  K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
+} from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+
+const logger = new Logger('DataSourcesRouter')
+
+// Re-seal refusals whose values-free `details` (missing credential KEY names / a load state) reach
+// the client on PUT /:id/credentials. A closed set, so no other coded refusal on that route changes
+// its body shape.
+const RESEAL_DETAIL_CODES: ReadonlySet<string> = new Set([
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
+])
+
+// A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
+// throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
+// reaches the client as its own 4xx (e.g. 403 arm-ahead-of-provisioning) with its coded reason, rather
+// than collapsing into a generic 500. The gate's messages are values-free by construction (they carry
+// no SQL, host, database, connection string or credential), so echoing the message here is safe.
+// Used on the management plane (create / update / rotate) AND the data plane (/query, /select): a
+// default-deny write refusal or an arm-binding revocation is a policy answer, not a query failure.
+function codedGateRefusal(error: unknown): { status: number; code: string; message: string } | null {
+  if (!(error instanceof Error)) return null
+  const status = (error as { status?: unknown }).status
+  const code = (error as { code?: unknown }).code
+  if (typeof status === 'number' && status >= 400 && status < 600 && typeof code === 'string') {
+    return { status, code, message: error.message }
+  }
+  return null
+}
+
+/**
+ * 2026-09-10 222 PLM 504 — opt-in for the EXPENSIVE schema listing (`?includeColumns=1` / `?detail=full`).
+ * Deliberately strict and default-OFF: anything unrecognised (including `includeColumns=0`,
+ * `detail=list`, or an array from a repeated query param) means the cheap list-only listing.
+ */
+export function wantsSchemaColumns(query: Record<string, unknown>): boolean {
+  const truthy = (value: unknown): boolean =>
+    typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+  if (truthy(query.includeColumns)) return true
+  return typeof query.detail === 'string' && query.detail.trim().toLowerCase() === 'full'
+}
+
+// A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
+// mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
+// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.99.99.16:1433`).
+// The detail goes to the server log; the client gets a fixed, values-free sentence and can use
+// `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
+export const SCHEMA_FAILURE_MESSAGE =
+  '读取数据源结构失败，请先「测试连接」查看原因 / Failed to read the data source schema; run "Test connection" for details'
+export const TABLE_INFO_FAILURE_MESSAGE =
+  '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
+export const CONNECT_FAILURE_MESSAGE =
+  '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -45,6 +106,12 @@ const DataSourceCreateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
@@ -63,6 +130,28 @@ const DataSourceCreateSchema = z.object({
     idleTimeout: z.number().optional(),
     acquireTimeout: z.number().optional()
   }).optional()
+}).superRefine((data, ctx) => {
+  // sqlserver: MSSQLAdapter.resolveServerAndPort() already requires connection.host OR
+  // connection.server and throws a clear error if both are absent — but only at connect() time.
+  // POST /api/data-sources never auto-connects (addDataSource always calls
+  // addDataSourceInternal(config, false), regardless of options.autoConnect), so a config missing
+  // both today persists successfully and only fails the first time something actually connects
+  // (next /select, /query, /test, or a server restart replaying persisted sources). Reject it here
+  // instead — this cannot reject any config that would otherwise have worked: it is EXACTLY the
+  // adapter's own requirement, just checked earlier.
+  if (data.type === 'sqlserver') {
+    const host = data.connection?.host
+    const server = data.connection?.server
+    const hasHost = typeof host === 'string' && host.trim().length > 0
+    const hasServer = typeof server === 'string' && server.trim().length > 0
+    if (!hasHost && !hasServer) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['connection', 'host'],
+        message: 'connection.host (or connection.server) is required for a sqlserver data source'
+      })
+    }
+  }
 })
 
 const DataSourceUpdateSchema = z.object({
@@ -77,6 +166,12 @@ const DataSourceUpdateSchema = z.object({
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
     genericQueryDisabled: z.boolean().optional(),
+    // G-4 DESTINATION MARKER. A durable, positive attestation that this source's destination IS the
+    // customer K3 database. When true, DataSourceManager refuses EVERY write to it permanently
+    // (insert/update/delete/copyData/raw query), no flag can re-enable it. This schema strips unknown
+    // option keys, so the marker must be declared here to be settable and to survive persistence;
+    // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
+    k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
@@ -156,6 +251,68 @@ function resolveUserId(req: Request): string | undefined {
 }
 
 /**
+ * Return only the tenant attached by JWT verification. Do not fall back to
+ * req.user.tenantId: tenantless legacy tokens may receive that field from a
+ * caller-controlled x-tenant-id compatibility header.
+ */
+function resolveAuthenticatedTenantId(req: Request): string | undefined {
+  const tenantId = req.authenticatedTenantId
+  return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : undefined
+}
+
+/**
+ * Resolve the MANAGEMENT actor for this request (the authority model).
+ *
+ * `platformAdmin` mirrors the rbac global-admin bypass's request-user check
+ * (rbac.ts requestUserIsAdmin: role === 'admin' or roles includes 'admin') —
+ * the exact tier that already passes every `data_sources:*` rbacGuard on
+ * these routes without a table lookup. jwtAuthMiddleware refreshes role data
+ * per request, so req.user is the authoritative in-request source. A DB-role
+ * admin whose token lacks the admin claim does NOT get the management bypass
+ * here (conservative direction: no extra grants beyond the request's claims).
+ *
+ * Used on MANAGEMENT surfaces only (list/get/test/connect/disconnect/update/
+ * rotate/delete). Data-plane routes (/query /select /schema /tables) keep
+ * passing the bare user id, which the manager scopes owner-only: management
+ * of a connection is not silent access to the customer data behind it.
+ */
+function resolveActor(req: Request): DataSourceActorContext {
+  const u = req.user
+  const roles = Array.isArray(u?.roles) ? u.roles.map((r) => String(r ?? '').trim()) : []
+  return {
+    userId: resolveUserId(req),
+    platformAdmin: !!u && (u.role === 'admin' || roles.includes('admin'))
+  }
+}
+
+/** True when a platform admin is acting on a source owned by someone else. */
+function isCrossOwnerAdminAction(actor: DataSourceActorContext, ownerId: string | undefined): boolean {
+  return actor.platformAdmin === true && ownerId !== undefined && ownerId !== actor.userId
+}
+
+/**
+ * Audit a platform admin's action on ANOTHER owner's source (actor + owner,
+ * values-free). Owner self-service paths intentionally emit nothing extra
+ * here — their audit behavior is unchanged.
+ */
+async function auditCrossOwnerAdminAction(
+  req: Request,
+  action: string,
+  resourceId: string,
+  ownerId: string | undefined,
+  extraMeta?: Record<string, unknown>
+): Promise<void> {
+  await auditLog({
+    actorId: req.user?.id?.toString(),
+    actorType: 'user',
+    action,
+    resourceType: 'data_source',
+    resourceId,
+    meta: { ownerId, crossOwnerAdmin: true, ...extraMeta }
+  })
+}
+
+/**
  * Conservative read-only SQL classifier for the raw /query path on read-only
  * SQL sources. Allows a single statement starting with SELECT / WITH / EXPLAIN
  * / SHOW; rejects multiple statements and SELECT ... INTO.
@@ -181,6 +338,40 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
   }
 }
 
+/**
+ * Reference counts for a whole READ surface, in ONE pair of grouped queries.
+ *
+ * Two properties this wrapper exists to hold:
+ * - NOT N+1: the counts for every listed source come from a single batched
+ *   call, so adding a source adds rows to a GROUP BY, not a round trip.
+ * - "unknown" is not "zero": if the count query fails, the listing still
+ *   answers (it is the management surface for these sources, and its own data
+ *   is intact) but referenceCount is OMITTED for every item. A displayed 0
+ *   would read as "safe to delete" — a claim we cannot make when the reference
+ *   table did not answer. The authoritative refusal is the DELETE guard, which
+ *   recomputes the count server-side and fails closed on the same error.
+ *
+ * values-free: the result carries integers only — never the name, tenant,
+ * owner or config of any referencing external system, and on failure only
+ * the SQLSTATE and the id count are logged (an error message here could name
+ * referencing rows).
+ */
+async function referenceCountsForDisplay(
+  manager: { countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> },
+  ids: readonly string[]
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  try {
+    return await manager.countExternalSystemReferencesByIds(ids)
+  } catch (err) {
+    logger.warn('reference count query failed; degrading to unknown for every listed id', {
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown',
+      ids: ids.length,
+    })
+    return new Map()
+  }
+}
+
 export function dataSourcesRouter(): Router {
   const router = Router()
 
@@ -198,12 +389,30 @@ export function dataSourcesRouter(): Router {
         })
       }
       const manager = getManager()
-      const sources = manager.listDataSources({ ownerId: userId })
+      const actor = resolveActor(req)
+      // Authority model: owners see their own sources; platform admins see
+      // every source (management metadata only — never credentials).
+      const sources = manager.listDataSources({ actor })
+      // ONE grouped count for the whole page (never one query per row). The
+      // integer is management metadata like `connected`/`ownerId`: it says HOW
+      // MANY integration bindings point here, never WHICH ones.
+      const referenceCounts = await referenceCountsForDisplay(manager, sources.map((s) => s.id))
+      const items = sources.map((source) => {
+        const referenceCount = referenceCounts.get(source.id)
+        // Omitted, not 0, when unknown — see referenceCountsForDisplay.
+        return referenceCount === undefined ? source : { ...source, referenceCount }
+      })
+      // Sources that exist but FAILED TO LOAD (#6079): a SIBLING of `items`, never inside it, so no
+      // consumer that treats an `items` entry as a usable source can receive one. Same visibility
+      // as `items` (stored owner, or platform admin). Omitted when empty: for every caller with
+      // nothing to see, the body stays byte-identical to what it was before this field existed.
+      const loadFailed = manager.listLoadFailedDataSources({ actor })
       return res.json({
         ok: true,
         data: {
-          items: sources,
-          total: sources.length
+          items,
+          total: items.length,
+          ...(loadFailed.length > 0 ? { loadFailed } : {})
         }
       })
     } catch (error) {
@@ -235,7 +444,8 @@ export function dataSourcesRouter(): Router {
       }
 
       const manager = getManager()
-      const healthMap = await manager.healthCheck({ ownerId: userId })
+      // Same actor scoping as the listing: owners see their own, admins see all.
+      const healthMap = await manager.healthCheck({ actor: resolveActor(req) })
 
       const health: Array<{
         id: string
@@ -273,15 +483,27 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
-      manager.assertAccess(req.params.id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(req.params.id, actor)
       const adapter = manager.getDataSource(req.params.id)
       const config = adapter.getConfig()
+      const ownerId = manager.getScope(req.params.id)?.ownerId
+
+      if (isCrossOwnerAdminAction(actor, ownerId)) {
+        await auditCrossOwnerAdminAction(req, 'read', req.params.id, ownerId)
+      }
+
+      // Same batched helper with a single id, so detail and listing can never
+      // disagree about what "referenced" means.
+      const referenceCount = (await referenceCountsForDisplay(manager, [req.params.id])).get(req.params.id)
 
       return res.json({
         ok: true,
         data: {
           ...sanitizeConfig(config),
-          connected: adapter.isConnected()
+          ownerId,
+          connected: adapter.isConnected(),
+          ...(referenceCount === undefined ? {} : { referenceCount })
         }
       })
     } catch (error) {
@@ -325,11 +547,23 @@ export function dataSourcesRouter(): Router {
           error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
         })
       }
+      const tenantId = resolveAuthenticatedTenantId(req)
+      if (!tenantId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'AUTHENTICATED_TENANT_REQUIRED', message: 'Authenticated tenant context required' }
+        })
+      }
       const manager = getManager()
       const config = parse.data as DataSourceConfig
-      // A0.1: own the source; workspace_id stays null (no clean workspace
-      // context on req — workspace-shared access is a follow-up).
-      const adapter = await manager.addDataSource(config, { ownerId: userId })
+      // Tenant authority comes only from the verified JWT claim. Never accept
+      // a body/options tenantId or req.user.tenantId (which can be populated by
+      // the legacy x-tenant-id compatibility header).
+      const adapter = await manager.addDataSource(config, {
+        ownerId: userId,
+        tenantId,
+        scopeKind: 'private'
+      })
 
       await auditLog({
         actorId: req.user?.id?.toString(),
@@ -353,6 +587,10 @@ export function dataSourcesRouter(): Router {
           ok: false,
           error: { code: 'CONFLICT', message: error.message }
         })
+      }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
       return res.status(500).json({
         ok: false,
@@ -456,11 +694,23 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
       const scope = manager.getScope(id)
+
+      // G-4 MARKER DURABILITY (P1). The k3Destination marker is set-once: a config edit may not clear
+      // or unset it. This is the #5401 config-edit vector — {options:{k3Destination:false}} would
+      // deep-merge and silently drop the marker, contradicting the non-overridable guarantee. Refuse
+      // with a coded error (the manager also force-preserves it as a belt-and-suspenders net).
+      if (attemptsToClearK3Marker(oldConfig.options, parse.data.options)) {
+        return res.status(403).json({
+          ok: false,
+          error: { code: K3_DESTINATION_MARKER_IMMUTABLE, message: K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE }
+        })
+      }
 
       const newConfig: DataSourceConfig = {
         ...oldConfig,
@@ -477,7 +727,8 @@ export function dataSourcesRouter(): Router {
       }
 
       // Atomic update: persists first, swaps the adapter only on success, and
-      // preserves ownership. A failed update leaves the original source intact.
+      // preserves ownership — an admin editing another owner's source must
+      // NOT become its owner. A failed update leaves the original intact.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
         workspaceId: scope?.workspaceId ?? undefined
@@ -490,6 +741,8 @@ export function dataSourcesRouter(): Router {
         resourceType: 'data_source',
         resourceId: id,
         meta: {
+          ownerId: scope?.ownerId,
+          ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           before: sanitizeConfig(oldConfig),
           after: sanitizeConfig(newConfig)
         }
@@ -509,6 +762,10 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -522,6 +779,11 @@ export function dataSourcesRouter(): Router {
   /**
    * PUT /api/data-sources/:id/credentials
    * Rotate write-only credentials. Non-secret config updates stay on PUT /:id.
+   *
+   * Also the ONE route that addresses a source which exists but FAILED TO LOAD (#6079): for such an
+   * id, the stored owner or a platform admin can re-seal an unreadable credential in place (see
+   * DataSourceManager.resealLoadFailedDataSource). Every other id-addressed route keeps answering
+   * 404 for a load-failed id.
    */
   router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     const parse = DataSourceCredentialsUpdateSchema.safeParse(req.body)
@@ -548,7 +810,46 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+
+      // ONE access decision for both kinds of id, FIRST, synchronously and from memory only. A
+      // non-owner non-admin of a load-failed id and anyone naming a nonexistent id run the SAME
+      // lookups to the SAME "not found" (→ the same 404 body below): no database statement, no
+      // audit row, no extra work on either path (existence non-disclosure, incl. timing).
+      const target = manager.resolveCredentialRouteTarget(id, actor)
+
+      // RE-SEAL BRANCH (#6079): the id is not loaded but its row failed to load, and the actor is
+      // its stored owner or a platform admin. Loaded ids never enter this branch — their behavior
+      // is unchanged below.
+      if (target === 'load_failed') {
+        const resealed = await manager.resealLoadFailedDataSource(id, parse.data.credentials, actor)
+        await auditLog({
+          actorId: req.user?.id?.toString(),
+          actorType: 'user',
+          action: 'update_credentials',
+          resourceType: 'data_source',
+          resourceId: id,
+          meta: {
+            resealed: true,
+            loadState: resealed.priorLoadState,
+            restartRequired: resealed.restartRequired,
+            changedCredentialKeys,
+            ownerId: resealed.ownerId,
+            ...(isCrossOwnerAdminAction(actor, resealed.ownerId ?? undefined) ? { crossOwnerAdmin: true } : {})
+          }
+        })
+        return res.json({
+          ok: true,
+          data: {
+            ...sanitizeConfig(resealed.config),
+            connected: resealed.connected,
+            resealed: true,
+            restartRequired: resealed.restartRequired
+          }
+        })
+      }
+
+      manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
@@ -563,6 +864,8 @@ export function dataSourcesRouter(): Router {
         id
       }
 
+      // Rotation stays WRITE-ONLY for every tier: an admin can set new
+      // credentials but no response surface ever returns credential values.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
         workspaceId: scope?.workspaceId ?? undefined
@@ -575,6 +878,8 @@ export function dataSourcesRouter(): Router {
         resourceType: 'data_source',
         resourceId: id,
         meta: {
+          ownerId: scope?.ownerId,
+          ...(isCrossOwnerAdminAction(actor, scope?.ownerId) ? { crossOwnerAdmin: true } : {}),
           changedCredentialKeys,
           before: sanitizeConfig(oldConfig),
           after: sanitizeConfig(newConfig)
@@ -595,6 +900,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        // The re-seal refusals carry values-free `details` (key NAMES / a load state) the client
+        // needs; every other coded refusal on this route keeps its pre-existing body shape.
+        const details = RESEAL_DETAIL_CODES.has(coded.code) ? (error as { details?: unknown }).details : undefined
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
+        })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -607,18 +926,52 @@ export function dataSourcesRouter(): Router {
 
   /**
    * DELETE /api/data-sources/:id
-   * Remove a data source configuration
+   * Remove a data source configuration.
+   *
+   * Referential guard: a source referenced by any integration external system
+   * (canonical connection_id, or an owner-attributed legacy config.dataSourceId)
+   * refuses deletion with a coded 409 naming the reference COUNT (never the
+   * referencing config), so an external system's binding cannot be silently
+   * dangled. There is NO force bypass (owner ruling 2026-09-20, ①): a
+   * `?force=true` query is ignored for every tier — admins included — and the
+   * answer is the same 409; the operator unbinds the external systems first.
+   * The former admin-only-force 403 code no longer exists.
+   *
+   * Three layers, outermost first: this ADVISORY pre-count on the autocommit
+   * connection (shapes the 409 with the count), the manager's own count inside
+   * its FOR UPDATE delete transaction (the gate), and the database's
+   * live-connection foreign key, which refuses the soft delete itself while a
+   * canonical binding exists (mapped by the manager to the same 409).
    */
   router.delete('/api/data-sources/:id', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      // Access first: a non-owner non-admin gets the uniform 404 before any
+      // referential detail can leak existence.
+      manager.assertAccess(id, actor)
 
       // Get config before removal for audit
       const adapter = manager.getDataSource(id)
       const config = adapter.getConfig()
+      const ownerId = manager.getScope(id)?.ownerId
 
+      const referenceCount = await manager.countExternalSystemReferences(id)
+      if (referenceCount > 0) {
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+            message: `Data source '${id}' is referenced by ${referenceCount} external system(s); unbind them first — 请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`,
+            details: { referenceCount }
+          }
+        })
+      }
+
+      // Durable-first removal (PERM-04): the manager writes the row FIRST and only then
+      // clears memory, and it re-runs the referential count itself inside its transaction.
+      // Nothing from the request can relax that check.
       await manager.removeDataSource(id)
 
       await auditLog({
@@ -627,7 +980,11 @@ export function dataSourcesRouter(): Router {
         action: 'delete',
         resourceType: 'data_source',
         resourceId: id,
-        meta: sanitizeConfig(config)
+        meta: {
+          ...sanitizeConfig(config),
+          ownerId,
+          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {})
+        }
       })
 
       return res.json({
@@ -639,6 +996,23 @@ export function dataSourcesRouter(): Router {
         return res.status(404).json({
           ok: false,
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
+        })
+      }
+      // The manager's own durable-first refusals (referential 409 on a TOCTOU race or from the
+      // database's live-connection FK, and the values-free DATA_SOURCE_DELETE_NOT_PERSISTED when
+      // the row write fails) keep their code and status instead of collapsing into a generic 500
+      // that reads like a partial delete. The referential 409 also keeps its `details`
+      // (`referenceCount`, a number or null) so the client sees the same shape as the pre-count's.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        const details = (error as { details?: unknown }).details
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
         })
       }
       return res.status(500).json({
@@ -659,7 +1033,13 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
+
+      const connectOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, connectOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'connect', id, connectOwnerId)
+      }
 
       await manager.connectDataSource(id)
       const adapter = manager.getDataSource(id)
@@ -678,11 +1058,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] connect failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'CONNECTION_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to connect'
+          message: CONNECT_FAILURE_MESSAGE
         }
       })
     }
@@ -696,7 +1085,13 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
+
+      const disconnectOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, disconnectOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'disconnect', id, disconnectOwnerId)
+      }
 
       await manager.disconnectDataSource(id)
 
@@ -729,11 +1124,17 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
-      manager.assertAccess(id, resolveUserId(req))
+      const actor = resolveActor(req)
+      manager.assertAccess(id, actor)
       const startTime = Date.now()
 
       const result = await manager.testConnection(id)
       const latency = Date.now() - startTime
+
+      const testOwnerId = manager.getScope(id)?.ownerId
+      if (isCrossOwnerAdminAction(actor, testOwnerId)) {
+        await auditCrossOwnerAdminAction(req, 'test', id, testOwnerId, { success: result.success })
+      }
 
       // A3: keep request-layer ok:true (a completed test is a successful request); the connection
       // outcome is data.success, with a redacted cause in data.error.message on failure.
@@ -781,6 +1182,10 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      // DATA PLANE: deliberately the bare-user-id (owner-only) actor shape.
+      // Managing a connection (test/fix/rotate/delete) is an admin capability;
+      // reading the customer data BEHIND it is not — an admin gets the same
+      // uniform 404 as any non-owner on /query, /select, /schema and /tables.
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { sql, params } = parse.data
 
@@ -847,6 +1252,14 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A deliberate gate refusal (default-deny SQL write, arm-binding mismatch, arm-ahead-of-
+      // provisioning) carries its own status+code — surface it, exactly as the management-plane
+      // routes do, instead of collapsing it into an anonymous 500. Presentation only: genuine
+      // query failures keep the 500 QUERY_ERROR shape below.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -875,6 +1288,7 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { table, ...options } = parse.data
 
@@ -900,6 +1314,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // Same as /query: a typed gate refusal surfaces with its own status/code; everything else
+      // keeps the 500 SELECT_ERROR shape.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
       return res.status(500).json({
         ok: false,
         error: {
@@ -917,6 +1337,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/schema', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 
@@ -924,7 +1345,14 @@ export function dataSourcesRouter(): Router {
         await manager.connectDataSource(req.params.id)
       }
 
-      const schema = await adapter.getSchema(req.query.schema as string | undefined)
+      // 2026-09-10 222 PLM 504: LIST-ONLY by default. The UI's "库表结构" panel is a two-step flow (pick a table →
+      // read its fields), so the listing never needed every table's columns; on the customer PLM
+      // (several hundred tables) the old 4N+2 fan-out ran past nginx's proxy_read_timeout and the
+      // browser got a 504 HTML page instead of an answer. `?includeColumns=1` (or `?detail=full`)
+      // restores the old body for callers that consume columns off the listing; it is bounded by
+      // the schema-detail budget, which refuses with a coded 504 BEFORE the proxy gives up.
+      const includeColumns = wantsSchemaColumns(req.query)
+      const schema = await adapter.getSchema(req.query.schema as string | undefined, { includeColumns })
 
       return res.json({
         ok: true,
@@ -937,11 +1365,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getSchema failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'SCHEMA_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get schema'
+          message: SCHEMA_FAILURE_MESSAGE
         }
       })
     }
@@ -954,6 +1391,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/tables/:table', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      // DATA PLANE: owner-only on purpose (see /query above).
       manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 
@@ -969,16 +1407,35 @@ export function dataSourcesRouter(): Router {
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
+        // Keep the 404 mapping, drop the verbatim echo: an ADAPTER's own not-found text carries
+        // server-side values (MongoDB answers `ns not found` naming database.collection). Both
+        // branches below repeat only what the caller already sent, and the missing-source wording
+        // stays byte-identical to the foreign-source refusal so 404 keeps hiding existence.
+        const missingSource = error.message.includes(`Data source with id '${req.params.id}' not found`)
         return res.status(404).json({
           ok: false,
-          error: { code: 'NOT_FOUND', message: error.message }
+          error: {
+            code: 'NOT_FOUND',
+            message: missingSource
+              ? `Data source '${req.params.id}' not found`
+              : `Table '${req.params.table}' not found`
+          }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getTableInfo failed for ${req.params.id}/${req.params.table}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TABLE_INFO_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get table info'
+          message: TABLE_INFO_FAILURE_MESSAGE
         }
       })
     }

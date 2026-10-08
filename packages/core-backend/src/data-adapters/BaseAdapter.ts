@@ -70,6 +70,12 @@ export interface QueryOptions {
     type?: 'inner' | 'left' | 'right' | 'full'
   }>
   raw?: boolean
+  // W-5: a PER-CALL override, consumed only by MSSQLAdapter. Undefined/false is byte-identical to
+  // this field never having existed — it ORs into the same connection.strictOffsetOrdering check
+  // #5243 already added (MSSQLAdapter.ts `select()`), it does not replace it. A caller that needs
+  // an offset>0 read to be refused without an orderBy for THIS one call — regardless of what the
+  // connection itself is configured with — sets this; every other adapter ignores it.
+  strictOffsetOrdering?: boolean
 }
 
 /**
@@ -104,10 +110,35 @@ export interface QueryResult<T = Record<string, DbValue>> {
   error?: Error
 }
 
+/**
+ * Options for a schema LISTING (getSchema). Default (options omitted) = list only.
+ */
+export interface SchemaFetchOptions {
+  /**
+   * true = also read every table's columns/keys/indexes (one round trip set PER TABLE — the
+   * pre-2026-09-10 behaviour). Only for callers that consume `columns` off the listing itself.
+   */
+  includeColumns?: boolean
+  /**
+   * Wall-clock budget for the includeColumns fan-out, in ms. <= 0 disables the budget.
+   * Omitted = the deployment default (see resolveSchemaDetailBudgetMs). Ignored on the list-only
+   * path, which is a fixed, small number of queries.
+   */
+  budgetMs?: number
+}
+
 export interface SchemaInfo {
   tables: TableInfo[]
   views?: ViewInfo[]
   procedures?: ProcedureInfo[]
+  /**
+   * How much of this listing was actually read from the source.
+   *  - 'list': names/schemas only — every entry's `columns` is EMPTY BY CONSTRUCTION and
+   *    `columnsLoaded` is false. Read a single table's columns with getTableInfo().
+   *  - 'full': per-table columns/keys/indexes were read (the pre-2026-09-10 behaviour).
+   * Optional so adapters that never had an N+1 listing (HTTP/Redis/Elasticsearch) stay untouched.
+   */
+  detail?: 'list' | 'full'
 }
 
 export interface TableInfo {
@@ -117,6 +148,12 @@ export interface TableInfo {
   primaryKey?: string[]
   indexes?: IndexInfo[]
   foreignKeys?: ForeignKeyInfo[]
+  /**
+   * Explicit "were the columns read?" marker so an EMPTY `columns` can never be mistaken for
+   * "this table has no columns". false = list-only entry (getSchema without includeColumns).
+   * Absent = legacy/unknown (adapters that always load columns).
+   */
+  columnsLoaded?: boolean
 }
 
 export interface ColumnInfo {
@@ -150,6 +187,8 @@ export interface ViewInfo {
   schema?: string
   definition?: string
   columns: ColumnInfo[]
+  /** Same marker as TableInfo.columnsLoaded. Views never carried columns, so this is false. */
+  columnsLoaded?: boolean
 }
 
 export interface ProcedureInfo {
@@ -223,7 +262,12 @@ export abstract class BaseDataAdapter extends EventEmitter {
   abstract delete<T = Record<string, DbValue>>(table: string, where: WhereClause): Promise<QueryResult<T>>
 
   // Schema operations
-  abstract getSchema(schema?: string): Promise<SchemaInfo>
+  // `options` is optional everywhere: OMITTING it means the cheap list-only listing (2026-09-10 222 PLM 504 — a
+  // per-table fan-out on a several-hundred-table PLM/ERP database ran past nginx's
+  // proxy_read_timeout and answered 504). Callers that genuinely need every table's columns in one
+  // shot must ASK for it (`{ includeColumns: true }`) so no caller can silently receive empty
+  // `columns` and read that as "no columns".
+  abstract getSchema(schema?: string, options?: SchemaFetchOptions): Promise<SchemaInfo>
   abstract getTableInfo(table: string, schema?: string): Promise<TableInfo>
   abstract getColumns(table: string, schema?: string): Promise<ColumnInfo[]>
   abstract tableExists(table: string, schema?: string): Promise<boolean>
@@ -305,6 +349,30 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return limit
   }
 
+  /**
+   * How this dialect writes a COLUMN IDENTIFIER into a WHERE clause.
+   *
+   * Split out from `sanitizeIdentifier` because the two answer different questions: sanitize asks
+   * "is this a legal identifier?" (and throws if not), while this asks "how do I EMIT it?". Every
+   * other clause an adapter builds — projection, table, JOIN target, ORDER BY — already goes through
+   * the adapter's own quoting; the WHERE clause was the one place that emitted a BARE identifier,
+   * because `buildWhereConditions` lives here in the base and the base has no dialect quoting.
+   *
+   * That gap was not cosmetic. A bare identifier means an ordinary column named after a reserved
+   * word (`key`, `plan`, `file`, `check`, `open`, `set`, …) lands in the SQL as a naked keyword, and
+   * anything downstream that READS the statement as text — notably the default-deny write gate's
+   * `isPureReadStatement` — can no longer tell the column from the keyword. A pure `SELECT … WHERE
+   * key = $1` was classified a WRITE and refused. Quoting removes that whole class at the source:
+   * a quoted identifier is unambiguously an identifier, to every reader of the statement.
+   *
+   * DEFAULT IS UNCHANGED BEHAVIOUR (validated, unquoted) so PostgreSQL/MySQL emit byte-identically
+   * to before; an adapter opts in by overriding. MSSQL overrides it, because MSSQL is the dialect
+   * whose adapter carries the statement-classifying gate.
+   */
+  protected whereIdentifier(key: string): string {
+    return this.sanitizeIdentifier(key)
+  }
+
   protected buildWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
     const result = this.buildWhereConditions(where, 1)
     return {
@@ -345,11 +413,11 @@ export abstract class BaseDataAdapter extends EventEmitter {
         }
         conditions.push(`(${nestedParts.join(key === '$or' ? ' OR ' : ' AND ')})`)
       } else if (value === null) {
-        conditions.push(`${this.sanitizeIdentifier(key)} IS NULL`)
+        conditions.push(`${this.whereIdentifier(key)} IS NULL`)
       } else if (Array.isArray(value)) {
         const list = value as DbValue[]
         const placeholders = list.map(() => `$${paramIndex++}`).join(', ')
-        conditions.push(`${this.sanitizeIdentifier(key)} IN (${placeholders})`)
+        conditions.push(`${this.whereIdentifier(key)} IN (${placeholders})`)
         params.push(...list)
       } else if (isWhereOperator(value)) {
         // Handle operators like { $gt: 5, $lt: 10 }
@@ -361,26 +429,26 @@ export abstract class BaseDataAdapter extends EventEmitter {
                 throw new Error(`${op} must be a non-empty array`)
               }
               const placeholders = val.map(() => `$${paramIndex++}`).join(', ')
-              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} (${placeholders})`)
+              conditions.push(`${this.whereIdentifier(key)} ${operator} (${placeholders})`)
               params.push(...val)
             } else if (op === '$between') {
               if (!Array.isArray(val) || val.length !== 2) {
                 throw new Error('$between must be a two-value array')
               }
-              conditions.push(`${this.sanitizeIdentifier(key)} BETWEEN $${paramIndex++} AND $${paramIndex++}`)
+              conditions.push(`${this.whereIdentifier(key)} BETWEEN $${paramIndex++} AND $${paramIndex++}`)
               params.push(...val)
             } else {
-              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} $${paramIndex++}`)
+              conditions.push(`${this.whereIdentifier(key)} ${operator} $${paramIndex++}`)
               params.push(val)
             }
           }
         }
       } else if (typeof value === 'object' && value !== null) {
         // Handle nested objects as JSON equality
-        conditions.push(`${this.sanitizeIdentifier(key)} = $${paramIndex++}`)
+        conditions.push(`${this.whereIdentifier(key)} = $${paramIndex++}`)
         params.push(value)
       } else {
-        conditions.push(`${this.sanitizeIdentifier(key)} = $${paramIndex++}`)
+        conditions.push(`${this.whereIdentifier(key)} = $${paramIndex++}`)
         params.push(value)
       }
     }
@@ -415,6 +483,16 @@ export abstract class BaseDataAdapter extends EventEmitter {
   // A3: the redacted cause of the most recent connect/test failure (null when healthy).
   get connectionError(): string | null {
     return this.lastConnectionError
+  }
+
+  // A3/#2: PUBLIC redaction of a cause that never passed through onError and is therefore NOT
+  // recorded in `connectionError`. Every adapter has such a branch — the driver-package-missing
+  // guard that throws BEFORE the try block (MSSQLAdapter :217, PostgresAdapter :74, MySQLAdapter
+  // :195, HTTPAdapter :134) — and DataSourceManager must still be able to LOG that cause when it
+  // turns a connect failure into the fixed values-free 503. Delegates to the very `redactSecrets`
+  // rules onError uses; it only removes text, so exposing it adds no new disclosure.
+  redactCause(message: string): string {
+    return this.redactSecrets(message)
   }
 
   // A3: scrub configured secret values + common secret patterns out of a message before it can be

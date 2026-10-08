@@ -1,290 +1,236 @@
 /**
- * T8-1: PIT Revert UNDELETE-execute (resurrect records that existed at T but are deleted now) — real DB.
- * Behind default-OFF MULTITABLE_ENABLE_PIT_UNDELETE, ON TOP of canManageSheetAccess (D2), with the undelete-specific
- * floor canDeleteRecord (NEVER canEditRecord) + a typed confirm:'undelete'. The resurrect set is bound into the
- * pit-revert identity (resurrectScopeHash, re-enumerated at execute → 409 on drift). Resurrect = INSERT the FULL
- * server-side T-snapshot under the ORIGINAL id (id-collision → 409, no overwrite), rebuild OUTBOUND meta_links from
- * the snapshot, NO inbound (design-lock L4 A), in ONE transaction (all-or-nothing). Runs only with DATABASE_URL.
+ * T8-1 → W0 L8: PIT Revert UNDELETE (resurrection) route contract — exact-anchor fail-closed (real DB).
+ *
+ * The free wall-clock `asOf` route and the first-delete-after-T vintage heuristic are no longer
+ * authoritative. Destructive recovery accepts exactly one of `historyBatchId` / `anchorOperationId`.
+ * Exact-anchor resurrection is intentionally CATEGORICALLY fail-closed: at-anchor inbound link state is
+ * unprovable, so a resurrect-bearing preview may enumerate `undeleteRecordIds` but must return
+ * `executable=false`, `previewIdentity=null`, `undeleteSupported=false`, and
+ * `undeleteBlockedReason: INBOUND_UNPROVABLE` (or `UNDELETE_DISABLED` when the legacy flag is off).
+ * Execute cannot obtain a token and must make zero writes.
+ *
+ * Retired route-level success assertions (happy resurrect, outbound rebuild, confirm:'undelete' success,
+ * all-or-nothing insert-trigger failures, schema-drift partial resurrect, etc.) no longer have an honest
+ * success path on this surface. Lower-level inbound replay / Option A consent remains covered by the
+ * direct trash-restore RB matrix in `multitable-undelete-inbound-replay-realdb.test.ts`. Kernel
+ * inbound-unprovable apply refusal is covered by unit + L8 route-wiring goldens.
+ *
+ * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { hashPreviewChanges, mintRestorePreviewIdentity } from '../../src/multitable/restore-preview-identity'
+import {
+  prepareExactAnchorHistoryFixture,
+  pruneSealedHistoryOperations,
+  type ExactAnchorHistoryFixture,
+} from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const BASE = `base_un_${TS}`, SHEET = `sheet_un_${TS}`
 const NAME = `fld_un_name_${TS}`, LINK = `fld_un_link_${TS}`
-const U = `rec_un_u_${TS}`        // existed at T1 (create), deleted at T2, no live row → undelete target
-const L = `rec_un_l_${TS}`        // a LIVE record whose data links to U (inbound edge was dropped on U's delete)
+const U = `rec_un_u_${TS}` // existed at anchor, deleted after → resurrect candidate
+const L = `rec_un_l_${TS}` // live neighbour (inbound edge holder baseline; not resurrected)
 const ACTOR = `user_un_${TS}`
 const FLAG = 'MULTITABLE_ENABLE_PIT_UNDELETE'
-const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
-const SNAP = { [NAME]: 'u-at-T1', [LINK]: [L] } // U's T-snapshot links OUTBOUND to L → rebuilt on undelete (proves the rebuild ran)
+const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
+const SNAP = { [NAME]: 'u-at-anchor', [LINK]: [L] }
 
-const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
+const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
 let app: Express
-let curPerms = ['multitable:read', 'multitable:write', 'multitable:share'] // write→canDeleteRecord, share→canManageSheetAccess
-const preview = (asOf: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ asOf })
-const execute = (asOf: string, previewIdentity: string, confirm?: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send({ asOf, previewIdentity, confirm })
-const liveRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
-const revCount = async (id: string) => Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE record_id = $1', [id])).rows[0] as { c: number }).c)
-const inboundEdges = async (id: string) => Number(((await q('SELECT count(*)::int AS c FROM meta_links WHERE foreign_record_id = $1', [id])).rows[0] as { c: number }).c)
-const outboundEdges = async (id: string) => Number(((await q('SELECT count(*)::int AS c FROM meta_links WHERE record_id = $1', [id])).rows[0] as { c: number }).c)
-const rev = (id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
-  q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5]::text[],'{}'::jsonb,$6::jsonb,$7)`, [SHEET, id, version, action, NAME, JSON.stringify(snap), at])
+let fixture: ExactAnchorHistoryFixture
+let curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
 
-async function seed(): Promise<void> {
-  // U: created at T0, deleted at T2, NO live row → "existed at T1, gone now" → undelete target.
-  await rev(U, 1, 'create', SNAP, T0)
-  await rev(U, 2, 'delete', SNAP, T2) // delete revision stores the pre-delete snapshot
-  // L: a LIVE record that links to U. U's delete dropped BOTH directions, so L's inbound edge to U is gone, but L's
-  // DATA still references U → inbound (A) re-appears only when L is re-saved, NOT by the undelete.
-  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] })])
-  // D-1c §0.6 fixture repair: L must be CAPTURE-COMPLETE (a create revision matching its live row) —
-  // otherwise the sheet-wide precheck sees a live record with zero revisions (the uncaptured-CREATE
-  // fingerprint) and correctly refuses every preview/execute in this suite before the resurrect logic
-  // under test ever runs. This is a fixture fix, not a §0.6 weakening: L was always meant to be a normal
-  // captured neighbour, not the uncaptured-write class §0.6 exists to catch.
-  await rev(L, 1, 'create', { [NAME]: 'L', [LINK]: [U] }, T0)
+const enableTrust = () => {
+  process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+  process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+  process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
 }
 
-describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
+const previewWallClock = (asOf: string) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ asOf })
+const previewExact = () =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({
+    anchorOperationId: fixture.anchorOperationId(),
+  })
+const execute = (body: Record<string, unknown>) =>
+  request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send(body)
+
+const liveRow = async (id: string) =>
+  (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as
+    | { data: Record<string, unknown>; version: number }
+    | undefined
+const revCount = async (id: string) =>
+  Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE record_id = $1', [id])).rows[0] as { c: number }).c)
+const inboundEdges = async (id: string) =>
+  Number(((await q('SELECT count(*)::int AS c FROM meta_links WHERE foreign_record_id = $1', [id])).rows[0] as { c: number }).c)
+const outboundEdges = async (id: string) =>
+  Number(((await q('SELECT count(*)::int AS c FROM meta_links WHERE record_id = $1', [id])).rows[0] as { c: number }).c)
+
+async function sheetWriteState() {
+  const records = (await q('SELECT id, data, version FROM meta_records WHERE sheet_id = $1 ORDER BY id', [SHEET])).rows
+  const revisionCount = Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+  const linkCount = Number(((await q(
+    `SELECT count(*)::int AS c FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)`,
+    [SHEET],
+  )).rows[0] as { c: number }).c)
+  const tokenBurnCount = Number(((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+  return { records, revisionCount, linkCount, tokenBurnCount }
+}
+
+async function seed(): Promise<void> {
+  // U: create before anchor, delete after → present at anchor, gone now → resurrect candidate.
+  await fixture.insertRevision({
+    recordId: U, version: 1, action: 'create', snapshot: SNAP, createdAt: T0, phase: 'before',
+    changedFieldIds: [NAME, LINK],
+  })
+  // Anchor on a LIVE neighbour so resolve has a real sealed endpoint (U itself is deleted).
+  await fixture.insertRevision({
+    recordId: L, version: 1, action: 'create', snapshot: { [NAME]: 'L', [LINK]: [U] }, createdAt: T0, phase: 'anchor',
+    changedFieldIds: [NAME, LINK],
+  })
+  // Delete reuses the last live version (contiguity: delete never occupies a data version).
+  await fixture.insertRevision({
+    recordId: U, version: 1, action: 'delete', snapshot: SNAP, createdAt: T2, phase: 'after',
+    changedFieldIds: [NAME, LINK],
+  })
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+    L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] }),
+  ])
+}
+
+describeIfDatabase('multitable T8-1 PIT undelete — exact-anchor fail-closed (real DB)', () => {
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: curPerms }; next() })
-    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '2' // captured at router creation; (k) exceeds it via the resurrect set
-    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for the WHOLE
-    // suite (independent of this file's own FLAG=PIT_UNDELETE on/off toggling, which this suite tests directly),
-    // so every existing revert-execute call here is unchanged.
-    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    app.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = { id: ACTOR, roles: ['member'], perms: curPerms }
+      next()
+    })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'UN Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'UN Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET, 'Name', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [LINK, SHEET, 'Link', 'link', JSON.stringify({ foreignSheetId: SHEET }), 2])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    await q(
+      `INSERT INTO users (id, password_hash, permissions)
+       VALUES ($1,'x',$2::jsonb)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions, is_active = TRUE`,
+      [ACTOR, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share'])],
+    )
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
-    await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET]).catch(() => {}) // meta_links has no sheet_id col
-    for (const t of ['meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+    delete process.env[FLAG]
+    await pruneSealedHistoryOperations(SHEET).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET]).catch(() => {})
+    for (const t of [
+      'meta_history_baselines',
+      'meta_history_trust_checkpoints',
+      'meta_recovery_token_burns',
+      'meta_record_version_markers',
+      'meta_records_trash',
+      'meta_record_revisions',
+      'meta_records',
+      'meta_fields',
+    ]) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
   })
   beforeEach(async () => {
     curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
-    await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET]) // meta_links has no sheet_id col
-    for (const t of ['meta_record_revisions', 'meta_records']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET])
+    enableTrust()
+    delete process.env[FLAG]
+    await pruneSealedHistoryOperations(SHEET).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET])
+    for (const t of [
+      'meta_history_baselines',
+      'meta_history_trust_checkpoints',
+      'meta_recovery_token_burns',
+      'meta_record_version_markers',
+      'meta_records_trash',
+      'meta_record_revisions',
+      'meta_records',
+    ]) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
+    fixture = await prepareExactAnchorHistoryFixture(SHEET)
     await seed()
   })
-  afterEach(() => { delete process.env[FLAG] })
 
-  test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
-
-  test('(a) preview classifies U as an undelete; undeleteSupported follows the flag', async () => {
-    delete process.env[FLAG]
-    const off = await preview(T1)
-    expect(off.status).toBe(200)
-    expect(off.body?.data?.summary?.visibleUndeleteCount).toBe(1)
-    expect(off.body?.data?.undeleteRecordIds).toEqual([U])
-    expect(off.body?.data?.undeleteSupported).toBe(false)
-    process.env[FLAG] = 'true'
-    expect((await preview(T1)).body?.data?.undeleteSupported).toBe(true)
+  test('sentinel: DATABASE_URL set', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  test('(b) flag OFF → execute 403 UNDELETE_DISABLED, U stays deleted', async () => {
-    delete process.env[FLAG]
-    const pv = await preview(T1)
-    const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect(x.status).toBe(403)
-    expect(x.body?.error?.code).toBe('UNDELETE_DISABLED')
-    expect(await liveRow(U)).toBeUndefined()
-  })
-
-  test('(c) canDeleteRecord floor: share-but-not-write actor (D2 ok) → 403, never canEditRecord-only', async () => {
+  test('wall-clock asOf is refused EXACT_ANCHOR_REQUIRED with zero writes (preview + execute)', async () => {
     process.env[FLAG] = 'true'
-    curPerms = ['multitable:read', 'multitable:share'] // canManageSheetAccess yes, canDeleteRecord NO
-    const pv = await preview(T1)
-    const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect(x.status).toBe(403)
-    expect(x.body?.error?.code).toBe('FORBIDDEN')
-    expect(await liveRow(U)).toBeUndefined()
-  })
+    const before = await sheetWriteState()
+    const pv = await previewWallClock('2026-01-02T00:00:00.000Z')
+    expect(pv.status).toBe(400)
+    expect(pv.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+    expect(pv.body?.data?.previewIdentity).toBeUndefined()
 
-  test('(d) typed confirm required: no confirm → 400; confirm:"undelete" → resurrects', async () => {
-    process.env[FLAG] = 'true'
-    const pv = await preview(T1)
-    const noConfirm = await execute(T1, pv.body?.data?.previewIdentity)
-    expect(noConfirm.status).toBe(400)
-    expect(noConfirm.body?.error?.code).toBe('CONFIRM_REQUIRED')
-    expect(await liveRow(U)).toBeUndefined() // nothing written
-    const ok = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect(ok.status).toBe(200)
-    expect(ok.body?.data?.resurrectedCount).toBe(1)
-  })
-
-  test('(e) happy resurrect: U re-inserted under its ORIGINAL id with the FULL T-snapshot + a create revision', async () => {
-    process.env[FLAG] = 'true'
-    const pv = await preview(T1)
-    const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect(x.status).toBe(200)
-    expect(x.body?.data?.undeleteRecordIds).toEqual([U])
-    const live = await liveRow(U)
-    expect(live?.data?.[NAME]).toBe('u-at-T1')   // full T-snapshot, not delete-time/trash state
-    expect(live?.version).toBe(1)
-    expect(await revCount(U)).toBeGreaterThanOrEqual(3) // create + delete + the new resurrect 'create'
-  })
-
-  test('(f) inbound (A): undelete REBUILDS outbound (U→L) but writes NO inbound edge (→U), even though L\'s data references U', async () => {
-    process.env[FLAG] = 'true'
-    expect(await inboundEdges(U)).toBe(0) // baseline: U's delete dropped the L→U edge (L's data still references U)
-    const pv = await preview(T1)
-    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
-    // OUTBOUND rebuilt from U's snapshot → proves the link-rebuild code actually ran (not a vacuous assertion):
-    expect(await outboundEdges(U)).toBe(1)
-    // INBOUND stays absent: a naive impl that scanned L's data and re-materialized L→U would make this 1 and FAIL.
-    expect(await inboundEdges(U)).toBe(0) // design-lock L4 (A)
-    const l = await liveRow(L)
-    expect(l?.data?.[LINK]).toEqual([U]) // L's data still references U — the edge re-materializes only on L's next save
-  })
-
-  test('(g) id occupied between preview and execute → 409, no overwrite (via re-enumeration drift; the in-txn FOR UPDATE is the TOCTOU backstop)', async () => {
-    process.env[FLAG] = 'true'
-    const pv = await preview(T1)
-    // A concurrent create takes U's id after preview. At execute, computeSheetRevert re-enumerates: U is now LIVE, so
-    // it reclassifies as a revert (not a resurrect) → resurrectScopeHash mismatch → 409 BEFORE the in-txn collision
-    // check. (The FOR UPDATE / unique-violation→409 guard is the deeper TOCTOU backstop, not reached here.) Either way:
-    // 409 and the squatter is never overwritten.
-    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,7)', [U, SHEET, JSON.stringify({ [NAME]: 'squatter' })])
-    // D-1c §0.6 fixture repair (P3-4): the squatter must ALSO be capture-complete (a matching revision) —
-    // otherwise the sheet-wide precheck refuses on the zero-revision-live-row rule first (still a 409, but
-    // for the WRONG reason, silently defeating this test's own re-enumeration/resurrectScopeHash-mismatch
-    // mechanism). created_at=T2 keeps it OUT of the T1 reconstruction window (U's target-at-T1 stays the
-    // original create snapshot), so the diff against the squatter's live data still exists and U still
-    // reclassifies from resurrect to revert at execute — exactly the drift this test exercises.
-    await rev(U, 7, 'create', { [NAME]: 'squatter' }, T2)
-    const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect([409, 410]).toContain(x.status)
-    expect(x.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID') // pins the INTENDED path, not a §0.6 refusal
-    const live = await liveRow(U)
-    expect(live?.data?.[NAME]).toBe('squatter') // never overwritten
-    expect(live?.version).toBe(7)
-  })
-
-  test('(h) drift: re-executing the same identity after U is live → resurrect-set changed → 409', async () => {
-    process.env[FLAG] = 'true'
-    const pv = await preview(T1)
-    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200) // U now live
-    const again = await execute(T1, pv.body?.data?.previewIdentity, 'undelete') // resurrect-set now empty → hash mismatch
-    expect([409, 410]).toContain(again.status)
-  })
-
-  // ── pre-rollout review fixes ──────────────────────────────────────────────────────────────────────────────
-  test('(i) fix#3 source: the resurrect revision is source=restore (Time Machine), not a plain rest create', async () => {
-    process.env[FLAG] = 'true'
-    const pv = await preview(T1)
-    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
-    const row = (await q('SELECT source FROM meta_record_revisions WHERE record_id=$1 AND action=$2 ORDER BY created_at DESC LIMIT 1', [U, 'create'])).rows[0] as { source: string } | undefined
-    expect(row?.source).toBe('restore')
-  })
-
-  test('(j) fix#2 schema-drift: a resurrect target whose T-snapshot has a removed field is NOT resurrected', async () => {
-    process.env[FLAG] = 'true'
-    const U2 = `rec_un_drift_${TS}`
-    await rev(U2, 1, 'create', { [`fld_gone_${TS}`]: 'x', [NAME]: 'd' }, T0) // a field id that is not in the sheet schema
-    const pv = await preview(T1)
-    expect(pv.body?.data?.undeleteRecordIds).toEqual([U]) // U2 excluded as schema-drift; only U is resurrectable
-    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
-    expect(await liveRow(U2)).toBeUndefined() // never resurrected (would have written the stale field key)
-  })
-
-  test('(k) fix#1 unified cap: live count passes the early ceiling but reverts+resurrects exceeds it → 413', async () => {
-    process.env[FLAG] = 'true'
-    // Ceiling = 2 (set at router creation in beforeAll). Live count = 1 (L) passes the EARLY ceiling check; the seed's
-    // U + these 2 extra undelete candidates = 3 resurrects exceed it → the post-scan UNIFIED check fires (the fix).
-    await rev(`rec_un_cap1_${TS}`, 1, 'create', { [NAME]: 'c1' }, T0)
-    await rev(`rec_un_cap2_${TS}`, 1, 'create', { [NAME]: 'c2' }, T0)
-    const res = await preview(T1)
-    expect(res.status).toBe(413)
-    expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
-    expect(res.body?.error?.message).toContain('This revert would touch 3 records')
-    expect(res.body?.error?.message).not.toContain('This sheet has 3 records')
-  })
-
-  test('(l) fix#4 no partial: an undelete failure aborts BEFORE the field-reverts (reorder) — a revert candidate stays unreverted', async () => {
-    process.env[FLAG] = 'true'
-    const R = `rec_un_revert_${TS}`
-    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, SHEET, JSON.stringify({ [NAME]: 'B' })]) // live revert candidate: T1=A, now=B
-    await rev(R, 1, 'create', { [NAME]: 'A' }, T0)
-    await rev(R, 2, 'update', { [NAME]: 'B' }, T2)
-    const pv = await preview(T1)
-    const FN = `un_fail_${TS}`, TRG = `un_fail_trg_${TS}`
-    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced undelete insert failure'; END; $fn$`, [])
-    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, [])
-    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_records FOR EACH ROW WHEN (NEW.id = '${U}') EXECUTE FUNCTION ${FN}()`, [])
-    try {
-      const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-      expect(x.status).toBeGreaterThanOrEqual(409) // undelete failed (409 conflict or 500) — request fails
-      expect(await liveRow(U)).toBeUndefined() // U not resurrected (txn rolled back)
-      const r = await liveRow(R)
-      expect(r?.data?.[NAME]).toBe('B') // R NOT reverted — the field-reverts run AFTER the (failed) undelete, so never executed
-      expect(r?.version).toBe(2)
-    } finally {
-      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
-      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
-    }
-  })
-
-  test('(m) multi-resurrect forced failure is all-or-nothing — no earlier resurrect survives a later insert failure', async () => {
-    process.env[FLAG] = 'true'
-    const U2 = `rec_un_zmulti_${TS}`
-    await rev(U2, 1, 'create', { [NAME]: 'u2-at-T1', [LINK]: [L] }, T0)
-    const pv = await preview(T1)
-    expect(pv.status).toBe(200)
-    expect(pv.body?.data?.undeleteRecordIds).toHaveLength(2)
-    expect(pv.body?.data?.undeleteRecordIds).toEqual(expect.arrayContaining([U, U2]))
-
-    const FN = `un_multi_fail_${TS}`, TRG = `un_multi_fail_trg_${TS}`
-    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced multi undelete insert failure'; END; $fn$`, [])
-    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, [])
-    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_records FOR EACH ROW WHEN (NEW.id = '${U2}') EXECUTE FUNCTION ${FN}()`, [])
-    try {
-      const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-      expect(x.status).toBeGreaterThanOrEqual(409)
-      expect(await liveRow(U)).toBeUndefined()
-      expect(await liveRow(U2)).toBeUndefined()
-      expect(await outboundEdges(U)).toBe(0)
-      expect(await outboundEdges(U2)).toBe(0)
-      expect(await revCount(U)).toBe(2) // create + delete only; no rolled-forward resurrect revision survived
-      expect(await revCount(U2)).toBe(1) // create only; no rolled-forward resurrect revision survived
-    } finally {
-      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
-      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
-    }
-  })
-
-  test('(n) cross-strategy token rejection: a SINGLE-record restore-preview token (wrong `type`) is rejected at the route, not just in the unit contract', async () => {
-    process.env[FLAG] = 'true'
-    // A token minted by a DIFFERENT strategy (T6-1 single-record restore-preview, `type: 'restore-preview'`) is
-    // signed with the same secret, so JWT signature/expiry verification alone would pass it — only the
-    // discriminated `type` check in verifyPitRevertPreviewIdentity rejects it (`wrong_type`). This proves the
-    // guard is wired at THIS route's execute path, not merely exercised in the pure-unit contract test.
-    const wrongStrategyToken = mintRestorePreviewIdentity({
-      sheetId: SHEET, recordId: U, targetVersion: 1, strategy: 'revert',
-      changesHash: hashPreviewChanges([{ fieldId: NAME, op: 'set', value: 'irrelevant' }]),
-      actorId: ACTOR,
+    const ex = await execute({
+      asOf: '2026-01-02T00:00:00.000Z',
+      previewIdentity: 'dummy-never-minted',
+      confirm: 'undelete',
     })
-    const x = await execute(T1, wrongStrategyToken, 'undelete')
-    expect(x.status).toBe(409)
-    expect(x.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
-    expect(x.body?.error?.message).toContain('wrong_type')
-    expect(await liveRow(U)).toBeUndefined() // rejected before any write — nothing resurrected
+    // The nonblank wall-clock authority is rejected before token verification.
+    expect(ex.status).toBe(400)
+    expect(ex.body?.error?.code).toBe('EXACT_ANCHOR_REQUIRED')
+    expect(await sheetWriteState()).toEqual(before)
+    expect(await liveRow(U)).toBeUndefined()
+  })
+
+  test('exact-anchor doomed resurrect preview: enumerates U, never promises undelete (flag OFF → UNDELETE_DISABLED)', async () => {
+    delete process.env[FLAG]
+    const pv = await previewExact()
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([U])
+    expect(pv.body?.data?.summary?.visibleUndeleteCount ?? pv.body?.data?.summary?.resurrectCount).toBe(1)
+    expect(pv.body?.data?.undeleteSupported).toBe(false)
+    expect(pv.body?.data?.undeleteBlockedReason).toBe('UNDELETE_DISABLED')
+    expect(pv.body?.data?.executable).toBe(false)
+    expect(pv.body?.data?.previewIdentity).toBeNull()
+  })
+
+  test('exact-anchor doomed resurrect preview: flag ON still fail-closed with INBOUND_UNPROVABLE', async () => {
+    process.env[FLAG] = 'true'
+    const pv = await previewExact()
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([U])
+    expect(pv.body?.data?.undeleteSupported).toBe(false)
+    expect(pv.body?.data?.undeleteBlockedReason).toBe('INBOUND_UNPROVABLE')
+    expect(pv.body?.data?.executable).toBe(false)
+    expect(pv.body?.data?.previewIdentity).toBeNull()
+  })
+
+  test('execute cannot obtain a token and makes zero writes (missing identity + forged token + confirm:undelete)', async () => {
+    process.env[FLAG] = 'true'
+    const before = await sheetWriteState()
+    const pv = await previewExact()
+    expect(pv.body?.data?.previewIdentity).toBeNull()
+
+    const noToken = await execute({ confirm: 'undelete' })
+    expect(noToken.status).toBe(400)
+    expect(noToken.body?.error?.code).toBe('VALIDATION_ERROR')
+
+    const forged = await execute({
+      previewIdentity: 'forged.token.value',
+      confirm: 'undelete',
+    })
+    expect(forged.status).toBe(409)
+    expect(forged.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+
+    expect(await sheetWriteState()).toEqual(before)
+    expect(await liveRow(U)).toBeUndefined()
+    expect(await revCount(U)).toBe(2) // create + delete only
+    expect(await inboundEdges(U)).toBe(0)
+    expect(await outboundEdges(U)).toBe(0)
   })
 })

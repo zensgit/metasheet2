@@ -56,6 +56,12 @@ export type MultitableTemplateBase = {
 export type InstallMultitableTemplateInput = {
   query: MultitableProvisioningQueryFn
   templateId: string
+  /**
+   * 已解析好的模板描述。用户自定义模板(id 以 `mtpl_` 开头)存在 DB 里,不在
+   * TEMPLATE_LIBRARY 常量表里,由路由按租户维度查出来后从这里传进来;省略时
+   * (内置模板)走原来的 getMultitableTemplate 查表路径,行为逐字不变。
+   */
+  template?: MultitableTemplate
   baseId?: string
   baseName?: string
   ownerId?: string | null
@@ -562,7 +568,9 @@ export async function detectTemplateConflicts(
 export async function installMultitableTemplate(
   input: InstallMultitableTemplateInput,
 ): Promise<InstallMultitableTemplateResult> {
-  const template = getMultitableTemplate(input.templateId)
+  const template = input.template
+    ? normalizeTemplate(input.template)
+    : getMultitableTemplate(input.templateId)
   if (!template) {
     throw new MultitableTemplateNotFoundError(input.templateId)
   }
@@ -604,6 +612,19 @@ export async function installMultitableTemplate(
   const fields: MultitableProvisioningField[] = []
   const views: MultitableProvisioningView[] = []
 
+  // S1 (adversarial review of #6091, 2026-09-26): this whole install runs inside one transaction
+  // (univer-meta.ts install route), so Postgres's now() — the DB default createView would
+  // otherwise rely on — is the SAME transaction-start instant for every view created here. A later
+  // "save as template" query orders by `ORDER BY created_at, id`; with every view sharing one
+  // timestamp, the tie-break becomes a sha1 view id (stableChildId) that has nothing to do with
+  // template order. Stamping a strictly increasing created_at per view (in template order) makes
+  // that later ORDER BY reproduce install order without touching any other createView caller.
+  // N-4 (second adversarial review): the stamp is now() + <sequence> microseconds, computed BY THE
+  // DATABASE (createView's createdAtOffsetMicros), not an app-side Date.now() — one clock for
+  // template views and for every view users create later, so clock skew between the app and DB
+  // servers cannot sort a later user view ahead of the template's own views.
+  let installedViewSequence = 0
+
   for (const templateSheet of template.sheets) {
     const sheetId = stableChildId('sheet', baseId, template.id, templateSheet.id)
     const sheetResult = await createSheet({
@@ -634,6 +655,8 @@ export async function installMultitableTemplate(
       const hiddenFieldIds = (templateView.hiddenFieldIds ?? [])
         .map((fieldId) => fieldIds[fieldId])
         .filter((fieldId): fieldId is string => typeof fieldId === 'string' && fieldId.length > 0)
+      const createdAtOffsetMicros = installedViewSequence
+      installedViewSequence += 1
       const viewResult = await createView({
         query: input.query,
         viewId,
@@ -643,6 +666,7 @@ export async function installMultitableTemplate(
         groupInfo: buildGroupInfo(templateView, fieldIds),
         hiddenFieldIds,
         config: buildViewConfig(templateView, fieldIds),
+        createdAtOffsetMicros,
       })
       if (!viewResult.created || !viewResult.view) {
         throw new MultitableTemplateConflictError(`View already exists: ${viewId}`)

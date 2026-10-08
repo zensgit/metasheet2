@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -17,6 +17,9 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string, perms = '*:*', roles = 'admin'): Promise<string> {
+  if (perms.split(',').some((permission) => ['*:*', 'approvals:*', 'approvals:write'].includes(permission.trim()))) {
+    await grantApprovalWriteForIntegrationActor(userId)
+  }
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`,
   )

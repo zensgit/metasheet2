@@ -8,6 +8,10 @@
 // It restores attendance settings and deletes only rows bearing its unique stamp or
 // synthetic user ids.
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import pg from 'pg'
 
 const BASE_URL = (process.env.BASE_URL || process.env.BASE || '').replace(/\/$/, '')
@@ -350,7 +354,20 @@ async function cleanup() {
   await q('DELETE FROM attendance_groups WHERE org_id = $1 AND name LIKE $2', [ORG_ID, `${STAMP}%`])
   await q('DELETE FROM attendance_shifts WHERE org_id = $1 AND name LIKE $2', [ORG_ID, `${STAMP}%`])
   await q('DELETE FROM attendance_events WHERE org_id = $1 AND user_id = ANY($2::text[])', [ORG_ID, [USER, FIXED_USER]])
-  await q('DELETE FROM attendance_records WHERE org_id = $1 AND user_id = ANY($2::text[])', [ORG_ID, [USER, FIXED_USER]])
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-0000000000f6',
+    ticket: 'STAGING-T6',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIds: [USER, FIXED_USER] }, { retireRecord: opsRetirementExecutor })
   await q('DELETE FROM attendance_requests WHERE org_id = $1 AND user_id = ANY($2::text[])', [ORG_ID, [USER, FIXED_USER]])
 
   const residue = (await q(

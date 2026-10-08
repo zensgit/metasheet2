@@ -751,10 +751,43 @@ function isPlmCapabilityAdapter(adapter: unknown): adapter is PlmCapabilityAdapt
   )
 }
 
+/**
+ * Owner identity resolved EXACTLY as `routes/data-sources.ts` resolves it (id -> userId -> sub),
+ * so the principal compared here is the same string that was persisted as `owner_id` when the
+ * source was registered. Kept local rather than imported so this fix stays inside this file.
+ */
+function resolveDataSourceOwnerId(req: Request): string | undefined {
+  const u = req.user
+  if (!u) return undefined
+  const raw = u.id ?? u.userId ?? u.sub
+  return raw != null ? String(raw) : undefined
+}
+
+/**
+ * Resolve a CLIENT-SUPPLIED `:id` into an adapter under the same per-user ownership assertion
+ * every other data-source consumer enforces (`DataSourceManager.assertAccess`, owner_id strict
+ * equality). `authenticate` alone only proves *a* user is calling — without this, any
+ * authenticated user who learns or guesses a data source id could drive these PLM workbench
+ * routes against ANOTHER user's registered connection.
+ *
+ * Throws on denial, and `assertAccess` throws the IDENTICAL "not found" wording as
+ * `getDataSource`, so a non-owner and a nonexistent id are indistinguishable: every caller's
+ * existing `catch` emits the same uniform 404 body. No existence oracle.
+ *
+ * Owner-only is deliberate for now. If a PLM workbench flow legitimately needs an org-shared
+ * source, that relaxation belongs to the data-source visibility model, not here.
+ */
+function getOwnedDataSource(req: Request, dataSourceId: string): unknown {
+  const manager = getDataSourceManager()
+  manager.assertAccess(dataSourceId, resolveDataSourceOwnerId(req))
+  return manager.getDataSource(dataSourceId)
+}
+
 // GET /api/plm-workbench/data-sources/:id/capabilities -- ADVISORY-ONLY passthrough of the
 // PLM adapter's integration capability manifest for UI degradation. No entitlement/role
-// judgement, no license read; it just relays the C1 result. Missing data source -> 404;
-// a non-PLM data source -> unsupported-mode (it simply does not speak the PLM handshake).
+// judgement, no license read; it just relays the C1 result. Missing OR not-owned data source ->
+// the same uniform 404; a non-PLM data source -> unsupported-mode (it simply does not speak the
+// PLM handshake).
 router.get(
   '/api/plm-workbench/data-sources/:id/capabilities',
   authenticate,
@@ -764,9 +797,10 @@ router.get(
     const dataSourceId = req.params.id
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
-      // getDataSource throws a not-found error for an unknown id.
+      // Uniform 404: an unknown id and a source owned by SOMEONE ELSE are indistinguishable here
+      // (assertAccess and getDataSource throw the same not-found wording).
       return res
         .status(404)
         .json({ error: 'Data source not found', data_source_id: dataSourceId })
@@ -859,6 +893,18 @@ function providerEcoIntentConflictCode(error: unknown): string | null {
   const code = (detail as { code?: unknown }).code
   return typeof code === 'string' && PROVIDER_ECO_INTENT_409_CODES.has(code) ? code : null
 }
+
+// Values-free 500/4xx body for the two BOM write-back routes (write PATCH + ECO revision-intent
+// POST). The provider/axios error's own `.message` can carry a connection target, an axios request
+// URL, or (for some drivers) credential-shaped detail; relayProviderWritebackError /
+// relayProviderEcoIntentError below only classify `status` + `reason`, never `.message`. So the two
+// call sites stop forwarding `result.error.message` and answer one of these fixed strings instead;
+// the real error still reaches `logger.error()` (server side only). Shape mirrors #6066's
+// admin-failure-envelope.ts (fixed code + fixed human string, original error logged not echoed).
+export const PLM_BOM_WRITEBACK_FAILED_CODE = 'PLM_BOM_WRITEBACK_FAILED'
+export const PLM_BOM_WRITEBACK_FAILED_MESSAGE = 'BOM 写入失败，详情见服务端日志'
+export const PLM_ECO_INTENT_FAILED_CODE = 'PLM_ECO_INTENT_FAILED'
+export const PLM_ECO_INTENT_FAILED_MESSAGE = 'ECO 意图请求失败，详情见服务端日志'
 
 function relayProviderEcoIntentError(error: unknown): { status: number; reason: string } {
   const status = providerErrorStatus(error)
@@ -964,7 +1010,7 @@ router.get(
     const partId = req.params.partId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
@@ -1027,7 +1073,7 @@ router.patch(
     const bomLineId = req.params.bomLineId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
@@ -1093,8 +1139,10 @@ router.patch(
     })
     if (result.error) {
       const relayed = relayProviderWritebackError(result.error)
+      logger.error('BOM write-back failed', result.error)
       return res.status(relayed.status).json({
-        error: result.error.message || 'BOM write-back failed',
+        error: PLM_BOM_WRITEBACK_FAILED_MESSAGE,
+        code: PLM_BOM_WRITEBACK_FAILED_CODE,
         data_source_id: dataSourceId,
         reason: relayed.reason,
       })
@@ -1128,7 +1176,7 @@ router.post(
     const partId = req.params.partId
     let adapter: unknown
     try {
-      adapter = getDataSourceManager().getDataSource(dataSourceId)
+      adapter = getOwnedDataSource(req, dataSourceId)
     } catch {
       return res
         .status(404)
@@ -1181,8 +1229,10 @@ router.post(
     const result = await adapter.requestBomEcoRevisionIntent(partId)
     if (result.error) {
       const relayed = relayProviderEcoIntentError(result.error)
+      logger.error('ECO revision intent failed', result.error)
       return res.status(relayed.status).json({
-        error: result.error.message || 'ECO revision intent failed',
+        error: PLM_ECO_INTENT_FAILED_MESSAGE,
+        code: PLM_ECO_INTENT_FAILED_CODE,
         data_source_id: dataSourceId,
         reason: relayed.reason,
       })

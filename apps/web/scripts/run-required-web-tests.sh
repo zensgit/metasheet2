@@ -8,11 +8,38 @@
 # be added to branch-protection required contexts without the path-filtered-required footgun
 # (a required check that never triggers leaves PRs hanging forever).
 #
+# 2026-08-07: `data-sources-ui` / `data-sources-api-preview` added. A control-gated sweep of
+# every test file in the repo found them executed by NOTHING — not this gate, not
+# approval-web-guard, not multitable-web-guard, no workflow at all (42 tests, all passing,
+# guarding the data-source UI + API-preview surface of the DB-integration line). Both tokens
+# were checked for the substring-collision hazard documented below: each matches exactly one
+# file and nothing else in apps/web.
 # Maintenance: when you add a web spec to approval-web-guard or multitable-web-guard, add it here
 # too (same two-point discipline). The 19 pre-existing red files (approvalStaticPicker,
 # approvalMobileDetailActions, several multitable-workbench/*, attendance/*, featureFlags,
-# k3WiseSetup, platform-app-launcher, …) are deliberately OUT of this set until fixed; broaden
+# k3WiseSetup, …) are deliberately OUT of this set until fixed; broaden
 # toward full-suite-minus-quarantine once they are triaged.
+# 2026-09-11: `platform-app-launcher` LEFT that quarantine list (18 remain). Its single red case was
+# ONE stale assertion, not a product bug: it asserted `apiGet('/api/after-sales/projects/current')`
+# with no second argument while usePlatformApps.ts:202-204 has been passing
+# `{ suppressUnauthorizedRedirect: true }` on that runtime-install probe since before this branch.
+# The assertion was repaired to the real call shape (product code untouched) and the file is wired
+# below together with the other two App Center permission gates.
+#
+# CASING CONVENTION (备料, noted 2026-09-08 — no token added, no behaviour change): every 备料
+# vitest token below is CamelCase — `StockPreparation*` / `stockPrep*` (see the many `Stock
+# Preparation*` and `stockPrepPermissionMatrix` tokens further down). That is not incidental: this
+# script's filter is a vitest path-SUBSTRING match, and `apps/web/verification/stock-prep-*.spec.ts`
+# (`stock-prep-p0-acceptance.spec.ts`, `stock-prep-p1-acceptance.spec.ts`) are Playwright cases —
+# they `import { test } from '@playwright/test'` and run under `playwright.verification.config.ts`,
+# never under vitest. Vitest's own default include glob still COLLECTS them (see the `verification/`
+# note further down in this file), so the only thing keeping this gate from trying to run Playwright
+# specs under vitest is that no CamelCase `StockPreparation*`/`stockPrep*` token is a substring of
+# their lowercase, hyphenated `stock-prep-*` filenames. If a future 备料 change ever needs a NEW
+# vitest token that starts with the lowercase `stock-prep` prefix, it must first add an explicit
+# exclusion for these two Playwright files — both here and in the shared lane(s) this script's
+# tokens are mirrored into (approval-web-guard.yml / multitable-web-guard.yml, per the two-point
+# discipline above) — or a lowercase token risks silently sweeping a Playwright file into vitest.
 #
 # T3/T4/T5 post-hoc gate (2026-07-12): `mount-behind-flow` added — the harness self-test
 # (tests/helpers/mount-behind-flow.spec.ts) that proves the shared UI-P2-1c T4 mock-client mount
@@ -103,6 +130,36 @@
 # covers this slice's extension to that file (4th tab, wrap-around boundary now comments<->attachments,
 # arrow-scoping guard extended to the attachments tab's file input); no new token needed there.
 #
+# Record inspector resizable panel (2026-09-05): `multitable-record-inspector-resize` — the new
+# MetaRecordInspector.vue resize/persistence/height-contract spec (splitter ARIA + keyboard resize,
+# pointer drag, localStorage width persistence + malformed-value fallback, expand toggle, sticky
+# header/tabs + scrolling body structure). NOTE the pre-existing bare `multitable-record-inspector`
+# token above already incidentally matches this file too (it is a plain string prefix of this token's
+# basename), so this token is not strictly load-bearing for coverage today -- added anyway, explicit
+# and named, per this file's established discipline of never relying on incidental substring luck for
+# a new spec's coverage (see the S4 `multitable-comments-panel` precedent above for the same
+# reasoning) -- a future rename/narrowing of `multitable-record-inspector` must not silently drop this
+# file.
+#
+# Record inspector v3 (2026-09-05, PR-A §1.2/§1.5, docs/development/
+# multitable-record-inspector-v3-design-20260905.md): `multitable-record-inspector-header` — the new
+# MetaRecordInspector.vue header spec (Row A toolbar structure, kebab a11y wiring + roving + Escape-
+# refocus, Row B title editing, prev/next chord, §3.3 tab-switch focus, opener focus capture/
+# restore). Same incidental-substring caveat as `-resize` above (the bare `multitable-record-inspector`
+# token already matches it too) — added anyway, explicit and named, same discipline.
+#
+# Record inspector v3 PR-B2 (2026-09-05, §1.3 "Field-anchored server errors", same design doc):
+# `multitable-record-inspector-field-errors` — the new spec for `patchCell`'s additive per-call
+# `GridPatchFailure | null` return (rollback + error.value unchanged; round 2 replaced the round-1
+# shared ref), the code-keyed `resolvePatchFailureRoute` matrix (fieldErrors / 422 / VALIDATION_ERROR →
+# field; a plain 400 with any other code → toast), MetaRecordFieldsPanel's rejected-value draft +
+# role=alert + aria-invalid/aria-describedby wiring, MetaRecordInspector's `fieldErrors` pass-through
+# and its exposed `canAnchorFieldError` predicate (round 2: inline only when the alert can render). The
+# workbench routing half lives in the already-gated `multitable-workbench-view` spec. Same
+# incidental-substring caveat as `-header` above (the bare `multitable-record-inspector` token matches
+# this file too) — added anyway, explicit and named. Collision-checked:
+# `npx vitest run multitable-record-inspector-field-errors` → exactly 1 file.
+#
 # OD-W2-5a (2026-07-16, docket #74, owner ruling OD-W2-5=(a) a-read-through):
 # `multitable-record-history-client-restored-from` — the client-tier golden proving BOTH history read
 # fetchers (listRecordHistory→normalizeRecordHistoryEntry, getHistoryBatch→normalizeHistoryChange) pass
@@ -120,6 +177,1673 @@
 # (grid/drawer/form both-directions parity with the server predicate; the LIVE cross-package drift guard
 # lives in packages/core-backend/tests/unit/field-always-readonly-web-parity.test.ts, wired by default —
 # no filter needed there).
+# B3-07 attachment slice ⑦ (2026-07-17, approval-attachment-pipeline-design-lock): `approval-attachment-upload`
+# — the client pre-validation mirror + upload client spec (apps/web/tests/approval-attachment-upload.test.ts).
+#
+# B3-07 §8 closeout (2026-07-20): `approval-attachment-refs` + `approval-attachment-download` —
+# frozen-reference resolution plus the authenticated Blob download path. Goldens cover tombstones,
+# G7 redaction inheritance (a
+# server-omitted ref renders as NOTHING, not a tombstone), the no-fabricated-metadata rule, and the
+# G13 stale-draft detection. Pure module, so desktop and mobile provably resolve through one helper.
+# Previously ran in NO CI lane, so the client↔server rules-version parity pin and the prototype-pollution
+# guard could never go red. Bare basename token; unique (no existing token is a substring of it, nor it of
+# any existing token).
+#
+# F0 (2026-08-17, PR #4939): `approval-form-inline-editor-extract` — behavior-equivalence spec for the
+# ApprovalFormInlineEditor.vue extraction (the form section pulled out of TemplateAuthoringView.vue,
+# 14 emitted events, parent handlers unchanged). Added to the always-on Canvas V2 residual block below
+# alongside the other approval-form-* canaries. Bare basename token; verified unique — no existing
+# `approval-form-*` token (approval-form-commands / approval-form-authoring-history /
+# approval-form-palette-focus / approval-form-draft) is a substring of it or vice versa.
+#
+# F1 (2026-08-17, delta §5 F1): `approval-form-identity` (opaque collision-resistant allocator,
+# FB-D5 OPAQUE_COLLISION_RESISTANT) + `approval-form-authoring-adapter` (the single production
+# command adapter over approvalFormCommands + form history: FB-D3 anchor re-resolution, FB-D4
+# one-history-entry semantics, FB-D5 collision retry, FB-D6 current-draft reference provider,
+# legacy-helper freeze pins). Both bare basename tokens; each verified to match exactly one file
+# in isolation, and no existing token (approval-form-authoring-history is the closest neighbor)
+# is a substring of either or vice versa.
+#
+# F2 (2026-08-17, delta §5 F2): `approval-form-drag-payload` (typed drag codec: single app MIME,
+# strict decode, transient-session store), `approval-form-palette-chips` (mounted Designer 2.0
+# palette: shipped-shell grouping pin, click/drag/keyboard, read-only), and
+# `approval-form-builder-slots` (mounted builder: N+1 semantic slots, exact FB-D3 anchors,
+# codec negatives with positive controls, stale-anchor no-op, five-trigger transient clearing,
+# FB-D4 click/drag/keyboard equivalence, FB-D8 no-production-mount pin). All bare basename
+# tokens; each verified to match exactly one file. Deliberate non-collisions: `approval-form-draft`
+# is NOT a substring of `approval-form-drag-payload` (draft vs drag-), `approval-form-palette-focus`
+# does not match `approval-form-palette-chips`, and the playwright-only
+# `verification/approval-form-builder-parity.spec.ts` matches none of these tokens.
+#
+# UI-6 (2026-08-17, master §4 UI-6 / approval-parity-master-design-lock-20260817.md): `approval-detail-record-table`
+# — ApprovalDetailView.vue's new tab anchors (审批详情/审批记录/全文评论) + audit-derived 审批记录
+# table projection. Chrome only; the table derives from the SAME already-fetched store.history the
+# existing parallel-aware timeline renders (no new endpoint, no second fetch), and the synthetic
+# 提交/结束 bookend rows are presentation-only (never written into store.history). Bare basename
+# token; verified unique against every existing `approval-detail-*` / `*-record-table*` token
+# (only `approval-detail-field` exists, and neither string is a substring of the other).
+#
+# UI-7 (2026-08-17, approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail
+# pane. Two new tokens: `approval-center-detail-pane-controller` (the pure generation-counter
+# race-guard module, race semantics only — mirrors `approval-route-preview-controller`'s own
+# dedicated unit spec) and `approval-center-master-detail` (the component-level spec: wide-vs-narrow
+# gating, single-fetch-on-selection + reselect-replace, quick-action shared-handler identity via the
+# `inlineApprovingId` cross-row gate, Esc/keyboard, URL restore). Both explicitly listed per this
+# file's own discipline even though the pre-existing bare `approval-center` token already
+# incidentally substring-matches both filenames — never rely on that incidental match alone.
+#
+# F3 (2026-08-17, delta §5 F3): `approval-form-field-update` (typed retype/property-update
+# commands: 12 named dependency-kind refusals, identity preservation, detail-column
+# update/retype/remove, adapter one-entry-per-edit) + `approval-form-field-inspector` (mounted
+# Designer 2.0 selected-field inspector: committed-edit-only history, per-keystroke forbidden,
+# dirty-buffer settle/block arms, values-free named refusal copy). Both bare basename tokens;
+# each verified to match exactly one file in isolation; no existing token (`approval-form-draft`
+# / `approval-form-drag-payload` are the closest neighbors) is a substring of either or vice
+# versa, and the two new tokens do not substring-match each other.
+#
+# L6-P1 (2026-08-17, docs/development/approval-lock6-requester-global-policy-20260817.md §1):
+# `approval-template-authoring-policy-carrier` — the RuntimePolicy authoring carrier fix (hydrate
+# reflects the persisted `allowRevoke` instead of a hardcoded `true`; `buildPublishPolicy` MERGES
+# onto the persisted policy instead of replacing it, so an API-set sibling field like
+# `autoApproval` survives an editor republish). Bare basename token; verified to match exactly one
+# file — no existing token is a substring of it (`approval-template-authoring-parallel-edit` is
+# the closest neighbor, diverging at `-p`) and it is not a substring of any existing token.
+#
+# L8-B (2026-08-17, docs/development/approval-lock8-field-vocabulary-20260817.md §1.2): date_range
+# (日期区间) — three new tokens. `approval-date-range-field` (draft carrier/buildFormSchema/
+# hydration/registration-completeness/OD-L8-4 exclusion/OD-L8-8 derived-duration pure-fn specs),
+# `approval-date-range-visibility` (OD-L8-5(a) per-type predicate: FE resolver, MS-9 selectable-
+# dependency predicate + endpoint options, dependency-tracking dotted safety on delete/retype),
+# `approval-date-range-inline-editor` (ApprovalFormInlineEditor.vue mounted spec: retype option,
+# property-block render, M7 wired-not-inert controls, type-selected non-rendering negative). All
+# three bare basename tokens; verified no existing token (checked the full `approval-date*` /
+# `*date-range*` namespace) is a substring of any of them or vice versa — the namespace was
+# entirely empty before this slice.
+#
+# L8-A (2026-08-17, docs/development/approval-lock8-field-vocabulary-20260817.md §1.1): explanation
+# (说明) — three new tokens. `approval-explanation-field` (draft carrier/buildFormSchema A-1
+# valuelessness stripping/hydration/registration-completeness/MS-9 predicate+retype-clearing/FE
+# resolveVisibilityFieldReference/prefill exclusion/buildDisplayFields visibility-gated render/
+# summaryFields exclusion/condition-branch exclusion pure-fn specs), `approval-explanation-inline-
+# editor` (ApprovalFormInlineEditor.vue mounted spec: retype option, props.text property block, M7
+# wired-not-inert control, 必填/占位文本 HIDDEN-for-explanation, type-selected non-rendering
+# negative), `approval-lock8-field-type-census` (§2.1 N-1: the MS-5/MS-9 mechanical census —
+# exhaustive per-type loops over `AUTHORABLE_FIELD_TYPES` with a completeness meta-check; the
+# backend half lives in packages/core-backend/tests/unit/approval-lock8-field-type-census.test.ts).
+# All three bare basename tokens; verified no existing token (checked the full `approval-explan*` /
+# `*explanation*` / `*lock8*` / `*census*` namespace) is a substring of any of them or vice versa —
+# the namespace was entirely empty before this slice (one pre-existing `lock8` hit is a doc-comment
+# citation, not a test token).
+#
+# F4 (2026-08-18, delta §5 F4): `approval-form-builder-route-leak` — the F2-gate handoff condition 3
+# real-router spec (constructs a CANCELLED navigation mid-drag; the guard clears the shared drag
+# session as its first statement, before the dirty-draft confirm). The flag-gate mount/hydration/
+# single-seed tests ride the ALREADY-listed `approvalTemplateAuthoring` token below (extended in the
+# same PR, not a new file). Bare basename token; verified unique — no existing `approval-form-*`
+# token is a substring of it or vice versa (closest neighbor `approval-form-builder-slots` diverges
+# at `-r`).
+#
+# P1-C (2026-08-18, approval-parity-master-design-lock-20260817.md §P1-C): shipped timeout +
+# threshold frontend compatibility — two new tokens. `approval-template-authoring-threshold-
+# timeout-compat` (pure-logic: both allowlists' no-flatten status, linear + complex round-trip,
+# mode-switch-away orphan-key cleanup, M6 dynamic-M honesty preview, linear-only fail-closed +
+# positive control against the SAME `collectParallelRegionNodeKeys` the canvas nested-parallel
+# guard already uses) and `approval-node-threshold-timeout-config` (mounted ApprovalGraphNode-
+# ConfigEditor.vue spec: M7 every new control wired, not inert; the timeout-effect option set
+# asserted against the DOM equals `NODE_TIMEOUT_SUPPORTED_EFFECTS` exactly — never invents
+# auto_approve/auto_reject). Both bare basename tokens; verified no existing token in the
+# `approval-template-authoring-*` / `approval-node-*` namespaces is a substring of either or vice
+# versa (closest neighbors: `approval-template-authoring-approval-node-edit` and
+# `approval-node-source-*`-shaped data-testids, neither collides).
+# L5 (2026-08-18, docs/development/approval-lock5-node-operation-policy-20260817.md §1.1/§2.2):
+# per-node operation policy (`操作权限`) — ONE new token, `approval-node-operation-policy`
+# (apps/web/tests/approval-node-operation-policy.test.ts: the OD-L5-2(a)/OD-L5-3(a) pure projection,
+# gate A-6 emptiness, gate A-7 mixed-state read-only + sibling preservation, gate A-3's
+# four-allowlist "stays EDITABLE in BOTH editors" with the `signaturePolicy`-still-read-only positive
+# control, and the linear/canvas round-trip). Bare basename token; verified unique — the
+# `approval-node-` prefix is now SHARED with P1-C's `approval-node-threshold-timeout-config` (landed
+# on main after this comment was first written), and neither of those two is a substring of the
+# other; nor is any other neighbour (`approval-handler-node-config`, `approval-handler-node-
+# authoring`, `approval-template-authoring-approval-node-edit`) a substring of it or vice versa.
+# The MOUNTED Lock-5 assertions (E-1/E-2, the handler F-1 FE half) extend the already-collected
+# `approval-template-authoring-canvas-inspector` and `approval-handler-node-config` specs, so they
+# need no new token.
+#
+# P7-R1 (FAIL-0/FAIL-7, 2026-08-18): `useApprovalBatchActions` — the 批量驳回 (batch reject)
+# superiority claim's core module (bounded-concurrency fan-out, per-row isolation, the
+# {succeeded, failed} failure manifest). Its spec (tests/useApprovalBatchActions.spec.ts) ran
+# green locally but in NO required workflow and NO guard — verified green in isolation before
+# wiring. Bare basename token; verified to match exactly one file (the co-located
+# src/approvals/useApprovalBatchActions.ts source module is not collected — it does not end in
+# .spec.ts/.test.ts) and is not a substring of, nor contains, any existing token.
+#
+# P7-R1 (FAIL-0 §5 mechanical sweep, 2026-08-18): a token-coverage sweep of every approval*
+# test file against the vitest-token universe of run-required-web-tests.sh +
+# approval-web-guard.yml + multitable-web-guard.yml + attendance-web-guard.yml +
+# plm-embed-web-guard.yml (vitest CLI filters are PATH-SUBSTRING matches, so the sweep checks
+# substring containment, not just exact tokens) found 24 approval*-named files matched by NO
+# lane. Two are false positives for this vitest-token method — they run via Playwright, not
+# vitest (`approval-form-builder-parity.spec.ts` via playwright.approval-verification.config.ts
+# / approval-browser-verify.yml; `approval-inspector-keyboard.spec.ts` via
+# playwright.verification.config.ts / multitable-browser-verify.yml, FAIL-1 above). Four belong
+# to the PLM line, not this one (`plmApprovalActionability`, `plmApprovalHistoryDisplay`,
+# `plmApprovalInboxActionPayload`, `plmApprovalInboxFeedback` — all import from
+# `src/views/plm/plmPanelModels`, not `src/approvals/**`); left for that line's owner, not
+# touched here. Of the remaining 18 (all import from `src/approvals/**` /
+# `src/views/approval/**`), 3 are RED today and are deliberately NOT wired (wiring a red file
+# would break this gate's own green-on-arrival guarantee):
+# `approvalStaticPicker` and `approvalMobileDetailActions` were ALREADY known-red (see this
+# file's own "19 pre-existing red files" note above); `approval-ui-workspace` is a newly-found
+# third red file (1 failing assertion: "presents template authoring as a four-step workspace").
+# All three are left for triage, same as the pre-existing quarantine list. The other 15 verified
+# green in isolation (`npx vitest run <token> --reporter=verbose`, zero unhandled errors) and are
+# wired below; each bare-basename token verified to match exactly one file and to collide with no
+# existing token in either direction.
+#
+# member-display-identity (2026-08-19): `approval-member-identity-coverage-enumeration` — the
+# mechanical enumeration guard over every scout-table viewer-facing site (raw-id-render class),
+# mirroring the backend FAIL-0 guard's wiring/presence discipline. Bare basename token; verified
+# to match exactly one file and not to collide with the pre-existing `approval-member-bar-
+# operation-policy` token (diverges at "bar" vs "identity", neither is a substring of the other).
+#
+# P5-C-1 (2026-08-20, member-action dialog grammar unification): `approval-member-action-dialog-
+# grammar` — mounted coverage for the NEW chrome this slice added (six dialog-root testids, the
+# transfer/return/comment confirm-disabled predicates, the stale-error-on-reopen guard now that
+# `actionDialogError` backs all six dialogs instead of two) plus a pure byte-identical-strings check
+# on `memberActionDialogGrammar.ts` itself. Bare basename token; verified to match exactly one
+# file and not to collide with `approval-member-bar-operation-policy` or `approval-member-
+# identity-coverage-enumeration` (diverges at "action-dialog-grammar", a substring of neither).
+#
+# Self-service tail UX (2026-08-21, staging trial fixes): three specs added.
+# `tests/App.spec.ts` uses the full path, NOT the bare `App` basename — `App` is a
+# substring of many other test files (e.g. `AttendanceApprovalFlowStepsEditor.spec.ts`,
+# `usePlatformApps.spec.ts`, anything starting with `Approval*`, since 'Approval' itself
+# starts with 'App'), so the bare token would multi-match. `attendance-date-only-format`
+# and `attendance-records-route-redirect` are bare basenames, each verified to match
+# exactly one file (`npx vitest run <token> --reporter=verbose` → "1 passed (1)"). New
+# top-bar identity-truncation helper spec `middleEllipsis` (bare basename, same
+# one-file verification) is wired alongside them.
+#
+# GATE-5047 rework (2026-08-21): P1 replaced the top-bar identity fix with
+# accountIdentityDisplay.ts (truncateAccountIdentity) — middleEllipsis is no longer used
+# directly for the email account identity; both specs are wired (`accountIdentityDisplay`
+# bare basename, verified 1-file match, does not collide with `approval-member-identity-
+# coverage-enumeration` or any other existing token). P2-1 added
+# `attendance-date-only-format-tz-probe.spec.ts` — NOT added as a separate token: the
+# EXISTING bare `attendance-date-only-format` token already substring-matches it too
+# (`attendance-date-only-format` is a literal prefix of
+# `attendance-date-only-format-tz-probe.spec.ts`), verified via
+# `npx vitest run attendance-date-only-format --reporter=verbose` → "2 passed (2)". Its
+# sibling fixture `tests/helpers/dateOnlyTzProbe.ts` is not itself collected as a test file
+# (no `.spec.ts` suffix; vitest's `include` glob is `**/*.spec.ts`).
+#
+# S3a (2026-08-21, comments shared FE kit extraction): `shared-comments-stub-client` — the new
+# tests/shared-comments-stub-client.spec.ts, proving shared/comments/composables/
+# useMultitableComments works against a minimal CommentsApiClient stub with no multitable
+# dependency (the seam a future approval-native storage backend implements). Bare basename token;
+# verified to match exactly one file (`npx vitest run shared-comments-stub-client --reporter=verbose`
+# → "7 passed (7)") and does not collide with any existing token in either direction (checked
+# against the full token list in this script and multitable-web-guard.yml).
+#
+# Navigability audit (2026-08-22, attendance UX/navigation fixes, no business-logic change):
+# three new pure-module specs. `attendanceCapabilityUnavailable` (the tab -> gating-flag ->
+# display-name lookup AttendanceExperienceView.vue's enriched "Capability not available" empty
+# state renders from — fix 1), `attendanceRequestReviewEntitlement` (the row-level approve/reject
+# entitlement predicate AttendanceView.vue's "Recent requests" list now reads instead of gating
+# solely on the deep-link-focused row — fix 2), and `attendanceFeatureOverride`
+# (mergeFeatureOverrideJson/isFeatureOverrideAllowed/setLocalFeatureOverride in
+# src/stores/featureFlags.ts — fix 1's local-override surfacing; deliberately NOT added via the
+# pre-existing `featureFlags` token family, since tests/featureFlags.spec.ts itself is one of this
+# file's own "19 pre-existing red files" quarantined above and wiring the whole suite would make
+# this gate red on arrival for unrelated reasons). All three bare basename tokens; each verified to
+# match exactly one file (`npx vitest run <token> --reporter=verbose`) and checked against every
+# existing token in this file and attendance-web-guard.yml for substring collision in either
+# direction — none found.
+# S3b (2026-08-22, approval comments tab): `approval-comments-client` (tests/approval-comments-
+# client.spec.ts, 20 tests — the CommentsApiClient adapter mapping S2's /api/approvals/:id/
+# comments* onto the shared kit's interface, incl. pagination/truncation/ordering and the three
+# unsupported-capability throws) and `approval-comments-panel` (tests/approval-comments-panel.
+# spec.ts, 12 tests — the mounted 全文评论 tab wrapper: reactions/resolve absence, tombstone
+# rendering, one-level threading, the member-display-identity guard, mention-candidate fetch,
+# delete re-hydration). Both bare basename tokens; each verified to match exactly one file
+# (`npx vitest run approval-comments-client --reporter=verbose` → "Test Files 1 passed", same for
+# approval-comments-panel) and checked for collision against the full token list in this script
+# and both approval-web-guard.yml / multitable-web-guard.yml.
+# Fix round (gate P2-1/P2-2/P3-1/P3-2/NIT-1/NIT-2/NIT-3, 2026-08-22): client's 17 became 19 (one
+# test pinning the truncation-direction fix P2-1, one a page-size-coupling drift guard NIT-1);
+# panel's 10 (the comment here originally said 9 — that was wrong, NIT-3) became 12 (one
+# mechanism-documentation test for P2-2, one for the previously-untested truncation notice).
+# `approval-detail-record-table.spec.ts` (already wired, unaffected by this comment) also gained 1
+# test — the REAL P2-2 regression guard, mounting ApprovalDetailView.vue itself and reddening if
+# its `:key="route.params.id"` is removed. File-level token wiring (this script + approval-web-
+# guard.yml) is unchanged — no new spec files.
+# Fix round 2 (requal N-1/N-2/N-3/N-4, 2026-08-22): client's 19 became 20 — one test pinning the
+# `<= capacity` branch's own `truncated` flag fix (N-2/PROBE-P1c); the truncation-window test
+# rewritten in place (offset-keyed mock, id assertions moved above the call-count assertion — N-1)
+# did not add a test. Panel's count is unchanged at 12 — N-3's fix (a bystander-comment assertion
+# discriminating a merge-vs-replace regression on its own) extended an EXISTING test body, adding
+# no new `it(...)`. File-level token wiring is unchanged — still no new spec files.
+# Owner-reported live authoring bug fix (2026-08-24, ApprovalFormInlineEditor.vue detail sub-field
+# `<el-table>` missing `row-key` + TemplateAuthoringView.vue's `addDetailColumn` collision-prone
+# `length + 1` id scheme): NEW token `approval-detail-column-row-key` (tests/approval-detail-
+# column-row-key.spec.ts, 3 tests — mounts the real TemplateAuthoringView.vue, reproduces both
+# defects red-before-fix, mutation-proven). Bare basename token; verified to match exactly one
+# file and checked for collision against every existing token in this script and both
+# approval-web-guard.yml paths blocks (neither `approval-detail-field` nor
+# `approval-detail-record-table` is a substring of it or vice versa) — none found.
+# grid-commit-reliability round 3 (2026-09-05): `multitable-grid-cell-edit-commit.spec.ts` and
+# `multitable-grid-cell-edit-commit-round2.spec.ts` were never wired into ANY token here (a
+# control-gated grep of this script found no `grid-cell-edit-commit` substring anywhere) — added now,
+# full filenames (not bare `multitable-grid-cell-edit-commit`, which is itself a substring of the
+# round2 file's name and so would already match both; full names keep each token's match exact and
+# independent of the other file's continued existence). `multitable-yjs-cell-editor-seed-forward.
+# spec.ts` — previously executed only as an unintentional side effect of the pre-existing
+# `multitable-yjs-cell-editor` bare-basename token below being a substring of its name (the exact
+# footgun this script's header warns about) — was DELETED as part of this same fix (P3-1 replaced the
+# mechanism it tested), so no token removal is needed: `multitable-yjs-cell-editor` still matches
+# exactly `multitable-yjs-cell-editor.spec.ts` now. No other token in this file or in
+# approval-web-guard.yml / multitable-web-guard.yml collides with either new filename.
+#
+# Record inspector v3 (2026-09-05, PR-A §1.1, docs/development/
+# multitable-record-inspector-v3-design-20260905.md): `multitable-grid-expand-record` — the new
+# MetaGridTable.vue spec for the row-number "open record" icon + Shift+Space (the two explicit-open
+# triggers PR-A adds to the grid), including the #5481 positive control (bare Space still starts
+# type-to-edit). Same two-point discipline as the `-cell-edit-commit` tokens above: the bare
+# `multitable-grid` token already incidentally matches this file too (a substring), so this token is
+# not strictly load-bearing for coverage today — added anyway, explicit and named.
+#
+# #5747 client contract (2026-09-15): `approval-templates-client` — apps/web/tests/multitable/
+# approval-templates-client.test.ts, the MultitableApiClient.listApprovalTemplates envelope golden
+# (parseJson already unwraps `{ data, total }`, so the editor's `res.data` was undefined and the
+# start_approval template dropdown was silently ALWAYS empty on a 200). It ran in NO workflow: a
+# token scan of this script, multitable-web-guard.yml and approval-web-guard.yml found no substring
+# of `tests/multitable/approval-templates-client.test.ts` among their 430 / 213 / 104 tokens, so the
+# file was laptop-only green. Bare basename token, checked BOTH directions: no existing token in any
+# of the three lanes is a substring of `approval-templates-client`, and it is a substring of none of
+# them (nearest neighbours are `approval-comments-client`, `personal-view-client` and the CamelCase
+# `approvalTemplateAuthoring`/`approvalTemplateCenterCategory` family — none contains or is contained
+# by it). Against the 827 vitest-collectable files under apps/web (tests/ + verification/, the
+# Playwright-under-vitest hazard this header warns about included) the token matches EXACTLY ONE
+# file, its own. NOTE: it is placed next to `personal-view-client` / `xlsx-mapping`, the two sibling
+# tokens for the same tests/multitable/ directory. The multitable-web-guard.yml mirror of this token
+# (the two-point discipline above) is NOT in this commit — .github/** is pushed separately under a
+# workflow-scoped token; until that lands this always-on lane is the only one running the file.
+# Its sibling tests/multitable/export-sheet-client.test.ts remains unwired here (untouched, out of
+# scope for this change).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec npx vitest run amountAutoSum approval-amount-in-words approval-assignee-source approval-center approval-common-template-presets approval-condition-summary approval-detail-field approval-e2e-lifecycle approval-e2e-permissions approval-field-visibility approval-form-draft approval-graph-layout approval-graph-summary approval-graph-topology-edit approval-number-field-props approval-prefill-from-snapshot approval-route-preview-controller approval-route-preview-summary approval-template-authoring-approval-node-edit approval-template-authoring-cc-edit approval-template-authoring-complex-node-config-allowlist approval-template-authoring-condition-edit approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-linear-step-spine approval-template-authoring-parallel-edit approval-template-route-preview-api approval-upcoming-nodes approval-urge-button-state approvalCardDecisionView approvalCenterRemindBadge approvalCenterSourceFilter approvalCenterTable approvalCenterUnreadBadge approvalDelegationStatus approvalDelegationView approvalDetailPolish approvalMetricsTopnReport approvalMetricsView approvalMobileI18n approvalMobileResponsive approvalTemplateAuthoring approvalTemplateCenterCategory approvalTemplateGovernance approvalTemplateVersionHistory asyncStateBlock automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView comment-affordance-color-consistency directoryManagementView lineDerivation meta-automation-labels meta-filter-group meta-grid-table meta-person-delivery-viewer-migration meta-record-drawer-history-diff meta-record-drawer-i18n meta-record-drawer-restore meta-toolbar-filter-builder migration mount-behind-flow multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-record-restore-client multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-view-manager multitable-ui multitable-workbench-1672-1673 multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell myDelegationView newTodoPill pageShell parallelBranchRunsView requesterPreviewFields routePreviewErrors statusTag templateArchiveConfirm templateGalleryFilter ui-foundation-style-guard uiFoundationTexture useAutoSumTotal workflowHubView automation-log-redact automation-log-support-packet automation-rule-concurrent-merge meta-ai-bulk-labels meta-api-error-labels meta-api-token-labels meta-automation-delivery-viewers-i18n meta-base-picker meta-bulk-edit-labels meta-cell-editor-i18n meta-comment-composer-i18n meta-comment-labels meta-comments-drawer-i18n meta-form-share-labels meta-form-view-i18n meta-link-picker-i18n meta-link-picker-labels meta-notification-bell meta-permission-labels meta-record-labels meta-toolbar-group-picker meta-view-render-labels meta-sheet-view-rail multitable-agg-footer-grid multitable-ai-bulk-fill-composable multitable-ai-bulk-fill-dialog multitable-ai-bulk-fill-job-composable multitable-ai-bulk-fill-job-dialog multitable-ai-shortcut-cell-editor multitable-ai-shortcut-client multitable-ai-shortcut-composable multitable-ai-shortcut-drawer multitable-ai-shortcut-field-manager multitable-alt-view-comment-chip-i18n multitable-api-token-manager multitable-attachment-editor multitable-attachment-list multitable-barcode-field multitable-base-local-state multitable-build-chart-option multitable-bulk-edit-dialog multitable-button-field-config multitable-button-run-client multitable-calendar-drag-reschedule multitable-calendar-view multitable-capabilities multitable-cell-button multitable-cell-visual-display multitable-cf-scale multitable-chart-load-error multitable-chart-renderer multitable-comment-composer multitable-comment-inbox.spec.ts multitable-comment-presence multitable-comment-reactions multitable-comment-realtime multitable-comments multitable-comments-drawer multitable-conflict-ux multitable-core-i18n multitable-crossbase-link-normalizer multitable-crossbase-link-picker multitable-dashboard-view multitable-datetime-field multitable-duration-field multitable-embed-host multitable-embed-route multitable-export-dialog multitable-field-config-i18n multitable-field-display-i18n multitable-field-validation-panel multitable-form-layout multitable-form-share-manager multitable-form-view multitable-formula-dryrun-panel multitable-formula-suggest-field-manager multitable-frozen-columns-grid multitable-frozen-columns-util multitable-gallery-view multitable-gantt-view multitable-hierarchy-view multitable-home-view multitable-import multitable-import-modal multitable-link-picker multitable-linked-record-chip multitable-linked-record-popover multitable-location-field multitable-longtext-cell multitable-manager-panels-i18n multitable-mention-inbox multitable-mention-popover multitable-mention-realtime multitable-multiselect-field multitable-nongrid-summary-rendering multitable-number-format multitable-people-import multitable-person-field multitable-personal-view-toggle multitable-phase10 multitable-phase12 multitable-phase13 multitable-phase14 multitable-phase15 multitable-phase3 multitable-phase4 multitable-phase5 multitable-phase6 multitable-phase7 multitable-phase8 multitable-phase9 multitable-qrcode-field multitable-record-drawer multitable-record-drawer-button multitable-record-drawer-duplicate multitable-record-drawer-t5-migration.spec.ts multitable-record-fields-panel multitable-record-history-panel multitable-record-history-client-restored-from multitable-record-inspector multitable-comments-panel multitable-record-attachments-panel multitable-record-permissions-composable multitable-richtext-editor-mention multitable-richtext-longtext multitable-richtext-mention multitable-richtext-wiring multitable-scoped-permissions multitable-sheet-presence multitable-sheet-realtime multitable-system-fields multitable-template-center-view multitable-template-detail-view multitable-timeline-view multitable-view-display-prefs-util multitable-workbench-i18n multitable-workbench.spec.ts multitable-yjs-cell-binding personal-view-client public-multitable-form view-manager-multitable-contract xlsx-mapping StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper conditional-formatting-dialog-i18n dingtalk-internal-view-link-warnings dingtalk-recipient-field-warnings dingtalk-public-form-link-warnings meta-grid-table-i18n.spec.ts multitable-comment-inbox-view.spec.ts multitable-b4-field-always-readonly --reporter=dot
+# Explicit organization sessions: a separate small process, retaining existing
+# API/approval and attendance suite ownership below.
+npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+# Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
+# #5012 (2026-08-19, human-tail finding): tests/api.spec.ts carries the omitHeaders
+# MECHANIC leg (SR-1 rules/me self-service contract) — it ran in NO workflow before, so
+# reverting the apiFetch delete-loop was green across every required check.
+# tests/attendance-rules-me-contract-sync.spec.ts pins the FE omit set against the
+# server's forbidden set BY READING THE PLUGIN SOURCE; it must live in THIS always-on
+# lane because attendance-web-guard skips vitest for plugins/**-only diffs.
+# These two are the first path-prefixed tokens in this bare-basename list — full paths
+# chosen for exactness (a future `*-api.spec.ts` would substring-collide with a bare
+# `api.spec.ts` token; today the bare token still selects exactly one file).
+# P5 (2026-09-14, transport-copy field incident): `tests/network-unavailable-copy.spec.ts` is the
+# ONLY spec that exercises the "a response EXISTS" arm of utils/networkErrors.ts's discriminator
+# (Response 503 / Response 200-non-JSON / a status-carrying error -> the gateway sentence). An
+# adversarial pass found it selected by NO `vitest run` token anywhere in .github/workflows/*.yml or
+# in this file, i.e. green only on a laptop -- the same footgun the #5012 note just above records
+# for tests/api.spec.ts. Full-path token, per the exactness convention of this block. Enrolment is
+# pinned mechanically by packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts,
+# which lives in a lane (`test (18.x)` / `test (20.x)`) that cannot be skipped.
+# DELETE transport fallback (2026-09-18, customer egress drops HTTP DELETE): `tests/delete-fallback.spec.ts`
+# pins src/utils/delete-fallback.ts (probe latches only on a CONFIRMED tunnel; native mode buys ONE POST+override
+# retry and never on an HTTP status; override mode from the start; storage-less operation). Full-path
+# token per this block's convention; no web guard covers utils/api.ts's transport layer, so this
+# always-on lane is its only point. `tests/api.spec.ts` (already here) carries the apiFetch wiring leg.
+npx vitest run \
+  tests/AttendanceReportFieldsSection.spec.ts \
+  tests/api.spec.ts \
+  tests/delete-fallback.spec.ts \
+  tests/attendance-rules-me-contract-sync.spec.ts \
+  tests/network-unavailable-copy.spec.ts \
+  approval-canvas-commands \
+  approval-form-commands \
+  approval-authoring-history \
+  approval-g5c-authoring-scenarios \
+  approval-version-read-summary \
+  approval-form-authoring-history \
+  approval-version-dual-canvas \
+  approval-flow-canvas-a11y \
+  approval-flow-canvas-summary-tooltip \
+  approval-canvas-inspector-a11y \
+  approval-form-palette-focus \
+  approval-form-inline-editor-extract \
+  approval-detail-column-row-key \
+  approval-form-identity \
+  approval-form-authoring-adapter \
+  approval-form-drag-payload \
+  approval-form-palette-chips \
+  approval-form-builder-slots \
+  approval-form-field-update \
+  approval-form-field-inspector \
+  approval-form-builder-route-leak \
+  approval-date-range-field \
+  approval-date-range-visibility \
+  approval-date-range-inline-editor \
+  approval-explanation-field \
+  approval-explanation-inline-editor \
+  approval-lock8-field-type-census \
+  approval-department-field \
+  approvalDepartmentPicker \
+  searchApprovalDirectoryDepartments \
+  approval-node-operation-policy \
+  approval-member-bar-operation-policy --reporter=dot
+npx vitest run featureFlagsApprovalAttachments --reporter=dot
+# Lock-9 OD-L9-10(a) (2026-08-22, FE process-attachment slice): `approval-process-attachment-dialog`
+# — NEW token for the mounted comment-dialog/timeline-render spec
+# (apps/web/tests/approval-process-attachment-dialog.spec.ts): affordance gating
+# (attachmentPipelineEnabled && isMyTurn, proven NOT canAct in both directions), staged
+# upload/remove through the process-attachment client, submitComment's attachmentIds
+# key-presence discipline, cancel-close DELETE cleanup, timeline render reusing
+# handleAttachmentDownload, and the loadAttachmentMetadata-watch/store.history regression (proven
+# to fail RED without the dependency — see the PR body). The sibling client-logic spec
+# (approval-attachment-upload-process.test.ts) is substring-covered by the pre-existing
+# `approval-attachment-upload` token, but ALSO gets its own explicit `approval-attachment-upload-process`
+# basename token below — `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts`
+# (a required test(18.x)/test(20.x) FAIL-0 guard) rejects incidental-substring-only coverage as
+# UNCOVERED ("a future rename/narrowing of that token would silently drop this spec"), so an exact
+# basename token is required for every new apps/web/tests/approval*.{test,spec}.ts file, not just a
+# passing substring.
+npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
+npx vitest run fwb-rule-authoring-helpers fwb-rule-authoring --reporter=dot
+npx vitest run tests/App.spec.ts attendance-date-only-format accountIdentityDisplay middleEllipsis attendance-records-route-redirect --reporter=dot
+# E-learning V0.1 (2026-08-25) + L3 manual-grading UI (2026-08-27) + L4
+# credit rules/wallet UI + content courses + titles/certificates/profile/analytics/portal
+# (2026-08-30): twenty-seven
+# whole-file tokens as a distinct targeted invocation so a name filter matching
+# zero tests cannot skip-green. Full paths avoid substring collisions with
+# future sibling specs. The L3 pair (elearning-manual-grading-client.spec.ts,
+# elearning-manual-grading-view.spec.ts) covers the standalone elearning:grade
+# queue/detail/submit UI added over the pre-existing manual-grading endpoints.
+npx vitest run \
+  tests/elearning-client.spec.ts \
+  tests/elearning-app-client.spec.ts \
+  tests/elearning-app-installation-section.spec.ts \
+  tests/elearning-analytics-admin.spec.ts \
+  tests/elearning-analytics-client.spec.ts \
+  tests/elearning-analytics-period.spec.ts \
+  tests/elearning-content-admin.spec.ts \
+  tests/elearning-content-client.spec.ts \
+  tests/elearning-content-learner.spec.ts \
+  tests/elearning-certificate-admin.spec.ts \
+  tests/elearning-certificate-client.spec.ts \
+  tests/elearning-certificate-wallet.spec.ts \
+  tests/elearning-credit-admin.spec.ts \
+  tests/elearning-credit-client.spec.ts \
+  tests/elearning-credit-wallet.spec.ts \
+  tests/elearning-learner-view.spec.ts \
+  tests/elearning-admin-view.spec.ts \
+  tests/elearning-routes.spec.ts \
+  tests/elearning-manual-grading-client.spec.ts \
+  tests/elearning-manual-grading-view.spec.ts \
+  tests/elearning-learning-profile-client.spec.ts \
+  tests/elearning-learning-profile-section.spec.ts \
+  tests/elearning-portal-admin.spec.ts \
+  tests/elearning-portal-client.spec.ts \
+  tests/elearning-portal-learner.spec.ts \
+  tests/elearning-practice-admin.spec.ts \
+  tests/elearning-practice-client.spec.ts \
+  tests/elearning-practice-learner.spec.ts \
+  tests/elearning-title-admin.spec.ts \
+  --reporter=dot
+# Attendance group list-detail closeout (#4354): these existing specs carry the
+# four-stage interaction and focused admin-rail behavior. Run them in an isolated
+# single fork because attendance-admin-regressions is intentionally a large mounted suite.
+NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
+# Employee overview 常用 icons (PR #5146 P1-3): these four specs must run in the required
+# web-tests lane, not only locally. Tokens are exact basenames; none is a substring of
+# another token already in this script (verified against useAttendanceAdmin*).
+# B0 (owner-approved approval-authoring draft-save + inspector UX slice, 2026-08-24):
+# `approval-template-authoring-save-minimum` — the NEW pure-function spec
+# (apps/web/tests/approval-template-authoring-save-minimum.test.ts) pinning the
+# save-vs-publish validation split (`validateTemplateFormFields`/`validateTemplateApprovalFlow`'s
+# `{ minimal: true }` mode, `validateDetailColumnsDraft`'s same flag, `validateTemplateSaveMinimum`,
+# `seedDraftIdentityForSave`). Bare basename token; verified unique — no existing
+# `approval-template-authoring-*` token is a substring of it or vice versa (closest neighbor
+# `approval-template-authoring-detail` diverges at the 4th word).
+npx vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
+
+# r4 item 4/5 (2026-09-10): field-config panel empty-state copy + scroll container
+# (apps/web/tests/multitable-field-config-panel.spec.ts). Own standalone `npx vitest run`
+# line, placed here rather than appended into the giant final `exec` line ~400 lines below
+# — that line is a single ~10KB physical line, and appending a second token there right
+# next to it would sit adjacent to the parallel #5602 hint/palette/retype branch's own
+# token append to that exact same line (`multitable-formula-editor`), which a 3-way merge
+# treats as a same-hunk conflict regardless of where in the line either side inserts, or
+# how much comment padding separates two SEPARATE new lines both immediately preceding it.
+# This spot is untouched by that branch and still runs under `set -euo pipefail` (line
+# 436) — a failure here aborts the script exactly like a failure in the final exec would.
+npx vitest run multitable-field-config-panel --reporter=dot
+
+# BOM备料 install page (§14 of multitable-application-model-20260830.md), 2026-08-31: four tokens
+# added. Two are NEW specs — `StockPreparationInstallRun` (the OK/SKIP/FAIL decision and the step
+# order, extracted from scripts/ops/stock-prep-acceptance-bootstrap.mjs so a reorder there reddens
+# here) and `StockPreparationInstallView` (the §14 defaults panel, the verbatim preflight fixes, the
+# SKIP rendering, and the R-11 gate on the run control). The other two are PRE-EXISTING specs that
+# this change touches and that ran in NO workflow at all: `StockPreparationWorkspace` (the tab strip,
+# which now carries the install tab) and `stockPrepPermissionMatrix` (which pins the browser mirror
+# of the plugin's permission vocabulary byte-equal, and which workbenchAccess.ts was extended in).
+# Substring collisions checked, since vitest's filter is a path substring match: `StockPreparation# InstallRun` / `StockPreparationInstallView` are each a substring of exactly one file and neither is
+# 通知下一步 (#5442) added two more that ran in NO workflow: `StockPreparationHandoff` (the only
+# witness for the handoff controls' visibility — both workbench-access mirrors say so in writing, and
+# it is also the only place the partial/failed notification copy is proven to render) and
+# `stockPreparationConfirmationQueue` (the sibling spec for the +150-line queue view the same PR
+# changed). Substring-collision checked: `StockPreparationHandoff` matches exactly one file and is not
+# a prefix of any other spec path; `stockPreparationConfirmationQueue` likewise.
+#
+# 缺件行的死胡同 (#5483) added `StockPreparationUnconfirmableHold` — the guard that a hold the
+# server cannot act on (missing_component and any future non-`duplicate_expanded_key` type)
+# disables its decide button and states the real remedy, instead of offering three actions that
+# all 409. Substring-collision checked: `StockPreparationUnconfirmableHold` matches exactly one
+# file and is not a substring of any other spec path.
+# a substring of the other; `StockPreparationWorkspace` does NOT match the sibling
+# `StockPreparationProjectWorkspaceView`; `stockPrepPermissionMatrix` matches one file. Each was
+# verified green in isolation and in this batch before being wired.
+# 「我的应用」landing page (#5392, 2026-08-31): the post-login/unknown-deep-link default lands here
+# now instead of attendance (featureFlags.ts#resolveHomePath). `my-apps-landing-view` is the NEW
+# spec (apps/web/tests/my-apps-landing-view.spec.ts — catalog-driven app cards incl. the
+# empty-catalog non-crash state and the reuse of the existing route-guard decision to hide an
+# unreachable card, plus the 最近打开的 Base cards reusing MultitableHomeView's own base-local-state
+# store). `featureFlags.plm.spec.ts` is a PRE-EXISTING spec this change touches (resolveHomePath's
+# platform-mode default moved from '/attendance' to '/home') that ran in NO workflow at all — full
+# filename, not the bare `featureFlags` token, since that bare token is also a substring of the
+# already-quarantined `featureFlags.spec.ts` (this file's own "19 pre-existing red files" list
+# above) and wiring it in would make this gate red on arrival for an unrelated file. Both verified
+# green in isolation and in this batch before being wired; neither collides with any existing token
+# in either direction (checked the full token list in this file).
+npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
+
+# App Center 双侧权限过滤 (G-7 ④, 2026-09-11): THREE tokens, all for the browser half of the App
+# Center visibility gate. The server half (`routes/platform-apps.ts#canSeePlatformApp`) is already
+# judged — plugin-tests.yml's `Run core-backend tests` step runs the whole no-DB vitest suite, which
+# collects `tests/unit/platform-apps-router.test.ts` and `tests/unit/permission-match.test.ts` by the
+# default include glob. The browser half had NO judge at all: `permission-match-parity` and
+# `platform-app-shell` are new files and `platform-app-launcher` sat in this file's quarantine list
+# (header note above), so a later commit could delete `accessibleApps` / `isPlatformAppAccessible`
+# and CI would stay green — a guard with no referee.
+#   * `permission-match-parity` — 61 cases driven by the SHARED truth table
+#     (packages/core-backend/tests/fixtures/permission-match-truth-table.json, read from disk by BOTH
+#     sides): it is the only thing that reddens when the browser algebra drifts from the server's
+#     `src/auth/permission-match.ts`, which is what would produce the "server hides it, browser shows
+#     it" fake entry G-7 forbids.
+#   * `platform-app-shell` — the shell view refuses to render an app whose declared codes the caller
+#     holds none of, and renders it on ONE hit.
+#   * `platform-app-launcher` — the same decision on the card grid (hidden / shown on one code /
+#     public when the manifest declares none).
+# Substring-collision checked the way this file requires, each token run alone with
+# `npx vitest run <token> --reporter=dot`: 1 file each. In particular `platform-app-launcher` does
+# NOT also match the sibling `tests/platform-app-actions.spec.ts`, and `permission-match-parity` does
+# not sweep in `src/utils/permission-match.ts` (not a `*.spec.ts`, never collected). All three
+# verified green in isolation and batched (72 tests) before being wired.
+# Two-point discipline, stated plainly: these tokens were NOT mirrored into approval-web-guard /
+# multitable-web-guard, because this PR's accepted diff is limited to packages/core-backend,
+# apps/web and one go-live-gate doc. This script IS the always-on required gate (web-tests.yml:77),
+# so the three gates do have a referee; mirroring into the two path-filtered guards is follow-up.
+npx vitest run permission-match-parity platform-app-shell platform-app-launcher --reporter=dot
+
+# App Center 失配账本 (G-7 4 的残留, 2026-09-11): ONE more token, and it is NOT a fourth guard - it is
+# the LEDGER of the two off-diagonal cells the visibility filter leaves open, asserted as exact sets:
+#   * visible-but-blocked - card shown, landing route refuses (stock-prep:operate, elearning:grade,
+#     elearning:stats: the entry routes demand a single :read that none of those three codes cover);
+#   * permitted-but-hidden - landing route allows, card filtered away (attendance, after-sales: their
+#     entry routes carry NO permissions key in meta at all, /p/:plugin/:viewId being the ungated
+#     wildcard, while their manifests declare 5 and 4 codes).
+# It is wired here because the go-live gate cites both cells as KNOWN-AND-ACCEPTED; without a referee
+# the cited contents would drift the moment a manifest or a route meta changes, and the doc would
+# silently become a lie. Redness here means "update the 4-residual ledger or get the owner decision",
+# not "a gate broke". Substring collision checked as this file requires: run alone, the token matches
+# exactly ONE file (Test Files 1 passed) and is matched by none of the three tokens above.
+npx vitest run platform-app-entry-mismatch-inventory --reporter=dot
+
+# 审批详情实例一致性 (instance consistency), 2026-09-06: TWO new tokens.
+#   * `approval-detail-instance-consistency` — the mounted ApprovalDetailView + REAL approval store
+#     spec (route switch clears the outgoing instance, write verbs act on the displayed instance,
+#     failed load shows the error state with a retry).
+#   * `approval-store-detail-generation` — the approvals-store unit spec (out-of-order detail and
+#     history responses, switch/failure clearing, action-result publication).
+#
+# Both are BARE BASENAMES, as packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts
+# requires (its T1 tier reds any apps/web/tests/approval*.spec.ts whose basename is not an exact
+# token here — an incidental substring match is explicitly rejected). That constraint interacts with
+# vitest's default include glob, which DOES collect apps/web/verification/*.spec.ts (Playwright
+# files that fail to collect under vitest): the browser-lane sibling for this change is therefore
+# named `approval-instance-consistency-race.spec.ts`, which neither token matches as a substring —
+# verified by running each token in isolation ("Test Files 1 passed").
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against all 437 tokens already in
+# this file (counting rule, so the figure stays re-derivable rather than rotting into a bare digit:
+# join backslash continuations, drop comment lines, take every whitespace-separated argument of an
+# `npx vitest run` command that does not start with `-`; that yields 437 before this change and 439
+# after, with no duplicates). Neither new token contains, nor is contained by, any existing one.
+# In particular the three pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key) are unrelated to
+# `approval-detail-instance-consistency` in both directions. Both verified green in isolation
+# (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
+npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
+
+# 视角化决策可用性 (viewer-scoped decision affordance), 2026-09-07: ONE token added —
+# `approval-detail-can-decide-current-node`, a NEW spec
+# (apps/web/tests/approval-detail-can-decide-current-node.spec.ts) over the mounted
+# ApprovalDetailView. It pins the six decision verbs against the server-resolved
+# `canDecideCurrentNode`: all six render on `true`, none on `false` (with `canAct` still true), all
+# six on ABSENT (older backend ⇒ today's behaviour, so absence never reads as deny), none when
+# `canAct` itself is false, and the #5528 instance-consistency gate still refusing on top of it.
+# It also pins the disclosed non-changes — 评论 / 撤回 / 催一下 keep their present reach — and
+# carries a fixture control proving the six verbs are otherwise eligible, so "no button" can only
+# be this field talking.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file (same counting rule as the paragraph above: join backslash continuations, drop comment lines,
+# take every non-flag positional of each `vitest run` command — 439 before this change, 440 after,
+# no duplicates): no existing token contains the new one, and the new one contains no existing
+# token. In particular the four pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key, approval-detail-instance-consistency)
+# are unrelated to it in both directions. Verified green in isolation
+# (`npx vitest run approval-detail-can-decide-current-node --reporter=dot` → "Test Files 1 passed")
+# and in this batch before wiring.
+npx vitest run approval-detail-can-decide-current-node --reporter=dot
+
+# 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
+# packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
+# these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
+# explicitly rejected there).
+#   * `approvalNavTodoBadge` — the app-shell 待办 badge on the top-nav 审批中心 entry: it is bound to
+#     the fetched pending count, moves on a realtime push without a second read, keeps the nav
+#     link's own text unchanged, hides on zero/failure, and renders for approvals:read only.
+#   * `approvalNavDelegationEntry` — the non-admin /my-delegation entry in the account area of the
+#     nav, plus the tripwires that the ADMIN 委托管理 button and the self-service route's own
+#     requiresAuth-only meta were both left as they were.
+#   * `approvalBatchTransferView` — the admin 批量转交 page over the EXISTING bulk reassign
+#     endpoint: the route's admin gate (with both a positive and a negative control on the same
+#     guard helper), the pinned request path/query/body, the confirm-before-submit step, and the
+#     per-row outcomes including the "server answered about neither" case.
+#
+#   * `approvalNavBatchTransferEntry` (round 2) — the 批量转交 NAV ENTRY's gate: it renders only when
+#     the SERVER's DB-backed approval-administrator capability says so, is absent on `denied` AND on
+#     "could not determine", and an ordinary user's shell never issues the read at all.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file using this file's own counting rule (join backslash continuations, drop comment lines, take
+# every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
+# that yields 440 before this change and 444 after, with no duplicates). None of the four new
+# tokens contains, nor is contained by, any existing one — in particular the neighbouring
+# `approvalCenterRemindBadge` / `approvalCenterUnreadBadge` share only the `approval` prefix with
+# `approvalNavTodoBadge`, and `approvalDelegationForm` /
+# `approvalDelegationRoute` / `approvalDelegationStatus` / `approvalDelegationView` /
+# `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions, and no
+# existing token is a prefix of `approvalBatchTransferView` nor it of one; `approvalBatchTransferView`
+# and `approvalNavBatchTransferEntry` do not contain each other either. Each verified green in
+# isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+
+# 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
+# batch below, StockPreparationSourcePreflight — a NEW spec
+# (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView
+# component, because the source panel lives in the 数据来源与体检 page beside the deployment preflight. It
+# pins the four measured lines, the topology-mismatch sentence (the one that names the zero-row
+# outcome the old behaviour produced silently), the gate on the run control, and the values-free
+# rendering. Substring collisions checked in BOTH directions, as this file requires: the token
+# matches exactly one file, is not a substring of StockPreparationInstallView /
+# StockPreparationInstallRun / StockPreparationWorkspace / StockPreparationProjectWorkspaceView, and
+# none of those is a substring of it. Verified green in isolation and in this batch before wiring.
+# 项目备料页 + 一线拉取 (#5460), 2026-09-03: SEVEN tokens added to the batch below, and an
+# executable enrolment pin added beside them so this can never silently happen again —
+# packages/core-backend/tests/unit/stock-prep-web-ci-coverage-enumeration.test.ts sweeps
+# apps/web/tests/StockPreparation*.spec.ts on every run of the required test (18.x)/(20.x) contexts
+# and fails on any file that is not tokenized here. An adversarial pass found that THREE new board
+# specs (StockPreparationProjectBoard / ProjectSync / ProjectSyncPanel) ran in no workflow at all,
+# and that FOUR older stock-prep specs (LargeBomPull, LargeBomPullPanel, OperatorProjectDirectory,
+# SourceBinding) had been dark since they landed. All seven verified green in isolation and in this
+# batch before being wired.
+#
+# SUBSTRING COLLISIONS, checked in BOTH directions as this file requires:
+#   * StockPreparationProjectSync    IS a substring of StockPreparationProjectSyncPanel.spec.ts, and
+#     StockPreparationLargeBomPull   IS a substring of StockPreparationLargeBomPullPanel.spec.ts —
+#     so all four of those use the .spec.ts-SUFFIXED form, which each match exactly one file
+#     ("...ProjectSync.spec.ts" is not a substring of "...ProjectSyncPanel.spec.ts").
+#   * StockPreparationProjectBoard / StockPreparationOperatorProjectDirectory /
+#     StockPreparationSourceBinding are unique: none is a substring of any existing token, and no
+#     existing token is a substring of them (in particular StockPreparationProjectWorkspaceView and
+#     StockPreparationSourcePreflight neither contain nor are contained by any of them).
+#
+# 缺件清单 (W3a) added `StockPreparationMissingComponents` — the missingComponentsOf() clamp +
+# StockPreparationProjectSyncPanel's 缺件清单 disclosure (render/empty-state/truncated/复制/导出 CSV
+# with the CSV-injection guard). Substring-collision checked both ways per this file's own
+# discipline: `StockPreparationMissingComponents` is not a substring of, and does not contain, any
+# other token already in this list (in particular it shares only the common `StockPreparation`
+# prefix with the other stock-prep tokens above and below it, none of which extend into
+# "MissingComponents").
+#
+# 缺件清单's B3 fix (the CSV/formula-injection guard was made opt-in so it could not silently rewrite
+# the eight existing PLM CSV exports) added a pinning suite to `usePlmExportActions.spec.ts` — a file
+# that was NOT previously tokenized here at all and so ran in no required workflow. Token
+# `usePlmExportActions` added: verified a live substring check against every token already in this
+# list (358 at the time) turns up zero collisions in either direction, and it matches exactly one
+# file on disk (`usePlmExportActions.ts`, the source module, is not `*.spec.ts` and is never
+# collected as a test by vitest's default include glob regardless of this token).
+#
+# 接入向导「开始使用」(P0-4, 2026-09-08) added `StockPreparationGettingStarted` — a NEW spec for the
+# new six-step wizard component that mounts at the top of the install tab. Substring-collision
+# checked: `StockPreparationGettingStarted` shares only the common `StockPreparation` prefix with
+# every sibling token in this list, none of which extend into "GettingStarted", and it is not a
+# substring of any of them either; it matches exactly one file on disk. The install tab's own mount
+# point contract (the wizard renders, first, ahead of every existing card) is pinned in
+# `StockPreparationInstallView.spec.ts`, already tokenized above — not a new token, since the wizard's
+# OWN behaviour has the new file.
+#
+# 任务首页 + 下一步条 + 状态徽标 (P0-2/P0-3/P0-6, 2026-09-08): ONE token added,
+# `StockPreparationOperatorHome` — the NEW spec (apps/web/tests/StockPreparationOperatorHome.spec.ts)
+# covering operatorNextStep.ts's seven priority-ordered rules; the "三处同词一致" cross-component
+# posture check, parameterised over every posture key (home card / workspace title / composed sync
+# panel all rendering the SAME `stockPrepPosture()` string for the same state); G3 silent
+# predread-failure degradation and G4's "still in flight is not an empty state"; the three home
+# empty states' mutually exclusive copy; G1's filled-primary-button count (the falsifiable form of
+# 每屏一个主操作位, which had no witness before); the 本机记忆 module's storage contract (exactly
+# three fields, tenant+principal scoping, `running` never persisted, corrupt payload degrades); the
+# directory ∪ memory merge direction; and §4.2 rule 4 surviving the tab unmount that is the only way
+# to reach it. Substring collision checked in BOTH directions per this file's discipline: no existing
+# `StockPreparation*` token is a substring of `StockPreparationOperatorHome` (the closest neighbour,
+# `StockPreparationOperatorProjectDirectory`, diverges after `StockPreparationOperator`), and it is
+# not a substring of any of them either. Verified green in isolation
+# (`npx vitest run StockPreparationOperatorHome --reporter=dot`) and in this batch before wiring.
+#
+# 向导第⑤步真实授权检测 (P1-3, 2026-09-08): ONE token added,
+# `StockPreparationOnboardingReadiness` — the NEW spec
+# (apps/web/tests/StockPreparationOnboardingReadiness.spec.ts) for the service that reads the
+# PLATFORM role catalog and answers 「有没有角色同时持有 stock-prep:read 与 stock-prep:operate、里面
+# 有几个人」: the conjunction (a role holding one code does not count), 成员 0 人 landing on ⚠ rather
+# than ✔, every unanswerable read (403/401/500/network/HTML-for-JSON/envelope-not-ok/unrecognised
+# shape) collapsing to `unknown` and never to 「还没有这样的角色」, and the reverse assertion that the
+# projection carries role names and integers only — no user id, email or display name, whatever the
+# server sends. The wizard's four DOM verdicts live in `StockPreparationGettingStarted`, already
+# tokenized above. Substring collision checked in BOTH directions: no existing token is a substring
+# of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
+# `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
+# substring of any of them; it matches exactly one file on disk.
+# 「记录与排查」面板 (P1-4/P1-5, 暗装, 2026-09-08) added `StockPreparationOpsPanel` — the NEW spec
+# (apps/web/tests/StockPreparationOpsPanel.spec.ts) for the audit-reverse-lookup + deployment-health
+# panel: 六格三态 (idle/ready/forbidden/unavailable, never a fourth colour), `allSettled` isolation
+# (one auto-cell's read failing leaves its siblings rendering fine), the 未检查 neutral state (no
+# success/warning class before a manual check runs), 计划任务's unconditional 未接入监控, the reverse
+# assertion that a raw `actor` handle / email never reaches the primary audit row (only the per-row
+# 技术详情 disclosure), the three-line disclaimer surviving every search branch, the empty-state and
+# 403 wording, and an anti-vacuity check that `STOCK_PREP_AUDIT_ACTION_PLAIN` covers all 14 actions
+# read directly off `stock-preparation-audit-store.cjs`'s own `STOCK_PREP_AUDIT_ACTIONS` (same
+# discipline as `StockPreparationPosturePlainLanguage.spec.ts`'s manifest read — that file is
+# text-scraped instead of required only because IT pulls a heavy dependency chain; the audit store
+# module requires nothing but `node:crypto`, so a direct `require` here is safe). This wave's panel
+# is NOT mounted anywhere yet — no rail exists (D3 is P1-1's job) — so it ships dark; the spec is the
+# whole coverage surface until the wiring PR lands. Substring collision checked in both directions
+# against every token above: `StockPreparationOpsPanel` shares only the common `StockPreparation`
+# prefix with its closest neighbours (`StockPreparationOperatorHome` / `...OperatorProjectDirectory`
+# diverge after `...Operator`; `StockPreparationProjectSyncPanel` / `...LargeBomPullPanel` diverge
+# before "Panel"), and it matches exactly one file on disk. Verified green in isolation
+# (`npx vitest run StockPreparationOpsPanel --reporter=dot`) and in this batch before wiring.
+#
+#
+# 错误码对照抽屉 + 安装页三分区重排 (P1-6/P1-7, 2026-09-08): ONE token added,
+# `StockPreparationCodeHelp` — the NEW spec (apps/web/tests/StockPreparationCodeHelp.spec.ts) for the
+# new `StockPreparationCodeHelpPanel.vue` / `codeHelp.ts` reverse-lookup drawer over six of
+# `plainLanguage.ts`'s code-keyed tables: H1 防漏 (rendered row count == an INDEPENDENTLY-imported sum
+# of the six raw tables' key counts, so a future silent drop is caught even if a table's own key count
+# later changes), H2 搜索 (code-substring and prose-substring narrowing, case-insensitive, empty query
+# = full list), H3 双语 (the same entry renders zh under zh-CN and en otherwise), H4 值面反向断言 (no
+# entry looks email- or part/drawing-number-shaped; the rendered panel never contains a realistic
+# planted business value). `StockPreparationInstallView.spec.ts` gained three P1-7 cases in the SAME
+# file (already tokenized) covering the three-region reorg this drawer's mount point is part of — no
+# new token needed for those. Substring-collision checked both directions: no existing
+# `StockPreparation*` token is a substring of `StockPreparationCodeHelp` (none extend into
+# "CodeHelp"), and it is not a substring of any of them either; it matches exactly one file on disk.
+# Verified green in isolation (`npx vitest run StockPreparationCodeHelp --reporter=dot`) and in this
+# batch before wiring.
+#
+#
+# 左栏 rail（工作 / 部署与接入 / 帮助）+ D2 落地页 (P1-1, 2026-09-08): ONE token added,
+# `StockPreparationRail` — the NEW spec (apps/web/tests/StockPreparationRail.spec.ts) for the grouped
+# vertical rail that replaced the horizontal tab strip, and for the D2=A landing that came with it:
+# R-01 it is STILL one tablist (same `stock-prep-tabs` container, role=tablist, the new
+# aria-orientation=vertical, every item still role=tab under its ORIGINAL `stock-prep-tab-<key>`, and
+# the role=tab count equals the testid count so a GROUP HEADING can never become a tab); R-02 per-item
+# filtering for four tiers asserted as the exact SET of visible keys (纯 read / operate∧read /
+# stock-prep:admin / 平台管理员) plus a group with no visible item disappearing WHOLE rather than
+# leaving an empty heading; R-03 深度工具 ▾ folds all seven legacy MVP tabs, starts `hidden`, opens on
+# click, and a folded tab still activates its panel (折叠不下线); R-04 the narrow-screen form is a media
+# query rather than a second, conditionally-rendered container (the R11 lesson from
+# ApprovalCenterView's no-op split div); the four D2 landing postures at the DOM level
+# (未装完→开始使用 / 装完→记录与排查 / 读不到→开始使用 / 一线→今天要处理, the last of which also
+# asserts the operator issues NO preflight read at all); `?tab=` accepting old and new keys; and the
+# 位置纪律 pin that `stock-prep-admin-action-notice` is still outside the whole v-if/v-else-if chain.
+# `StockPreparationWorkspace.spec.ts` / `StockPreparationProjectBoard.spec.ts` /
+# `stockPrepPermissionMatrix.spec.ts` all changed in the SAME wave and are already tokenized — no new
+# token needed for those. Substring-collision checked both directions: no existing `StockPreparation*`
+# token is a substring of `StockPreparationRail` (none extend into "Rail"), and it is not a substring
+# of any of them; the three other rail specs on disk (AttendanceAdminRail, IntegrationWorkbenchRail,
+# meta-sheet-view-rail) neither contain nor are contained by it, and `StockPreparationRail` matches
+# exactly one file. Verified green in isolation (`npx vitest run StockPreparationRail --reporter=dot`)
+# and in this batch before wiring.
+# 09-10 测试反馈第 8 条(模板中心不能新建模板),2026-09-10。新增 token
+# `multitable-template-save-as` —— 对应新 spec apps/web/tests/multitable-template-save-as.spec.ts
+# (「把 Base 存为模板」入口的权限显隐、表单校验、warnings 展示、删除后强制刷新)。
+# 两点纪律照旧:同一个 token 也加进 multitable-web-guard.yml 的 vitest 过滤名与路径触发。
+# 撞名检查:它既不是任何既有 token 的子串,也不包含任何既有 token —— 最近的邻居
+# `multitable-template-center-view` / `multitable-template-detail-view` 只共享
+# "multitable-template-" 前缀,第三段就分叉(save-as vs center-view/detail-view);
+# 仓库里以它为子串的文件只有那一个新 spec。
+#
+# Report item O-8 (approval UI locale consistency), 2026-09-08. Token `templateCenterI18n` added
+# for the NEW spec apps/web/tests/templateCenterI18n.spec.ts — TemplateCenterView.vue previously
+# never called useLocale() at all (every string was an unconditional Chinese literal); this pins
+# the en/zh mount assertions across the admin table, the requester gallery, the archive/unarchive
+# dialog + toasts, and the mechanical no-stray-CJK guard over the converted file. Inserted next to
+# the neighbouring `approvalTemplateCenterCategory`/`approvalTemplateGovernance` tokens (same
+# component, same directory) whose fixture Chinese it does not disturb — that spec was separately
+# updated to pin `useLocale().setLocale('zh-CN')` explicitly, since one of its assertions
+# (`visibilityScopeLabel()`'s "全员可见"/"角色 N" output) is now locale-conditional rather than an
+# unconditional literal (that pin also means the file no longer exercises an en path for
+# TemplateCenterView.vue — templateCenterI18n.spec.ts is the sole en coverage for that view).
+#
+# Same slice: token `approvalCenterDesktopEmptyTextI18n` for the NEW spec
+# apps/web/tests/approvalCenterDesktopEmptyTextI18n.spec.ts — ApprovalCenterView.vue's DESKTOP
+# `<ApprovalCenterTable>` `:empty-text` (5 tabs) was an unconditional Chinese-literal ternary even
+# though the MOBILE `<ApprovalMobileList>` path one prop over already read the same locale-aware
+# computed (renamed mobileEmptyText -> tabEmptyText, now feeding both). This is a FRESH COPY of
+# approval-center.spec.ts's own mock/stub harness (not an edit to that shared ~40-test file) with
+# one addition: the local `ElTable` stub renders `slots.empty` when `data` is empty, mirroring the
+# real el-table's `<template #empty>` — a slot the REQUIRED-lane `approvalCenterTable.spec.ts`'s
+# own stub does not render (it drives ApprovalCenterTable.vue with `empty-text` as an input prop
+# and never exercises the slot), so this new spec is the only required-lane coverage that actually
+# renders the empty state through a component tree. Inserted next to the neighbouring
+# `approvalCenterTable`/`approvalCenterUnreadBadge`/`approvalCenterSourceFilter`/
+# `approvalCenterRemindBadge` tokens (same view).
+#
+# SUBSTRING COLLISION, checked mechanically in BOTH directions against every token already in this
+# file (this file's own counting rule: join backslash continuations, drop comment lines, take every
+# non-flag positional of each `vitest run` command — 444 before `templateCenterI18n`, 445 after,
+# 446 after `approvalCenterDesktopEmptyTextI18n`, no duplicates): neither new token is contained by,
+# nor contains, any existing token (in particular `multitable-template-center-view` /
+# `multitable-template-detail-view` share only the unrelated hyphenated substring
+# "template-center-view"/"template-detail-view", not `templateCenterI18n`'s camelCase form; and
+# `approvalCenterTable`/`approvalCenterUnreadBadge`/`approvalCenterSourceFilter`/
+# `approvalCenterRemindBadge` share only the common `approvalCenter` prefix with
+# `approvalCenterDesktopEmptyTextI18n`, none extending into "DesktopEmptyTextI18n"). Each verified
+# green in isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this
+# batch before wiring.
+#
+# 项目查询 (P2-1, 设计稿 §6.3 第一行, 2026-09-08): ONE token added, `StockPreparationProjectQuery` —
+# the NEW spec (apps/web/tests/StockPreparationProjectQuery.spec.ts) for the query panel: the two
+# filter levels ANDed with the search box, the four URL state bits restored and mirrored back, the
+# 「只有 sel 变化才读看板、而且只读一次」 contract, the four empty states' mutually exclusive copy and
+# `data-empty-state` values, 「后端没答来源」 disabling the second level without emptying the list, the
+# chip counts being taken under the other two filters (a count is a promise about what pressing it
+# shows), the row-count cell's three branches worded exactly as 项目备料页 words them, and the
+# values-free reverse assertions on the search term (no storage, no request, no log).
+#
+# 收尾小修波 D4 共享常量 (hardening wave, 2026-09-08): ONE token added, `StockPreparationHomeQueryLabels`
+# — the NEW spec (apps/web/tests/StockPreparationHomeQueryLabels.spec.ts) for the shared status-chip
+# label map and pull-banner priority resolver that 今天要处理 and 项目查询 both now call
+# (`stockPrepHomeStatusLabel` / `resolveStockPrepPullBanner`, operatorHomeCards.ts / plainLanguage.ts)
+# instead of each carrying its own byte-identical copy. Covers: all five chip keys have a bilingual
+# pair and the frozen key order; the three-sentence pull-banner priority chain (unreadable > capped >
+# incomplete) plus the `undefined`-is-not-`false` guard; and a SOURCE-LEVEL guard (reads both `.vue`
+# files off disk) that neither view re-introduces a local `FILTER_LABELS`/`STATUS_LABELS` table or its
+# own `pullTargetReady === false` chain — a mount-based check would only prove today's wiring, not that
+# a later edit cannot quietly regrow the duplication this file exists to close.
+# Substring-collision checked both directions: no existing `StockPreparation*` token is a substring of
+# `StockPreparationHomeQueryLabels` (the two nearest, `StockPreparationOperatorHome` and
+# `StockPreparationProjectQuery`, diverge right after `StockPreparation` — "OperatorHome" and
+# "ProjectQuery" are neither prefixes nor suffixes of "HomeQueryLabels"), and it is not a substring of
+# any of them either. It matches exactly one file under apps/web/tests.
+#
+# WHY IT IS HERE AND NOT ONLY IN THE GUARD LANE. `web-tests` is the one required front-end context
+# with no path filter, so a stock-prep spec that is only tokenized in
+# scripts/ops/integration-guard-run-web-specs.sh runs at a WEAKER strength than every sibling
+# stock-prep spec. The enrolment pin
+# (packages/core-backend/tests/unit/stock-prep-web-ci-coverage-enumeration.test.ts) enforces exactly
+# that, sweeping apps/web/tests/StockPreparation*.spec.ts live on every `test (18.x)`/`test (20.x)`
+# run — this file's absence from the list below turned that guard RED, which is how it was caught.
+#
+# SUBSTRING COLLISIONS, checked in BOTH directions as this file requires: no token in the exec line
+# below is a substring of `StockPreparationProjectQuery`, and it is not a substring of any of them.
+# The four nearest neighbours are `StockPreparationProjectBoard`,
+# `StockPreparationProjectSync.spec.ts`, `StockPreparationProjectSyncPanel.spec.ts` and
+# `StockPreparationProjectWorkspaceView`, all of which diverge from it right after
+# `StockPreparationProject`. It matches exactly one file under apps/web/tests.
+# TemplateDetailView.vue i18n retrofit (report item O-8 continuation, PR #5545, 2026-09-08): ONE
+# token added, `templateDetailI18n` — the NEW spec (apps/web/tests/templateDetailI18n.spec.ts) for
+# TemplateDetailView.vue, which previously never called useLocale() at all (every string was an
+# unconditional Chinese literal, and the StatusTag carried `force-locale="zh"`) — the DETAIL-view
+# counterpart to TemplateCenterView.vue's own O-8 retrofit (`templateCenterI18n`, already in this
+# file). Covers: en/zh mount sweeps over the full page chrome (header/category/visibility/SLA
+# editors, form-fields + field-visibility-rules + approval-graph + version-history sections, meta
+# row), the status badge following the shell locale with `force-locale` removed, a POST-MOUNT
+# locale-flip assertion (mount zh -> flip the shell locale -> assert re-render, then back — the
+# property a `const t = isZh.value ? ZH : EN` evaluated once at setup cannot satisfy), category/
+# SLA/visibility save-toast and validation-error locale coverage, archive/unarchive dialog title +
+# buttons + toast, the restore-version confirm dialog/toast, the view-changes diff panel's
+# dynamic chrome (mode options, diff-summary labels), a label-table completeness assertion over
+# BOTH the flat `templateDetailLabels.ts` ZH/EN pair and its eight per-value MAP_PAIRS (field
+# type/node type/approval mode/empty-assignee policy/node-timeout effect/version status/version-
+# change kind/version-change entity), and a CJK guard over TemplateDetailView.vue itself that
+# extracts and vets every `isZh.value ? <zh> : <en>` inline ternary this slice added (12 today —
+# a dynamic count/sentence a table key would only awkwardly hold) plus two NAMED, pre-existing,
+# out-of-scope Chinese literals it does not touch (the `NON_ALL_SCOPE_UNIT_LABEL` constant pinned
+# verbatim by approval-member-identity-coverage-enumeration.spec.ts, and the two version-diff-
+# overlay node-label `'流程节点'` fallbacks shared with that unconverted module family) — anything
+# else CJK in the file still reds this guard.
+#
+# Two existing files touched in the SAME slice, already tokenized elsewhere in this file (no new
+# token needed): `approvalTemplateVersionHistory.spec.ts` gained an explicit
+# `useLocale().setLocale('zh-CN')` pin in its `beforeEach` (its own assertions are all Chinese-
+# literal and, before this slice, always ran under the view's only — hardcoded — output; the pin
+# PRESERVES that original intent now that the view is locale-aware, mirroring the same fix
+# templateCenterI18n.spec.ts's own header documents for approvalTemplateCenterCategory.spec.ts).
+# `approval-member-identity-coverage-enumeration.spec.ts` had ONE ALLOWLIST entry's pinned text
+# updated (`模板 Key: {{ template.key }}` -> `{{ t.metaKeyLabel }} {{ template.key }}`, same
+# disposition/group — the `.key` mustache itself is unchanged, only its label text became
+# bilingual) after that census's own mechanical scan caught the literal going stale.
+#
+# SUBSTRING COLLISION, checked mechanically in both directions against every token already on the
+# final exec line at the time (369 before, 370 after on that exec line only; join backslash
+# continuations, drop comment lines, take every non-flag positional of the exec line's `vitest
+# run` command — the union across all `vitest run` commands in this file was larger still): no
+# existing token is a substring of `templateDetailI18n`, and it is not a substring of
+# any of them — in particular `templateCenterI18n` shares only the `template` prefix and the
+# `I18n` suffix, diverging at `Center`/`Detail`; the hyphenated `multitable-template-detail-view`
+# shares only "template-detail-view", not `templateDetailI18n`'s camelCase form. Matches exactly
+# one file under apps/web/tests. Verified green in isolation (`npx vitest run templateDetailI18n
+# --reporter=dot` -> "Test Files 1 passed", 13/13 then; 14/14 after a later coverage-gap fix added
+# one more test to the same file) and in this batch before wiring.
+# P3-4 (2026-09-08): the whole-execution re-run button on AutomationExecutionsView added
+# `apps/web/tests/automation-rerun-execution.spec.ts` (view-level: admin/state gating, confirm-
+# dialog consequence enumeration, cancel/confirm/failure paths, i18n, and a pin on the untouched
+# load-failure Retry) plus two client wire-contract tests in the ALREADY-tokenized
+# `multitable-client.spec.ts` (no new token needed there). Token `automation-rerun-execution`
+# checked both directions against all 359 tokens then in this list: zero collisions, and it
+# matches exactly one file on disk.
+# Record inspector v3 PR-B1 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
+# §3 "PR-B" B1): ONE token added to the batch below, `multitable-record-fields-sections` — the NEW spec
+# (apps/web/tests/multitable-record-fields-sections.spec.ts) for the details tab's sectioned field list
+# (view order + "hidden in this view", the N3 property-hidden negative golden, legacy flat path parity),
+# the hide-empty toggle (isEmptyValue-shared predicate, snapshot, five exemption positive controls),
+# MetaCellRenderer link chips (clickable iff fetchRecord — HI-1 mechanical), the copy-link
+# disabled-when-clipboard-absent gate, the FP-local textarea mod+Enter / Enter-advance keys, and the
+# 3-up gallery CSS provision. Placed right after `multitable-record-fields-panel` (specs before flags).
+# SUBSTRING COLLISIONS, checked in BOTH directions as this file requires (mechanically, by the edit
+# script that inserted the token, against every token then on the exec line): no existing token is a
+# substring of `multitable-record-fields-sections` and it is a substring of none — in particular
+# `multitable-record-fields-panel` and `multitable-record-fields-sections` share only the
+# `multitable-record-fields-` prefix, and the bare `multitable-record-inspector` / `multitable-record-
+# drawer*` tokens neither contain nor are contained by it. Verified green in isolation and in this
+# batch before wiring. The same token is added to multitable-web-guard.yml's own run-list (two-point
+# discipline, header of this file), together with path triggers for the spec, MetaRecordFieldsPanel.vue
+# and the new MetaRecordFieldSection.vue, which that advisory guard previously did not trigger on.
+# 多维表 × 审批 阶段二 PR 2b 前端 (2026-09-15, docs/development/takeover-beiliao-20260821/
+# multitable-approval-phase2-record-submit-design-20260915.md §5 + §6 前端行): TWO tokens added to the
+# batch below, `multitable-record-approval-submit` and `multitable-record-approval-panel` — the NEW specs
+# apps/web/tests/multitable-record-approval-submit.spec.ts (the kebab 送审 entry's four-part gate incl.
+# the no-apiClient/no-sheetId shapes the frozen drawer specs mount, the FROZEN MetaRecordDrawer shell's
+# 1:1 prop/emit forwarding, the dialog's server-side `{status:'published'}` template filter asserted on the
+# mock's ARGUMENTS, the unsupported-field-type refusal, the 409 in-flight notice with/without a router, the
+# success emit, plus the four new client methods' URL/body/normalization/typed-409 contract) and
+# apps/web/tests/multitable-record-approval-panel.spec.ts (the panel's first-expand-only fetch, its
+# self-gating absence without client/sheetId/record, the router-less request-number fallback, StatusTag
+# rendering, the values-free drift COUNT, and the record-switch / version-bump / refreshToken re-read rules).
+# Both files are NEW, so no existing token's coverage changes.
+# SUBSTRING COLLISION, checked mechanically in BOTH directions against every token in this file (same
+# counting rule this file documents: join backslash continuations, drop comment lines, take every non-flag
+# positional of each `vitest run` — 485 before, 487 after, no duplicates): no existing token is a substring
+# of either new token, and neither is a substring of any existing token. The nearest neighbours are
+# `multitable-record-attachments-panel` / `multitable-record-fields-panel` / `multitable-record-history-panel`
+# (they share only the `multitable-record-` prefix and the `-panel` suffix, diverging at `approval` vs
+# `attachments`/`fields`/`history`), `multitable-record-inspector*` and `multitable-record-drawer*` (neither
+# contains nor is contained by them), and the hyphenated `approval-*` tokens (e.g. `approval-record-link`),
+# which share only the word `approval` and are NOT substrings of `multitable-record-approval-*`. Each token
+# matches exactly ONE file under apps/web (verified by a full non-node_modules path sweep). Verified green in
+# isolation (`npx vitest run multitable-record-approval-submit --reporter=dot` -> 25/25;
+# `npx vitest run multitable-record-approval-panel --reporter=dot` -> 14/14) and in this batch before wiring.
+# Two-point discipline (header of this file): these two tokens (`multitable-record-approval-submit`,
+# `multitable-record-approval-panel`) ARE mirrored into .github/workflows/multitable-web-guard.yml (both
+# `on:` path blocks carry the two new components + the two specs; the run-list carries both tokens) —
+# landed in the same PR with a workflow-scoped push. This script remains the always-on required gate
+# (web-tests.yml:77); the guard is the path-filtered second opinion.
+# 审批进度卡片 (Q17): ONE token added to the batch below, `multitable-record-approval-progress` -- the NEW
+# spec apps/web/tests/multitable-record-approval-progress.spec.ts. It pins the record drawer's per-
+# submission 「查看进度」 card: the `approvals:read` FE gate (nothing rendered and NO instance read without
+# it), the first-expand-only + cached pair of reads (getApproval + getApprovalHistory in parallel), the
+# 步骤/待处理人/历史 rendering incl. BOTH the platform branch's snake_case history rows and the camelCase
+# DTO shape, the 20-row cap, the 403/404/other mapping parsed out of apiGet's generic `API error: NNN`
+# throw, the refreshToken/version cache invalidation, 完成时间 on terminal rows only, and a router-less
+# mount adding no NEW [Vue warn]. The approvals api module is vi.mock'ed at module level -- no real HTTP.
+# FIX ROUND (same token, 5 more tests): the four degradation sentences are now pinned by EQUALITY plus a
+# negative on the thrown message (a `toContain` stayed green if someone appended `error.message`), the
+# 当前待处理人 line by EXACT rendered text (id-absence could not see the ACTIVE-at-current-node filter
+# disappear), the runtime half of the gate by a permission-revoke race, a detail payload that echoes a
+# DIFFERENT instance id is refused, an action code colliding with an Object.prototype key renders RAW,
+# and a null/scalar/empty history element is dropped instead of rendering a 「未知」 ghost row.
+# SUBSTRING COLLISION, checked mechanically in BOTH directions against every token in this file (same
+# counting rule this file documents: join backslash continuations, drop comment lines, take every
+# non-flag positional of each `vitest run`): NO existing token is a substring of
+# `multitable-record-approval-progress`, and it is a substring of none -- the two nearest neighbours
+# `multitable-record-approval-submit` / `multitable-record-approval-panel` share only the
+# `multitable-record-approval-` prefix and diverge at `progress` vs `submit`/`panel`. The token matches
+# exactly ONE file under apps/web (verified by a full non-node_modules path sweep). Verified green in
+# isolation (`npx vitest run multitable-record-approval-progress --reporter=dot` -> 28/28 after the fix
+# round, 23/23 when first wired) and alongside both sibling approval specs (95/95).
+# Two-point discipline (header of this file): the same token is mirrored into
+# .github/workflows/multitable-web-guard.yml (both `on:` path blocks carry the new spec; the run-list
+# carries the token).
+# 自动化往返回归 (2026-09-15, #5739 泛化 / #5756 的覆盖面补齐): ONE token added to the batch below,
+# `multitable-automation-manager-roundtrip` -- the NEW spec
+# apps/web/tests/multitable-automation-manager-roundtrip.spec.ts. It drives the REAL chain, not a
+# fixture: captured fetchFn -> REAL MultitableApiClient.listAutomationRules -> useMultitableAutomations
+# -> MetaAutomationManager 卡片「编辑」 -> MetaAutomationRuleEditor -> 未改动「保存」 -> captured PATCH
+# body, asserting that an action config key the editor does not model (`x_customerExtension`) survives
+# in BOTH halves of that body (the V1 `actions[]` AND the legacy `actionConfig` mirror, which
+# parseUpdateRuleInput takes verbatim) for the 12 round-trippable action types and for the
+# template-routed `approval.completed` shape reported from site; a 14th case PINS current behaviour
+# for a non-array `actions`. This is exactly the coverage the already-tokenized
+# `multitable-automation-rule-editor` spec cannot give: that one mounts the editor with a HAND-BUILT
+# `rule` prop, i.e. downstream of the list-GET normalization, the composable and the manager's
+# rule->editor hand-off, which is where the key can actually be lost.
+# SUBSTRING COLLISION, checked mechanically in BOTH directions against every token on this file's
+# `vitest run` lines (same counting rule documented above: join backslash continuations, drop comment
+# lines, take every non-flag positional -- 487 before, 488 after, no duplicates): NO token contains
+# `multitable-automation-manager-roundtrip`, and the ONLY existing token that is a substring of it is
+# the bare `multitable-automation-manager`, which therefore already matches this file INCIDENTALLY
+# (`npx vitest run multitable-automation-manager` now collects 2 files: multitable-automation-manager
+# .spec.ts + multitable-automation-manager-roundtrip.spec.ts). The explicit token is added anyway, per
+# this file's established discipline of never relying on incidental substring luck for a new spec's
+# coverage (see the S4 `multitable-comments-panel` and `multitable-record-inspector-resize` precedents
+# above) -- a future rename or narrowing of `multitable-automation-manager` (e.g. to
+# `multitable-automation-manager.spec.ts`, the disambiguation form used elsewhere in this file) must
+# not silently drop this file. The new token matches exactly ONE file in a full non-node_modules sweep
+# of all 2309 spec/test files in the repo, and the nearest neighbours -- `multitable-automation-rule-
+# editor`, `automation-action-summary`, `automation-recipes`, `automation-save-block-reasons`,
+# `automation-target-sheet-options`, `automation-rerun-execution`, `automation-rule-concurrent-merge`,
+# `automation-log-redact`, `automation-log-support-packet`, `meta-automation-labels`,
+# `AutomationExecutionsView` -- neither contain it nor are contained by it. Verified green in isolation
+# (`npx vitest run multitable-automation-manager-roundtrip --reporter=dot` -> 14/14) together with
+# `multitable-automation-manager.spec.ts` (83/83) and `multitable-automation-rule-editor` (171/171).
+# Two-point discipline (header of this file): the .github/workflows/multitable-web-guard.yml mirror of
+# this token (both `on:` path blocks + run-list) IS landed in the same PR via a workflow-scoped push;
+# this always-on required gate runs it on every PR and the path-filtered guard is the second opinion.
+# Attendance import token/org binding: both specs are also listed in attendance-web-guard.yml;
+# keep their execution explicit in the always-on required lane.
+npx vitest run attendance-import-preview-regression.spec.ts useAttendanceAdminImportWorkflow.spec.ts --reporter=dot || exit $?
+# Attendance report closeout: this spec is also listed in attendance-web-guard.yml; keep its
+# required-lane execution explicit and fail the script if the dedicated run fails.
+npx vitest run attendance-punch-outcome --reporter=dot || exit $?
+# 角色管理保存核对 (2026-09-16): `roleManagementSave` — the RBAC role editor's post-save reconciliation
+# and its mid-air-collision token. Ran in NO workflow before this: apps/web/tests has no other
+# RoleManagementView spec, and neither web guard covers the admin role surface (this is neither an
+# approval nor a multitable page), so the two-point discipline has exactly ONE point here. Substring
+# collision checked mechanically in BOTH directions over all 490 parsed tokens (no duplicates) and
+# every spec/test file under apps/web: `roleManagementSave` matches exactly one file, no existing
+# token already collects that file, and no existing token contains it. Verified green in isolation
+# (5/5) and red under each of three in-memory mutations of the view it covers.
+#
+# W7-A3 场景 B 页面验收 (2026-09-20): ONE token added, `StockPreparationScenarioBAcceptance` — the NEW
+# spec (apps/web/tests/StockPreparationScenarioBAcceptance.spec.ts) mounts StockPreparationDashboardView
+# and StockPreparationSnapshotDiffView against a synthetic 1-batch/54-line snapshot-batch shape (the
+# W7-A2 / #5877 落库形状实证) and asserts the overview/detail render, the empty state, the error state and
+# the values-free contract. Only-tests change; no src edit. Substring-collision checked both directions:
+# no existing `StockPreparation*` token is a substring of `StockPreparationScenarioBAcceptance` (the
+# nearest, `StockPreparationSnapshotDiffView`/`StockPreparationDashboardView`, diverge right after
+# `StockPreparation`), and it is not a substring of any existing token. Verified green in isolation
+# (`npx vitest run StockPreparationScenarioBAcceptance --reporter=dot` -> 5/5) and red under an
+# in-memory mutation (mocked row count 54 -> 53 flips two assertions red).
+#
+# SC-04 运行详情前端 (2026-09-20): ONE token added, `IntegrationRunDetail` — the NEW spec
+# (apps/web/tests/IntegrationRunDetail.spec.ts) mounts IntegrationWorkbenchView and drives the
+# monitoring panel's per-run 详情 entry against a mocked GET /api/integration/runs/:runId, asserting
+# the single-read URL (runId in the PATH, no hand-rolled x-tenant-id header), the rendered run, the
+# empty-details state, the 404 / 501 code-mapped copy in both locales, and the values-free contract.
+# Substring-collision checked mechanically in BOTH directions over all 469 parsed tokens of the two
+# registration files: no existing token is a substring of `IntegrationRunDetail` and none contains it
+# (the nearest neighbours, `IntegrationReadSource*` / `IntegrationMonitoringSection`, diverge right
+# after `Integration`), no existing token already collects the new file, and the token matches exactly
+# one file under apps/web. Verified green in isolation
+# (`npx vitest run IntegrationRunDetail --reporter=dot` -> 9/9) and red under five mutations of the
+# code it covers (single-read URL -> `/runs?id=`: 8 red; each error-code branch dropped: 2 red; empty
+# `details` no longer collapsing: 2 red; a hand-rolled tenant header added: 1 red).
+#
+# Q3c 导出对账摘要 (2026-09-20): ONE token added, `StockPreparationDiffSummaryExport` — the NEW spec
+# (apps/web/tests/StockPreparationDiffSummaryExport.spec.ts) covers StockPreparationSnapshotDiffView.vue's
+# client-side CSV export button: no new GET is issued on export; the CSV’s changeCount section carries
+# the full ten-entry vocabulary (closing Q3a’s two-key gap — componentCodeChanged/materialChanged);
+# held/ready counts and the per-change-type diffId list appear only once a row-detail drill-down has
+# been opened; and the exported bytes are values-free (no planted material/quantity/drawing-number
+# value reaches the CSV). Both underlying files — StockPreparationSnapshotDiffView.vue and
+# services/integration/stockPreparation/bomSnapshotDiff.ts — already sit under the `/**` roster
+# entries this lane fires on for stock-prep changes generally; this token is the same per-spec
+# follow-up already deferred for StockPreparationSourceBinding / StockPreparationProjectQuery /
+# StockPreparationHomeQueryLabels / StockPreparationScenarioBAcceptance above. Substring-collision
+# checked in BOTH directions against every existing `StockPreparation*` token in this file: none is
+# a substring of `StockPreparationDiffSummaryExport` (the nearest, `StockPreparationDataSourceRegistry`
+# / `StockPreparationSnapshotDiffView`, diverge right after `StockPreparation`), it is not a substring
+# of any of them, and it matches exactly one file under apps/web/tests. Verified green in isolation
+# (`npx vitest run StockPreparationDiffSummaryExport --reporter=dot`) and in this batch before wiring.
+#
+# 客户反馈 2026-09-24 #3 final review F1 (2026-09-25): `MetaAutomationLogViewer` — tests/MetaAutomationLogViewer.spec.ts
+# pins the rule log panel a customer actually sees (已跳过 count/badge, trigger-record-gone step sentences instead of
+# the raw `target_record_missing` code). It was selected by NO token here and by no workflow, i.e. green only on a
+# laptop (its sibling meta-automation-log-viewer-migration.spec.ts already runs via the `migration` token).
+# CamelCase token: no existing token is a substring of it, it is a substring of none, and it matches exactly
+# one file (the kebab-case sibling does not contain it). Not added to multitable-web-guard.yml: that workflow
+# was out of scope for the change that added it.
+# 客户反馈 2026-09-24 #5 视图排序/筛选残留 (2026-09-25): ONE token added, `multitable-view-switch-sort-filter`
+# — the NEW spec drives the real useMultitableGrid + MetaToolbar + MetaGridTable through a view switch
+# (A with 3 sorts + 1 filter → blank B) and asserts no badge / no header arrows in B, that a header
+# click / 应用 / 清除筛选 in B never persists A's rules, and that clearing the last rule saves an
+# explicit empty value. Substring-collision checked both directions: `multitable-view-manager` and
+# `multitable-view-display-prefs-util` diverge right after `multitable-view-`, the token is not a
+# substring of any existing token, and it matches exactly one file under apps/web. The
+# multitable-web-guard.yml mirror (two-point discipline) needs a workflow-scope push and is left to a
+# follow-up; this required lane is what executes the spec on every PR.
+# Same item, review follow-up (2026-09-26): ONE more token, `multitable-workbench-create-view-sort-filter`
+# — mounts the real MultitableWorkbench with the REAL useMultitableGrid + MetaToolbar + MetaViewManager and
+# creates a view through 视图管理 → 添加 (onCreateView: selectView + an explicit loadViewData that runs
+# BEFORE the view-switch watcher), asserting a staged, unapplied sort edit of the previous view is never
+# PATCHed into the new one. Substring-collision checked both directions: `multitable-workbench-view` /
+# `multitable-workbench-bulk-delete` / `multitable-workbench-drawer-button-wiring` diverge right after
+# `multitable-workbench-`, `multitable-view-switch-sort-filter` is not a substring of it, the token is not a
+# substring of any existing token, and it matches exactly one file under apps/web. Same workflow-scope
+# caveat for the multitable-web-guard.yml mirror.
+#
+# ============================================================================================
+# 登记行形状（Q8 / C4 P1，2026-09-21）— 一行一个 token，大小写不敏感字母序
+# ============================================================================================
+# 下面这条 `exec npx vitest run …` 曾经是一条 11410 字节的单物理行。它是全仓并发冲突最密集
+# 的一行：2026-09-01 以来被改了 76 次，几乎每次两条以上的加-spec 分支并行在飞，都要在这同一
+# 条物理行上三方合并，于是 O(n²) 地互撞。插件侧同类问题（package.json 的 scripts.test 巨行）
+# 已由 #5420 拆成 test-chain.txt + merge=union 根治，这里是同一处方的 web 版。
+#
+# 规则（新增 token 时照做）：
+#   1. 一行一个 token，两个空格缩进，行尾 ` \` 续行；最后一行是 `  --reporter=dot`（无续行）。
+#   2. 按 **大小写不敏感字母序** 插入到它该在的位置。字母序不是洁癖：它让「新 token 落在哪一
+#      行」由名字唯一决定，两条 PR 的新 token 只有在名字相邻时才可能碰同一处 hunk。若谁都
+#      往末尾追加，多行化就白做了——所以有守卫强制序（见下）。
+#   3. 仍然要做双向子串碰撞检查（本文件通篇的老规矩），以及另一登记点
+#      scripts/ops/integration-guard-run-web-specs.sh 的两点同步。
+#
+# 结构由 packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts 守：
+# `bash -n` 通过；恰好一条 exec 逻辑行；token 无重复；字母序；末尾 flag 只有 --reporter=dot。
+# .gitattributes 另给了 `merge=union` 作本地 rebase 兜底（服务端是否遵守未证实，见那里的注释）。
+#
+# 解析本文件的守卫必须「去注释 → 拼接续行 → 取唯一 exec 逻辑行」，不能按物理行 startsWith。
+# ============================================================================================
+# A-2 slice 1 (approval form grouping lock v2.13 §2 "多 org 成员", 第 8 轮 P3-b, 2026-09-18):
+# `SessionOrgSwitcher.spec.ts` — the isolated unit spec for the new shared
+# `apps/web/src/components/SessionOrgSwitcher.vue` (copied and generalized from
+# `views/attendance/AttendanceSessionOrgSwitcher.vue`, which stays untouched — moving/editing it
+# would narrow `attendance-web-guard.yml:297-301,:397-400`'s closed-world session-spec census).
+# Full-filename token (not the bare `SessionOrgSwitcher` basename): verified against every existing
+# token below (none is a substring of it, it is a substring of none) — no coverage silently drops.
+# It still incidentally ALSO matches `tests/AttendanceSessionOrgSwitcher.spec.ts` (the token is a
+# suffix of that sibling filename: `Attendance` + `SessionOrgSwitcher.spec.ts`; `npx vitest run
+# SessionOrgSwitcher.spec.ts --reporter=verbose` locally confirms exactly these 2 files, 4 tests) —
+# harmless duplication, not a gap: that file already runs required via its OWN dedicated token at
+# line 477 above, so this line re-running it changes no coverage, just re-executes an already-gated
+# file. This token covers the new shared component in isolation only; the acceptance-J integration
+# spec (403 SESSION_ORG_REQUIRED → selector → retry → 201, wired into the approval template center
+# page) has since landed on this same branch as the `ApprovalTemplateGroupsPanel` token below (P3
+# hygiene wave, 2026-09-19: this sentence originally said "lands in a later slice with its own
+# token" — stale, since that slice had already landed here before this comment was corrected).
+#
+# A-2 slice 2 (approval form grouping lock v2.13 §6 phase 1 FE client, 2026-09-18): `approvalTemplateGroupsClient`
+# — unit spec for the seven group-endpoint client functions added to `approvals/api.ts`
+# (list/create/rename/archive/unarchive/link/unlink), including the acceptance-J assertion that a
+# 403 `SESSION_ORG_REQUIRED` throws `ApprovalApiError` with `.code` intact rather than being
+# collapsed to a generic message — the case the front-end 403-retry flow (a later slice) will
+# branch on. Verified against every existing token above: none is a substring of it, it is a
+# substring of none (`python3` bidirectional scan, 397 tokens, zero collisions — recomputed 2026-09-19
+# in the P3 hygiene wave; see the FE verification MD's hygiene section for why this moved from the
+# original "394 tokens" snapshot); `npx vitest run approvalTemplateGroupsClient --reporter=verbose`
+# locally confirms it resolves to exactly this one spec file (8/8 tests). This token covers the
+# client functions in isolation only.
+#
+# A-2 scope item 4 (approval form grouping lock v2.13 §4 acceptance J, 2026-09-18):
+# `ApprovalTemplateGroupsPanel` — the integration spec this line's earlier `SessionOrgSwitcher`
+# comment deferred: `ApprovalTemplateGroupsPanel.vue` (mounted from `TemplateCenterView.vue` for
+# `canManageTemplates`) is the panel that actually calls the seven group endpoints, and its own
+# spec exercises the full 403 `SESSION_ORG_REQUIRED` → shared switcher → retry → 201 loop end to
+# end through the real `useSessionOrg`/`useAuth` composables (only `apiFetch` is mocked), plus
+# that a single-org member (never 403'd) never sees the selector and never calls
+# `/api/auth/session-org*`. Mutation-verified (removing the panel's `err.code ===
+# 'SESSION_ORG_REQUIRED'` branch leaves the retry test stuck on the first 403, confirmed red, then
+# restored via `cp` backup/diff/cmp). Verified against every existing token above: none is a
+# substring of it, it is a substring of none (`python3` bidirectional scan, 395 tokens, zero
+# collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it
+# resolves to exactly this one spec file (2/2 tests).
+# restored via `cp` backup/diff/cmp) — that was the LIST endpoint's own SESSION_ORG_REQUIRED
+# branch (`loadGroups`); a separate probe on the CREATE endpoint's branch (`onCreate`) isolates to
+# only the create-flow test, and each restore verified byte-identical via `cmp`, so both of the
+# panel's two catch sites are independently mutation-covered by a dedicated test (list-load
+# 403-then-retry vs. create 403-then-retry — 3 cases total). Verified against every existing token
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 395
+# tokens, zero collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally
+# confirms it resolves to exactly this one spec file (3/3 tests).
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 397
+# tokens, zero collisions — recomputed 2026-09-19 in the P3 hygiene wave; see the FE verification
+# MD's hygiene section for why this moved from the original "395 tokens" snapshot); `npx vitest run
+# ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it resolves to exactly this one
+# spec file (3/3 tests).
+#
+# P3 hygiene wave correction (2026-09-19): the three tokens above were originally appended as a
+# SECOND, duplicate copy of this entire `exec npx vitest run ...` line instead of being inserted
+# into the one below — because bash's `exec` builtin unconditionally replaces the process on the
+# FIRST such line reached (no `if`/`case` guards this line), that duplicate line was dead code, and
+# none of `SessionOrgSwitcher.spec.ts` / `approvalTemplateGroupsClient` / `ApprovalTemplateGroupsPanel`
+# were ever exercised by the required `web-tests` job on this branch until this commit folded them
+# into the one live line below. Root cause: commit `96c512876` (`2ef7add98` on this branch after a
+# later rebase) added the duplicate copy rather than editing the existing line in place; three later
+# commits kept appending their own tokens to that dead copy without anyone noticing, because both
+# `tail -1` (used by the A-2 gate report) and this file's own verification-MD Python helper's
+# first-match `.startswith(...)` scan only ever look at ONE `exec npx vitest run` line and silently
+# picked the wrong one. See the FE verification MD's P3 hygiene section for the full repro.
+# P3 hygiene wave correction (2026-09-19), second pass — the paragraph this replaces named the
+# wrong root cause; see the FE verification MD's hygiene section and
+# p3-hygiene-gate2-A2-20260919.md §1.1 for the corrected repro. What actually happened: the
+# original commit (`2699e0a07`, author date 2026-09-18 06:57:35) edited this line IN PLACE (17
+# insertions / 1 deletion — a normal same-line edit, not an appended second line) to add only the
+# FIRST of the three tokens (`SessionOrgSwitcher.spec.ts`) — sorted-token diff between `0144932ac`
+# and `2699e0a07` shows exactly that one addition and nothing else. `approvalTemplateGroupsClient`
+# and `ApprovalTemplateGroupsPanel` were NOT on this line yet; they landed on it later, in
+# `1e55c39b8` (author date 2026-09-18 07:10:50) and `bc66e283e` (author date 2026-09-18 07:33:18)
+# respectively. The file-level `git log -S'<token>' -- <this file>` cited by the previous pass
+# cannot discriminate an exec-line landing from a comment-only mention of the same token, so the
+# claim above is backed by the exec-line form instead, run once on the named commit and once on
+# its parent:
+#     git show <sha>:<this file> | grep '^exec npx vitest run' | grep -c '<token>'
+# Verbatim results (measured 2026-09-19): for `approvalTemplateGroupsClient`, 0 at `1e55c39b8^`
+# and 1 at `1e55c39b8`; for `ApprovalTemplateGroupsPanel`, 0 at `bc66e283e^` and 1 at
+# `bc66e283e`. One caveat on the words "this line": at `bc66e283e` the file still carried TWO
+# exec lines (`git show bc66e283e:<this file> | grep -n '^exec npx vitest run'` prints 1186 and
+# 1227) and the token landed on 1227 — the dead duplicate, not the live first-reached line. For
+# the duplicate era "this line" therefore means the dead copy produced by the merge described
+# next. A later rebase produced
+# `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
+# that same commit whose three-way merge against a sibling edit to this file kept BOTH versions of
+# the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
+# risk: bash's `exec` builtin unconditionally replaces the process on the FIRST such line reached,
+# so only the earlier of the two lines ever ran. On the commits actually named in the prior
+# paragraph's audit trail (`cb6d7fa9f`, `d3097be00`) — both of which predate the rebase above —
+# the three tokens had never been split off a dead duplicate in the first place: there was only
+# ever the single live line at those commits, so the "never exercised until this commit" claim did
+# not hold for this branch's history. The duplicate-line hazard itself is real
+# (see the two repo precedents cited in scripts/dev/atg-exec-line-post-rebase-check.sh's header)
+# and that script exists to catch it mechanically on future rebases; this paragraph corrects only
+# the narrative of how this specific occurrence resolved.
+# 请假撤销入口 阶段 B (2026-09-29, docs/development/approval-cancel-entry-phase-b-fe-design-20260929.md):
+# five `cancelRoundEntry*` tokens — core vocabulary / error copy / attendance client, the four approval
+# list / preview StatusTag surfaces, the detail view (P-2 + approver path), the approval-center approver
+# path, and the attendance self-service entry. Each token matches exactly its own file and no existing
+# token is a substring of any of them or vice versa (bidirectional scan in the design MD §7).
+# 阶段 B2 (same MD, §B2): `cancelRoundEntryApproverList` — the attendance-side list of cancellations
+# awaiting the viewer's approval (owner 2026-09-29 16:5x); `cancelRoundEntryTodoCenter` — the todo
+# center's cancel-round sub-type label (P-11 (b)); `cancelRoundEntryContract` — the client↔server
+# cancel-round contract read from the server sources. Same bidirectional scan, recorded in §B2.
+# 服务端填单草稿 F3-D1 (2026-10-01, docs/development/approval-server-form-drafts-replay-20260930.md):
+# ONE token added, `serverFormDraft` — the client wrapper spec (apps/web/tests/serverFormDraft.spec.ts)
+# for the server-side approval form drafts replayed from #5703, paired with the same token on
+# approval-web-guard.yml's targeted run line. It matches exactly one spec file, and a bidirectional
+# substring scan against every token in this file finds no token that contains it or is contained by
+# it (`approval-form-draft` is the closest neighbour and shares no substring relation).
+exec npx vitest run \
+  amountAutoSum \
+  approval-amount-in-words \
+  approval-assignee-source \
+  approval-attachment-download \
+  approval-attachment-refs \
+  approval-attachment-upload \
+  approval-attachment-upload-process \
+  approval-canvas-viewport \
+  approval-center \
+  approval-center-detail-pane-controller \
+  approval-center-master-detail \
+  approval-comments-client \
+  approval-comments-panel \
+  approval-common-template-presets \
+  approval-condition-summary \
+  approval-detail-field \
+  approval-detail-record-table \
+  approval-e2e-lifecycle \
+  approval-e2e-permissions \
+  approval-field-visibility \
+  approval-form-draft \
+  approval-graph-layout \
+  approval-graph-summary \
+  approval-graph-topology-edit \
+  approval-handler-node-authoring \
+  approval-handler-node-config \
+  approval-member-action-dialog-grammar \
+  approval-member-identity-coverage-enumeration \
+  approval-node-threshold-timeout-config \
+  approval-number-field-props \
+  approval-prefill-from-snapshot \
+  approval-process-attachment-dialog \
+  approval-record-link \
+  approval-record-link-picker \
+  approval-route-preview-controller \
+  approval-route-preview-summary \
+  approval-template-authoring-approval-node-edit \
+  approval-template-authoring-canvas-inspector \
+  approval-template-authoring-cc-edit \
+  approval-template-authoring-complex-node-config-allowlist \
+  approval-template-authoring-condition-edit \
+  approval-template-authoring-detail \
+  approval-template-authoring-errors \
+  approval-template-authoring-field-permissions \
+  approval-template-authoring-graph-preserve \
+  approval-template-authoring-linear-step-spine \
+  approval-template-authoring-parallel-edit \
+  approval-template-authoring-policy-carrier \
+  approval-template-authoring-save-minimum \
+  approval-template-authoring-threshold-timeout-compat \
+  approval-template-route-preview-api \
+  approval-template-version-diff \
+  approval-templates-client \
+  approval-upcoming-nodes \
+  approval-urge-button-state \
+  approval-version-graph-overlay \
+  approvalApiErrorSurfacing \
+  approvalCardDecisionView \
+  approvalCenterDesktopEmptyTextI18n \
+  approvalCenterRemindBadge \
+  approvalCenterSourceFilter \
+  approvalCenterTable \
+  approvalCenterUnreadBadge \
+  approvalCountsRealtime \
+  approvalDelegationForm \
+  approvalDelegationRoute \
+  approvalDelegationStatus \
+  approvalDelegationView \
+  approvalDetailPolish \
+  approvalMetricsTopnReport \
+  approvalMetricsView \
+  approvalMobileI18n \
+  approvalMobileResponsive \
+  approvalNewView \
+  approvalQuickPhrases \
+  approvalRecentTemplates \
+  approvalRelativeWait \
+  approvalResubmitButton \
+  approvalTemplateAuthoring \
+  approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
+  approvalTemplateGovernance \
+  approvalTemplateGroupsClient \
+  ApprovalTemplateGroupsPanel \
+  approvalTemplateRouteGuard \
+  approvalTemplateVersionHistory \
+  approvalUserPicker \
+  asyncStateBlock \
+  attendance-selfservice-dashboard \
+  attendanceAdminEndpointCompatibility \
+  attendanceCapabilityUnavailable \
+  attendanceEmployeeLeaveRequestCard \
+  attendanceEmployeeMakeupRequestCard \
+  attendanceEmployeeQuickActionIcons \
+  attendanceEmployeeWorkspaceCommonIcons \
+  attendanceEmployeeWorkspacePresentation \
+  attendanceFeatureOverride \
+  attendanceOverviewRequestReveal \
+  attendanceRequestReviewEntitlement \
+  attendanceUserPickerEndpoint \
+  automation-action-summary \
+  automation-condition-legacy-person-picker \
+  automation-condition-typing-editor \
+  automation-condition-value-input \
+  automation-condition-values \
+  automation-log-redact \
+  automation-log-support-packet \
+  automation-recipes \
+  automation-rerun-execution \
+  automation-rule-concurrent-merge \
+  automation-save-block-reasons \
+  automation-target-sheet-options \
+  AutomationExecutionsView \
+  cancelRoundEntryApproverList \
+  cancelRoundEntryAttendancePanel \
+  cancelRoundEntryCenterRoute \
+  cancelRoundEntryContract \
+  cancelRoundEntryCore \
+  cancelRoundEntryDetailView \
+  cancelRoundEntrySurfaces \
+  cancelRoundEntryTodoCenter \
+  categoryCandidateInput \
+  comment-affordance-color-consistency \
+  conditional-formatting-dialog-i18n \
+  data-sources-api-preview \
+  data-sources-ui \
+  dataSourcesLoadFailedReseal \
+  dingtalk-internal-view-link-warnings \
+  dingtalk-public-form-link-warnings \
+  dingtalk-recipient-field-warnings \
+  DirectoryDeprovisionEvidencePanel.spec.ts \
+  directoryManagementView \
+  featureFlagsApprovalMobile \
+  formViewValidation \
+  IntegrationRunDetail \
+  IntegrationStockPrepPanel \
+  lineDerivation \
+  meta-ai-bulk-labels \
+  meta-api-error-labels \
+  meta-api-token-labels \
+  meta-automation-delivery-viewers-i18n \
+  meta-automation-labels \
+  meta-base-picker \
+  meta-bulk-edit-labels \
+  meta-cell-editor-i18n \
+  meta-comment-composer-i18n \
+  meta-comment-labels \
+  meta-comments-drawer-i18n \
+  meta-filter-group \
+  meta-form-share-labels \
+  meta-form-view-i18n \
+  meta-grid-table \
+  meta-grid-table-i18n.spec.ts \
+  meta-link-picker-i18n \
+  meta-link-picker-labels \
+  meta-notification-bell \
+  meta-permission-labels \
+  meta-person-delivery-viewer-migration \
+  meta-record-drawer-history-diff \
+  meta-record-drawer-i18n \
+  meta-record-drawer-restore \
+  meta-record-labels \
+  meta-sheet-view-rail \
+  meta-toolbar-filter-builder \
+  meta-toolbar-group-picker \
+  meta-view-render-labels \
+  MetaAutomationLogViewer \
+  migration \
+  mount-behind-flow \
+  multitable-agg-footer-grid \
+  multitable-ai-availability-gate \
+  multitable-ai-bulk-fill-composable \
+  multitable-ai-bulk-fill-dialog \
+  multitable-ai-bulk-fill-job-composable \
+  multitable-ai-bulk-fill-job-dialog \
+  multitable-ai-shortcut-cell-editor \
+  multitable-ai-shortcut-client \
+  multitable-ai-shortcut-composable \
+  multitable-ai-shortcut-drawer \
+  multitable-ai-shortcut-field-manager \
+  multitable-alt-view-comment-chip-i18n \
+  multitable-api-token-manager \
+  multitable-attachment-editor \
+  multitable-attachment-list \
+  multitable-automation-manager \
+  multitable-automation-manager-roundtrip \
+  multitable-automation-rule-editor \
+  multitable-automation-trigger-time \
+  multitable-b4-field-always-readonly \
+  multitable-barcode-field \
+  multitable-base-local-state \
+  multitable-build-chart-option \
+  multitable-bulk-edit-dialog \
+  multitable-button-field-config \
+  multitable-button-run-client \
+  multitable-calendar-drag-reschedule \
+  multitable-calendar-view \
+  multitable-capabilities \
+  multitable-cell-button \
+  multitable-cell-renderer-person-inactive \
+  multitable-cell-visual-display \
+  multitable-cf-scale \
+  multitable-chart-load-error \
+  multitable-chart-renderer \
+  multitable-client \
+  multitable-comment-affordance \
+  multitable-comment-composer \
+  multitable-comment-inbox-realtime \
+  multitable-comment-inbox-view.spec.ts \
+  multitable-comment-inbox.spec.ts \
+  multitable-comment-presence \
+  multitable-comment-reactions \
+  multitable-comment-realtime \
+  multitable-comments \
+  multitable-comments-drawer \
+  multitable-comments-panel \
+  multitable-conditional-formatting \
+  multitable-conditional-rule \
+  multitable-config-history-modal \
+  multitable-config-revert-refresh \
+  multitable-conflict-ux \
+  multitable-copy-sheet-dialog \
+  multitable-copy-sheet-rail \
+  multitable-copy-sheet-workbench \
+  multitable-core-i18n \
+  multitable-crossbase-link-normalizer \
+  multitable-crossbase-link-picker \
+  multitable-crossbase-workbench-wiring \
+  multitable-dashboard-view \
+  multitable-datetime-business-tz \
+  multitable-datetime-deferred-surfaces \
+  multitable-datetime-field \
+  multitable-datetime-grid-lockout \
+  multitable-duration-field \
+  multitable-embed-host \
+  multitable-embed-route \
+  multitable-export-dialog \
+  multitable-external-context-sync \
+  multitable-field-config-i18n \
+  multitable-field-display-i18n \
+  multitable-field-manager \
+  multitable-field-validation-panel \
+  multitable-field-visibility \
+  multitable-form-layout \
+  multitable-form-share-manager \
+  multitable-form-view \
+  multitable-formula-dryrun-panel \
+  multitable-formula-editor \
+  multitable-formula-suggest-field-manager \
+  multitable-frozen-columns-grid \
+  multitable-frozen-columns-util \
+  multitable-gallery-view \
+  multitable-gantt-view \
+  multitable-grid \
+  multitable-grid-cell-edit-commit-round2.spec.ts \
+  multitable-grid-cell-edit-commit.spec.ts \
+  multitable-grid-expand-record \
+  multitable-hierarchy-view \
+  multitable-history-center-ai-shortcut-label \
+  multitable-history-center-inline-diff \
+  multitable-history-center-pinned-batch-deeplink \
+  multitable-history-fe \
+  multitable-home-view \
+  multitable-import \
+  multitable-import-create-fields-plan \
+  multitable-import-modal \
+  multitable-kanban-view \
+  multitable-link-picker \
+  multitable-linked-record-chip \
+  multitable-linked-record-popover \
+  multitable-location-field \
+  multitable-longtext-cell \
+  multitable-manager-panels-i18n \
+  multitable-mention-inbox \
+  multitable-mention-popover \
+  multitable-mention-realtime \
+  multitable-multiselect-field \
+  multitable-nongrid-summary-rendering \
+  multitable-number-format \
+  multitable-people-import \
+  multitable-person-field \
+  multitable-person-picker \
+  multitable-personal-view-toggle \
+  multitable-phase10 \
+  multitable-phase11 \
+  multitable-phase12 \
+  multitable-phase13 \
+  multitable-phase14 \
+  multitable-phase15 \
+  multitable-phase3 \
+  multitable-phase4 \
+  multitable-phase5 \
+  multitable-phase6 \
+  multitable-phase7 \
+  multitable-phase8 \
+  multitable-phase9 \
+  multitable-qrcode-field \
+  multitable-record-approval-panel \
+  multitable-record-approval-progress \
+  multitable-record-approval-submit \
+  multitable-record-attachments-panel \
+  multitable-record-drawer \
+  multitable-record-drawer-button \
+  multitable-record-drawer-duplicate \
+  multitable-record-drawer-t5-migration.spec.ts \
+  multitable-record-fields-panel \
+  multitable-record-fields-sections \
+  multitable-record-history-client-restored-from \
+  multitable-record-history-panel \
+  multitable-record-inspector \
+  multitable-record-inspector-field-errors \
+  multitable-record-inspector-header \
+  multitable-record-inspector-resize \
+  multitable-record-permission-manager \
+  multitable-record-permissions-composable \
+  multitable-record-restore-client \
+  multitable-reorder-view-fields \
+  multitable-required-if \
+  multitable-reset-confirm-dialog \
+  multitable-reset-tsource-picker \
+  multitable-restore-batch-dialog \
+  multitable-restore-preview-dialog \
+  multitable-richtext-editor-mention \
+  multitable-richtext-longtext \
+  multitable-richtext-mention \
+  multitable-richtext-wiring \
+  multitable-rollup-aggregation-fe \
+  multitable-scoped-permissions \
+  multitable-sheet-cursor-state \
+  multitable-sheet-permission-manager \
+  multitable-sheet-presence \
+  multitable-sheet-realtime \
+  multitable-sheet-trash \
+  multitable-system-fields \
+  multitable-template-center-view \
+  multitable-template-detail-view \
+  multitable-template-save-as \
+  multitable-timeline-view \
+  multitable-trash-fe \
+  multitable-ui \
+  multitable-view-display-prefs-util \
+  multitable-view-manager \
+  multitable-view-switch-sort-filter \
+  multitable-workbench-1672-1673 \
+  multitable-workbench-ai-availability-wiring \
+  multitable-workbench-bulk-delete \
+  multitable-workbench-create-view-sort-filter \
+  multitable-workbench-dashboard-exit \
+  multitable-workbench-drawer-button-wiring \
+  multitable-workbench-history-field-scope-wiring \
+  multitable-workbench-i18n \
+  multitable-workbench-import-create-fields \
+  multitable-workbench-import-flow \
+  multitable-workbench-manager-flow \
+  multitable-workbench-permission-wiring \
+  multitable-workbench-restore-wiring \
+  multitable-workbench-sheet-delete \
+  multitable-workbench-view \
+  multitable-workbench.spec.ts \
+  multitable-yjs-cell-binding \
+  multitable-yjs-cell-editor \
+  multitable-yjs-scalar-cell \
+  myDelegationView \
+  newTodoPill \
+  pageShell \
+  parallelBranchRunsView \
+  personal-view-client \
+  public-multitable-form \
+  requesterPreviewFields \
+  roleManagementSave \
+  routePreviewErrors \
+  run-required-web-tests-shape \
+  searchApprovalDirectoryUsers \
+  serverFormDraft \
+  SessionOrgSwitcher.spec.ts \
+  shared-comments-stub-client \
+  statusTag \
+  StockPreparationCodeHelp \
+  stockPreparationConfirmationQueue \
+  StockPreparationDashboardView \
+  StockPreparationDataSourceRegistry \
+  StockPreparationDiffSummaryExport \
+  StockPreparationExceptionQueueView \
+  StockPreparationGettingStarted \
+  StockPreparationHandoff \
+  StockPreparationHomeQueryLabels \
+  StockPreparationInstallRun \
+  StockPreparationInstallView \
+  StockPreparationLargeBomPull.spec.ts \
+  StockPreparationLargeBomPullPanel.spec.ts \
+  StockPreparationManagedTableRelabelPanel \
+  StockPreparationMappingConfirmView \
+  StockPreparationMissingComponents \
+  StockPreparationOnboardingReadiness \
+  StockPreparationOperatorHome \
+  StockPreparationOperatorProjectDirectory \
+  StockPreparationOpsPanel \
+  StockPreparationPosturePlainLanguage \
+  StockPreparationPrepLineView \
+  StockPreparationProjectBoard \
+  StockPreparationProjectQuery \
+  StockPreparationProjectSync.spec.ts \
+  StockPreparationProjectSyncPanel.spec.ts \
+  StockPreparationProjectWorkspaceView \
+  StockPreparationRail \
+  StockPreparationScenarioBAcceptance \
+  StockPreparationSnapshotDiffView \
+  StockPreparationSourceBinding \
+  StockPreparationSourcePreflight \
+  StockPreparationStageOverview \
+  StockPreparationStageStepper \
+  StockPreparationUnconfirmableHold \
+  StockPreparationUnitConfirmView \
+  StockPreparationWorkspace \
+  stockPrepPermissionMatrix \
+  tasks-api-m3.spec.ts \
+  tasks-api.spec.ts \
+  tasks-badge.spec.ts \
+  tasks-context.spec.ts \
+  tasks-detail-m3.spec.ts \
+  tasks-detail-view.spec.ts \
+  tasks-list-view.spec.ts \
+  tasks-nav-badge.spec.ts \
+  tasks-nav-feature-gate.spec.ts \
+  tasks-nav-relogin.spec.ts \
+  tasks-routes.spec.ts \
+  tasks-view-transitions.spec.ts \
+  tasks-view.spec.ts \
+  templateArchiveConfirm \
+  templateCenterI18n \
+  templateDetailI18n \
+  templateGalleryFilter \
+  todoApi \
+  TodoCenterView \
+  todoCountsRealtime \
+  ui-foundation-style-guard \
+  uiFoundationTexture \
+  useApprovalBatchActions \
+  useApprovalDirectory \
+  useAttendanceAdminConfig \
+  useAttendanceAdminProvisioning \
+  useAttendanceAdminUsers \
+  useAutoSumTotal \
+  usePlmExportActions \
+  userManagementView \
+  view-manager-multitable-contract \
+  workflowHubView \
+  xlsx-mapping \
+  --reporter=dot

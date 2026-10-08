@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
 
 // B3-04 D-2 — ApprovalUserPicker is the ONE reusable remote participant picker wired into
@@ -21,10 +22,12 @@ import ApprovalUserPicker from '../src/approvals/components/ApprovalUserPicker.v
 const ElSelect = defineComponent({
   name: 'ElSelect',
   props: {
-    modelValue: { type: String, default: undefined },
+    modelValue: { type: [String, Array], default: undefined },
     loading: Boolean,
     disabled: Boolean,
     placeholder: String,
+    multiple: Boolean,
+    multipleLimit: Number,
     filterable: Boolean,
     remote: Boolean,
     clearable: Boolean,
@@ -40,9 +43,14 @@ const ElSelect = defineComponent({
       }),
       h('select', {
         'data-testid': 'stub-select',
-        value: this.modelValue ?? '',
+        multiple: this.multiple,
+        value: this.modelValue ?? (this.multiple ? [] : ''),
+        'data-multiple-limit': String(this.multipleLimit ?? 0),
         onChange: (e: Event) => {
-          const value = (e.target as HTMLSelectElement).value
+          const target = e.target as HTMLSelectElement
+          const value = this.multiple
+            ? Array.from(target.selectedOptions).map((option) => option.value)
+            : target.value
           this.$emit('update:modelValue', value)
         },
       }, this.$slots.default?.()),
@@ -52,8 +60,8 @@ const ElSelect = defineComponent({
 
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
-  render() { return h('option', { value: this.value }, this.label) },
+  props: { label: String, value: String, disabled: Boolean },
+  render() { return h('option', { value: this.value, disabled: this.disabled }, this.label) },
 })
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -62,6 +70,12 @@ async function flushUi(cycles = 5): Promise<void> {
     await nextTick()
   }
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalUserPicker', () => {
   let app: VueApp<Element> | null = null
@@ -83,8 +97,13 @@ describe('ApprovalUserPicker', () => {
   })
 
   async function mountPicker(props: Record<string, unknown> = {}) {
-    const events: { 'update:modelValue': unknown[]; select: unknown[] } = {
+    const events: {
+      'update:modelValue': unknown[]
+      'update:multipleModelValue': unknown[]
+      select: unknown[]
+    } = {
       'update:modelValue': [],
+      'update:multipleModelValue': [],
       select: [],
     }
     const Host = defineComponent({
@@ -93,6 +112,8 @@ describe('ApprovalUserPicker', () => {
           h(ApprovalUserPicker, {
             ...props,
             'onUpdate:modelValue': (value: unknown) => events['update:modelValue'].push(value),
+            'onUpdate:multipleModelValue': (value: unknown) =>
+              events['update:multipleModelValue'].push(value),
             onSelect: (option: unknown) => events.select.push(option),
           })
       },
@@ -155,6 +176,79 @@ describe('ApprovalUserPicker', () => {
     expect(events.select).toEqual([{ id: 'u1', name: 'Alice', email: 'a@x.io' }])
   })
 
+  it('multi-select emits the complete id array through its typed multi event and carries the max limit', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: '' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    const events = await mountPicker({
+      modelValue: ['u1'],
+      multiple: true,
+      maxSelections: 2,
+    })
+
+    const select = container!.querySelector('[data-testid="stub-select"]') as HTMLSelectElement
+    expect(select.multiple).toBe(true)
+    expect(select.dataset.multipleLimit).toBe('2')
+    for (const option of Array.from(select.options)) {
+      option.selected = option.value === 'u1' || option.value === 'u2'
+    }
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(events['update:multipleModelValue']).toEqual([['u1', 'u2']])
+    expect(events['update:modelValue']).toEqual([])
+    expect(events.select).toEqual([null])
+  })
+
+  it('excluded requester ids are disabled while a selected id remains usable', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'requester-1', name: '申请人', email: '' },
+      { id: 'u2', name: '审批人', email: '' },
+    ])
+    await mountPicker({
+      modelValue: ['u2'],
+      multiple: true,
+      excludedUserIds: ['requester-1'],
+    })
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.find((option) => option.value === 'requester-1')?.disabled).toBe(true)
+    expect(options.find((option) => option.value === 'u2')?.disabled).toBe(false)
+  })
+
+  it('keeps an excluded requester disabled when a restored draft already selected it', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'requester-1', name: '申请人', email: '' },
+    ])
+    await mountPicker({
+      modelValue: ['requester-1'],
+      multiple: true,
+      excludedUserIds: ['requester-1'],
+    })
+
+    const option = container!.querySelector('option') as HTMLOptionElement
+    expect(option.value).toBe('requester-1')
+    expect(option.disabled).toBe(true)
+  })
+
+  it('unresolved initial multi selections stay values-free and distinguishable', async () => {
+    searchSpy.mockResolvedValue([])
+    await mountPicker({
+      modelValue: ['opaque-a', 'opaque-b'],
+      multiple: true,
+      initialOptions: [
+        { id: 'opaque-a', name: '', email: '' },
+        { id: 'opaque-b', name: '', email: '' },
+      ],
+    })
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.map((option) => option.textContent)).toEqual(['成员 1', '成员 2'])
+    expect(options.map((option) => option.textContent).join('|')).not.toContain('opaque-')
+    expect(options.every((option) => option.disabled === false)).toBe(true)
+  })
+
   it('api failure degrades to empty options — no throw, no crash', async () => {
     searchSpy.mockRejectedValue(new Error('boom'))
 
@@ -181,5 +275,83 @@ describe('ApprovalUserPicker', () => {
 
     labels = Array.from(container!.querySelectorAll('option')).map((o) => o.textContent)
     expect(labels).toEqual(['Real Name · real@x.io'])
+  })
+
+  // Discriminating negative (raw-id-exposure-fix follow-up, 20260819): `optionLabel()` used to
+  // fall back to the raw `option.id` whenever `option.name` was blank/absent -- the exact shape
+  // `searchApprovalDirectoryUsers` (api.ts) produces for a real backend directory record with a
+  // missing/non-string `name` (defaulted to `''`, not omitted, and not filtered out). Component-
+  // level coverage of the SAME defect the site-level `approval-e2e-lifecycle.spec.ts` negatives
+  // (加签/转交 dropdowns) exercise through ApprovalDetailView's wiring.
+  it('a directory user with no name never renders the raw id as option text (discriminating negative)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'user_9', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option'))
+    const labels = options.map((o) => o.textContent)
+    expect(labels).toEqual(['Alice · a@x.io', '成员 2'])
+    expect(labels.join('|')).not.toContain('user_9')
+    // The option VALUE (the real submit payload) is unaffected -- only the visible TEXT changed.
+    expect(options.map((o) => o.value)).toEqual(['u1', 'user_9'])
+  })
+
+  // Distinguishability: two nameless directory users must not collapse into one indistinguishable
+  // label -- an admin picking between them needs to be able to tell them apart.
+  it('two nameless directory users get mutually distinguishable ordinal labels', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'user_9', name: '', email: '' },
+      { id: 'user_42', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const labels = Array.from(container!.querySelectorAll('option')).map((o) => o.textContent)
+    expect(labels).toEqual(['成员 1', '成员 2'])
+    expect(new Set(labels).size).toBe(2)
+  })
+
+  // member-display-identity (2026-08-19) — owner directive: this picker backs FLOW-CHANGING
+  // selections (transfer/add-sign/fill-form-user/delegatee), so an unidentifiable directory entry
+  // must be more than relabelled -- it must be unselectable.
+  it('a directory user with no name is rendered DISABLED (cannot be selected for a flow-changing action)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'user_9', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    const alice = options.find((o) => o.value === 'u1')!
+    const nameless = options.find((o) => o.value === 'user_9')!
+    expect(alice.disabled, 'a resolved (named) option must stay selectable').toBe(false)
+    expect(nameless.disabled, 'an unresolvable option must be disabled').toBe(true)
+  })
+
+  // POSITIVE CONTROL for the disabled-state test above: proves it is name-selected, not "every
+  // option is disabled" -- two named options both stay selectable.
+  it('POSITIVE CONTROL: every option with a real name stays selectable (not disabled)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options).toHaveLength(2)
+    for (const option of options) expect(option.disabled).toBe(false)
+  })
+
+  // The field must never reject its OWN current selection as unidentifiable, even if that
+  // selection's `initialOption` carries no name (a preselected id whose display name genuinely
+  // could not be recovered) -- otherwise a form field would appear to invalidate its own value.
+  it('the CURRENT modelValue is never rendered disabled, even if its initialOption has no name', async () => {
+    searchSpy.mockResolvedValue([])
+    await mountPicker({ modelValue: 'u-preset', initialOption: { id: 'u-preset', name: '', email: '' } })
+
+    const option = container!.querySelector('option') as HTMLOptionElement
+    expect(option.value).toBe('u-preset')
+    expect(option.disabled).toBe(false)
   })
 })

@@ -1,17 +1,29 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_BASE_ID,
   createSheet,
+  ensureFields,
   ensureLegacyBase,
   ensureObject,
   ensureView,
   findObjectSheet,
+  findObjectView,
+  getObjectSheetId,
+  getObjectViewId,
+  getObjectFieldId as getProvisionedObjectFieldId,
   patchObjectFieldProperty,
   getObjectField,
   resolveObjectFieldIds,
+  buildObjectFieldsRepairSurface,
+  runObjectFieldsRepairTransactionWith,
+  ensureMissingObjectFields,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
+import {
+  ENSURE_FIELDS_OVERWRITE_MODE_ENV,
+  MultitableEnsureFieldsRefusedError,
+} from '../../src/multitable/ensureFieldsOverwriteMode'
 
 type FakeBase = {
   id: string
@@ -109,6 +121,12 @@ function createQuery(): {
         order,
       }
       if (existing) {
+        // Honor the actual conflict clause: `DO NOTHING` (preserve mode and
+        // ensureMissingObjectFields) must leave the stored row untouched and report
+        // rowCount 0, which is how additive callers tell "added" from "skipped".
+        if (normalized.includes('ON CONFLICT (id) DO NOTHING')) {
+          return { rows: [], rowCount: 0 }
+        }
         Object.assign(existing, nextField)
       } else {
         fields.push(nextField)
@@ -149,6 +167,19 @@ function createQuery(): {
       } else {
         views.push(nextView)
         return { rows: [], rowCount: 1 }
+      }
+    }
+
+    // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+    // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+    // this branch the fake would fall through to the `Unhandled SQL` throw below.
+    if (
+      normalized.includes('FROM meta_fields') &&
+      normalized.includes('WHERE id = $1 AND sheet_id = $2')
+    ) {
+      const [id, sheetId] = params as [string, string]
+      return {
+        rows: fields.filter((field) => field.id === id && field.sheet_id === sheetId),
       }
     }
 
@@ -477,6 +508,66 @@ describe('multitable provisioning helper', () => {
     expect(views).toHaveLength(1)
   })
 
+  it('findObjectView reads ONE provisioned view by its derived id, read-only, null when absent', async () => {
+    // The read sibling of `ensureView`. It exists because `getObjectViewId` only COMPOSES an id and
+    // deliberately says nothing about whether the view is there — so a caller deep-linking to a
+    // provisioned view (备料's 「打开项目备料」) could not tell "provisioned" from "composed" and would
+    // hand out a link to a view that resolves to nothing.
+    const { query, views, fields, sheets } = createQuery()
+    const projectId = 'tenant_9:integration-core'
+    const objectId = 'plm_stock_preparation'
+
+    // absent BEFORE it is ensured — the negative half, and the one the fallback depends on.
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
+
+    await ensureObject({
+      query,
+      projectId,
+      descriptor: { id: objectId, name: 'Stock Preparation', fields: [{ id: 'active', name: 'Active', type: 'checkbox' }] },
+    })
+    const hiddenId = getProvisionedObjectFieldId(projectId, objectId, 'active')
+    await ensureView({
+      query,
+      projectId,
+      sheetId: getObjectSheetId(projectId, objectId),
+      descriptor: {
+        id: 'prep-fill',
+        objectId,
+        name: '备料填写视图',
+        type: 'grid',
+        hiddenFieldIds: [hiddenId],
+        sortInfo: { rules: [{ fieldId: hiddenId, desc: false }] },
+        groupInfo: { fieldIds: [hiddenId], fieldId: hiddenId },
+        filterInfo: { conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] },
+      },
+    })
+
+    const before = JSON.parse(JSON.stringify({ views, fields, sheets }))
+    const got = await findObjectView({ query, projectId, objectId, viewId: 'prep-fill' })
+    expect(got).toMatchObject({
+      id: getObjectViewId(projectId, objectId, 'prep-fill'),
+      name: '备料填写视图',
+      hiddenFieldIds: [hiddenId],
+    })
+    expect(got?.sortInfo).toEqual({ rules: [{ fieldId: hiddenId, desc: false }] })
+    expect(got?.groupInfo).toEqual({ fieldIds: [hiddenId], fieldId: hiddenId })
+    expect(got?.filterInfo).toEqual({ conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] })
+    // READ-ONLY: nothing in the store moved.
+    expect(JSON.parse(JSON.stringify({ views, fields, sheets }))).toEqual(before)
+
+    // A view id nobody provisioned stays null even on a sheet that HAS views — the probe answers
+    // about ONE derived id, never "does this sheet have any view".
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'not-provisioned' }),
+    ).resolves.toBeNull()
+    // And an object in ANOTHER project derives a different id, so it cannot read this one's view.
+    await expect(
+      findObjectView({ query, projectId: 'tenant_8:integration-core', objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
+  })
+
   it('persists kanban group metadata for default board views', async () => {
     const { query } = createQuery()
 
@@ -503,5 +594,422 @@ describe('multitable provisioning helper', () => {
       groupFieldId: 'status',
       cardFieldIds: ['ticketNo', 'title', 'priority'],
     })
+  })
+})
+
+describe('buildObjectFieldsRepairSurface (W2/P2-3 atomic repair surface)', () => {
+  it('binds every method to the ONE passed query — no method escapes to another connection', async () => {
+    // The atomicity guarantee is that all four repair methods share a single (tx-bound)
+    // query. This exercises the SHIPPED surface-builder (index.ts uses the same function),
+    // so a future divergence — one method wired to a different connection — is caught here
+    // and in the real-DB rollback test, not left to a hand-mirrored copy (review P3).
+    const sqls: string[] = []
+    const spy: MultitableProvisioningQueryFn = async (sql: string) => {
+      sqls.push(sql)
+      return { rows: [], rowCount: 0 }
+    }
+    const surface = buildObjectFieldsRepairSurface(spy)
+
+    await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
+    await surface.resolveExistingObjectFieldIds({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    await surface.readObjectFieldsContent({ projectId: 'tenant_1:plugin', objectId: 'obj', fieldIds: ['a'] })
+    // Non-empty fields so ensureMissingObjectFields actually emits an INSERT — otherwise the
+    // WRITE binding is not pinned hermetically (review NIT: an empty-fields ensure emits zero
+    // SQL, so a write-method escape would leave this test green).
+    await surface.ensureMissingObjectFields({
+      projectId: 'tenant_1:plugin',
+      objectId: 'obj',
+      fields: [{ id: 'newField', name: 'New Field', type: 'string' }],
+    })
+
+    const joined = sqls.join(' ; ').toLowerCase()
+    // findObjectSheet routed through the spy (meta_sheets) …
+    expect(joined).toMatch(/meta_sheets/)
+    // … resolveExistingObjectFieldIds + readObjectFieldsContent (meta_fields SELECT) …
+    expect(joined).toMatch(/from meta_fields/)
+    // … and ensureMissingObjectFields (meta_fields INSERT) — the WRITE binding, pinned.
+    expect(joined).toMatch(/insert into meta_fields/)
+    // All four DB-touching methods used the injected query.
+    expect(sqls.length).toBeGreaterThanOrEqual(4)
+  })
+})
+
+describe('runObjectFieldsRepairTransactionWith (W2/P2-3 atomic glue)', () => {
+  it('builds the surface from the tx query and propagates a verify throw so the caller rolls back', async () => {
+    const sqls: string[] = []
+    let committed = false
+    let rolledBack = false
+    // Fake transaction runner: commits when `run` resolves, "rolls back" (records + rethrows)
+    // when `run` throws. This is exactly the contract index.ts fulfils with
+    // poolManager.get().transaction — so testing over it tests the shipped glue's shape.
+    const withTxQuery = async <R>(run: (q: MultitableProvisioningQueryFn) => Promise<R>): Promise<R> => {
+      const spy: MultitableProvisioningQueryFn = async (sql: string) => {
+        sqls.push(sql)
+        return { rows: [], rowCount: 0 }
+      }
+      try {
+        const r = await run(spy)
+        committed = true
+        return r
+      } catch (e) {
+        rolledBack = true
+        throw e
+      }
+    }
+
+    // Happy path: fn receives a surface bound to the tx query; the runner commits.
+    const ok = await runObjectFieldsRepairTransactionWith(withTxQuery, async (surface) => {
+      await surface.findObjectSheet({ projectId: 'tenant_1:plugin', objectId: 'obj' })
+      return 'done'
+    })
+    expect(ok).toBe('done')
+    expect(committed).toBe(true)
+    expect(sqls.join(' ')).toMatch(/meta_sheets/) // surface really used the tx query
+
+    // Verify-throw path: fn throws → the throw propagates OUT so the caller's tx rolls back
+    // (a runner that swallowed the throw would leave committed=true here).
+    committed = false
+    await expect(
+      runObjectFieldsRepairTransactionWith(withTxQuery, async () => {
+        throw new Error('verify failed')
+      }),
+    ).rejects.toThrow('verify failed')
+    expect(rolledBack).toBe(true)
+    expect(committed).toBe(false)
+  })
+})
+
+/**
+ * P0-S S3 (Codex round 2) — ensureFields/ensureObject destructive-reconcile default.
+ *
+ * The ratified direction: an EXISTING object is never silently destructively reconciled.
+ * On any name/type/property/order diff the DEFAULT refuses; only an explicit opt-in may
+ * overwrite; additive repair goes through ensureMissingObjectFields.
+ */
+describe('ensureObject destructive-reconcile guard (P0-S S3 fail-closed default)', () => {
+  const DESCRIPTOR = {
+    id: 'installedAsset',
+    name: 'Installed Asset',
+    fields: [
+      { id: 'assetCode', name: 'Asset Code', type: 'string' as const },
+      { id: 'serialNo', name: 'Serial No', type: 'string' as const },
+    ],
+  }
+  const PROJECT = 'tenant_42:after-sales'
+
+  afterEach(() => {
+    delete process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV]
+  })
+
+  it('leaves a FRESH install completely unaffected — every field is a create, never a refusal', async () => {
+    const { query, fields } = createQuery()
+
+    const result = await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    expect(result.fields).toHaveLength(2)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No'])
+  })
+
+  it('re-ensuring an UNCHANGED descriptor stays idempotent — no diff, so no refusal', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    await expect(
+      ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR }),
+    ).resolves.toBeDefined()
+
+    expect(fields).toHaveLength(2)
+  })
+
+  it('ADDITIVE evolution still works — a brand-new field id is a create, not an overwrite', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    await ensureObject({
+      query,
+      projectId: PROJECT,
+      descriptor: {
+        ...DESCRIPTOR,
+        fields: [...DESCRIPTOR.fields, { id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const }],
+      },
+    })
+
+    expect(fields).toHaveLength(3)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+  })
+
+  it.each([
+    ['name', { id: 'serialNo', name: 'Serial Number', type: 'string' as const }, ['name']],
+    ['type', { id: 'serialNo', name: 'Serial No', type: 'number' as const }, ['type']],
+  ])(
+    'REFUSES by default when an existing field differs in %s, naming the diff kinds',
+    async (_label, mutated, expectedKinds) => {
+      const { query, fields } = createQuery()
+      await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+      const before = fields.map((field) => ({ ...field }))
+
+      const attempt = ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[0], mutated] },
+      })
+
+      await expect(attempt).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+      const error = await attempt.catch((err) => err as MultitableEnsureFieldsRefusedError)
+      expect(error.code).toBe('MULTITABLE_ENSURE_FIELDS_REFUSED')
+      expect(error.diffKinds).toEqual(expectedKinds)
+      // values-free: ids + kinds only, never the stored or incoming field name
+      expect(error.message).not.toContain('Serial Number')
+      // and the tenant's rows are untouched — the refusal happens BEFORE the write
+      expect(fields).toEqual(before)
+    },
+  )
+
+  it('REFUSES on a reorder — positional churn is a real overwrite, not a no-op', async () => {
+    const { query } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[1], DESCRIPTOR.fields[0]] },
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+  })
+
+  it('the exact literal overwrite env restores the old destructive behavior', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = 'overwrite'
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: {
+          ...DESCRIPTOR,
+          fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+        },
+      }),
+    ).resolves.toBeDefined()
+
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial Number'])
+  })
+
+  it.each(['', 'OVERWRITE', 'overwrit', 'true'])(
+    'a near-miss env value %j does NOT re-arm overwrite — still refuses',
+    async (value) => {
+      const { query } = createQuery()
+      await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+      process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = value
+
+      await expect(
+        ensureObject({
+          query,
+          projectId: PROJECT,
+          descriptor: {
+            ...DESCRIPTOR,
+            fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+          },
+        }),
+      ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+    },
+  )
+
+  it('the per-call opt-in overwrites without disarming the guard process-wide', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    const mutatedDescriptor = {
+      ...DESCRIPTOR,
+      fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+    }
+
+    await expect(
+      ensureObject({ query, projectId: PROJECT, descriptor: mutatedDescriptor, overwriteMode: 'overwrite' }),
+    ).resolves.toBeDefined()
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial Number'])
+
+    // the env was never set, so an ordinary caller is still fail-closed
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial No v3', type: 'string' as const }] },
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+  })
+
+  it('preserve mode keeps the existing row and does not throw', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = 'preserve'
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: {
+          ...DESCRIPTOR,
+          fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+        },
+      }),
+    ).resolves.toBeDefined()
+
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No'])
+  })
+
+  it('ensureMissingObjectFields remains the additive repair path for an existing object', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    const result = await ensureMissingObjectFields({
+      query,
+      projectId: PROJECT,
+      objectId: DESCRIPTOR.id,
+      fields: [
+        // one already-present field (must be skipped, never mutated) and one genuinely new
+        { id: 'serialNo', name: 'Serial Number', type: 'string' as const },
+        { id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const },
+      ],
+    })
+
+    expect(result.addedFieldIds).toHaveLength(1)
+    expect(result.skippedExistingFieldIds).toHaveLength(1)
+    // the pre-existing row kept its ORIGINAL name despite the differing descriptor
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+  })
+})
+
+/**
+ * P0-S S3 — the pre-read must ride the CALLER'S client, not an ambient pool.
+ *
+ * Every real caller hands `ensureFields` a transaction-bound `query`: the template
+ * installer runs base + sheets + fields + views inside ONE `pool.transaction(...)`
+ * (`src/routes/univer-meta.ts:6925` -> `src/multitable/template-library.ts:622`), and the
+ * plugin path does the same through `ensureObjectInScope` (`src/index.ts:1796`).
+ *
+ * So the guard's per-field pre-read has to travel on `input.query`. If it were ever
+ * refactored onto a pool connection the guard would silently invert: a pool read cannot
+ * see rows the caller's own uncommitted transaction just wrote, so an existing field would
+ * classify as `create` and be overwritten anyway — the exact hazard S3 exists to close.
+ * These tests pin the routing so that refactor fails loudly instead.
+ */
+describe('ensureFields pre-read rides the caller-supplied query fn (P0-S S3)', () => {
+  const SHEET_ID = 'sheet_tx_scoped'
+
+  afterEach(() => {
+    delete process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV]
+  })
+
+  /** A fake standing in for one transaction client, recording every statement it receives. */
+  async function seedTransactionClient() {
+    const store = createQuery()
+    const seen: string[] = []
+    const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+      seen.push(String(sql).replace(/\s+/g, ' ').trim())
+      return store.query(sql, params)
+    }
+
+    await createSheet({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      name: 'Tx Scoped',
+      description: null,
+    })
+    seen.length = 0 // only ensureFields traffic from here on
+
+    return { ...store, txQuery, seen }
+  }
+
+  it('issues one pre-read per field on the caller client, and a first install only creates', async () => {
+    const { txQuery, seen, fields } = await seedTransactionClient()
+
+    const installed = await ensureFields({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      fields: [
+        { id: 'f_code', name: 'Code', type: 'string' },
+        { id: 'f_note', name: 'Note', type: 'string' },
+      ],
+    })
+
+    expect(installed).toHaveLength(2)
+
+    const preReads = seen.filter(
+      (sql) => sql.includes('FROM meta_fields') && sql.includes('WHERE id = $1 AND sheet_id = $2'),
+    )
+    expect(preReads).toHaveLength(2)
+    // 2 pre-reads + 2 upserts + the final read-back: NOTHING escaped to another connection
+    expect(seen).toHaveLength(5)
+    // and a first install is a plain create — the guard never refuses provisioning
+    expect(fields.map((field) => field.name)).toEqual(['Code', 'Note'])
+  })
+
+  it('sees rows written through the SAME client, so the guard still catches a rename', async () => {
+    const { txQuery, fields } = await seedTransactionClient()
+
+    await ensureFields({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      fields: [{ id: 'f_code', name: 'Code', type: 'string' }],
+    })
+    const before = fields.map((field) => ({ ...field }))
+
+    // A pool-scoped pre-read could not observe the row written just above, would classify
+    // it 'create' and overwrite it. Reading through the caller's client, the rename is caught.
+    await expect(
+      ensureFields({
+        query: txQuery,
+        sheetId: SHEET_ID,
+        fields: [{ id: 'f_code', name: 'Code Renamed', type: 'string' }],
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+
+    expect(fields).toEqual(before)
+  })
+})
+
+// ── the plugin's own provisioning paths never traverse the managed-field delete guard ───────────
+// routes/univer-meta.ts `DELETE /fields/:fieldId` refuses every field on a registry-registered sheet
+// (src/multitable/managed-field-delete-guard.ts). That guard lives on the HTTP route; `ensureObject`
+// and `ensureMissingObjectFields` are called by plugins with a query function and never pass through
+// an Express router, so the guard cannot affect them BY CONSTRUCTION. This cell pins the observable
+// half of that claim: the whole SQL set the two paths issue contains no DELETE at all (there is no
+// plugin "deprovision" of multitable fields) and never the guard's registry read.
+describe('plugin provisioning path vs the managed-field delete guard (DELETE /fields/:fieldId)', () => {
+  const PROJECT = 'tenant_42:after-sales'
+  const DESCRIPTOR = {
+    id: 'installedAsset',
+    name: 'Installed Asset',
+    fields: [
+      { id: 'assetCode', name: 'Asset Code', type: 'string' as const },
+      { id: 'serialNo', name: 'Serial No', type: 'string' as const },
+    ],
+  }
+
+  it('ensureObject + ensureMissingObjectFields issue no DELETE and never the guard\'s plugin_multitable_object_registry read', async () => {
+    const { query: inner, fields } = createQuery()
+    const issued: string[] = []
+    const query: MultitableProvisioningQueryFn = async (sql, params) => {
+      issued.push(sql.replace(/\s+/g, ' ').trim())
+      return inner(sql, params)
+    }
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    const repaired = await ensureMissingObjectFields({
+      query,
+      projectId: PROJECT,
+      objectId: DESCRIPTOR.id,
+      fields: [{ id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const }],
+    })
+
+    expect(repaired.addedFieldIds).toHaveLength(1)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+    expect(issued.length).toBeGreaterThan(0)
+    expect(issued.filter((sql) => /^DELETE\b/i.test(sql))).toEqual([])
+    expect(issued.filter((sql) => /plugin_multitable_object_registry/i.test(sql))).toEqual([])
+    // every provisioned field id has the deterministic shape the guard module documents
+    for (const id of repaired.addedFieldIds) expect(id).toMatch(/^fld_[0-9a-f]{24}$/)
   })
 })

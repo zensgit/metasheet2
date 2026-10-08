@@ -8,6 +8,9 @@ import express, { type Express } from 'express'
 import request from 'supertest'
 import { checkWebhookTargetUrl } from '../../src/multitable/webhook-ssrf-guard'
 import { pinnedHttpsFetch } from '../../src/multitable/webhook-pinned-fetch'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 // Egress + SSRF are mocked at their module boundary so the dispatch's gate / dedup / audit /
 // scrub logic is exercised without real DNS or sockets. importOriginal-spread preserves the
@@ -92,11 +95,11 @@ const reader = { id: 'u_read', roles: ['member'], perms: ['multitable:read'] }
 const nonReader = { id: 'u_none', roles: ['member'], perms: ['multitable:comment'] }
 
 describe('B1-a1 button/run route (mock pool)', () => {
-  beforeEach(async () => { currentUser = reader; noRecord = false; auditInserts = 0; app = await buildApp() })
+  beforeEach(async () => { currentUser = reader; noRecord = false; auditInserts = 0; app = await buildApp(); pinned.setApp(app) })
   afterEach(() => { vi.restoreAllMocks(); currentUser = undefined; noRecord = false })
 
   it('runs an inert record_click button → 200 succeeded', async () => {
-    const res = await request(app).post(runUrl('fld_btn')).send({})
+    const res = await request(pinned.url()).post(runUrl('fld_btn')).send({})
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     expect(res.body.data.status).toBe('succeeded')
@@ -109,7 +112,8 @@ describe('B1-a1 button/run route (mock pool)', () => {
   it('SECURITY: a non-reader cannot execute (403) — visibility != executability', async () => {
     currentUser = nonReader
     app = await buildApp()
-    const res = await request(app).post(runUrl('fld_btn')).send({})
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(runUrl('fld_btn')).send({})
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
   })
@@ -117,35 +121,36 @@ describe('B1-a1 button/run route (mock pool)', () => {
   it('record not on the sheet → 404', async () => {
     noRecord = true
     app = await buildApp()
-    const res = await request(app).post(runUrl('fld_btn')).send({})
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(runUrl('fld_btn')).send({})
     expect(res.status).toBe(404)
   })
 
   it('non-button field → 400 NOT_A_BUTTON', async () => {
-    const res = await request(app).post(runUrl('fld_text')).send({})
+    const res = await request(pinned.url()).post(runUrl('fld_text')).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('NOT_A_BUTTON')
   })
 
   it('button with no actionType → 400 BUTTON_NOT_CONFIGURED', async () => {
-    const res = await request(app).post(runUrl('fld_btn_unconf')).send({})
+    const res = await request(pinned.url()).post(runUrl('fld_btn_unconf')).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('BUTTON_NOT_CONFIGURED')
   })
 
   it('send_webhook is now enabled but EGRESS-gated: a reader (no admin / no multitable:send_webhook) → 403', async () => {
-    const res = await request(app).post(runUrl('fld_btn_webhook')).send({ requestId: 'req_wh_1' })
+    const res = await request(pinned.url()).post(runUrl('fld_btn_webhook')).send({ requestId: 'req_wh_1' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
   })
 
   it('unknown field → 404', async () => {
-    const res = await request(app).post(runUrl('fld_missing')).send({})
+    const res = await request(pinned.url()).post(runUrl('fld_missing')).send({})
     expect(res.status).toBe(404)
   })
 
   it('record_click stays inert: requestId is OPTIONAL (no requestId → 200)', async () => {
-    const res = await request(app).post(runUrl('fld_btn')).send({})
+    const res = await request(pinned.url()).post(runUrl('fld_btn')).send({})
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('succeeded')
   })
@@ -273,6 +278,7 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
     // end); individual tests re-mock it to simulate an audit failure.
     vi.spyOn(poolManager, 'get').mockReturnValue(createNotifyMockPool(state) as any)
     notifyApp = await buildNotifyApp(editor)
+    pinned.setApp(notifyApp)
   })
   afterEach(() => { vi.restoreAllMocks() })
 
@@ -281,7 +287,7 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
   const confirmUrl = `/api/multitable/sheets/${SHEET_ID}/records/${RECORD_ID}/fields/fld_btn_notify_confirm/button/run`
 
   it('side-effecting action REQUIRES a requestId → 400 without one (no write)', async () => {
-    const res = await request(notifyApp).post(url).send({})
+    const res = await request(pinned.url()).post(url).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('REQUEST_ID_REQUIRED')
     expect(state.notificationInserts).toHaveLength(0)
@@ -291,7 +297,8 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
 
   it('§3 actor gate: a read-only user lacks canSendNotification → 403, NOTHING written', async () => {
     notifyApp = await buildNotifyApp(reader)
-    const res = await request(notifyApp).post(url).send({ requestId: 'req-1' })
+    pinned.setApp(notifyApp)
+    const res = await request(pinned.url()).post(url).send({ requestId: 'req-1' })
     expect(res.status).toBe(403)
     expect(state.notificationInserts).toHaveLength(0)
     expect(state.dedupKeys.size).toBe(0)
@@ -301,14 +308,15 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
     // canSendNotification derives from full multitable:write/admin only; write-own is
     // record-scoped and must NOT imply notifying members from any row.
     notifyApp = await buildNotifyApp({ id: 'u_writeown', roles: ['member'], perms: ['multitable:write-own'] })
-    const res = await request(notifyApp).post(url).send({ requestId: 'req-wo' })
+    pinned.setApp(notifyApp)
+    const res = await request(pinned.url()).post(url).send({ requestId: 'req-wo' })
     expect(res.status).toBe(403)
     expect(state.notificationInserts).toHaveLength(0)
     expect(state.dedupKeys.size).toBe(0)
   })
 
   it('§4 server-confirm: confirm.enabled + confirmed omitted → 400 CONFIRMATION_REQUIRED, NOTHING written, requestId NOT consumed', async () => {
-    const res = await request(notifyApp).post(confirmUrl).send({ requestId: 'req-confirm' })
+    const res = await request(pinned.url()).post(confirmUrl).send({ requestId: 'req-confirm' })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('CONFIRMATION_REQUIRED')
     expect(state.notificationInserts).toHaveLength(0)
@@ -316,7 +324,7 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
     expect(state.dedupKeys.size).toBe(0)
 
     // The SAME requestId later WITH confirmed:true still sends once (not consumed).
-    const retry = await request(notifyApp).post(confirmUrl).send({ requestId: 'req-confirm', confirmed: true })
+    const retry = await request(pinned.url()).post(confirmUrl).send({ requestId: 'req-confirm', confirmed: true })
     expect(retry.status).toBe(200)
     expect(retry.body.data.status).toBe('succeeded')
     expect(retry.body.data.deduplicated).toBeUndefined()
@@ -324,14 +332,14 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
   })
 
   it('§4 server-confirm: confirmed:false is treated as not-confirmed → 400', async () => {
-    const res = await request(notifyApp).post(confirmUrl).send({ requestId: 'req-confirm-f', confirmed: false })
+    const res = await request(pinned.url()).post(confirmUrl).send({ requestId: 'req-confirm-f', confirmed: false })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('CONFIRMATION_REQUIRED')
     expect(state.notificationInserts).toHaveLength(0)
   })
 
   it('§3.1 recipient HARD-REJECT: ANY non-member rejects the whole run → 400, NOTHING written', async () => {
-    const res = await request(notifyApp).post(badUrl).send({ requestId: 'req-bad' })
+    const res = await request(pinned.url()).post(badUrl).send({ requestId: 'req-bad' })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('RECIPIENT_NOT_AUTHORIZED')
     expect(state.notificationInserts).toHaveLength(0)
@@ -340,7 +348,7 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
   })
 
   it('all-members recipient set delivers a notification.sent row with the message + writes an audit row', async () => {
-    const res = await request(notifyApp).post(url).send({ requestId: 'req-ok' })
+    const res = await request(pinned.url()).post(url).send({ requestId: 'req-ok' })
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('succeeded')
     expect(state.notificationInserts.map((r) => r.user_id)).toEqual(['u_member'])
@@ -357,9 +365,9 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
   })
 
   it('§6 at-most-once: a duplicate requestId writes the notification ONCE + no second audit', async () => {
-    const first = await request(notifyApp).post(url).send({ requestId: 'req-dup' })
+    const first = await request(pinned.url()).post(url).send({ requestId: 'req-dup' })
     expect(first.status).toBe(200)
-    const replay = await request(notifyApp).post(url).send({ requestId: 'req-dup' })
+    const replay = await request(pinned.url()).post(url).send({ requestId: 'req-dup' })
     expect(replay.status).toBe(200)
     expect(replay.body.data.deduplicated).toBe(true)
     expect(state.notificationInserts.filter((r) => r.user_id === 'u_member')).toHaveLength(1)
@@ -377,7 +385,7 @@ describe('B1-S1 D0-A send_notification button (mock pool)', () => {
       .spyOn(logServiceModule.AutomationLogService.prototype, 'recordWithQuery')
       .mockRejectedValue(new Error('audit boom'))
 
-    const res = await request(notifyApp).post(url).send({ requestId: 'req-failclosed' })
+    const res = await request(pinned.url()).post(url).send({ requestId: 'req-failclosed' })
     // Fail-closed: the run does NOT report success.
     expect(res.status).toBe(500)
     expect(res.body.ok).toBe(false)
@@ -482,7 +490,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
 
   it('admin success: reached 2xx → 200 succeeded, dedup outcome=succeeded, audit row written', async () => {
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-ok' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-ok' })
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('succeeded')
     expect(mockFetch).toHaveBeenCalledTimes(1)
@@ -493,14 +502,16 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
 
   it('exact-grant (multitable:read + multitable:send_webhook) user → 200 succeeded', async () => {
     const app = await buildWebhookApp(whGrant)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-grant' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-grant' })
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('succeeded')
   })
 
   it('SECURITY [P2-2]: a wildcard multitable:* grant does NOT confer egress → 403 (exact grant required)', async () => {
     const app = await buildWebhookApp(whWildcard)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-wild' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-wild' })
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
     expect(mockFetch).not.toHaveBeenCalled()
@@ -510,7 +521,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
   it('non-2xx reached → 200 failed (surfaced, no body leak), dedup outcome=failed', async () => {
     mockFetch.mockResolvedValue({ status: 502, ok: false })
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-502' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-502' })
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('failed')
     expect([...state.dedupRows.values()][0].outcome).toBe('failed')
@@ -520,7 +532,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
   it('transport error → 200 failed, dedup outcome=failed', async () => {
     mockFetch.mockRejectedValue(new Error('socket hang up'))
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-transport' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-transport' })
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('failed')
     expect([...state.dedupRows.values()][0].outcome).toBe('failed')
@@ -529,7 +542,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
   it('SSRF reject → 400 pre-txn, NOTHING sent, NO dedup row, NO audit', async () => {
     mockSsrf.mockResolvedValue({ ok: false, reason: 'blocked internal address 169.254.169.254' } as any)
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-ssrf' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-ssrf' })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('WEBHOOK_TARGET_REJECTED')
     expect(mockFetch).not.toHaveBeenCalled()
@@ -539,9 +553,10 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
 
   it('[P1-2] replay of a SUCCESS → succeeded+deduplicated, NO second egress', async () => {
     const app = await buildWebhookApp(whAdmin)
-    const first = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-dup' })
+    pinned.setApp(app)
+    const first = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-dup' })
     expect(first.body.data.status).toBe('succeeded')
-    const replay = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-dup' })
+    const replay = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-dup' })
     expect(replay.status).toBe(200)
     expect(replay.body.data.status).toBe('succeeded')
     expect(replay.body.data.deduplicated).toBe(true)
@@ -551,9 +566,10 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
   it('[P1-2] replay of a FAILURE → failed+deduplicated (NOT a false success), NO second egress', async () => {
     mockFetch.mockResolvedValue({ status: 500, ok: false })
     const app = await buildWebhookApp(whAdmin)
-    const first = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-dupfail' })
+    pinned.setApp(app)
+    const first = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-dupfail' })
     expect(first.body.data.status).toBe('failed')
-    const replay = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-dupfail' })
+    const replay = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-dupfail' })
     expect(replay.status).toBe(200)
     expect(replay.body.data.status).toBe('failed') // the OLD code returned 'succeeded' here
     expect(replay.body.data.deduplicated).toBe(true)
@@ -564,7 +580,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
     const logServiceModule = await import('../../src/multitable/automation-log-service')
     vi.spyOn(logServiceModule.AutomationLogService.prototype, 'recordWithQuery').mockRejectedValue(new Error('audit boom'))
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-auditfail' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-auditfail' })
     // Egress happened once, but the durable record failed → response is NON-success.
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('failed')
@@ -580,7 +597,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
     mockSsrf.mockResolvedValue({ ok: true, protocol: 'https:', hostname: 'hooks.example.com', addresses: ['93.184.216.34'] } as any)
     mockFetch.mockResolvedValue({ status: 200, ok: true })
     const app2 = await buildWebhookApp(whAdmin)
-    const replay = await request(app2).post(wh('fld_wh_ok')).send({ requestId: 'r-auditfail' })
+    pinned.setApp(app2)
+    const replay = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-auditfail' })
     expect(replay.body.data.status).toBe('failed') // pending → non-success, never re-egressed
     expect(mockFetch).not.toHaveBeenCalled()
   })
@@ -588,7 +606,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
   it('[#1882 F1] value-scrub: a secret-shaped value in the error is scrubbed in audit AND dedup result_message', async () => {
     mockFetch.mockRejectedValue(new Error('connect failed: postgresql://admin:SuperSecretPwd@db.internal:5432/app'))
     const app = await buildWebhookApp(whAdmin)
-    const res = await request(app).post(wh('fld_wh_ok')).send({ requestId: 'r-scrub' })
+    pinned.setApp(app)
+    const res = await request(pinned.url()).post(wh('fld_wh_ok')).send({ requestId: 'r-scrub' })
     expect(res.body.data.status).toBe('failed')
     const stored = [...state.dedupRows.values()][0]
     expect(stored.result_message).not.toContain('SuperSecretPwd')
@@ -600,7 +619,8 @@ describe('B1-S2 send_webhook button (mock pool)', () => {
 
   it('[P2-3] header allowlist: only content-type/accept pass; auth/custom dropped; HMAC signature code-owned (not shadowable)', async () => {
     const app = await buildWebhookApp(whAdmin)
-    await request(app).post(wh('fld_wh_secret')).send({ requestId: 'r-hdr' })
+    pinned.setApp(app)
+    await request(pinned.url()).post(wh('fld_wh_secret')).send({ requestId: 'r-hdr' })
     expect(mockFetch).toHaveBeenCalledTimes(1)
     const sentHeaders = (mockFetch.mock.calls[0] as any[])[3].headers as Record<string, string>
     expect(sentHeaders['Content-Type']).toBe('application/xml') // caller may set content-type

@@ -41,6 +41,8 @@ export type MetaRecordLabelKey =
   // --- W2 S5 (design-lock multitable-w2-unified-record-inspector-design-lock-20260714.md §2 附件面板
   //     row, §7 S5): the 4th inspector tab label (G-10 term 附件). ---
   | 'record.attachments'
+  // --- Resizable panel (2026-09-05): drag-resize splitter + expand toggle on the panel's left edge. ---
+  | 'record.resizeHandle' | 'record.expand' | 'record.collapse'
   | 'record.historyLoading' | 'record.historyUnavailable' | 'record.historyEmpty'
   | 'record.historyActionCreated' | 'record.historyActionDeleted' | 'record.historyActionUpdated'
   // --- Layer 1 record-level restore (Slice 3) ---
@@ -65,6 +67,7 @@ export type MetaRecordLabelKey =
   | 'record.configHistoryEntityField' | 'record.configHistoryEntityView' | 'record.configHistoryEntityPermission'
   | 'record.configHistoryEntitySheetConfig' | 'record.configHistoryActionCreate' | 'record.configHistoryActionUpdate'
   | 'record.configHistoryActionDelete' | 'record.configHistoryEmpty' | 'record.configHistoryLoading' | 'record.configHistoryBy'
+  | 'record.configHistoryDetailsUnavailable'
   // --- T9-W config-restore (revert a config change) ---
   | 'record.configRestoreAction' | 'record.configRestoreTitle' | 'record.configRestoreWillRevert'
   | 'record.configRestoreDrift' | 'record.configRestoreGated' | 'record.configRestoreConfirm'
@@ -93,22 +96,90 @@ export type MetaRecordLabelKey =
   | 'notification.eventNotificationSent'
   // --- MetaFormView multi-page nav chrome (A4) ---
   | 'form.previousPage' | 'form.nextPage'
-  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout) ---
+  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout; W2 exact-anchor: manual/free-time keys
+  //     retired — the picker only ever sources an exact Global History batch) ---
   | 'record.resetPickerHeading' | 'record.resetPickerHistoryLabel' | 'record.resetPickerHistoryPlaceholder'
   | 'record.resetPickerRefresh' | 'record.resetPickerHistoryLoading'
   | 'record.resetPickerHistoryEmpty' | 'record.resetPickerHistoryUnavailable'
-  | 'record.resetPickerManualSummary' | 'record.resetPickerManualLabel' | 'record.resetPickerFutureWarn'
+  | 'record.resetPickerExactAnchorNote'
+  | 'record.revertPickerHeading' | 'record.recoveryPickerHeading' | 'record.recoveryPickerExactAnchorNote'
   | 'record.resetPickerTargetPrefix' | 'record.resetPickerTargetSuffix' | 'record.resetPickerFromBatch'
   | 'record.resetPickerErrorLoad' | 'record.resetPickerSystemActor' | 'record.resetPickerDefaultAction'
   // --- T8-2 Reset UI confirm dialog (R5c strict-zero closeout, final microslice of this line) ---
   | 'record.resetConfirmDialogAria' | 'record.resetConfirmCancelAria' | 'record.resetConfirmLoading'
-  | 'record.resetConfirmViewInTrash'
+  | 'record.resetConfirmSubmitting' | 'record.resetConfirmNoChanges'
+  | 'record.resetConfirmViewInTrash' | 'record.resetConfirmRetryPreview'
   | 'record.resetConfirmErrorDisabled' | 'record.resetConfirmErrorForbidden' | 'record.resetConfirmErrorBlocked'
   | 'record.resetConfirmErrorStale' | 'record.resetConfirmErrorTooLarge' | 'record.resetConfirmErrorTypeMismatch'
   | 'record.resetConfirmErrorGeneric'
+  // --- W2 exact-anchor kernel refusal mapping (L6-b/L7/L8 reason vocabulary) ---
+  | 'record.resetConfirmErrorAnchorInvalid' | 'record.resetConfirmErrorCheckpoint'
+  | 'record.resetConfirmErrorTrustRequired' | 'record.resetConfirmErrorSchemaDrift'
+  | 'record.resetConfirmErrorLinkIntegrity' | 'record.resetConfirmErrorValueInvalid'
+  | 'record.resetConfirmErrorInboundUnprovable' | 'record.resetConfirmErrorRetentionConflict'
+  | 'record.revertConfirmDialogAria' | 'record.revertConfirmErrorDisabled'
+  | 'record.revertConfirmErrorForbidden' | 'record.revertConfirmErrorTooLarge'
+  | 'record.revertConfirmErrorTrustRequired' | 'record.revertConfirmErrorGeneric'
+  | 'record.revertConfirmInvalidPreview'
   | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
   | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
   | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-A §1.2 header) ---
+  | 'record.moreActions'
+  // Row A copy-link icon: emit only in PR-A (§3 PR-A file line); the clipboard write + the
+  // done/failed live-region text are PR-B1 (§3 PR-B1 WB line names the copy-link handler) — the
+  // done/failed keys are declared here now (reserved) so B1 needs no new i18n PR.
+  | 'record.copyLink' | 'record.copyLinkDone' | 'record.copyLinkFailed'
+  | 'record.titleFieldAria'
+  // --- Record inspector v3 (design 2026-09-05, PR-B1 §1.3 body): the details-tab hide-empty toggle's
+  //     CONSTANT label (APG toggle button — `aria-pressed` carries the state; round 2 removed the
+  //     round-1 `record.showEmpty` pressed copy) and the link-field "edit links" button copy shown
+  //     beside the linked-record chips. The "hidden in this view" section heading is the
+  //     count-interpolated `recordHiddenFieldsHeading` below; §1 has no heading (round 2 removed the
+  //     round-1 `record.fieldsInView` key). ---
+  | 'record.hideEmpty'
+  | 'record.editLinks'
+  // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
+  //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
+  //     kebab row (+ its own title key, button-suffix pattern above); every `approval.*` key belongs to
+  //     MetaRecordApprovalSubmitDialog.vue or MetaRecordApprovalPanel.vue. Counts/identifiers are
+  //     interpolated by the helpers at the foot of this file, never concatenated in a template. ---
+  | 'record.submitApproval' | 'record.submitApprovalTitle'
+  | 'approval.dialogTitle' | 'approval.close' | 'approval.cancel' | 'approval.submit' | 'approval.submitting'
+  | 'approval.template' | 'approval.templatePlaceholder' | 'approval.templatesLoading'
+  | 'approval.templatesUnavailable' | 'approval.formLoading' | 'approval.formLoadFailed'
+  | 'approval.unsupportedField' | 'approval.requiredMissing' | 'approval.requiredMark'
+  | 'approval.inFlight' | 'approval.viewInstance' | 'approval.submitFailed'
+  | 'approval.panelTitle' | 'approval.panelExpand' | 'approval.panelCollapse'
+  | 'approval.panelLoading' | 'approval.panelError' | 'approval.panelEmpty'
+  | 'approval.requestNo' | 'approval.submittedBy' | 'approval.submittedAt' | 'approval.unknownActor'
+  // --- 评审第二轮补齐 / round-2 gaps. The route's refusals are fixed ENGLISH strings and its
+  //     submission statuses include two values the shared approvalInstance status table does not
+  //     know ('creating'/'failed'), so both were reaching a zh UI as raw English. These keys are the
+  //     localization layer for exactly those two gaps, plus the two "what you see may not be what
+  //     the server uses" notices (truncated roster / unpublished template draft). ---
+  | 'approval.statusCreating' | 'approval.statusFailed' | 'approval.failureReason'
+  | 'approval.errorPermissionDenied' | 'approval.errorTemplateForbidden'
+  | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
+  | 'approval.errorCreateFailed' | 'approval.errorValidation'
+  | 'approval.errorOrgUnresolved'
+  | 'approval.templateDraftPending'
+  // --- 2a 后续前端 / list page follow-up (backend PR #5763: the list route now answers
+  //     `{ submissions, hasMore }` and stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a row whose
+  //     terminal write is CORRECT but whose requester bell was never written). The panel shows at most
+  //     one page, so `hasMore` needs copy that says so, and the row marker needs a label for that code
+  //     — an unlabelled code renders NOTHING (see recordApprovalErrorLabel), i.e. a silent miss. ---
+  | 'approval.errorNotificationFailed' | 'approval.errorNotificationFailedTerminal'
+  // --- 审批进度卡片 / record-drawer approval PROGRESS card. The panel already lists a record's
+  //     submissions; the progress card is the collapsed, approvals:read-gated read of the approval
+  //     INSTANCE behind one of them (步骤 / 当前待处理人 / 历史). Every string here is either chrome or a
+  //     values-free degradation notice — the card renders identifiers, the display names the approval
+  //     centre already shows, a step COUNT and a localized action verb, never a form value. ---
+  | 'approval.progressExpand' | 'approval.progressCollapse' | 'approval.progressLoading'
+  | 'approval.progressApprovers' | 'approval.progressHistory' | 'approval.progressHistoryEmpty'
+  | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
+  | 'approval.progressMismatch'
+  | 'approval.progressRetry' | 'approval.completedAt'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -144,6 +215,9 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.details': { en: 'Details', zh: '详情' },
   'record.history': { en: 'History', zh: '历史' },
   'record.attachments': { en: 'Attachments', zh: '附件' },
+  'record.resizeHandle': { en: 'Resize record panel', zh: '调整记录面板宽度' },
+  'record.expand': { en: 'Expand panel', zh: '展开面板' },
+  'record.collapse': { en: 'Collapse panel', zh: '收起面板' },
   'record.historyLoading': { en: 'Loading history...', zh: '正在加载历史...' },
   'record.historyUnavailable': { en: 'History unavailable for this record.', zh: '此记录的历史不可用。' },
   'record.historyEmpty': { en: 'No history yet.', zh: '暂无历史。' },
@@ -201,7 +275,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configHistoryEntityField': { en: 'Field', zh: '字段' },
   'record.configHistoryEntityView': { en: 'View', zh: '视图' },
   'record.configHistoryEntityPermission': { en: 'Permission', zh: '权限' },
-  'record.configHistoryEntitySheetConfig': { en: 'Sheet config', zh: '数据表配置' },
+  'record.configHistoryEntitySheetConfig': { en: 'Table settings', zh: '表级设置' },
+  'record.configHistoryDetailsUnavailable': { en: 'Configuration details are unavailable for this entry.', zh: '此条历史未保存可显示的配置详情。' },
   'record.configHistoryActionCreate': { en: 'Created', zh: '新建' },
   'record.configHistoryActionUpdate': { en: 'Updated', zh: '更新' },
   'record.configHistoryActionDelete': { en: 'Deleted', zh: '删除' },
@@ -250,9 +325,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'form.previousPage': { en: 'Previous', zh: '上一页' },
   'form.nextPage': { en: 'Next', zh: '下一页' },
 
-  // T8-2 Reset UI T-source picker (ResetToPointPicker.vue, R5b strict-zero closeout — the component was born
-  // after the i18n line closed and shipped all-English; flag (pitResetEnabled) is dormant by default so this
-  // is a shape-only migration, no behavior change).
+  // Exact-anchor recovery picker. Reset and Revert are separately capability-gated and remain dormant by default.
   'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此数据表重置到某个全局历史点' },
   'record.resetPickerHistoryLabel': { en: 'History point', zh: '历史点' },
   'record.resetPickerHistoryPlaceholder': { en: 'Select a recent history batch', zh: '选择一个最近的历史批次' },
@@ -260,23 +333,32 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetPickerHistoryLoading': { en: 'Loading history points...', zh: '正在加载历史点...' },
   'record.resetPickerHistoryEmpty': { en: 'No recent history batches found.', zh: '未找到最近的历史批次。' },
   'record.resetPickerHistoryUnavailable': { en: 'History points unavailable.', zh: '历史点不可用。' },
-  'record.resetPickerManualSummary': { en: 'Advanced manual time', zh: '高级：手动指定时间' },
-  'record.resetPickerManualLabel': { en: 'Manual point in time', zh: '手动指定时间点' },
-  'record.resetPickerFutureWarn': { en: 'Pick a time in the past — you can only reset to an earlier state.', zh: '请选择过去的时间——只能重置到更早的状态。' },
+  'record.resetPickerExactAnchorNote': {
+    en: 'Reset uses an exact, audited point from Global History only — free time entry is not supported.',
+    zh: '重置仅使用来自全局历史的精确、可审计的时间点——不支持自由输入时间。',
+  },
   'record.resetPickerTargetPrefix': { en: 'Target:', zh: '目标：' },
   'record.resetPickerTargetSuffix': { en: '(your local time)', zh: '（你的本地时间）' },
   'record.resetPickerFromBatch': { en: 'from history batch', zh: '来自历史批次' },
   'record.resetPickerErrorLoad': { en: 'Failed to load history points', zh: '加载历史点失败' },
   'record.resetPickerSystemActor': { en: 'System', zh: '系统' },
   'record.resetPickerDefaultAction': { en: 'update', zh: '更新' },
+  'record.revertPickerHeading': { en: 'Revert this sheet to a Global History point', zh: '将此数据表回退到某个全局历史点' },
+  'record.recoveryPickerHeading': { en: 'Recover this sheet from Global History', zh: '从全局历史恢复此数据表' },
+  'record.recoveryPickerExactAnchorNote': {
+    en: 'Recovery uses an exact, audited point from Global History only — free time entry is not supported.',
+    zh: '恢复仅使用来自全局历史的精确、可审计时间点——不支持自由输入时间。',
+  },
 
-  // T8-2 Reset UI confirm dialog (ResetConfirmDialog.vue, R5c strict-zero closeout — the final microslice of
-  // this line; ResetToPointPicker/R5b was the other post-closure component, now landed). Static labels only;
-  // the asOf/count-interpolated strings live in the helper functions below.
+  // Exact-anchor recovery confirmation. Static labels live here; asOf/count-interpolated strings use the
+  // helpers below so Reset and Revert can keep their distinct semantics.
   'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将数据表重置到某个时间点' },
   'record.resetConfirmCancelAria': { en: 'Cancel', zh: '取消' },
   'record.resetConfirmLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
+  'record.resetConfirmSubmitting': { en: 'Applying the recovery…', zh: '正在执行恢复…' },
+  'record.resetConfirmNoChanges': { en: 'This history point already matches the current sheet.', zh: '当前数据表已与该历史点一致。' },
   'record.resetConfirmViewInTrash': { en: 'View in Trash', zh: '在回收站中查看' },
+  'record.resetConfirmRetryPreview': { en: 'Preview again', zh: '重新预览' },
   'record.resetConfirmErrorDisabled': { en: 'Reset is not enabled here.', zh: '此处未启用重置。' },
   'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此数据表。' },
   'record.resetConfirmErrorBlocked': { en: 'A target record is locked or denied — nothing was changed.', zh: '某条目标记录被锁定或拒绝 — 未做任何更改。' },
@@ -287,6 +369,45 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // untranslated in both locales.
   'record.resetConfirmErrorTypeMismatch': { en: 'Type "reset" to confirm.', zh: '请输入 "reset" 以确认。' },
   'record.resetConfirmErrorGeneric': { en: 'Reset could not be completed. Please re-preview and try again.', zh: '重置未能完成。请重新预览后再试。' },
+  'record.resetConfirmErrorAnchorInvalid': {
+    en: "This isn't a valid exact history point. Refresh and choose a batch from the list.",
+    zh: '这不是一个有效的精确历史点。请刷新并从列表中重新选择一个批次。',
+  },
+  'record.resetConfirmErrorCheckpoint': {
+    en: 'No trusted history checkpoint covers this point any more — choose a more recent one.',
+    zh: '没有可信的历史检查点覆盖该时间点了——请选择一个更近的时间点。',
+  },
+  'record.resetConfirmErrorTrustRequired': {
+    en: "Reset is unavailable — this sheet's history trust could not be verified.",
+    zh: '重置不可用——无法验证此数据表的历史可信度。',
+  },
+  'record.resetConfirmErrorSchemaDrift': {
+    en: 'The schema changed since this point — re-preview or choose a different point.',
+    zh: '自该时间点以来结构已发生变化——请重新预览或选择其他时间点。',
+  },
+  'record.resetConfirmErrorLinkIntegrity': {
+    en: 'A related link target is missing or invalid — nothing was changed.',
+    zh: '相关联的链接目标缺失或无效——未做任何更改。',
+  },
+  'record.resetConfirmErrorValueInvalid': {
+    en: 'A target value is no longer valid for the current schema — nothing was changed.',
+    zh: '某个目标值对当前结构已不再有效——未做任何更改。',
+  },
+  'record.resetConfirmErrorInboundUnprovable': {
+    en: "This reset can't restore deleted records safely — nothing was changed.",
+    zh: '此次重置无法安全地恢复已删除的记录——未做任何更改。',
+  },
+  'record.resetConfirmErrorRetentionConflict': {
+    en: 'Reset is unavailable while revision retention is running. Try again after retention is disabled.',
+    zh: '修订保留任务运行期间无法执行重置。请在停用保留任务后重试。',
+  },
+  'record.revertConfirmDialogAria': { en: 'Revert sheet to a history point', zh: '将数据表回退到某个历史点' },
+  'record.revertConfirmErrorDisabled': { en: 'Revert is not enabled here.', zh: '此处未启用回退。' },
+  'record.revertConfirmErrorForbidden': { en: 'You do not have permission to revert this sheet.', zh: '你没有权限回退此数据表。' },
+  'record.revertConfirmErrorTooLarge': { en: 'This sheet has too many records for a one-shot revert.', zh: '此数据表记录过多，无法一次性回退。' },
+  'record.revertConfirmErrorTrustRequired': { en: "Revert is unavailable — this sheet's history trust could not be verified.", zh: '回退不可用——无法验证此数据表的历史可信度。' },
+  'record.revertConfirmErrorGeneric': { en: 'Revert could not be completed. Please re-preview and try again.', zh: '回退未能完成。请重新预览后再试。' },
+  'record.revertConfirmInvalidPreview': { en: 'This Revert preview contains a destructive delete set and was refused. Refresh and preview again.', zh: '此次回退预览包含破坏性删除集合，已被拒绝。请刷新后重新预览。' },
   // The three inline-bold words in the destructive warning paragraph. Word-for-word bold placement doesn't
   // map 1:1 to Chinese, so the zh values are chosen so the concatenated sentence (built from these plus the
   // resetConfirmWarn* helpers below, in the same fixed template slots) still reads naturally.
@@ -298,6 +419,101 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.resetConfirmTypePrefix': { en: 'Type', zh: '输入' },
   'record.resetConfirmTypeSuffix': { en: 'to confirm:', zh: '以确认：' },
   'record.resetConfirmTypeAria': { en: 'type reset to confirm', zh: '输入 reset 以确认' },
+  'record.moreActions': { en: 'More actions', zh: '更多操作' },
+  'record.copyLink': { en: 'Copy link', zh: '复制链接' },
+  'record.copyLinkDone': { en: 'Link copied', zh: '链接已复制' },
+  'record.copyLinkFailed': { en: 'Could not copy link', zh: '链接复制失败' },
+  'record.titleFieldAria': { en: 'Record title', zh: '记录标题' },
+  'record.hideEmpty': { en: 'Hide empty fields', zh: '隐藏空字段' },
+  'record.editLinks': { en: 'Edit links', zh: '编辑关联' },
+  // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
+  // convention as every other block in this table.
+  'record.submitApproval': { en: 'Submit for approval', zh: '送审' },
+  'record.submitApprovalTitle': { en: 'Submit this record for approval', zh: '将此记录提交审批' },
+  'approval.dialogTitle': { en: 'Submit for approval', zh: '送审' },
+  'approval.close': { en: 'Close submit dialog', zh: '关闭送审对话框' },
+  'approval.cancel': { en: 'Cancel', zh: '取消' },
+  'approval.submit': { en: 'Submit', zh: '提交' },
+  'approval.submitting': { en: 'Submitting…', zh: '正在提交…' },
+  'approval.template': { en: 'Approval template', zh: '审批模板' },
+  'approval.templatePlaceholder': { en: 'Pick a template', zh: '请选择模板' },
+  'approval.templatesLoading': { en: 'Loading templates…', zh: '正在加载模板…' },
+  // Empty published-template roster and a 403 on the roster read collapse to the SAME notice by design
+  // (MetaRecordApprovalSubmitDialog.vue loadTemplates — no free-text template-id fallback either way),
+  // and that collapse is pinned by its own spec ("shows the same notice when the roster read is
+  // refused (403)"), so this stays ONE sentence covering both causes rather than asserting either one —
+  // it only adds the actionable next step (ask an administrator to check both).
+  'approval.templatesUnavailable': { en: 'No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.', zh: '无可用模板或无审批读取权限，请联系管理员确认已发布审批模板，并核实你是否有审批读取权限。' },
+  'approval.formLoading': { en: 'Loading form…', zh: '正在加载表单…' },
+  'approval.formLoadFailed': { en: 'Failed to load the template form.', zh: '加载模板表单失败。' },
+  'approval.unsupportedField': { en: 'This template contains an unsupported field type — please start it from the approval centre.', zh: '该模板含不支持的字段类型，请到审批中心发起。' },
+  'approval.requiredMissing': { en: 'Fill in every required field first.', zh: '请先填写所有必填项。' },
+  'approval.requiredMark': { en: 'Required', zh: '必填' },
+  'approval.inFlight': { en: 'This record is already in approval with this template.', zh: '该记录已在此模板审批中。' },
+  'approval.viewInstance': { en: 'Open the approval', zh: '查看审批' },
+  'approval.submitFailed': { en: 'Submit failed.', zh: '送审失败。' },
+  'approval.panelTitle': { en: 'Approvals', zh: '审批' },
+  'approval.panelExpand': { en: 'Show approvals', zh: '展开审批' },
+  'approval.panelCollapse': { en: 'Hide approvals', zh: '收起审批' },
+  'approval.panelLoading': { en: 'Loading approvals…', zh: '正在加载审批…' },
+  'approval.panelError': { en: 'Failed to load approvals.', zh: '加载审批失败。' },
+  'approval.panelEmpty': { en: 'This record has never been submitted for approval.', zh: '此记录尚未送审。' },
+  'approval.requestNo': { en: 'Request', zh: '编号' },
+  'approval.submittedBy': { en: 'Submitted by', zh: '申请人' },
+  'approval.submittedAt': { en: 'Submitted at', zh: '送审时间' },
+  'approval.unknownActor': { en: 'Unknown', zh: '未知' },
+  // Submission statuses the shared `approvalInstance` StatusTag domain does not carry (they describe
+  // the SUBMISSION, not an approval instance) — localized here rather than widening that shared table.
+  'approval.statusCreating': { en: 'Submitting', zh: '提交中' },
+  'approval.statusFailed': { en: 'Submit failed', zh: '提交失败' },
+  'approval.failureReason': { en: 'Reason', zh: '失败原因' },
+  // The route's coded refusals (multitable-record-approvals.ts / record-approval-submission-service.ts).
+  // Their server messages are fixed ENGLISH sentences; we render these by CODE instead.
+  // `RECORD_APPROVAL_PERMISSION_DENIED` is one code shared by THREE different gates (routes/
+  // multitable-record-approvals.ts: the record read gate, the multitable submit-approval capability
+  // gate, and the approval-side approvals:write actor gate) — the copy is deliberately generic about
+  // WHICH of the three refused (naming only two, as an earlier version did, told a caller refused for
+  // being unable to READ THE RECORD to go ask for the wrong two permissions instead).
+  'approval.errorPermissionDenied': { en: 'You do not have permission to submit this record for approval — this can be missing record read access, missing multitable submit-approval permission, or missing approval-write permission. Ask an administrator to check your access.', zh: '没有送审权限（可能是记录读取权限、多维表送审权限或审批发起权限之一缺失），请联系管理员核实相关权限。' },
+  'approval.errorTemplateForbidden': { en: 'You may not use this approval template.', zh: '无权使用该审批模板。' },
+  'approval.errorTemplateNotPublished': { en: 'This approval template is not published.', zh: '该审批模板未发布。' },
+  'approval.errorRecordNotFound': { en: 'This record no longer exists.', zh: '记录不存在或已被删除。' },
+  'approval.errorCreateFailed': { en: 'Could not create the approval. Please try again.', zh: '创建审批实例失败，请稍后重试。' },
+  'approval.errorValidation': { en: 'The form does not match this template. Check the required fields.', zh: '表单内容不符合模板要求，请检查必填项。' },
+  // `APPROVAL_ORG_UNRESOLVED` (approval-instance-org-derivation.ts): the submitter's active `user_orgs`
+  // membership count is not exactly one. Values-free by construction upstream (no count, no org id, no
+  // user id) — the copy stays that way and only names the fix: an administrator must correct the
+  // account's organization membership.
+  'approval.errorOrgUnresolved': { en: "Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.", zh: '你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。' },
+  'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
+  // The ROW-LEVEL marker (`RECORD_APPROVAL_NOTIFICATION_FAILED`): the submission is terminal and correct,
+  // only the requester's bell is missing. Two variants because the outcome differs: the auto-approve path
+  // that stamps it is usually `approved`, but the same compensation runs for any terminal outcome, and a
+  // rejected row must not be told it 「已通过」.
+  'approval.errorNotificationFailed': { en: 'Approved, but the notification could not be sent.', zh: '已通过，但通知发送失败' },
+  'approval.errorNotificationFailedTerminal': { en: 'Completed, but the notification could not be sent.', zh: '已结束，但通知发送失败' },
+  // 审批进度卡片. The two failure notices below are DELIBERATELY different sentences: 403 is "this
+  // account may not read approvals at all" (the rbacGuard on GET /api/approvals/:id, which runs BEFORE
+  // any per-instance check), while 404 is the values-free answer the instance-scope predicate gives a
+  // NON-PARTICIPANT of an approval that does exist. Telling a non-participant 「无权」 would misreport a
+  // scope answer as a role answer, and telling a role-less account 「不是参与人」 would send them hunting
+  // for a CC that would not help.
+  'approval.progressExpand': { en: 'Show progress', zh: '查看进度' },
+  'approval.progressCollapse': { en: 'Hide progress', zh: '收起进度' },
+  'approval.progressLoading': { en: 'Loading progress…', zh: '正在加载进度…' },
+  'approval.progressApprovers': { en: 'Pending with', zh: '当前待处理人' },
+  'approval.progressHistory': { en: 'History', zh: '历史' },
+  'approval.progressHistoryEmpty': { en: 'No history yet.', zh: '暂无历史记录。' },
+  'approval.progressForbidden': { en: 'You may not view approval progress.', zh: '无权查看审批进度' },
+  'approval.progressNotParticipant': { en: 'You are not a participant of this approval — progress is not visible.', zh: '你不是该审批的参与人，进度不可见' },
+  'approval.progressFailed': { en: 'Failed to load progress.', zh: '进度加载失败' },
+  // The read SUCCEEDED but the answer is not about the instance the card asked for (`detail.id` !== the
+  // id we passed). Printing it would attach one approval's timeline to another approval's row, so the
+  // card says so and — like 403/404 — offers no 重试: a second read returns the same wrong instance.
+  // Values-free on purpose: neither the requested nor the answered id appears in the sentence.
+  'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
+  'approval.progressRetry': { en: 'Retry', zh: '重试' },
+  'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -355,6 +571,46 @@ export function formPageIndicator(current: number, total: number, isZh: boolean)
   return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
 }
 
+// recordCompactCount (P3-1, 2026-09-05 follow-up): a plain integer renders as-is up to 999; past
+// that it switches to `Intl.NumberFormat`'s compact notation ("1.2K", "1万" in zh — CLDR's own
+// compact forms, not a hand-rolled "k" suffix) so a huge record-list total cannot, by itself, make
+// `recordPosition`'s string arbitrarily long. This is ONE of the two header-overflow-bound layers
+// named by the P3-1 finding — the other is the CSS `max-width`/ellipsis backstop on
+// `.meta-record-drawer__nav-pos` (MetaRecordInspector.vue's own style comment) for whatever this
+// compaction still leaves too wide (or an environment without full ICU compact-notation support).
+// An explicit locale (not `undefined`, which reads the runtime's own default and would make this
+// helper's output ENVIRONMENT-dependent) keeps the two locales' output deterministic across Node
+// versions/CI runners the same way this file's other locale-branched helpers already are.
+function recordCompactCount(n: number, isZh: boolean): string {
+  if (!Number.isFinite(n) || Math.abs(n) < 1000) return String(n)
+  try {
+    return new Intl.NumberFormat(isZh ? 'zh-CN' : 'en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
+  } catch {
+    return String(n)
+  }
+}
+
+// recordPosition: inspector Row A "n/N" record-list position indicator (design 2026-09-05, PR-A
+// §1.2). The 360px toolbar floor has no room for surrounding words (see the design's own ASCII
+// mock), so only the separator's spacing differs by locale — zh keeps the tight "n/N" convention,
+// en gets a little breathing room ("n / N"). P3-1 (2026-09-05 follow-up): both numbers route through
+// `recordCompactCount` above — a no-op for every value this file's own tests exercise (all well
+// under 1000), so no existing text pin changes; see that function's own comment for what changes
+// past that.
+export function recordPosition(current: number, total: number, isZh: boolean): string {
+  const c = recordCompactCount(current, isZh)
+  const t = recordCompactCount(total, isZh)
+  return isZh ? `${c}/${t}` : `${c} / ${t}`
+}
+
+// recordHiddenFieldsHeading: the record inspector's "hidden in this view" section heading (record
+// inspector v3, design 2026-09-05, PR-B1 §1.3 body) — the count is the number of fields the active
+// view hides that the viewer is nonetheless allowed to see (layer-2 ∩ layer-3 visible, view-hidden).
+// Same interpolated-helper shape as `recordPosition` above; the count is data, rendered raw.
+export function recordHiddenFieldsHeading(count: number, isZh: boolean): string {
+  return isZh ? `本视图中隐藏的字段 (${count})` : `Hidden in this view (${count})`
+}
+
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt
 // (MetaConfigHistoryModal). `confirmToken` is one of the server-defined
 // ConfigRestoreExecuteConfirm literals ('uncreate' | 'undelete' | 'revert-permission')
@@ -387,10 +643,12 @@ export function inactivePersonDisplay(display: string, isZh: boolean): string {
   return isZh ? `${display}（已停用）` : `${display} (deactivated)`
 }
 
-// --- ResetConfirmDialog.vue interpolation helpers (R5c) ---
-// `asOf` is the wire point-in-time value (display + API `asOf`) and record counts are wire summary
-// numbers — both always interpolated raw, never translated. Each helper below reconstructs one
-// EN sentence byte-for-byte (verified against a before/after DOM snapshot diff) plus its zh counterpart.
+// --- ResetConfirmDialog.vue interpolation helpers (R5c; W2 exact-anchor) ---
+// `asOf` here is DISPLAY TEXT ONLY (the selected anchor's createdAt, snapshotted when the dialog opens) —
+// it is never sent over the wire; the destructive authority is the exclusive historyBatchId/anchorOperationId
+// anchor. Record counts are wire summary numbers. Both are always interpolated raw, never translated. Each
+// helper below reconstructs one EN sentence byte-for-byte (verified against a before/after DOM snapshot diff)
+// plus its zh counterpart.
 
 // resetConfirmEntryLabel: the destructive entry button ("Reset to <T>…").
 export function resetConfirmEntryLabel(asOf: string, isZh: boolean): string {
@@ -402,8 +660,37 @@ export function resetConfirmTitle(asOf: string, isZh: boolean): string {
   return isZh ? `将数据表重置到 ${asOf}` : `Reset sheet to ${asOf}`
 }
 
-// resetConfirmResultSummary: the post-execute result line (deleted + reverted counts + asOf).
+export function revertConfirmEntryLabel(asOf: string, isZh: boolean): string {
+  return isZh ? `回退到 ${asOf}…` : `Revert to ${asOf}…`
+}
+
+export function revertConfirmTitle(asOf: string, isZh: boolean): string {
+  return isZh ? `将数据表回退到 ${asOf}` : `Revert sheet to ${asOf}`
+}
+
+// resetConfirmBlockedResurrectMessage: preview-time block — a preview whose plan would need to restore
+// `resurrectCount` deleted record(s) can never become executable (exact-anchor kernel fails RESURRECT closed
+// as `inbound-unprovable`). Rendered INSTEAD of the revert/destructive confirm branches, never alongside them.
+export function resetConfirmBlockedResurrectMessage(resurrectCount: number, isZh: boolean): string {
+  return isZh
+    ? `无法重置到该时间点——这需要恢复 ${resurrectCount} 条已删除的记录，当前不支持该操作。请选择一个更近的历史点。`
+    : `Can't reset to this point — it would require restoring ${resurrectCount} deleted record(s), which isn't supported. Choose a more recent history point.`
+}
+
+export function revertConfirmBlockedResurrectMessage(resurrectCount: number, isZh: boolean): string {
+  return isZh
+    ? `无法回退到该时间点——这需要恢复 ${resurrectCount} 条已删除的记录，当前不支持该操作。请选择一个更近的历史点。`
+    : `Can't revert to this point — it would require restoring ${resurrectCount} deleted record(s), which isn't supported. Choose a more recent history point.`
+}
+
+// resetConfirmResultSummary: the post-execute result line. A non-destructive Revert-equivalent
+// does not mention the recycle bin; destructive Reset reports both deleted and reverted counts.
 export function resetConfirmResultSummary(deletedCount: number, revertedCount: number, asOf: string, isZh: boolean): string {
+  if (deletedCount === 0) {
+    return isZh
+      ? `${revertedCount} 条记录已回退到 ${asOf}。`
+      : `${revertedCount} record(s) reverted to ${asOf}.`
+  }
   return isZh
     ? `${deletedCount} 条记录已移至回收站 · ${revertedCount} 条记录已回退到 ${asOf}。`
     : `${deletedCount} record(s) moved to the recycle bin · ${revertedCount} reverted to ${asOf}.`
@@ -415,6 +702,14 @@ export function resetConfirmRevertEquivIntro(asOf: string, revertCount: number, 
   return isZh
     ? `${asOf} 之后没有新建任何记录。这会将 ${revertCount} 条记录回退到它们在 ${asOf} 时的状态 — 非破坏性操作，等同于`
     : `Nothing was created after ${asOf}. This reverts ${revertCount} record(s) to their state at ${asOf} — non-destructive, the same as`
+}
+
+// Revert keeps records created after the anchor; unlike Reset's zero-delete branch, it must never claim that
+// no such records exist. This copy is intentionally mode-specific even though both paths share a confirm button.
+export function revertConfirmIntro(asOf: string, revertCount: number, isZh: boolean): string {
+  return isZh
+    ? `${asOf} 之后新建的记录会保留。这会将 ${revertCount} 条记录回退到它们在 ${asOf} 时的状态 — 非破坏性操作，即`
+    : `Records created after ${asOf} will be kept. This reverts ${revertCount} record(s) to their state at ${asOf} — non-destructive`
 }
 
 // resetConfirmRevertButtonLabel: the non-destructive confirm button ("Revert to <T>").
@@ -453,4 +748,230 @@ export function resetConfirmWarnAfterNot(asOf: string, isZh: boolean): string {
   return isZh
     ? `一次普通恢复。如果需要保留 ${asOf} 之后新建的记录，请使用`
     : `a normal restore. Need to keep records created after ${asOf}? Use`
+}
+
+// 记录级送审 (design §5): "送审后数据已变更（N 个字段）" — the drift notice on a submission row. A COUNT,
+// never a field name and never a value: the server only ever returns changed field IDs, and even those
+// are not rendered here.
+//
+// COUNT-FREE when the id list is empty. `{ changed: true, changedFieldIds: [] }` is a LEGITIMATE server
+// answer, not a bug: `changed` is anchored on the record version, while the id list is filtered through
+// the caller's own field-read mask (record-approval-submission-service.ts computeRecordApprovalDrift),
+// so a viewer who may not read the changed fields gets the warning with no ids. Rendering that as
+// "已变更（0 个字段）" would contradict itself.
+export function recordApprovalDriftNotice(changedCount: number, isZh: boolean): string {
+  if (!Number.isFinite(changedCount) || changedCount <= 0) {
+    return isZh ? '送审后数据已变更' : 'Record changed after submit'
+  }
+  return isZh
+    ? `送审后数据已变更（${changedCount} 个字段）`
+    : `Record changed after submit (${changedCount} field${changedCount === 1 ? '' : 's'})`
+}
+
+// The success toast after a submit. `requestNo` is the server-issued display number (e.g. AP-2026-0001);
+// when the backend has not assigned one yet the toast degrades to the plain verb.
+export function recordApprovalSubmittedToast(requestNo: string | undefined, isZh: boolean): string {
+  if (!requestNo) return isZh ? '已送审' : 'Submitted for approval'
+  return isZh ? `已送审 ${requestNo}` : `Submitted for approval ${requestNo}`
+}
+
+// 记录级送审 round-2: map the record-approval route's REFUSAL CODES to localized copy. The route's
+// own messages are fixed English sentences ('Insufficient permissions', 'Approval template is not
+// published', …) which the shared client surfaces verbatim, so a zh operator would read English. Codes
+// are identifiers, never values — an unknown one returns null and the caller falls back to its generic
+// copy rather than printing a raw token.
+const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
+  RECORD_APPROVAL_PERMISSION_DENIED: 'approval.errorPermissionDenied',
+  RECORD_APPROVAL_TEMPLATE_FORBIDDEN: 'approval.errorTemplateForbidden',
+  RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED: 'approval.errorTemplateNotPublished',
+  RECORD_APPROVAL_RECORD_NOT_FOUND: 'approval.errorRecordNotFound',
+  RECORD_APPROVAL_CREATE_FAILED: 'approval.errorCreateFailed',
+  RECORD_APPROVAL_NOTIFICATION_FAILED: 'approval.errorNotificationFailed',
+  VALIDATION_ERROR: 'approval.errorValidation',
+  FORBIDDEN: 'approval.errorPermissionDenied',
+  // Passed through verbatim by mapCreateApprovalFailure (record-approval-submission-service.ts) from
+  // ApprovalProductService's createApproval (approval-instance-org-derivation.ts) — without this entry
+  // the dialog fell back to the route's fixed English sentence ("Approval creation was rejected").
+  APPROVAL_ORG_UNRESOLVED: 'approval.errorOrgUnresolved',
+}
+
+export function recordApprovalErrorLabel(code: string | undefined, isZh: boolean): string | null {
+  if (!code) return null
+  const key = RECORD_APPROVAL_ERROR_LABELS[code]
+  return key ? recordLabel(key, isZh) : null
+}
+
+// The two submission statuses that are NOT approval-instance statuses ('creating' = the durable row
+// exists but the instance is not created yet; 'failed' = createApproval refused). The shared
+// `approvalInstance` StatusTag domain deliberately does not carry them, and its raw-status fallback
+// would print the English token in a zh UI — so the panel renders THESE two itself. Returns null for
+// every status StatusTag does own, which is the panel's signal to use StatusTag.
+export function recordApprovalSubmissionStatusLabel(status: string, isZh: boolean): string | null {
+  if (status === 'creating') return recordLabel('approval.statusCreating', isZh)
+  if (status === 'failed') return recordLabel('approval.statusFailed', isZh)
+  return null
+}
+
+/**
+ * The ROW error code the backend stamps on a submission whose terminal write landed but whose requester
+ * notification did not (`RECORD_APPROVAL_ROW_ERROR_CODES.notificationFailed` in
+ * record-approval-submission-service.ts). Exported so the panel matches the CODE, never a message.
+ */
+export const RECORD_APPROVAL_NOTIFICATION_FAILED_CODE = 'RECORD_APPROVAL_NOTIFICATION_FAILED'
+
+/**
+ * Statuses that mean "this submission is over" — the four approval completion outcomes the backend's
+ * `RECORD_APPROVAL_TERMINAL_OUTCOMES` lists. `failed` is NOT one of them: it is the submission's own
+ * refusal state and already explains itself through `approval.failureReason`.
+ */
+const RECORD_APPROVAL_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'approved',
+  'rejected',
+  'revoked',
+  'cancelled',
+])
+
+/**
+ * The SAME set as above, exposed as a predicate so the panel's 「完成时间」 line and the notification
+ * marker agree on what "over" means by construction. A second literal list in the component would be
+ * free to drift (and a `completedAt` printed next to a `pending` row would assert an outcome the server
+ * never gave — the column is populated only on the terminal promote).
+ */
+export function isRecordApprovalTerminalStatus(status: string): boolean {
+  return RECORD_APPROVAL_TERMINAL_STATUSES.has(status)
+}
+
+/**
+ * The row marker for a TERMINAL submission that still owes its requester notification. Returns null for
+ * every other (status, code) pair, so:
+ *   - a clean terminal row renders nothing,
+ *   - an in-flight row carrying the code renders nothing (the backend only stamps it on a terminal
+ *     promote; showing it on a `pending` row would assert an outcome we do not have),
+ *   - a `failed` row keeps its existing failure line instead of gaining a second one.
+ * The APPROVED copy is the marker the design asked for; the other three terminal outcomes get the
+ * outcome-neutral variant, because 「已通过」 about a rejected row would be a lie.
+ */
+export function recordApprovalNotificationFailedNotice(
+  status: string,
+  code: string | undefined,
+  isZh: boolean,
+): string | null {
+  if (code !== RECORD_APPROVAL_NOTIFICATION_FAILED_CODE) return null
+  if (!RECORD_APPROVAL_TERMINAL_STATUSES.has(status)) return null
+  // Through the SAME code→label map every other coded row uses, so an unlabelled code still renders
+  // nothing rather than a raw token.
+  return status === 'approved'
+    ? recordApprovalErrorLabel(code, isZh)
+    : recordLabel('approval.errorNotificationFailedTerminal', isZh)
+}
+
+/**
+ * The panel reads ONE page (`?limit=`) and the route answers `hasMore` when this record has more
+ * submissions than that page. There is no paging UI here on purpose (design §5 ships a section, not a
+ * list view), so the honest thing is to say what is on screen: the most recent `shown`.
+ */
+export function recordApprovalHasMoreNotice(shown: number, isZh: boolean): string {
+  const count = Number.isFinite(shown) && shown > 0 ? Math.trunc(shown) : 0
+  if (count <= 0) {
+    return isZh ? '还有更多（仅显示最近一页）' : 'More exist (showing the most recent page only)'
+  }
+  return isZh
+    ? `还有更多（仅显示最近 ${count} 条）`
+    : `More exist (showing the ${count} most recent only)`
+}
+
+// The picker asks for at most `shown` published templates (the route's ceiling). When the answer is
+// exactly that full, more may exist and there is no paging and no free-text id fallback here — say so
+// instead of silently presenting a truncated roster as the whole list.
+export function recordApprovalTemplatesTruncatedNotice(shown: number, isZh: boolean): string {
+  return isZh
+    ? `仅显示前 ${shown} 个已发布模板，其余请到审批中心发起。`
+    : `Showing the first ${shown} published templates only — start the rest from the approval centre.`
+}
+
+// ---------------------------------------------------------------------------
+// 审批进度卡片 / record approval PROGRESS card. The panel's per-submission, approvals:read-gated read of
+// the approval INSTANCE (GET /api/approvals/:id + /history). Every helper below is copy only: it takes a
+// COUNT, a CODE or an ORDINAL and never a form value.
+// ---------------------------------------------------------------------------
+
+/**
+ * 「第 N / M 步」 — the instance's step position, mirroring ApprovalCenterDetailPane's own line so the
+ * two surfaces read identically. Returns null unless BOTH numbers are real: the DTO types both as
+ * `number | null` (a non-pending instance has no current step), and 「第 - / 2 步」 is chrome pretending
+ * to be data.
+ */
+export function recordApprovalProgressStepNotice(
+  currentStep: unknown,
+  totalSteps: unknown,
+  isZh: boolean,
+): string | null {
+  if (typeof currentStep !== 'number' || !Number.isFinite(currentStep)) return null
+  if (typeof totalSteps !== 'number' || !Number.isFinite(totalSteps)) return null
+  return isZh ? `第 ${currentStep} / ${totalSteps} 步` : `Step ${currentStep} of ${totalSteps}`
+}
+
+/**
+ * The values-free, still-distinguishable fallback for an assignee whose display name the shared
+ * directory resolver could not confirm — the SAME convention (and the same wording in zh) as
+ * ApprovalCenterDetailPane's `assigneeLabel`. Never the raw internal user id.
+ */
+export function recordApprovalApproverFallbackLabel(ordinal: number, isZh: boolean): string {
+  const n = Number.isFinite(ordinal) && ordinal > 0 ? Math.trunc(ordinal) : 1
+  return isZh ? `成员 ${n}` : `Member ${n}`
+}
+
+/**
+ * The history rows the card renders are capped (the card is a summary, not the timeline — the approval
+ * centre owns that). The notice counts the CAP, which is also the number of rows actually on screen.
+ */
+export function recordApprovalProgressHistoryCapNotice(cap: number, isZh: boolean): string {
+  const count = Number.isFinite(cap) && cap > 0 ? Math.trunc(cap) : 0
+  return isZh
+    ? `仅显示最近 ${count} 条`
+    : `Showing the ${count} most recent only`
+}
+
+/**
+ * The history `action` vocabulary the platform writes (enumerated from the backend's own
+ * `action: '...'` literals in services/Approval*.ts + routes/approval*.ts). Copy carried over verbatim
+ * from ApprovalDetailView's local `actionLabel` map so the drawer and the approval centre name the same
+ * event the same way; that map is a component-local function with no export, so this is a deliberate
+ * second copy of the STRINGS, not of a mechanism.
+ *
+ * An UNKNOWN code is returned RAW (never dropped, never guessed): a server that adds a verb tomorrow
+ * shows the verb rather than a blank row, which is the same forward-compatible rule
+ * `recordBatchReasonLabel` already follows.
+ */
+const RECORD_APPROVAL_HISTORY_ACTION_LABELS: Record<string, { en: string; zh: string }> = {
+  created: { en: 'Submitted', zh: '发起' },
+  approve: { en: 'Approved', zh: '通过' },
+  auto_approve: { en: 'Auto-approved', zh: '自动通过' },
+  reject: { en: 'Rejected', zh: '驳回' },
+  transfer: { en: 'Transferred', zh: '转交' },
+  revoke: { en: 'Revoked', zh: '撤回' },
+  comment: { en: 'Commented', zh: '评论' },
+  return: { en: 'Returned', zh: '退回' },
+  sign: { en: 'Signed', zh: '签字' },
+  add_sign: { en: 'Approver added', zh: '加签' },
+  reduce_sign: { en: 'Approver removed', zh: '减签' },
+  cc: { en: 'Copied to', zh: '抄送' },
+  handle: { en: 'Handled', zh: '办理' },
+  remind: { en: 'Reminded', zh: '催办' },
+  reassign: { en: 'Reassigned', zh: '改派' },
+  jump: { en: 'Jumped', zh: '跳转' },
+}
+
+export function recordApprovalHistoryActionLabel(action: string, isZh: boolean): string {
+  // OWN keys only. The table above is a bare object literal, so it INHERITS `Object.prototype`: an action
+  // code that happens to be `toString` / `constructor` / `valueOf` / `hasOwnProperty` / `__proto__` would
+  // find a TRUTHY inherited member, skip the `return action` fallback and render `entry.zh === undefined`
+  // as an EMPTY cell — a blank row where the contract right above promises the RAW code. Reachability is
+  // not the argument (today's server writes an enumerated verb); the contract is stated, so it holds for
+  // every string rather than for the strings we happened to think of.
+  const entry = Object.prototype.hasOwnProperty.call(RECORD_APPROVAL_HISTORY_ACTION_LABELS, action)
+    ? RECORD_APPROVAL_HISTORY_ACTION_LABELS[action]
+    : undefined
+  if (!entry) return action
+  return isZh ? entry.zh : entry.en
 }

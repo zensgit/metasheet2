@@ -13,6 +13,7 @@ import { loadValidators } from '../types/validator'
 import { loadMulter, createUploadMiddleware, createOptionalUpload } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
 import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
+import { isBpmnRuntimeEnabled, requireBpmnRuntimeEnabled } from '../workflow/bpmnRuntimeConfig'
 
 // Load validators (express-validator or no-op fallbacks)
 const { body, param, query } = loadValidators()
@@ -26,13 +27,38 @@ const router = Router()
 const logger = new Logger('WorkflowAPI')
 const workflowEngine = new BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())
 
-// Initialize engine unless explicitly disabled (e.g., CI smoke).
-if (process.env.DISABLE_WORKFLOW === 'true') {
-  logger.warn('Workflow engine disabled (DISABLE_WORKFLOW=true)')
-} else {
+// P0-S S1 — fail-closed BPMN runtime gate. The whole `/api/workflow` surface is
+// runtime (deploy/start/instances/tasks/message/signal/incidents) and lacks
+// per-task/tenant authorization, so it is closed by default and only served when
+// `ENABLE_BPMN_RUNTIME=true`. Every route below returns 503 while disabled;
+// closing the route surface is what removes the anonymous-access exposure.
+router.use(requireBpmnRuntimeEnabled)
+
+// Initialize the engine ONLY when the runtime is enabled (default OFF). This also
+// keeps the timer poller, `resumeActiveInstances`, metrics and health-check off —
+// runtime-off implies poller-off. (The legacy opt-out `DISABLE_WORKFLOW=true` is
+// still honored via `isBpmnRuntimeEnabled`.)
+if (isBpmnRuntimeEnabled()) {
   workflowEngine.initialize().catch(error => {
     logger.error('Failed to initialize Workflow Engine:', error)
   })
+} else {
+  logger.warn('BPMN workflow runtime disabled (set ENABLE_BPMN_RUNTIME=true to enable).')
+}
+
+/**
+ * Stops this module's `workflowEngine` singleton (including its `node-cron` minute
+ * poller, when `ENABLE_BPMN_TIMER_POLLER=true` — see `BPMNWorkflowEngine.shutdown()`).
+ * Safe to call even when the engine was never initialized (e.g. `DISABLE_WORKFLOW=true`,
+ * or `initialize()` is still in flight — `shutdown()` only touches its own
+ * already-populated maps).
+ *
+ * Previously this only ran via the `process.on('SIGTERM', ...)` listener below, which
+ * fires on a REAL OS signal — `MetaSheetServer.stop()` (used directly in tests, with no
+ * signal involved) never reached it. `index.ts`'s `stop()` now calls this explicitly.
+ */
+export async function shutdownWorkflowEngine(): Promise<void> {
+  await workflowEngine.shutdown()
 }
 
 // Type definitions for database rows
@@ -776,7 +802,7 @@ router.get(
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down workflow engine...')
-  await workflowEngine.shutdown()
+  await shutdownWorkflowEngine()
 })
 
 export default router

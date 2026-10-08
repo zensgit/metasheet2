@@ -1,4 +1,17 @@
-import type { NodeFieldPermission } from '../types/approval-product'
+import { NODE_FIELD_ACCESS_VALUES, type NodeFieldAccess, type NodeFieldPermission } from '../types/approval-product'
+
+// Lock-7 L7-A — most-restrictive-wins ordering across nodes: hidden ≻ readonly ≻ required ≻ editable.
+// Higher rank is more restrictive. Absent from the matrix ≡ `editable` (OD-L7-9, rank 0). Lock-7B
+// (OD-L7B-1/§2.3) inserts `required` immediately above `editable` and below `readonly`: `required` is
+// `editable` plus an obligation, never more restrictive than `readonly`/`hidden` on the read axis.
+// `Record<NodeFieldAccess, number>` is EXHAUSTIVE — a member added to the type without a rank here
+// fails the build (the one compiler-guarded census site, C-3).
+const NODE_FIELD_ACCESS_RANK: Record<NodeFieldAccess, number> = {
+  editable: 0,
+  required: 1,
+  readonly: 2,
+  hidden: 3,
+}
 
 /**
  * Structurally-minimal view of a stored runtime graph for redaction purposes.
@@ -7,7 +20,9 @@ import type { NodeFieldPermission } from '../types/approval-product'
  * re-validation on the read path (and without a circular import on the bridge).
  */
 export interface RedactableRuntimeGraph {
-  nodes?: Array<{ key?: unknown; config?: unknown } | null | undefined> | null
+  // `type` is read by the bridge DTO to surface `currentNodeType` (Lock-3 §2.2 — tell a 办理 task
+  // apart from an approval task on the member surface). Still a raw JSONB view; no re-validation.
+  nodes?: Array<{ key?: unknown; type?: unknown; config?: unknown } | null | undefined> | null
 }
 
 /**
@@ -37,31 +52,105 @@ export interface RedactableRuntimeGraph {
  * The snapshot is shallow-cloned only when at least one field is actually
  * removed, so the default/no-hidden path stays allocation-free and byte-stable.
  */
+/**
+ * The set of field ids the active node(s) mark `access: 'hidden'` — the single, shared derivation
+ * of "which fields are hidden at this instance's active node(s)". Both the snapshot redaction below
+ * AND the attachment download byte-gate (§4.2 gate 2 / G7) consume THIS function, so the echoed
+ * snapshot and the byte path can never drift on what "hidden" means (no separate hidden decision).
+ * Pure, allocation-cheap (empty Set on any degenerate input), never throws.
+ */
+/**
+ * Lock-7 L7-A / OD-L7-5 — the SINGLE derivation of "this actor's / this instance's access to a
+ * field", over the given node set. Returns a `Map<fieldId, NodeFieldAccess>` holding, per field, the
+ * MOST-RESTRICTIVE access across every supplied node (`hidden` ≻ `readonly` ≻ `required` ≻
+ * `editable`, Lock-7B §2.3 — see the rank table above). A field
+ * ABSENT from the returned map ≡ `editable` (OD-L7-9, legacy default). Pure, allocation-cheap on
+ * degenerate input, never throws.
+ *
+ * Three consumers, each supplying its own node set (L7-A table): the snapshot echo and attachment
+ * byte gate pass the INSTANCE-active node set (precedence preserved, read behaviour byte-identical);
+ * the NEW write mask passes exactly `[nodeKey]` — the actor's single claimed seat — where precedence
+ * is unobservable (one element) and only the absent-key default and the per-field access matter.
+ * Re-expressing `collectHiddenFieldIds` over THIS function is what keeps the three consumers from
+ * drifting on what "hidden" means (L7-A; G-1a asserts a single-node mutation reds all three).
+ */
+export function resolveFieldAccessAtNodes(
+  runtimeGraph: RedactableRuntimeGraph | null,
+  nodeKeys: ReadonlyArray<string | null | undefined>,
+): Map<string, NodeFieldAccess> {
+  const access = new Map<string, NodeFieldAccess>()
+  if (!runtimeGraph || !Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) {
+    return access
+  }
+  const targetKeys = new Set(
+    nodeKeys.filter((key): key is string => typeof key === 'string' && key.length > 0),
+  )
+  if (targetKeys.size === 0) return access
+
+  for (const node of runtimeGraph.nodes) {
+    if (!node || typeof node.key !== 'string' || !targetKeys.has(node.key)) continue
+    const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] } | undefined)?.fieldPermissions
+    if (!Array.isArray(permissions)) continue
+    for (const permission of permissions) {
+      if (!permission || typeof permission.fieldId !== 'string') continue
+      const candidate = permission.access
+      // Lock-7B OD-L7B-10 / G-2 anti-gate — MECHANICAL enumeration over the canonical Set, never an
+      // appended `|| candidate === 'required'` literal arm (which would pass every test written for
+      // THIS member and reproduce the identical silent-drop defect for the NEXT one). This is C-4, the
+      // one census site that fails OPEN and SILENTLY when it drifts (§2.3/§2.3a): an unrecognized
+      // candidate is simply skipped, and the field falls back to absent ≡ `editable` (OD-L7-9) with no
+      // error anywhere — and since Lock-7B keys the whole required-at-node enforcement path on this
+      // resolver's output (OD-L7B-11), a drift here silently discharges every 必填 obligation (G-3).
+      if (!NODE_FIELD_ACCESS_VALUES.has(candidate)) continue
+      const existing = access.get(permission.fieldId)
+      // Most-restrictive-wins: keep the higher rank. First-seen wins ties (identical rank).
+      if (existing === undefined || NODE_FIELD_ACCESS_RANK[candidate] > NODE_FIELD_ACCESS_RANK[existing]) {
+        access.set(permission.fieldId, candidate)
+      }
+    }
+  }
+  return access
+}
+
+/**
+ * Lock-7 L7-A — resolve one field's effective access at the given node set, defaulting ABSENT ≡
+ * `editable` (OD-L7-9). This is the write consumer's single read point (`[nodeKey]`) so the write
+ * mask and the read-DTO access map (OD-L7-10) never disagree — both go through this function.
+ */
+export function fieldAccessAtNodes(
+  runtimeGraph: RedactableRuntimeGraph | null,
+  nodeKeys: ReadonlyArray<string | null | undefined>,
+  fieldId: string,
+): NodeFieldAccess {
+  return resolveFieldAccessAtNodes(runtimeGraph, nodeKeys).get(fieldId) ?? 'editable'
+}
+
+/**
+ * The set of field ids the active node(s) mark `access: 'hidden'` — now DERIVED over
+ * `resolveFieldAccessAtNodes` (L7-A R-5) rather than a second traversal, so the hidden axis stays
+ * byte-identical to the shipped union while the snapshot echo, the attachment byte gate and the
+ * write mask all read one matrix. Byte-identical because most-restrictive-wins reduces to "hidden at
+ * ANY active node ⇒ hidden", which is exactly the prior union.
+ */
+export function collectHiddenFieldIds(
+  runtimeGraph: RedactableRuntimeGraph | null,
+  activeNodeKeys: ReadonlyArray<string | null | undefined>,
+): Set<string> {
+  const hiddenFieldIds = new Set<string>()
+  for (const [fieldId, access] of resolveFieldAccessAtNodes(runtimeGraph, activeNodeKeys)) {
+    if (access === 'hidden') hiddenFieldIds.add(fieldId)
+  }
+  return hiddenFieldIds
+}
+
 export function redactHiddenFormFields(
   formSnapshot: Record<string, unknown> | null,
   runtimeGraph: RedactableRuntimeGraph | null,
   activeNodeKeys: ReadonlyArray<string | null | undefined>,
 ): Record<string, unknown> | null {
   if (!formSnapshot || !runtimeGraph) return formSnapshot
-  if (!Array.isArray(runtimeGraph.nodes) || runtimeGraph.nodes.length === 0) return formSnapshot
 
-  const activeKeys = new Set(
-    activeNodeKeys.filter((key): key is string => typeof key === 'string' && key.length > 0),
-  )
-  if (activeKeys.size === 0) return formSnapshot
-
-  const hiddenFieldIds = new Set<string>()
-  for (const node of runtimeGraph.nodes) {
-    if (!node || typeof node.key !== 'string' || !activeKeys.has(node.key)) continue
-    const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] } | undefined)?.fieldPermissions
-    if (!Array.isArray(permissions)) continue
-    for (const permission of permissions) {
-      if (permission && permission.access === 'hidden' && typeof permission.fieldId === 'string') {
-        hiddenFieldIds.add(permission.fieldId)
-      }
-    }
-  }
-
+  const hiddenFieldIds = collectHiddenFieldIds(runtimeGraph, activeNodeKeys)
   if (hiddenFieldIds.size === 0) return formSnapshot
 
   // Only clone when at least one hidden field is actually present in the snapshot.

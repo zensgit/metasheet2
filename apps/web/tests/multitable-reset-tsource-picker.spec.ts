@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
 /**
- * T8-2 Reset UI — ResetToPointPicker (the T-source the #3250 dialog was missing). Hidden unless `pitResetEnabled`.
- * Sources a point-in-time T from recent Global History batches first, keeps datetime-local as an advanced fallback,
- * and binds the (sheetId, asOf) wire to the client. The WIRE tests below assert the selected history batch's
- * `createdAt` ISO reaches reset-preview/reset-execute.
+ * T8-2 / W2 Reset UI — ResetToPointPicker (the T-source the #3250 dialog was missing), exact-anchor contract.
+ * Hidden unless `pitResetEnabled`. Sources the destructive anchor EXCLUSIVELY from a selected Global History
+ * batch (`historyBatchId`) — there is no free-time fallback. The WIRE tests below assert the selected batch's
+ * `historyBatchId` (never a wall-clock time) reaches reset-preview, and that reset-execute is token-only.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { createApp, nextTick } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import ResetToPointPicker from '../src/multitable/components/ResetToPointPicker.vue'
-import { MultitableApiClient } from '../src/multitable/api/client'
+import { MultitableApiClient, type ExactAnchorRequest, type ResetPreview } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
 import type { HistoryBatchSummary } from '../src/multitable/types'
 
@@ -36,8 +38,10 @@ function mount(over: Record<string, unknown> = {}) {
     baseId: 'base_abc',
     sheetId: 'sheet_xyz',
     listHistoryEvents: vi.fn(async () => ({ batches, total: batches.length, nextCursor: null, searchTruncated: false })),
-    resetPreview: vi.fn(async () => ({ asOf: '', strategy: 'reset', summary: { visibleRevertCount: 0, deleteCount: 0 }, deleteRecordIds: [], previewIdentity: 't' })),
-    resetExecute: vi.fn(async () => ({ asOf: '', strategy: 'reset', revertedCount: 0, deletedRecordIds: [] })),
+    resetPreview: vi.fn(async () => ({ strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 }, deleteRecordIds: [], previewIdentity: 't' })),
+    resetExecute: vi.fn(async () => ({ strategy: 'reset', revertedCount: 0, deletedRecordIds: [] })),
+    revertPreview: vi.fn(async () => ({ strategy: 'revert', summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 }, deleteRecordIds: [], previewIdentity: 'rt' })),
+    revertExecute: vi.fn(async () => ({ strategy: 'revert', revertedCount: 0, deletedRecordIds: [] })),
     ...over,
   }
   const app = createApp(ResetToPointPicker, props)
@@ -49,11 +53,10 @@ const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
   for (let i = 0; i < tries; i++) { if (pred()) return; await flush() }
   throw new Error('waitUntil: condition not met')
 }
-const setInput = (sel: string, val: string) => { const el = q(sel) as HTMLInputElement; el.value = val; el.dispatchEvent(new Event('input')) }
 const setSelect = (sel: string, val: string) => { const el = q(sel) as HTMLSelectElement; el.value = val; el.dispatchEvent(new Event('change')) }
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; useLocale().setLocale('en') })
 
-describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
+describe('ResetToPointPicker — T8-2 / W2 exact-anchor Reset UI T-source', () => {
   it('(a) whole entry HIDDEN when pitResetEnabled false / absent (fail-closed)', async () => {
     mount({ pitResetEnabled: false }); await nextTick()
     expect(q('[data-test="reset-picker"]')).toBeFalsy()
@@ -62,24 +65,36 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(q('[data-test="reset-picker"]')).toBeFalsy()
   })
 
-  it('(b) enabled: loads and shows recent Global History batches, but NO dialog/target until a T is chosen', async () => {
-    const props = mount(); await nextTick()
+  it('(a2) Revert-only capability loads history and exposes Revert, while Reset remains hidden', async () => {
+    mount({ pitResetEnabled: false, sheetRevertEnabled: true }); await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
-    expect(q('[data-test="reset-picker-history-select"]')).toBeTruthy()
-    expect(q('[data-test="reset-picker-input"]')).toBeTruthy() // advanced/manual fallback stays mounted
-    expect(q('[data-test="reset-picker-target"]')).toBeFalsy()
-    expect(q('[data-test="reset-entry"]')).toBeFalsy() // the dialog isn't mounted yet → no second reset button
-    expect((props.listHistoryEvents as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['base_abc', { sheetId: 'sheet_xyz', limit: 20 }])
-  })
-
-  it('(c) FUTURE manual fallback T → future hint, no dialog (can only reset to the past)', async () => {
-    mount(); await nextTick()
-    setInput('[data-test="reset-picker-input"]', '2099-01-01T00:00'); await flush()
-    expect(q('[data-test="reset-picker-future"]')).toBeTruthy()
+    expect(q('.reset-picker__heading')?.textContent).toBe('Revert this sheet to a Global History point')
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
+    await waitUntil(() => !!q('[data-test="revert-entry"]'))
     expect(q('[data-test="reset-entry"]')).toBeFalsy()
   })
 
-  it('(d1) P3-2 history load ERROR: listHistoryEvents rejects → error hint shown, manual fallback still mounts a dialog', async () => {
+  it('(b) enabled: loads and shows recent Global History batches, but NO dialog/target until a batch is chosen; no manual/free-time control exists', async () => {
+    const props = mount(); await nextTick()
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
+    expect(q('[data-test="reset-picker-history-select"]')).toBeTruthy()
+    expect(q('[data-test="reset-picker-input"]')).toBeFalsy() // manual datetime-local fallback is GONE (W2)
+    expect(q('[data-test="reset-picker-manual"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-target"]')).toBeFalsy()
+    expect(q('[data-test="reset-entry"]')).toBeFalsy() // the dialog isn't mounted yet → no second reset button
+    expect(q('[data-test="reset-picker-exact-anchor-note"]')).toBeTruthy()
+    expect((props.listHistoryEvents as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['base_abc', { sheetId: 'sheet_xyz', limit: 20 }])
+  })
+
+  it('(c) selecting a valid history batch composes the exact anchor and shows the target line + mounts the ResetConfirmDialog entry', async () => {
+    mount(); await nextTick()
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
+    expect(q('[data-test="reset-picker-target"]')).toBeTruthy()
+    await waitUntil(() => !!q('[data-test="reset-entry"]')) // dialog mounted → its own entry button present
+  })
+
+  it('(d1) P3-2 history load ERROR: listHistoryEvents rejects → error hint shown; there is no manual fallback to source an anchor from', async () => {
     const listHistoryEvents = vi.fn(async () => { throw new Error('history service unavailable') })
     mount({ listHistoryEvents }); await nextTick()
     await waitUntil(() => !!q('[data-test="reset-picker-history-error"]'))
@@ -87,11 +102,7 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(q('[data-test="reset-picker-history-loading"]')).toBeFalsy()
     expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
     expect(q('[data-test="reset-picker-history-unavailable"]')).toBeFalsy()
-    // the manual/Advanced fallback isn't disabled by a history-load failure — it must still be able to
-    // source a T and mount the dialog (the whole point of keeping it as a fallback).
-    setInput('[data-test="reset-picker-input"]', '2020-01-16T12:00'); await flush()
-    expect(q('[data-test="reset-picker-target"]')).toBeTruthy()
-    await waitUntil(() => !!q('[data-test="reset-entry"]'))
+    expect(q('[data-test="reset-entry"]')).toBeFalsy() // no anchor available → nothing to reset to
   })
 
   it('(d2) P3-2 history EMPTY: canLoadHistory true + zero batches → empty hint (not the error or unavailable hint)', async () => {
@@ -111,30 +122,19 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(q('[data-test="reset-picker-history-error"]')).toBeFalsy()
     expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
     expect(listHistoryEvents).not.toHaveBeenCalled() // canLoadHistory is false — no doomed fetch attempt
-    // the select + manual fallback are still present (fail-closed on THIS source only, not the whole picker)
     expect(q('[data-test="reset-picker-history-select"]')).toBeTruthy()
-    expect(q('[data-test="reset-picker-input"]')).toBeTruthy()
   })
 
-  it('(e) valid history batch T → shows local target + mounts the ResetConfirmDialog entry', async () => {
-    mount(); await nextTick()
-    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
-    setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
-    expect(q('[data-test="reset-picker-target"]')).toBeTruthy()
-    await waitUntil(() => !!q('[data-test="reset-entry"]')) // dialog mounted → its own entry button present
-  })
-
-  it('(f) WIRE: choosing a history batch → reset-preview hits the picker sheetId with that batch createdAt ISO', async () => {
-    const batchCreatedAt = '2020-01-15T10:30:00.000Z'
+  it('(e) WIRE: choosing a history batch → reset-preview hits the picker sheetId with an EXCLUSIVE historyBatchId body (no asOf, no wall-clock)', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: {
-      asOf: '', strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0 }, deleteRecordIds: [], previewIdentity: 'srv',
+      strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 }, deleteRecordIds: [], previewIdentity: 'srv',
     } }), { status: 200 }))
     const client = new MultitableApiClient({ fetchFn })
     mount({
-      listHistoryEvents: vi.fn(async () => ({ batches: [historyBatch('batch_wire', batchCreatedAt)], total: 1, nextCursor: null, searchTruncated: false })),
+      listHistoryEvents: vi.fn(async () => ({ batches: [historyBatch('batch_wire')], total: 1, nextCursor: null, searchTruncated: false })),
       sheetId: 'sheet_xyz',
-      resetPreview: (sid: string, asOf: string) => client.resetPreview(sid, asOf),
-      resetExecute: (sid: string, asOf: string, id: string) => client.resetExecute(sid, asOf, id),
+      resetPreview: (sid: string, anchor: ExactAnchorRequest) => client.resetPreview(sid, anchor),
+      resetExecute: (sid: string, id: string) => client.resetExecute(sid, id),
     })
     await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
@@ -146,25 +146,27 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     const body = JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)
     expect(url).toContain('sheet_xyz')           // sheetId wiring (picker → client), not a fixture
     expect(url).toContain('/reset-preview')
-    expect(body.asOf).toBe(batchCreatedAt)
+    expect(body).toEqual({ historyBatchId: 'batch_wire' })
+    expect(body.asOf).toBeUndefined()
+    expect(body.anchorOperationId).toBeUndefined()
   })
 
-  it('(g) POST-EXECUTE SEAM: a successful reset fires onDone and hits reset-execute with the history batch ISO', async () => {
+  it('(f) POST-EXECUTE SEAM: a successful reset fires onDone and hits reset-execute with ONLY the previewIdentity + confirm — never the batch id or a timestamp', async () => {
     const onDone = vi.fn()
-    const batchCreatedAt = '2020-01-15T10:30:00.000Z'
+    const listHistoryEvents = vi.fn(async () => ({ batches: [historyBatch('batch_execute')], total: 1, nextCursor: null, searchTruncated: false }))
     const fetchFn = vi.fn(async (url: string) => {
       // deleteCount:0 → the dialog's revert-equivalent path (no typed confirm) so we can drive execute simply.
       if (String(url).includes('reset-preview')) return new Response(JSON.stringify({ ok: true, data: {
-        asOf: '', strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0 }, deleteRecordIds: [], previewIdentity: 'srv',
+        strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 }, deleteRecordIds: [], previewIdentity: 'srv',
       } }), { status: 200 })
-      return new Response(JSON.stringify({ ok: true, data: { asOf: '', strategy: 'reset', revertedCount: 1, deletedRecordIds: [] } }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true, data: { strategy: 'reset', revertedCount: 1, deletedRecordIds: [] } }), { status: 200 })
     })
     const client = new MultitableApiClient({ fetchFn })
     mount({
       sheetId: 'sheet_xyz', onDone,
-      listHistoryEvents: vi.fn(async () => ({ batches: [historyBatch('batch_execute', batchCreatedAt)], total: 1, nextCursor: null, searchTruncated: false })),
-      resetPreview: (sid: string, asOf: string) => client.resetPreview(sid, asOf),
-      resetExecute: (sid: string, asOf: string, id: string) => client.resetExecute(sid, asOf, id),
+      listHistoryEvents,
+      resetPreview: (sid: string, anchor: ExactAnchorRequest) => client.resetPreview(sid, anchor),
+      resetExecute: (sid: string, id: string) => client.resetExecute(sid, id),
     })
     await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
@@ -176,11 +178,115 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     await waitUntil(() => fetchFn.mock.calls.length >= 2)
     expect(String(fetchFn.mock.calls[1][0])).toContain('sheet_xyz')
     expect(String(fetchFn.mock.calls[1][0])).toContain('/reset-execute')
-    expect(JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string).asOf).toBe(batchCreatedAt)
+    const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
+    expect(execBody).toEqual({ previewIdentity: 'srv', confirm: 'reset' })
     await waitUntil(() => onDone.mock.calls.length >= 1) // the seam back to the workbench (grid refresh) fired
+    await waitUntil(() => listHistoryEvents.mock.calls.length >= 2) // committed recovery refreshes the History picker too
   })
 
-  it('(h) R5b i18n: zh locale renders the typed zh labels (strings live in meta-record-labels, not inline)', async () => {
+  it('(f1) REVERT WIRE: exact batch preview + token-only execute use the Revert routes and never acquire Reset authority', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (String(url).includes('revert-preview')) return new Response(JSON.stringify({ ok: true, data: {
+        strategy: 'revert', summary: { visibleRevertCount: 2, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 2 }, deleteRecordIds: [], previewIdentity: 'revert-token',
+      } }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true, data: { strategy: 'revert', revertedCount: 2, deletedRecordIds: [] } }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+    mount({
+      pitResetEnabled: false,
+      sheetRevertEnabled: true,
+      listHistoryEvents: vi.fn(async () => ({ batches: [historyBatch('batch_revert')], total: 1, nextCursor: null, searchTruncated: false })),
+      revertPreview: (sid: string, anchor: ExactAnchorRequest) => client.revertPreview(sid, anchor),
+      revertExecute: (sid: string, id: string) => client.revertExecute(sid, id),
+    })
+    await nextTick()
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_revert'); await flush()
+    ;(q('[data-test="revert-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => fetchFn.mock.calls.length === 1)
+    expect(String(fetchFn.mock.calls[0][0])).toContain('/revert-preview')
+    expect(JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)).toEqual({ historyBatchId: 'batch_revert' })
+    await waitUntil(() => !!q('[data-test="reset-confirm-btn"]'))
+    expect(q('[data-test="reset-confirm-type"]')).toBeFalsy()
+    expect(q('[data-test="reset-confirm-ack"]')).toBeFalsy()
+    expect(q('[data-test="reset-confirm-revert-equiv"]')?.textContent).toContain('Records created after')
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => fetchFn.mock.calls.length === 2)
+    expect(String(fetchFn.mock.calls[1][0])).toContain('/revert-execute')
+    expect(JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)).toEqual({ previewIdentity: 'revert-token' })
+  })
+
+  it('(f1b) both capabilities expose two distinct commands for the same audited anchor', async () => {
+    mount({ pitResetEnabled: true, sheetRevertEnabled: true }); await nextTick()
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
+    expect(q('.reset-picker__heading')?.textContent).toBe('Recover this sheet from Global History')
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
+    await waitUntil(() => !!q('[data-test="revert-entry"]') && !!q('[data-test="reset-entry"]'))
+  })
+
+  it('(f2) SHEET SWITCH: revokes the selected anchor immediately and a late old-sheet preview cannot execute on the new sheet', async () => {
+    const sheetId = ref('sheet_A')
+    let resolvePreview!: (value: ResetPreview) => void
+    let resolveSheetB!: (value: { batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }) => void
+    const resetPreview = vi.fn((_sid: string, _anchor: ExactAnchorRequest) => new Promise<ResetPreview>((resolve) => { resolvePreview = resolve }))
+    const resetExecute = vi.fn(async () => ({ strategy: 'reset' as const, revertedCount: 1, deletedCount: 0 }))
+    const listHistoryEvents = vi.fn((_baseId: string, params?: { sheetId?: string }) => {
+      if (params?.sheetId === 'sheet_B') {
+        return new Promise<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>((resolve) => {
+          resolveSheetB = resolve
+        })
+      }
+      return Promise.resolve({
+        batches: [historyBatch(`batch_${params?.sheetId ?? 'none'}`)],
+        total: 1,
+        nextCursor: null,
+        searchTruncated: false,
+      })
+    })
+    const app: App<Element> = createApp({
+      setup: () => () => h(ResetToPointPicker, {
+        pitResetEnabled: true,
+        baseId: 'base_abc',
+        sheetId: sheetId.value,
+        listHistoryEvents,
+        resetPreview,
+        resetExecute,
+      }),
+    })
+    const c = document.createElement('div'); document.body.appendChild(c); app.mount(c)
+    mounted.push({ unmount: () => app.unmount() })
+
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_sheet_A'); await flush()
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => resetPreview.mock.calls.length === 1)
+    expect(resetPreview.mock.calls[0]).toEqual(['sheet_A', { historyBatchId: 'batch_sheet_A' }])
+
+    sheetId.value = 'sheet_B'
+    await flush()
+    await waitUntil(() => listHistoryEvents.mock.calls.some((call) => call[1]?.sheetId === 'sheet_B'))
+    // The B-list is deliberately still pending. Scope revocation must not wait for its response.
+    expect(q('[data-test="reset-confirm"]')).toBeFalsy()
+    expect(q('[data-test="reset-entry"]')).toBeFalsy()
+
+    resolvePreview({
+      strategy: 'reset',
+      summary: { visibleRevertCount: 1, deleteCount: 0, resurrectCount: 0, driftCount: 0, effectiveWriteCount: 1 },
+      deleteRecordIds: [],
+      previewIdentity: 'old-sheet-token',
+    })
+    await flush()
+    expect(resetExecute).not.toHaveBeenCalled()
+    resolveSheetB({
+      batches: [historyBatch('batch_sheet_B')],
+      total: 1,
+      nextCursor: null,
+      searchTruncated: false,
+    })
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 2)
+  })
+
+  it('(g) R5b i18n: zh locale renders the typed zh labels (strings live in meta-record-labels, not inline)', async () => {
     useLocale().setLocale('zh-CN')
     mount(); await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
@@ -191,11 +297,7 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     // are data, rendered raw (only the missing-action/missing-actor FALLBACK literals are typed labels)
     expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options[1].textContent?.trim()).toContain('update - Ada - 1 条记录')
     expect(q('[data-test="reset-picker-history-refresh"]')?.textContent?.trim()).toBe('刷新')
-    expect(q('[data-test="reset-picker-manual"] summary')?.textContent).toBe('高级：手动指定时间')
-    expect(q('[data-test="reset-picker-manual"] .reset-picker__label > span')?.textContent).toBe('手动指定时间点')
-    // future warn (manual T in the future)
-    setInput('[data-test="reset-picker-input"]', '2099-01-01T00:00'); await flush()
-    expect(q('[data-test="reset-picker-future"]')?.textContent?.trim()).toBe('请选择过去的时间——只能重置到更早的状态。')
+    expect(q('[data-test="reset-picker-exact-anchor-note"]')?.textContent?.trim()).toBe('重置仅使用来自全局历史的精确、可审计的时间点——不支持自由输入时间。')
     // valid history T → zh target line
     setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
     const target = q('[data-test="reset-picker-target"]')?.textContent ?? ''
@@ -204,7 +306,7 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(target).toContain('来自历史批次 batch_ne')
   })
 
-  it('(h2) R5b i18n: zh empty/unavailable/loading-error hints render the typed zh labels', async () => {
+  it('(h) R5b i18n: zh empty/unavailable/loading-error hints render the typed zh labels', async () => {
     useLocale().setLocale('zh-CN')
     // empty
     mount({ listHistoryEvents: vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false })) }); await nextTick()
@@ -219,5 +321,15 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     mount({ listHistoryEvents: vi.fn(async () => { throw 'not-an-error' }) }); await nextTick()
     await waitUntil(() => !!q('[data-test="reset-picker-history-error"]'))
     expect(q('[data-test="reset-picker-history-error"]')?.textContent).toBe('加载历史点失败')
+  })
+
+  it('(i) Workbench consumes the server-derived Revert capability and binds both exact-anchor client calls', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/multitable/views/MultitableWorkbench.vue'), 'utf8')
+    expect(source).toContain(':sheet-revert-enabled="sheetRevertEnabled"')
+    expect(source).toContain('capabilitySource.value?.sheetRevertEnabled === true')
+    expect(source).toContain(':revert-preview="revertPreviewWire"')
+    expect(source).toContain(':revert-execute="revertExecuteWire"')
+    expect(source).toContain('workbench.client.revertPreview(sid, anchor)')
+    expect(source).toContain('workbench.client.revertExecute(sid, previewIdentity)')
   })
 })

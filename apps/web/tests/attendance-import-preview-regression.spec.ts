@@ -67,12 +67,21 @@ function unwrapRef<T>(value: unknown): T {
   return value as T
 }
 
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) => btoa(JSON.stringify(value))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`
+}
+
 describe('Attendance import preview regression', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
+    window.localStorage.removeItem('auth_token')
     window.localStorage.setItem('metasheet_locale', 'en')
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -83,6 +92,44 @@ describe('Attendance import preview regression', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.localStorage.removeItem('auth_token')
+  })
+
+  it('binds prepare and preview to the same non-default organization', async () => {
+    const tenantId = '00000000-0000-4000-8000-000000000123'
+    window.localStorage.setItem('auth_token', unsignedJwt({ id: 'qa-user', tenantId }))
+    const apiFetchMock = vi.mocked(apiFetch)
+    let preparePayload: Record<string, unknown> | null = null
+    let previewPayload: Record<string, unknown> | null = null
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/prepare')) {
+        preparePayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { commitToken: 'tenant-bound-token', expiresAt: '2099-01-01T00:00:00.000Z' },
+        })
+      }
+      if (url.startsWith('/api/attendance/import/preview')) {
+        previewPayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [], csvWarnings: [], groupWarnings: [], rowCount: 1 },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    findButton(findImportSection(container!), 'Preview').click()
+    await vi.waitFor(() => expect(previewPayload).not.toBeNull())
+
+    expect(preparePayload).toEqual({ orgId: tenantId })
+    expect(previewPayload).toMatchObject({ orgId: tenantId, commitToken: 'tenant-bound-token' })
   })
 
   it('clears stale preview rows/warnings on preview retry failure and keeps retry action context', async () => {
@@ -153,6 +200,7 @@ describe('Attendance import preview regression', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(container!.textContent).toContain('user-old'))
     expect(container!.textContent).toContain('user-old')
     expect(container!.textContent).toContain('CSV warnings: stale-csv-warning; stale-group-warning')
 
@@ -160,6 +208,7 @@ describe('Attendance import preview regression', () => {
     await flushUi(6)
 
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
     expect(importSection.textContent).not.toContain('stale-csv-warning')
@@ -175,6 +224,7 @@ describe('Attendance import preview regression', () => {
     findButton(container!, 'Retry preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(previewRequestCount).toBe(3)
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
@@ -337,6 +387,7 @@ describe('Attendance import preview regression', () => {
       // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('文件未解析出可导入的数据行'))
       expect(container!.textContent).toContain('文件未解析出可导入的数据行')
       expect(container!.textContent).toContain('另存为 → CSV')
       expect(container!.textContent).toContain('VALIDATION_ERROR')
@@ -344,6 +395,7 @@ describe('Attendance import preview regression', () => {
       // Server header-missing diagnostic → header-specific zh copy.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('CSV 表头缺少必需列'))
       expect(previewRequestCount).toBe(2)
       expect(container!.textContent).toContain('CSV 表头缺少必需列')
       expect(container!.textContent).toContain('VALIDATION_ERROR')

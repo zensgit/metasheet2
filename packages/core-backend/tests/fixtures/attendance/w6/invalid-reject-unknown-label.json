@@ -1,0 +1,24 @@
+{
+  "__fixtureKind": "invalid-reject",
+  "__violates": "W6-R6 enum-strict: unknown label / posture values must be rejected, never defaulted",
+  "payload": {
+    "ok": true,
+    "data": {
+      "groupId": "a4556006-0008-4000-8000-000000000001",
+      "groupType": "fixed_shift",
+      "timezone": "Asia/Shanghai",
+      "activeMemberCount": 4,
+      "managerPosture": { "ownerCount": 1, "subOwnerCount": 0 },
+      "calculationPosture": "partially_enabled",
+      "domains": {
+        "membership": {
+          "label": "mostly_effective",
+          "reasonCodes": [],
+          "editorRef": { "kind": "group_stage", "stage": "people" }
+        }
+      },
+      "conflicts": [],
+      "evaluatedAt": "2026-08-05T00:00:00.000Z"
+    }
+  }
+}

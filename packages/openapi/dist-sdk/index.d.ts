@@ -399,6 +399,44 @@ export interface paths {
          *     both page/pageSize and the older limit/offset pagination fallback.
          *     Use `tab` for the current inbox lens, plus optional sourceSystem,
          *     workflowKey, businessKey, assignee, status, and search filters.
+         *
+         *     The visible set is determined server-side on every request. No query
+         *     parameter can make a response exceed it; adding a parameter can only
+         *     narrow the result, never reach a row the scope does not already admit.
+         *
+         *     The two halves of that set are NOT the same, and the difference is
+         *     stated rather than averaged over. PLATFORM rows are limited to the
+         *     caller's own participation -- instances they requested, hold a seat on
+         *     (user-, role- or queue-typed), recorded an action on, or were CC'd on.
+         *     NON-PLATFORM rows (phase-1 external mirrors, `sourceSystem` other than
+         *     `platform`) carry no participation condition at all: they are visible to
+         *     any caller holding `approvals:read` whose actor id the request resolves.
+         *     A request whose actor id does not resolve receives nothing, mirrors
+         *     included. Roles are read from the database, not from token claims; a
+         *     queue-typed seat is matched against the request's permission set.
+         *
+         *     The scope also carries a database-backed approval-administrator arm.
+         *     That arm is not observable through this endpoint: every `tab` is itself
+         *     limited to the caller's own participation and is ANDed with the scope,
+         *     so an administrator's response is the same as any other caller's. This
+         *     endpoint is not an administrative listing surface.
+         *
+         *     COMPATIBILITY: a request that omits `tab` is served the default
+         *     (`pending`) tab, which carries its own `status = 'pending'` condition --
+         *     UNLESS the request supplies a `status` filter of its own. In that case
+         *     no tab condition is applied at all, and the response is the
+         *     server-determined scope intersected with that status filter and nothing
+         *     else. So a tab-less `status=approved` returns the caller's own approved
+         *     rows, from both source systems, rather than an empty page. An EXPLICIT
+         *     tab is never overridden by this rule: `tab=pending&status=approved`
+         *     keeps both conditions and therefore returns nothing, because the caller
+         *     named both halves. An empty `status=` is absent, not a filter, and so
+         *     leaves the default tab in place. Measured change,
+         *     stated as a narrowing rather than as a preservation: a tab-less request
+         *     previously returned the whole `approval_instances` table to any caller;
+         *     it now returns that caller's own scoped feed, mixed across platform and
+         *     non-platform sources. What is preserved is the source-system axis of
+         *     that feed, not its size.
          */
         get: operations["listApprovals"];
         put?: never;
@@ -416,6 +454,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/record-link-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List candidate records for an approval record-link field
+         * @description FWB-0 Layer 2 dedicated candidate picker for ordinary fillers. Scoped to a
+         *     server-pinned (baseId, sheetId) pair from a form `record-link` field. Requires
+         *     the same `approvals:write` permission as createApproval (not read/act-only).
+         *
+         *     Returns only rows the actor can read, with human display labels derived from
+         *     visible non-computed source fields (never a raw record id). Missing sheet,
+         *     base mismatch, and unreadable target share one public refuse shape (no existence
+         *     oracle). Does NOT reuse multitable `/fields/:fieldId/link-options`.
+         */
+        get: operations["listApprovalRecordLinkOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/directory/departments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active departments for an approval form picker
+         * @description Lock-2 L2-A participant-facing department directory. The server derives the
+         *     canonical directory integration from the authenticated actor. Callers cannot
+         *     select an organization or integration, and the response exposes no provider or
+         *     integration identifier. Search and tree modes return only active departments.
+         */
+        get: operations["listApprovalDirectoryDepartments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/pending": {
         parameters: {
             query?: never;
@@ -427,6 +515,25 @@ export interface paths {
          * Get pending approvals for current actor
          * @deprecated
          * @description Deprecated. Use GET /api/approvals with `tab=pending` instead.
+         *
+         *     The visible set is determined server-side, by the same scope
+         *     `GET /api/approvals` applies and in both this endpoint's queries -- the
+         *     page and the `total` alike. Because this endpoint is hard-filtered to
+         *     pending platform-owned rows, that scope reduces to the caller's own
+         *     participation: instances they requested, hold a seat on (user-, role- or
+         *     queue-typed), recorded an action on, or were CC'd on, plus the
+         *     database-backed approval-administrator arm. Roles are read from the
+         *     database, not from token claims. Measured change: this endpoint
+         *     previously returned every pending platform instance to any caller
+         *     holding `approvals:read`.
+         *
+         *     The administrator arm IS observable here, unlike on
+         *     GET /api/approvals where every `tab` narrows to the caller's own
+         *     participation: this endpoint applies no tab, so an identity the database
+         *     records as an approval administrator receives the pending platform rows
+         *     it has no participation in. That reach is bounded to the
+         *     administrator's own organisations only while the organisation pin is
+         *     enabled; the pin ships disabled.
          */
         get: operations["listPendingApprovalsLegacy"];
         put?: never;
@@ -722,6 +829,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/metrics/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester (person)
+         * @description Requires the `approvals:analytics` permission (a person-level performance ranking is an
+         *     HR/ops-analytics lens, gated separately from approval administration). Aggregates approval
+         *     metrics by the requester (person), Top-100 by volume. A null key is the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByPerson"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/metrics/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics aggregated by requester department (team)
+         * @description Admin-only. Aggregates approval metrics by the requester's frozen department
+         *     (directoryDepartment with a department fallback), Top-100 by volume. A null key is
+         *     the unattributed bucket.
+         */
+        get: operations["getApprovalMetricsByTeam"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approval-templates": {
         parameters: {
             query?: never;
@@ -926,6 +1077,21 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Outdoor-approval leg only — reachable from POST /api/attendance/punch when an outdoor punch requires approval and enters the request_create boundary. Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -1368,6 +1534,21 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -1479,6 +1660,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         post?: never;
@@ -1785,6 +1981,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -2109,6 +2320,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -2384,6 +2610,8 @@ export interface paths {
                         isOvernight?: boolean;
                         /** @deprecated */
                         is_overnight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields. While authoritative segment calculation is disabled for the org, multi-segment shifts are authoring preview-only. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         /** @deprecated */
                         late_grace_minutes?: number;
@@ -2396,6 +2624,7 @@ export interface paths {
                         workingDays?: number[];
                         /** @deprecated */
                         working_days?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2416,6 +2645,13 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields), or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2477,10 +2713,14 @@ export interface paths {
                         timezone?: string;
                         workStartTime?: string;
                         workEndTime?: string;
+                        isOvernight?: boolean;
+                        /** @description Canonical segments (W3). Mutually exclusive with the legacy workStartTime/workEndTime/isOvernight fields in the same request. A start/end-only update on a multi-segment shift is rejected with a typed 422; a metadata-only update preserves the persisted segments. */
+                        segments?: components["schemas"]["AttendanceShiftSegmentInput"][];
                         lateGraceMinutes?: number;
                         earlyGraceMinutes?: number;
                         roundingMinutes?: number;
                         workingDays?: number[];
+                        flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
                         orgId?: string;
                     };
                 };
@@ -2501,6 +2741,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active assignment, rotation, pending swap, or pending/published dispatch blocks converting one segment to multiple while segment calculation is disabled). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID, ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID for a canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
@@ -2532,7 +2793,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                409: components["responses"]["Conflict"];
+                /** @description Shift not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by any assignment row (including ended/inactive history), a rotation rule, a pending swap snapshot, or a pending/published dispatch target. Historical evidence is preserved. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -2602,6 +2876,7 @@ export interface paths {
                     "application/json": {
                         userId: string;
                         shiftId: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate: string;
                         /** Format: date */
@@ -2612,6 +2887,8 @@ export interface paths {
                         user_id?: string;
                         /** @description Legacy snake_case alias for shiftId. */
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /**
                          * Format: date
                          * @description Legacy snake_case alias for startDate.
@@ -2677,6 +2954,7 @@ export interface paths {
                     "application/json": {
                         userId?: string;
                         shiftId?: string;
+                        slotIndex?: number;
                         /** Format: date */
                         startDate?: string;
                         /** Format: date */
@@ -2685,6 +2963,8 @@ export interface paths {
                         orgId?: string;
                         user_id?: string;
                         shift_id?: string;
+                        /** @description Legacy snake_case alias for slotIndex. */
+                        slot_index?: number;
                         /** Format: date */
                         start_date?: string;
                         /** Format: date */
@@ -3020,6 +3300,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/employee-quick-action-icons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Employee-readable 常用 pictogram keys (icon ids only)
+         * @description Returns only the four icon keys. Does not expose the admin settings document.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                makeup: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                leave: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                overtime: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                swap: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/export": {
         parameters: {
             query?: never;
@@ -3144,6 +3477,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance-admin/calculation-group-memberships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a user's effective calculation-group membership timeline */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    userId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ordered, non-overlapping membership timeline */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceCalculationGroupMembership"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Calculation-group timeline read failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-group-memberships/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transition a user to a calculation group on an inclusive effective date */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        orgId: string;
+                        userId: string;
+                        /** Format: uuid */
+                        targetGroupId: string;
+                        /** Format: date */
+                        effectiveOn: string;
+                        reason: string;
+                        correlationId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Transition applied or replayed idempotently */
+                200: {
+                    headers: {
+                        "X-Correlation-Id"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                correlationId: string;
+                                /** @enum {string} */
+                                outcome: "transitioned" | "unchanged";
+                                membership: components["schemas"]["AttendanceCalculationGroupMembership"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description Target user is not active in the requested organization */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Calculation-group transition failed */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/groups": {
         parameters: {
             query?: never;
@@ -3198,6 +3670,8 @@ export interface paths {
                         timezone: string;
                         ruleSetId?: string;
                         description?: string;
+                        /** @enum {string} */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -3281,6 +3755,11 @@ export interface paths {
                         timezone?: string;
                         ruleSetId?: string;
                         description?: string;
+                        /**
+                         * @description Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
+                         * @enum {string}
+                         */
+                        attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
                         orgId?: string;
                     };
                 };
@@ -5159,7 +5638,14 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            /** @description Send the same organization identifier used by the subsequent preview or commit request. */
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        orgId?: string;
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -6391,6 +6877,172 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance-admin/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read immutable attendance calculation detail as an administrator */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/records/{recordId}/calculation-detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the signed-in user's immutable attendance calculation detail */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    calculationId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Immutable calculation detail */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: components["schemas"]["AttendanceW4CalculationDetail"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance-admin/calculation-shadow-backlog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read values-free attendance shadow difference backlog counts */
+        get: {
+            parameters: {
+                query: {
+                    orgId: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Values-free shadow difference aggregates */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                items: components["schemas"]["AttendanceW4ShadowBacklogItem"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/effective-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Group effective-policy aggregate (values-free, read-only)
+         * @description W6 aggregate read model (design lock section 4). GET-only; org identity comes from the authenticated principal; a delegated attendance admin must also hold active membership in the target org. Unknown, cross-org, and inaccessible groups share one values-free 404 shape. The response never contains member lists, user IDs, punch values, or secrets (red line W6-R2).
+         */
+        get: operations["getAttendanceGroupEffectivePolicy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit-logs": {
         parameters: {
             query?: never;
@@ -6954,13 +7606,15 @@ export interface paths {
         };
         /**
          * List comment mention candidates
-         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         * @description Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. By default the term is a literal case-insensitive substring of name, email or id. When `match=exact-email` (#5819) is set, the term is instead matched against the stored email by trimmed, case-insensitive equality - still requires a non-blank `q`, and the returned rows are a subset of what the substring search would return for the same term. `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
          */
         get: {
             parameters: {
                 query: {
                     spreadsheetId: string;
                     q?: string;
+                    /** @description Optional. When set to `exact-email`, switches from substring search to trimmed, case-insensitive email equality (#5819). */
+                    match?: "exact-email";
                     limit?: number;
                 };
                 header?: never;
@@ -7450,10 +8104,19 @@ export interface paths {
             };
         };
         post?: never;
-        /** Delete data source */
+        /**
+         * Delete data source
+         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, details.referenceCount) while any integration external system references this source (canonical connection_id, or an owner-attributed legacy config.dataSourceId). There is no bypass: unbind the external systems first. The check runs inside the delete transaction under a row lock, and the database's foreign key onto data_sources.live_id refuses the soft delete itself while a canonical binding exists (reported as the same 409, with details.referenceCount null).
+         */
         delete: {
             parameters: {
-                query?: never;
+                query?: {
+                    /**
+                     * @deprecated
+                     * @description Retired 2026-09-20 (owner ruling: a referenced source cannot be deleted). The server ignores this parameter for every tier, platform admins included, and answers the same 409. Kept only so old clients still validate; do not send it.
+                     */
+                    force?: boolean;
+                };
                 header?: never;
                 path: {
                     id: string;
@@ -7469,7 +8132,15 @@ export interface paths {
                     };
                     content?: never;
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description Referenced by external systems (details.referenceCount in the error body; unbind first) */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -7785,6 +8456,2407 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning-app/installation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization cloud-classroom installation
+         * @description Organization and actor come only from the authenticated session. Missing
+         *     instance means not-installed. canManage is server-derived from hydrated
+         *     global elearning administrator authority and active organization membership.
+         *     Follows the deployment master flag: while it is not exact 'true', GET, POST
+         *     and PUT all answer 404 `{ error: feature_disabled }` right after
+         *     authentication, read and write nothing, and do not reveal whether an
+         *     installation exists. Existing installations are kept and apply again once
+         *     the flag is exact 'true'.
+         */
+        get: operations["getElearningAppInstallation"];
+        /**
+         * Enable or disable an installed cloud classroom
+         * @description Requires the same authority as installation. Deployment exact-true flags
+         *     remain an upper bound. Disabling forces notification opt-in OFF and retains
+         *     learning data. New business admission stops; admitted work and necessary
+         *     storage cleanup may drain. No production storage is provisioned.
+         */
+        put: operations["configureElearningAppInstallation"];
+        /**
+         * Install cloud classroom inactive, notifications OFF
+         * @description Requires elearning global administrator authority and active membership.
+         *     Repeated installation preserves existing state. Does not grant permissions,
+         *     enable deployment flags, provision storage, or send notifications.
+         */
+        post: operations["installElearningApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report e-learning master and capability flags
+         * @description Plugin route. JWT session is required by the global `/api` gate.
+         *     Returns `{ enabled, capabilities }` with keys content, assignment,
+         *     assessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled
+         *     plus content/assignment/assessment/media only; incentive and analytics
+         *     stay parked. Secondary master-off after registration is a values-free
+         *     404 FEATURE_DISABLED (no flag names, no capabilities object).
+         */
+        get: operations["getElearningCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/credit-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active organization credit rules
+         * @description Global `elearning:admin` only. Requires master and incentive flags to
+         *     be exact `true`. Organization comes only from the JWT-bound session.
+         */
+        get: operations["listElearningCreditRules"];
+        put?: never;
+        /**
+         * Publish a new active credit-rule version
+         * @description Global `elearning:admin` only. Actor and organization are server
+         *     derived. Publishing atomically retires the prior active version.
+         *     `requestId` is organization-scoped: same normalized payload replays
+         *     the same closed response; a changed payload returns values-free 409.
+         */
+        post: operations["publishElearningCreditRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/credit-titles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the active organization credit-title threshold snapshot
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization is server-derived. The closed response contains only the
+         *     active immutable revision and its threshold-ordered title rows.
+         */
+        get: operations["getElearningTitleSnapshot"];
+        put?: never;
+        /**
+         * Publish one complete credit-title threshold snapshot
+         * @description Global `elearning:admin` only. Actor and organization are server-derived.
+         *     The complete normalized snapshot becomes one immutable active revision.
+         *     The same organization-scoped `requestId` and logical payload replay the
+         *     original closed result; changed values return a values-free 409.
+         */
+        post: operations["publishElearningTitleSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/certificate-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active organization certificate templates
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization is server-derived. The closed response contains only each
+         *     active immutable template revision. This surface stores template and
+         *     issuance metadata; it does not render or expose PDF, image, or download
+         *     artifacts.
+         */
+        get: operations["listElearningCertificateTemplates"];
+        put?: never;
+        /**
+         * Publish an immutable certificate-template revision
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization and actor are server-derived. The same organization-scoped
+         *     `requestId` and normalized payload replay the original closed result;
+         *     changed values return a values-free 409. Publishing stores metadata only
+         *     and does not render or expose PDF, image, or download artifacts.
+         */
+        post: operations["publishElearningCertificateTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/certificate-issues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a certificate ledger record to a same-organization learner
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization, actor, serial number, and issuance time are server-derived.
+         *     The same organization-scoped `requestId` and normalized payload replay
+         *     the original closed result; changed values return a values-free 409.
+         *     The result is immutable ledger metadata, not a rendered PDF, image, or
+         *     downloadable certificate artifact.
+         */
+        post: operations["issueElearningCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/certificates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the authenticated learner's certificate ledger records
+         * @description Requires `ELEARNING_ENABLED` and `ELEARNING_INCENTIVE_ENABLED` to each
+         *     equal the exact literal `true` plus an e-learning read-capable role.
+         *     Organization and learner identity are server-derived; only that learner's
+         *     same-organization immutable records are returned. The closed DTO contains
+         *     metadata and parameter snapshots only, with no PDF, render, or download
+         *     capability.
+         */
+        get: operations["listMyElearningCertificates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/credits/adjustments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply a manual credit adjustment to a same-organization learner
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization and actor are derived only from the authenticated server
+         *     context and are never accepted from the request body. `requestId` is
+         *     organization-scoped: the same normalized payload replays the same
+         *     closed result, while a changed payload returns values-free 409.
+         */
+        post: operations["adjustElearningCredit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/content-revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an immutable article or external-link revision
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_CONTENT_ENABLED` must each equal the exact literal `true`.
+         *     Organization and actor are server-derived and are never accepted from
+         *     the closed request body. Reusing `requestId` with the same normalized
+         *     payload replays the immutable revision; a changed payload returns a
+         *     values-free conflict.
+         */
+        post: operations["createElearningContentRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/courses/content/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish one ordered content-only course version
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_CONTENT_ENABLED` must each equal the exact literal `true`.
+         *     Organization and actor are server-derived. The closed request freezes
+         *     a non-empty ordered list of same-organization immutable content
+         *     revisions; array order becomes the one-based course-item position.
+         */
+        post: operations["publishElearningContentCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/course-items/{itemId}/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Open an accessible article or external-link item and record completion
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     `ELEARNING_ENABLED` and `ELEARNING_CONTENT_ENABLED` must each equal the
+         *     exact literal `true`. Organization, learner, completion time, event,
+         *     and assurance are server-derived. The closed body accepts only the
+         *     idempotency `requestId`; the response exposes sanitized article HTML or
+         *     the validated HTTPS link, never both.
+         */
+        post: operations["openElearningContentCourseItem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/practice-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an objective-question practice set from a published paper
+         * @description Global `elearning:admin` only. `ELEARNING_ENABLED` and
+         *     `ELEARNING_ASSESSMENT_ENABLED` must each equal the exact literal `true`;
+         *     CONTENT and MEDIA are not readiness inputs. Organization and actor are
+         *     server-derived. Reusing requestId with the same normalized paperId and
+         *     title replays the original closed result; changed values return a
+         *     values-free conflict.
+         */
+        post: operations["createElearningPracticeSet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active objective-question practice sets
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. The closed result contains active set
+         *     metadata only and never answer keys, explanations, or paper snapshots.
+         */
+        get: operations["listMyElearningPracticeSets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start an immutable objective-question practice session
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization,
+         *     learner, session identity, order, and time are server-derived. The
+         *     public questions are closed and never contain answer keys or explanations.
+         */
+        post: operations["startElearningPracticeSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sessions/{sessionId}/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit one answer to an immutable practice-session question
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. selectedOptionIds is the only answer
+         *     material accepted. The closed result reports own-answer correctness and
+         *     wrong-book transition, but never the answer key, correct option ids,
+         *     explanation, or raw snapshot.
+         */
+        post: operations["submitElearningPracticeAnswer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/practice-sets/{practiceSetId}/wrong-questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List unresolved wrong questions for one practice set
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires only the master and ASSESSMENT exact-true gates. Organization
+         *     and learner are server-derived. The projection is computed from
+         *     append-only wrong/resolved events and returns only closed public questions
+         *     without answer keys, correct option ids, or explanations.
+         */
+        get: operations["listMyElearningWrongQuestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/credits/wallet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated learner credit wallet
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     User and organization come only from the authenticated session. The
+         *     closed DTO excludes request hashes, effect keys, and raw references.
+         */
+        get: operations["getMyElearningCreditWallet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/credits/wallet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one same-organization learner wallet as global admin
+         * @description Global `elearning:admin` only. `userId` must resolve to an active user
+         *     in the authenticated organization. Department-scoped statistics are
+         *     not part of this L4 endpoint.
+         */
+        get: operations["getAdminElearningCreditWallet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated learner historical archive
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     The organization and learner are derived only from the authenticated
+         *     session. The archive is projected from immutable completion evidence
+         *     and graded attempts; it does not expose answers, grading comments,
+         *     event digests, request hashes, actor identifiers, or access-basis keys.
+         *     Historical completed courses remain visible after course withdrawal.
+         */
+        get: operations["getMyElearningLearningProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * One-shot authenticated MP4 upload
+         * @description Multipart field `file` only (one file part; no client metadata).
+         *     Duration is server-probed. RBAC `elearning:write`. Identity, org, RBAC,
+         *     storage, and quotas are checked before multipart ingest. 201 may be
+         *     `ready` or probe-rejected `rejected`; storage keys never appear.
+         */
+        post: operations["uploadElearningMedia"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/courses/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish a one-video plus one-exam course
+         * @description Admin composite publish. RBAC `elearning:admin`. Requires watch gate plus
+         *     ASSESSMENT. JSON limit 1 MiB (just over is values-free 413 payload_too_large).
+         *     Actor/org are injected from JWT, never from the body. Unknown top-level
+         *     keys are invalid_input. Learner responses never echo answer keys.
+         */
+        post: operations["publishElearningCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/question-banks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List assessment question banks
+         * @description Admin-only L3 assessment read. Returns organization-scoped bank
+         *     metadata and question counts; it never returns question content.
+         */
+        get: operations["listElearningQuestionBanks"];
+        put?: never;
+        /**
+         * Create an assessment question bank
+         * @description Admin-only L3 assessment write. Requires master, content, and
+         *     assessment flags plus `elearning:admin`. Actor and organization are
+         *     injected from the authenticated request. JSON limit 1 MiB.
+         */
+        post: operations["createElearningQuestionBank"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/question-banks/{bankId}/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the latest revision of each question in a bank
+         * @description Admin-only L3 assessment read. Returns one latest immutable revision
+         *     per stable question, including its answer key and explanation. These
+         *     fields are never exposed by learner exam APIs.
+         */
+        get: operations["listElearningBankQuestions"];
+        put?: never;
+        /**
+         * Create a stable assessment question with revision one
+         * @description Admin-only L3 assessment write. Objective questions carry a closed answer
+         *     key. A short_answer carries options=[] and correctOptionIds=[] and is
+         *     scored later by the manual-grading service. The response returns identifiers only.
+         */
+        post: operations["createElearningBankQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/questions/{questionId}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append one immutable assessment-question revision
+         * @description Admin-only L3 assessment write. Existing revisions are never mutated.
+         *     The closed response returns identifiers and the new revision number.
+         */
+        post: operations["appendElearningQuestionRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/question-banks/{bankId}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import objective questions from one XLSX worksheet
+         * @description Admin-only L3 assessment write. The workbook is limited to 1 MiB and
+         *     a 64 MiB expanded archive, uses a bounded standard single-disk ZIP,
+         *     and must contain exactly one formula-free worksheet with at most 500
+         *     data rows and 25 columns. The import is committed atomically. Duplicate
+         *     rows create separate questions.
+         */
+        post: operations["importElearningQuestionBankXlsx"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/papers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish an immutable fixed-revision paper
+         * @description Admin-only L3 assessment write. Each item pins one immutable question
+         *     revision. V1 accepts 1 through 200 items and rejects 201 before DB I/O.
+         */
+        post: operations["publishElearningFixedPaper"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/exams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish exam rules bound to an immutable paper
+         * @description Admin-only L3 assessment write. Window, duration, shuffle, attempt,
+         *     pass-score, and review-disclosure rules are frozen at publication.
+         *     The response never contains paper snapshots, answer keys, or explanations.
+         */
+        post: operations["publishElearningPaperExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/attempts/{attemptId}/manual-grades": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append one initial short-answer grade
+         * @description L3 initial manual-grading command. RBAC requires `elearning:grade` or
+         *     `elearning:admin`; non-global graders must also cover the learner in
+         *     their current management scope. One immutable ledger row is appended
+         *     per short-answer question. When every short answer has a grade, the
+         *     server derives the aggregate score, pass result, and final graded
+         *     state in the same transaction. Replaying the same request id, actor,
+         *     and canonical payload returns duplicate=true without another write;
+         *     conflicting reuse fails closed. This endpoint does not perform
+         *     regrading and never returns the learner answer, grader comment, answer
+         *     key, or paper snapshot. JSON limit 16 KiB.
+         */
+        post: operations["submitElearningManualGrade"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/manual-grading/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List submitted attempts awaiting initial manual grading
+         * @description L3 grader queue. RBAC requires `elearning:grade` or
+         *     `elearning:admin`. Global administrators may read the organization;
+         *     every non-global grader must have an active management scope, and
+         *     each row is filtered by that scope in SQL. The closed response never
+         *     contains learner answers, paper snapshots, answer keys, explanations,
+         *     rubrics, grading request ids, or attempts outside the current scope.
+         */
+        get: operations["listElearningManualGradingAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/manual-grading/attempts/{attemptId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the short-answer material needed for initial manual grading
+         * @description L3 grader detail. RBAC and management-scope rules match the queue.
+         *     Out-of-scope and non-awaiting attempts are not visible. The closed
+         *     response contains only short-answer prompts, points, the learner's
+         *     corresponding answers, and any initial manual grade already appended.
+         *     It never returns objective questions, answer keys, explanations,
+         *     rubrics, request ids, raw snapshots, regrade history, or another
+         *     learner's attempt.
+         */
+        get: operations["getElearningManualGradingAttempt"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/direct": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Direct-assign a published course version to one user
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `assign` ACL and management-scope coverage of the target user.
+         *     JSON limit 16 KiB. Actor/org are injected from JWT.
+         */
+        post: operations["assignElearningDirect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Materialize an audience into one published-version assignment
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `assign` ACL, and every audience rule must stay within their
+         *     management scope. JSON limit 16 KiB. Rules are normalized and
+         *     resolved once from current same-org active directory state, then the
+         *     resulting members are stored as assignment facts. Idempotent replay does
+         *     not resolve the audience again. At most 10,000 members may be materialized.
+         */
+        post: operations["assignElearningBatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/{assignmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up assignment progress for every member
+         * @description L2 tracking operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the owning course/plan
+         *     owner role or exact `track` ACL. Their current management scope is
+         *     applied in SQL before cursor/limit, so out-of-scope member rows never
+         *     enter the page; no intersecting member is a 403. Cursor is a member UUID
+         *     keyset and page size is at most 100. Closed DTO only: assignment metadata
+         *     plus member progress statuses. Scores, answers, answer keys, raw
+         *     events, revocation reason, storage data, and hidden audit values are
+         *     never returned. Deadline expiry is overdue, not revoke; a revoked
+         *     member has no current obligation and therefore reports overdue false.
+         */
+        get: operations["getElearningAssignmentProgress"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Explicitly revoke one assignment member
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the owning course/plan
+         *     owner role or exact `assign` ACL and management-scope coverage of the
+         *     member. Body key `reason` only, trimmed length 1..500. Actor and authoritative
+         *     org come from JWT. First call sets revoked_at to server time. Same
+         *     normalized reason is duplicate true. A different reason is conflict.
+         *     Cross-org or missing member is 404. Progress, evidence, attempts, and
+         *     the parent assignment are never deleted or reset. A training-plan child
+         *     returns 409 and must use the plan-assignment revocation operation.
+         */
+        put: operations["revokeElearningAssignmentMember"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish an ordered plan that pins course versions
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. Items preserve request order,
+         *     use one-based positions, and pin currently published versions whose
+         *     course heads are active. At most 100 unique course versions. Idempotency
+         *     is scoped by authoritative org plus requestId.
+         */
+        post: operations["publishElearningTrainingPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/{planId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one plan and its pinned active version
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; no JSON body.
+         *     Authoritative org comes from JWT. Cross-org and missing plan ids return
+         *     not_found. The response is closed to head metadata and ordered pinned
+         *     course version ids; it contains no assignments, learners, answers, or scores.
+         */
+        get: operations["getElearningTrainingPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/{planId}/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Atomically assign every course in a pinned training plan
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the plan owner role or
+         *     exact `assign` ACL, and every audience rule must stay within their
+         *     management scope. JSON limit 16 KiB. The active published plan
+         *     version is pinned, the audience is resolved once, and one ordinary
+         *     assignment with the identical materialized member set is created per
+         *     plan item in a single transaction. Same-key replay returns the original
+         *     frozen plan version and counts without re-reading current directory or
+         *     course state. At most 100 courses and 10,000 members.
+         */
+        post: operations["assignElearningTrainingPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin-scopes/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one administrator's delegated department scope
+         * @description Global e-learning-admin L2 operation. RBAC `elearning:admin`; JSON limit
+         *     16 KiB. Actor and authoritative org come from JWT. The requested active
+         *     set replaces the previous set atomically; removed or changed rows are
+         *     one-way revoked and retained as history. Department ownership and the
+         *     target user's active same-org membership are checked by the server.
+         */
+        put: operations["replaceElearningAdminScopes"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/{planId}/collaborators/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one training-plan collaborator's closed action set
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; the service additionally requires the plan owner or
+         *     an org-global e-learning admin. Actions are exactly `assign`, `scope`,
+         *     and `track`; they never imply edit, publish, grading, or export rights.
+         */
+        put: operations["replaceElearningTrainingPlanCollaborator"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plan-assignments/{planAssignmentId}/revocation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Atomically revoke every child obligation in one plan assignment
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the plan owner role or
+         *     exact `assign` ACL and management-scope coverage of the entire frozen
+         *     cohort. JSON limit 16 KiB. The operation writes one
+         *     plan-level revocation triplet and revokes every materialized child
+         *     assignment member in the same transaction. Same normalized reason is
+         *     duplicate true; a different reason conflicts. Individual child-member
+         *     revocation is rejected so one plan cohort cannot split across courses.
+         */
+        put: operations["revokeElearningTrainingPlanAssignment"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/courses/{courseId}/collaborators/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one course collaborator's closed action set
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; the service additionally requires the course owner
+         *     or an org-global e-learning admin. Actions are exactly `assign`,
+         *     `scope`, and `track`; they never imply edit, publish, grading, or export.
+         */
+        put: operations["replaceElearningCourseCollaborator"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/courses/{courseId}/scope": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Append and activate a course visibility-scope revision
+         * @description L2 content operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `scope` ACL, and every requested rule must stay within their
+         *     management scope. JSON limit 16 KiB. This changes only who may
+         *     discover and self-study an active published course. It never creates,
+         *     revokes, or reclassifies an assignment. Current live rules are `all`,
+         *     same-org active `department`, same-org directory `position`, and same-org
+         *     active `user`; an empty rule array means visible to nobody. Platform role
+         *     rules return unsupported_subject until org-scoped role membership exists.
+         */
+        put: operations["setElearningCourseScope"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/courses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the current learner's assigned and visible courses
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     Requires `ELEARNING_ENABLED` and `ELEARNING_CONTENT_ENABLED` to each
+         *     equal the exact literal `true`. No JSON body. At most 100 course
+         *     versions. Actor and organization are server-derived. Assignment access
+         *     wins when both bases match; visibility access is optional self-study
+         *     and returns assignment null. Every course is exactly one closed shape:
+         *     legacy video plus exam, or ordered article/external-link items.
+         */
+        get: operations["listMyElearningCourses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the current learner for one visible self-study course
+         * @description Requires master, content, and enrollment flags to each equal exact
+         *     `true`, plus learner read RBAC. Organization and learner are derived
+         *     from the authenticated session. Registration appends immutable audit
+         *     evidence only: it never creates an assignment, grants access, assigns
+         *     a deadline, awards credit, or records completion. Current active
+         *     visibility is rechecked by the existing course-access authority.
+         */
+        post: operations["enrollMyElearningCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/items/{itemId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start or resume a verified watch session for a video item
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object only. itemId is the course
+         *     version video item, not a media id. JSON limit 16 KiB.
+         */
+        post: operations["startElearningWatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/sessions/{sessionId}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record a verified watch heartbeat
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Required keys sequence (>=1), positionMs (>=0),
+         *     playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
+         */
+        post: operations["recordElearningWatchHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an active or timed-out watch challenge
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
+         *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
+         *     The server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only
+         *     raster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the
+         *     expected selection are never returned as structured fields. The client submits exactly two distinct opaque
+         *     option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
+         *     the stored result; a different payload with the same requestId returns a values-free conflict.
+         */
+        post: operations["acknowledgeElearningWatchChallenge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/items/{itemId}/playback-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a short-lived media playback ticket
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object. Returns an opaque HMAC token
+         *     (not a session JWT). Token TTL is at most 600 seconds. Storage keys and
+         *     signing secrets never appear. JSON limit 16 KiB.
+         */
+        post: operations["issueElearningPlaybackTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/media/playback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream MP4 bytes for a playback ticket
+         * @description Token-auth GET. No session JWT, cookies, or bearer. Credential is the
+         *     single `token` query parameter issued by playback-ticket. Mounted before
+         *     the authenticated e-learning routers and the global JWT gate.
+         *
+         *     Range is a single `bytes=` range (commas are invalid_range). Server cap
+         *     is 8388608 bytes (8 MiB).
+         *
+         *     - No Range and object size ≤ cap and the returned span is the full object → 200.
+         *     - No Range and object size > cap → 206 of the first cap bytes with Content-Range.
+         *     - Range present and satisfiable → 206 with Content-Range (even if the range covers the whole object).
+         *     - Unsatisfiable range → 416 JSON `{ error: unsatisfiable_range }` (no Content-Range header).
+         *     - Malformed Range → 400 `{ error: invalid_range }`.
+         *
+         *     Successful bodies are video/mp4 with Accept-Ranges: bytes, Cache-Control:
+         *     private, no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer.
+         *     Storage keys never appear.
+         */
+        get: operations["getElearningMediaPlayback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/items/{itemId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start an objective exam attempt
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.
+         *     itemId is the course version exam item. Returned paper is redacted
+         *     (no answerKey, correct ids, explanation, examId, or passScore).
+         *     Result includes canonical own answers for every paper question and the
+         *     immutable server-issued `deadlineAt` (`null` for an untimed attempt).
+         *     JSON limit 16 KiB.
+         */
+        post: operations["startElearningExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/attempts/{attemptId}/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save draft answers for a started exam attempt
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
+         *     only (map of questionRevisionId to selected option ids or short-answer text). Only started
+         *     attempts may save. Same canonical body is duplicate true. Result is the
+         *     closed started DTO with own answers and the same immutable `deadlineAt`.
+         *     No answer keys. JSON limit 8 MiB; oversized bodies fail before the service.
+         */
+        put: operations["saveElearningExamAnswers"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/attempts/{attemptId}/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit an exam attempt and auto-grade its objective portion
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId
+         *     to selected option ids or short-answer text). Objective-only papers return
+         *     graded. Mixed papers return awaiting_manual with passed=null after the
+         *     objective portion is recorded. The result has no per-question key,
+         *     selected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized
+         *     bodies fail before the service.
+         */
+        post: operations["submitElearningExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/attempts/{attemptId}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the policy-released review for one own graded attempt
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin` and
+         *     the exam capability gate are required. Identity and organization come
+         *     only from the authenticated request. `no_review` never releases a
+         *     review; `correctness_after_window` uses the database clock and opens at
+         *     the configured window end. `wrong_items_after_submit` returns only
+         *     incorrect rows. Current course access is re-evaluated before release,
+         *     so archived content still requires an effective assignment and
+         *     withdrawn content remains globally blocked. The closed DTO contains
+         *     own selections, correctness, and awarded points, but never answer keys,
+         *     correct option ids, explanations, examId, or passScore.
+         */
+        get: operations["getElearningExamReview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the active learning portal presentation
+         * @description Requires the master and CONTENT capability flags plus `elearning:read`.
+         *     Organization and learner identity are derived only from the authenticated
+         *     request. The response is either the closed empty presentation or the active
+         *     immutable portal revision. It never returns actor, organization, request-hash,
+         *     or request-id fields.
+         */
+        get: operations["getElearningPortalSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Publish one immutable learning portal revision
+         * @description Requires the master and CONTENT capability flags plus `elearning:admin`.
+         *     Organization and actor identity are server-derived. The command is closed to
+         *     requestId, siteName, tagline, bannerUrl, and ordered internal navigation.
+         *     Reusing requestId with the same normalized payload replays the original result;
+         *     a different payload returns a values-free conflict.
+         */
+        put: operations["publishElearningPortalSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/analytics/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create one suppressed department aggregate CSV export
+         * @description Requires `elearning:admin`, global administrator authority, and the exact-literal
+         *     `ELEARNING_ENABLED=true` plus `ELEARNING_ANALYTICS_ENABLED=true` gates.
+         *     Organization and actor are server-derived only from the authenticated request. The closed
+         *     command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
+         *     returns the original closed nine-field result; a different payload for the same
+         *     requestId returns a values-free conflict. The export never contains individual answers,
+         *     traces, grades, or unsuppressed small-group values.
+         */
+        post: operations["createElearningAnalyticsExport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/analytics/exports/{exportId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the current state of one department aggregate export
+         * @description Requires the same global-admin, organization, management-scope, RBAC, and exact feature
+         *     gates as creation. Actor and organization remain server-derived. The response is the
+         *     closed nine-field result and never exposes storage keys, digests, file sizes, snapshots,
+         *     organization identifiers, or person-level fields.
+         */
+        get: operations["getElearningAnalyticsExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/analytics/exports/{exportId}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download one ready suppressed department aggregate CSV export
+         * @description Rechecks current organization, actor, global-admin authority, management scope, expiry,
+         *     RBAC, and exact feature gates at download time. Only a succeeded, unexpired export is
+         *     returned. Production storage remains fail-closed when no authorized storage adapter is
+         *     configured.
+         */
+        get: operations["downloadElearningAnalyticsExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/external-systems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List external systems
+         * @description Read-only external-system listing, scoped by (tenantId, workspaceId) and optionally narrowed by kind/status. `data` is a plain array of IntegrationExternalSystem (the credential-redacted public projection); there is no cursor or total count. A workspace-scoped caller's page additionally merges in tenant-wide (null-workspace) rows so a system shared across the tenant is still visible from a workspace — see listExternalSystems' merge branch for the exact windowing.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null (tenant-wide) workspace, which is never widened further. */
+                    workspaceId?: string;
+                    /** @description Restrict to one adapter kind (e.g. k3, data-source:sql-readonly). Not validated against an enum server-side — an unknown kind simply matches zero rows. */
+                    kind?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (ExternalSystemValidationError), not an empty result. */
+                    status?: "active" | "inactive" | "error";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/external-systems/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one external system
+         * @description Read-only single-system read, scoped by (tenantId, workspaceId, id). Returns the same credential-redacted IntegrationExternalSystem projection as the list route. Another tenant's system id and a non-existent id both raise ExternalSystemNotFoundError → 404 with the identical message.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description External system id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description System not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipelines
+         * @description Read-only pipeline listing, scoped by (tenantId, workspaceId) and optionally narrowed by status/sourceSystemId/targetSystemId. `data` is a plain array of IntegrationPipeline, newest first (ORDER BY created_at DESC); there is no cursor or total count. The list projection never embeds `fieldMappings` (only the single-pipeline read can).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to pipelines in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "draft" | "active" | "paused" | "disabled";
+                    /** @description Restrict to pipelines whose sourceSystemId matches. */
+                    sourceSystemId?: string;
+                    /** @description Restrict to pipelines whose targetSystemId matches. */
+                    targetSystemId?: string;
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline
+         * @description Read-only single-pipeline read, scoped by (tenantId, workspaceId, id). By default the response embeds `fieldMappings` (a second read of the pipeline's field-mapping rows); pass `includeFieldMappings=false` to skip that second read and omit the key entirely (not an empty array). Another tenant's pipeline id and a non-existent id both raise PipelineNotFoundError → 404 with the identical message and no distinguishing detail.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Any value other than the exact string `false` is treated as true (the handler's check is `!== 'false'`). Default true. */
+                    includeFieldMappings?: "true" | "false";
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Pipeline not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one row's cross-run provenance timeline
+         * @description Read-only cross-run provenance timeline for one rowId, scoped by (tenantId, workspaceId, rowId) and optionally narrowed by pipelineId and a [from, to] window on the run's `created_at`. Reads the migration-060 integration_provenance_by_row view; ordered oldest-first (by run_created_at, then a stable secondary compare). `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does NOT re-redact and never returns raw payloads. No write, replay or retry.
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description Row id to fetch the timeline for. Missing/empty is a 400 (ROW_ID_REQUIRED). */
+                    rowId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict the timeline to events from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Inclusive lower bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    from?: string;
+                    /** @description Inclusive upper bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    to?: string;
+                    /** @description Max events to return. Capped at 500 at the route (the registry's own ceiling is higher; the tighter of the two always wins). */
+                    limit?: number;
+                    /** @description Events to skip. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["ProvenanceTimelineEntry"][];
+                        };
+                    };
+                };
+                /** @description rowId missing, or an unparsable from/to. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The host's pipeline registry does not implement the by-row provenance read. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dead letters
+         * @description Read-only dead-letter listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/runId/status. `data` is a plain array of IntegrationDeadLetter, newest first (ORDER BY created_at DESC); there is no cursor or total count. `sourcePayload`/`transformedPayload` are stripped by default; only a caller whose session resolves as admin AND passes `includePayload=true` gets them back (sanitized). A non-admin caller passing `includePayload=true` is silently ignored (redacted view), not rejected.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to dead letters from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to dead letters from one run. */
+                    runId?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (DeadLetterError), not an empty result. */
+                    status?: "open" | "replayed" | "discarded";
+                    /** @description Admin-only. Must be the exact string `true`; any other value (including for a non-admin caller) keeps the redacted (payload-stripped) projection. */
+                    includePayload?: "true" | "false";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationDeadLetter"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipeline runs
+         * @description Read-only run listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/status. `data` is a plain array of IntegrationPipelineRun, newest first (ORDER BY created_at DESC); there is no cursor or total count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to runs of one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to runs in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "pending" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline run
+         * @description Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"];
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs/{runId}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one run's provenance timeline
+         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry. One call answers ONE PAGE (default 200 events) together with `total`, `truncated` and `nextCursor`, so a client can always tell the first page from the whole timeline; pass the previous page's `nextCursor` as `cursor` to read the next page.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the run reads apply. */
+                    workspaceId?: string;
+                    /** @description Max events per page. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
+                    limit?: number;
+                    /** @description The previous page's `nextCursor` (the `eventIndex` of the last event it returned). Answers the events strictly after it, in `eventIndex` order, under the same (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything else that is not 1-15 ASCII decimal digits is refused with 400 INVALID_CURSOR (never silently treated as the first page); the tenant scope is checked before the cursor. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of the run's timeline plus its completeness disclosure. `truncated` is true iff at least one more event exists after the last returned item; `nextCursor` is then that item's `eventIndex` as a string (null otherwise). `total` counts every event the run has in the caller's scope, independent of `cursor` and `limit`. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["ProvenanceTimelineEntry"][];
+                                /** @description Every event this run has in the caller's scope (not just this page). */
+                                total: number;
+                                /** @description True iff more events exist after the last returned item. */
+                                truncated: boolean;
+                                /** @description Cursor for the next page when `truncated`; null on the last page. */
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                /** @description runId missing from the path, or a malformed `cursor` */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry implements neither the per-run provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) — optional-method wiring older than this route. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a project's immutable BOM snapshot batches (stock-prep view 2)
+         * @description Read-only, values-free LIST of the immutable BOM snapshot batches for one business project — queryRecords-only against the internal MetaSheet-provisioned MVP tables, never PLM/K3/any external system. Uses the two-project split: the STAGING project (derived from the auth tenant) locates the provisioned sheets, `projectId` (the PLM business project) filters the batch rows and is echoed back. An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. `workspaceId` is accepted by the query allowlist but is never read by the handler or the read function — it has no effect on the result (confirmed by reading both; not a documented no-op elsewhere in this module family).
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description The (business) PLM project id. Missing/empty is a 400 (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field: projectId). */
+                    projectId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but NOT forwarded to the read function — has no effect on the response (dead parameter; documented here so a caller does not assume it scopes anything). */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotBatchListResult"];
+                        };
+                    };
+                };
+                /** @description Missing `projectId`, or an unsupported query field. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50 pages of READ_PAGE_LIMIT=500 rows each) reading the batch/line/run sheets — fails closed rather than scanning forever. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API (findObjectSheet/resolveFieldIds) or the records API (queryRecords) is not available. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Values-free counts diff of one snapshot batch vs its base (stock-prep view 2)
+         * @description Read-only, values-free diff of the named snapshot batch against its immutable predecessor (auto-picked: same business project, highest snapshotVersion strictly below the current one) or an explicit caller-chosen `baseSnapshotBatchId`. The business project used for the predecessor search is read from the CURRENT batch row itself (the FE diff call sends no `projectId`); the `projectId` query param is only a fallback used when that batch row cannot be read. `workspaceId` is accepted by the query allowlist but has no effect on the result (same dead-parameter note as the LIST route). H-1 gate: BOTH the current and the resolved base batch must be structurally complete (at least one line AND a matching run row) — an incomplete side fails loud with 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated diff. An unprovisioned substrate (no batch/line/exception sheet exists at all) degrades gracefully to zero counts and `baseSnapshotBatchId: null`, unless an explicit base was requested (then 404).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Caller-chosen base pair, overriding the predecessor auto-pick. Must differ from `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must exist (404 SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same business project as the diffed batch (409 SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the diffed batch's own row exists — a caller-chosen pair against a ghost current id is also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Fallback business-project id, used only when the current batch row cannot be read (the normal path reads the project from that row). Does not filter or narrow the diffed batch itself (the batch id already rode the path). */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description An explicit `baseSnapshotBatchId` that does not exist, or that cannot be verified because the diffed batch's own row does not exist. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The resolved base belongs to a different business project than the diffed batch, OR (H-1) the current/base batch is structurally incomplete, OR the current/base batch identity is ambiguous (duplicate snapshotBatchId or duplicate run identity, no substrate unique index). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Per-row diff browse of one snapshot batch vs its base (stock-prep view 2 rows)
+         * @description Read-only, values-free PER-ROW diff browse: diffType/changeTypes/reviewStatus per diff row, for the FE's row-level drill-down under view 2. Same base resolution (auto-pick or explicit `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff (GET .../diff); the enum filters `reviewStatus`/`diffType` are validated against the route's own closed vocabulary FIRST (400 with the field name), so the read function's own belt-and-braces re-check of the same vocabulary is unreachable via HTTP. `heldRowCount` is computed over the WHOLE pair BEFORE these filters are applied, so a filtered read still carries that context; `rowCount` is the post-filter row count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Same semantics as the counts diff route's `baseSnapshotBatchId`. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Restrict rows to one reviewStatus. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    reviewStatus?: "ready" | "held";
+                    /** @description Restrict rows to one diffType. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    diffType?: "added" | "removed" | "changed" | "unchanged" | "held";
+                    /** @description Same fallback semantics as the counts diff route's `projectId`. */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffRowsResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, an out-of-vocabulary `reviewStatus`/`diffType`, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Same semantics as the counts diff route's 404. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Same semantics as the counts diff route's 409 (project mismatch / H-1 incomplete / ambiguous). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the underlying bounded sheet scan exceeded its page bound (same as the LIST route's 422). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -7867,6 +10939,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/bases/{baseId}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List restorable deleted tables in a base
+         * @description Requires sheet lifecycle authority and read access. Returns only eligible soft-deleted user tables; managed and system projections are excluded. Authorization is applied before pagination. No total count is exposed. Missing, deleted, and inaccessible bases return 403. The opaque cursor is bound to the base and uses a stable table-id keyset.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque nextCursor from the preceding page of this base. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    baseId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Authorized deleted tables, possibly empty. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                sheets: {
+                                    id: string;
+                                    baseId: string;
+                                    name: string;
+                                    description: string | null;
+                                    /** Format: date-time */
+                                    deletedAt: string;
+                                }[];
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/templates": {
         parameters: {
             query?: never;
@@ -7938,9 +11072,11 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created */
+                /** @description Created. Repeated identical installs inside the server-side dedupe window (same authenticated tenant, user, templateId, workspaceId and baseName) return the FIRST base again instead of creating another one; the body is then byte-identical to the original 201 and only the Idempotent-Replayed header distinguishes the two. */
                 201: {
                     headers: {
+                        /** @description Present with the value `true` only when this 201 replayed an earlier install instead of creating a new base; absent on a fresh install. Ops/gateway signal only — the web client does not read it, and it is not CORS-exposed, so browser JS cannot see it without Access-Control-Expose-Headers. */
+                        "Idempotent-Replayed"?: "true";
                         [name: string]: unknown;
                     };
                     content: {
@@ -8210,7 +11346,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a multitable sheet */
+        /**
+         * Soft-delete a multitable sheet
+         * @description Marks the table deleted while retaining its fields, records, and views. It is no longer accessible through live table reads or writes. Authorized users can restore it from the table recycle bin; this is not a record deletion or field deletion.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -8242,6 +11381,63 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted multitable sheet
+         * @description Clears the table deletion marker under the same lifecycle authority as table deletion. Retained fields, records, views, and inbound links become available again. Does not restore an earlier data version or recreate a table that was permanently deleted. Live or missing tables return 404; a concurrent recovery fence returns 409. No feature flag is changed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Table restored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                restored: string;
+                                sheet: {
+                                    id: string;
+                                    baseId: string | null;
+                                    name: string;
+                                    description: string | null;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -9718,7 +12914,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -9804,7 +13000,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -10041,7 +13237,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -14347,6 +17543,10 @@ export interface components {
             updatedAt?: string;
             /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
+            /** @description Display labels for this comment's own mentions, keyed by user id. A label is the user's name, or their email when they have no name (the label the mention search returns, without its email subtitle). Only in GET /api/comments responses to an interactive session caller, only on that caller's own comments, only for active users, and for at most 50 distinct ids per response. Never sent to API-token callers. An id without an entry has no label in this response (inactive or deleted user, no name or email, or beyond the 50-distinct-id ceiling). */
+            mentionLabels?: {
+                [key: string]: string;
+            };
         };
         CommentsListResponse: {
             /** @example true */
@@ -14368,6 +17568,10 @@ export interface components {
             sheetId?: string | null;
             viewId?: string | null;
             recordId?: string | null;
+            baseName?: string | null;
+            sheetName?: string | null;
+            viewName?: string | null;
+            fieldName?: string | null;
         };
         CommentInboxResponse: {
             /** @example true */
@@ -14392,10 +17596,36 @@ export interface components {
             ok?: boolean;
             data?: {
                 items?: components["schemas"]["CommentMentionCandidate"][];
-                /** @example 1 */
+                /**
+                 * @description Number of items in this (clamped) page - never a deployment-wide count.
+                 * @example 1
+                 */
                 total?: number;
-                /** @example 50 */
+                /**
+                 * @description Effective page size after the server ceiling (50).
+                 * @example 50
+                 */
                 limit?: number;
+                /**
+                 * @description The trimmed search term that was applied (empty when `requiresQuery` is true).
+                 * @example jam
+                 */
+                query?: string;
+                /**
+                 * @description True when more candidates matched than this page holds.
+                 * @example false
+                 */
+                hasMore?: boolean;
+                /**
+                 * @description True when the call carried no usable search term; `items` is then empty.
+                 * @example false
+                 */
+                requiresQuery?: boolean;
+                /**
+                 * @description Minimum trimmed search-term length the server accepts.
+                 * @example 1
+                 */
+                minQueryLength?: number;
             };
         };
         CommentUnreadCountResponse: {
@@ -14516,6 +17746,86 @@ export interface components {
             /** Format: date-time */
             updated_at?: string;
         };
+        AttendanceW4ShadowDiff: {
+            /** @enum {integer} */
+            schemaVersion: 1;
+            /** @enum {string} */
+            code: "equal" | "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            changedFields: ("workDate" | "status" | "firstInAt" | "lastOutAt" | "workMinutes" | "lateMinutes" | "earlyLeaveMinutes" | "context" | "input")[];
+            absoluteMinuteDelta: number;
+            segmentCount: number;
+        };
+        AttendanceW4CalculationSegment: {
+            index: number;
+            /** Format: date-time */
+            expectedStartAt: string;
+            /** Format: date-time */
+            expectedEndAt: string;
+            /** Format: date-time */
+            actualInAt: string | null;
+            /** Format: date-time */
+            actualOutAt: string | null;
+            workMinutes: number;
+            lateMinutes: number;
+            earlyLeaveMinutes: number;
+            /** @enum {string} */
+            status: "normal" | "late" | "early_leave" | "late_early" | "missing_check_in" | "missing_check_out" | "missing_both";
+            statusReasons: ("within_window" | "late_check_in" | "early_check_out" | "missing_check_in" | "missing_check_out" | "missing_both" | "approved_correction_applied" | "approved_leave_overlay" | "approved_overtime_overlay" | "dst_fold_start_earlier" | "dst_fold_end_later")[];
+        };
+        AttendanceW4Calculation: {
+            /** Format: uuid */
+            id: string;
+            version: number;
+            /** @enum {string} */
+            kind: "legacy_baseline" | "calculation" | "reversal";
+            /** @enum {string} */
+            mode: "shadow" | "authoritative";
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            engineVersion: string;
+            /** @enum {integer} */
+            snapshotSchemaVersion: 1;
+            /** @enum {string} */
+            outcome: "baseline" | "completed" | "review_required" | "reversed";
+            /** @enum {string} */
+            outcomeReasonCode: "calculated" | "shadow_only" | "legacy_projection_baseline" | "ambiguous_segment_match" | "duplicate_check_in" | "duplicate_check_out" | "dst_gap_local_time" | "dst_fold_shared_boundary_ambiguous" | "invalid_timezone" | "invalid_segment_order" | "invalid_evidence_order" | "overlapping_actual_intervals" | "evidence_outside_attribution_window" | "missing_frozen_context" | "legacy_attribution_not_upgradeable" | "frozen_evidence_unavailable" | "context_resolution_ambiguous" | "context_mismatch" | "input_schema_invalid" | "legacy_time_ingress_not_authoritative" | "approved_fact_conflict" | "manual_override_invalid" | "import_metric_conflict" | "import_rollback_reversal" | "operator_retirement";
+            /** @enum {string} */
+            projectionEffect: "none" | "set_active" | "set_retired";
+            expectedSegmentCount: number;
+            /** @enum {string|null} */
+            projectedStatus: "normal" | "late" | "early_leave" | "late_early" | "partial" | "absent" | "adjusted" | "off" | null;
+            projectedWorkMinutes: number | null;
+            projectedLateMinutes: number | null;
+            projectedEarlyLeaveMinutes: number | null;
+            shadowDiff: components["schemas"]["AttendanceW4ShadowDiff"] | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AttendanceW4CalculationDetail: {
+            /** Format: uuid */
+            recordId: string;
+            calculation: components["schemas"]["AttendanceW4Calculation"] | null;
+            segments: components["schemas"]["AttendanceW4CalculationSegment"][];
+            current: {
+                /** @enum {string} */
+                projectionOwner: "legacy_untracked" | "w4" | "w4_group";
+                /** @enum {string} */
+                visibilityState: "active" | "retired";
+                /** @enum {string} */
+                visibilityReason: "active" | "review_placeholder" | "import_rollback" | "operator_retirement";
+                /** @enum {string} */
+                posture: "shadow" | "authoritative" | "undeterminable";
+            };
+        };
+        AttendanceW4ShadowBacklogItem: {
+            /** @enum {string} */
+            entrypoint: "live" | "legacy_import" | "integration_sync" | "correction" | "approved_leave" | "approved_overtime" | "outdoor_approval" | "manual_override" | "recompute" | "scheduled" | "approval_reversal" | "import_rollback" | "ops_retirement";
+            /** @enum {string} */
+            code: "expected_break_exclusion" | "status_changed" | "work_minutes_mismatch" | "late_minutes_mismatch" | "early_leave_minutes_mismatch" | "missing_boundary_mismatch" | "work_date_mismatch" | "context_mismatch" | "input_mismatch" | "review_required" | "legacy_uncomparable";
+            label: string;
+            critical: boolean;
+            count: number;
+        };
         AttendanceRequest: {
             id?: string;
             user_id?: string;
@@ -14574,10 +17884,22 @@ export interface components {
             counterpartyWorkDate?: string;
             /** Format: date */
             counterparty_work_date?: string;
-            requesterShiftId?: string;
-            requester_shift_id?: string;
-            counterpartyShiftId?: string;
-            counterparty_shift_id?: string;
+            /** @description Null when historical evidence outlives its deleted requester shift. */
+            requesterShiftId?: string | null;
+            /** @deprecated */
+            requester_shift_id?: string | null;
+            /** @description Resolved requester shift name or a neutral deleted/unavailable label. */
+            requesterShiftLabel?: string;
+            /** @enum {string} */
+            requesterShiftStatus?: "available" | "deleted";
+            /** @description Null when historical evidence outlives its deleted counterparty shift. */
+            counterpartyShiftId?: string | null;
+            /** @deprecated */
+            counterparty_shift_id?: string | null;
+            /** @description Resolved counterparty shift name or a neutral deleted/unavailable label. */
+            counterpartyShiftLabel?: string;
+            /** @enum {string} */
+            counterpartyShiftStatus?: "available" | "deleted";
             requesterSlotIndex?: number;
             requester_slot_index?: number;
             counterpartySlotIndex?: number;
@@ -14611,7 +17933,12 @@ export interface components {
             targetScheduleGroupId?: string;
             targetAttendanceGroupId?: string | null;
             targetDepartmentRef?: string | null;
-            targetShiftId?: string;
+            /** @description Null only when a historical cancelled dispatch outlives its deleted target shift. */
+            targetShiftId?: string | null;
+            /** @description Resolved shift name or a neutral deleted/unavailable label. */
+            targetShiftLabel?: string;
+            /** @enum {string} */
+            targetShiftStatus?: "available" | "deleted";
             slotIndex?: number;
             /** Format: date */
             startDate?: string;
@@ -14795,6 +18122,16 @@ export interface components {
             timezone?: string;
             ruleSetId?: string | null;
             description?: string | null;
+            /** @enum {string} */
+            attendanceType?: "fixed_shift" | "scheduled_shift" | "free_time";
+            /**
+             * @deprecated
+             * @enum {string}
+             */
+            attendance_type?: "fixed_shift" | "scheduled_shift" | "free_time";
+            memberCount?: number;
+            /** @deprecated */
+            member_count?: number;
             /** Format: date-time */
             createdAt?: string | null;
             /** Format: date-time */
@@ -14807,6 +18144,28 @@ export interface components {
             userId?: string;
             /** Format: date-time */
             createdAt?: string | null;
+        };
+        AttendanceCalculationGroupMembership: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            userId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: date */
+            effectiveFrom: string;
+            /** Format: date */
+            effectiveTo: string | null;
+            assignedBy: string;
+            assignedReason: string;
+            assignedCorrelationId: string;
+            closedBy: string | null;
+            closedReason: string | null;
+            closedCorrelationId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
         };
         AttendancePayrollTemplate: {
             id?: string;
@@ -15057,6 +18416,220 @@ export interface components {
              */
             runCreatedAt: string;
         };
+        /** @description SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift. */
+        IntegrationPipelineRun: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            pipelineId: string;
+            /** @description Run mode recorded by the runner (e.g. dry-run vs. a real write run). */
+            mode: string;
+            triggeredBy?: string | null;
+            status: string;
+            rowsRead: number;
+            rowsCleaned: number;
+            rowsWritten: number;
+            rowsFailed: number;
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            durationMs?: number | null;
+            errorSummary?: string | null;
+            /** @description Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it. */
+            details?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        /** @description Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by plugin-integration-core's batchSummary (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per immutable snapshot batch of the business project. Values-free: no drawing number, quantity, unit, path key or timestamp value, only counts/status enums/booleans and the presence of createdAt (never its value). */
+        StockPreparationSnapshotBatchSummary: {
+            snapshotBatchId: string | null;
+            /** @description Defaults to 0 when the stored cell is missing or non-numeric. */
+            snapshotVersion: number;
+            snapshotStatus: string | null;
+            syncRunId: string | null;
+            /** @description Count of bom_snapshot_line rows linked to this batch. */
+            lineCount: number;
+            /** @description Whether the batch row's createdAt cell is set — never the timestamp itself. */
+            createdAtPresent: boolean;
+            /** @description True when the multi-step persist path (batch row -> lines -> run row) did not finish: zero lines OR no matching run row (isBatchIncomplete, stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as normal. */
+            incomplete: boolean;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered newest-first (highest snapshotVersion first; snapshotBatchId breaks ties, orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. */
+        StockPreparationSnapshotBatchListResult: {
+            /** @description The (business) projectId the request named, echoed back. */
+            projectId: string;
+            batchCount: number;
+            batches: components["schemas"]["StockPreparationSnapshotBatchSummary"][];
+        };
+        /** @description Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10 keys; each defaults to 0 when the engine's evidence carries no rows of that changeType. `componentCodeChanged`/`materialChanged` (added Q3c) are independent of `fingerprintChanged` — a row can carry more than one changeType, so these two do not subtract from it. */
+        StockPreparationSnapshotChangeCounts: {
+            added: number;
+            removed: number;
+            quantityChanged: number;
+            unitChanged: number;
+            versionChanged: number;
+            pathChanged: number;
+            missingChildBom: number;
+            /** @description Tally of the engine's source_fingerprint_changed changeType. */
+            fingerprintChanged: number;
+            /** @description In-place component-code swap at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            componentCodeChanged: number;
+            /** @description In-place material substitution at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            materialChanged: number;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff of the named batch against its resolved base (predecessor or caller-chosen). An unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to zero counts and a null baseSnapshotBatchId rather than an error. */
+        StockPreparationSnapshotDiffResult: {
+            snapshotBatchId: string;
+            /** @description null when no predecessor exists and the caller named none. Otherwise the resolved (auto-picked or caller-chosen and validated) base batch id. */
+            baseSnapshotBatchId: string | null;
+            changeCounts: components["schemas"]["StockPreparationSnapshotChangeCounts"];
+            /** @description exception_confirmation rows linked to this batch whose stored severity is 'blocking'; not filtered by resolution status. */
+            blockingExceptionCount: number;
+        };
+        /** @description Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526, :543) — a future engine key can never leak through this route unreviewed. Values-free: handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity, unit or path key value. */
+        StockPreparationSnapshotDiffRow: {
+            /** @description Deterministic id (stableDiffId) hashing (base, current, row key). */
+            diffId: string;
+            /** @enum {string} */
+            diffType: "added" | "removed" | "changed" | "unchanged" | "held";
+            /**
+             * @description 'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240).
+             * @enum {string}
+             */
+            reviewStatus: "ready" | "held";
+            changeTypes: ("added" | "removed" | "quantity_changed" | "unit_changed" | "version_changed" | "path_changed" | "parent_changed" | "material_changed" | "component_code_changed" | "source_fingerprint_changed" | "invalid_qty" | "missing_child_bom" | "duplicate_path_key" | "missing_path_key")[];
+            /** @description Fixed diagnostic token naming which diff rule produced this row (e.g. matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot, previous_missing_path_key). Closed set today but not asserted stable across engine versions, so left as a free string rather than an enum. */
+            reason: string;
+            /** @description Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where it is the number of raw rows collapsed into this one diagnostic entry. */
+            rowCount: number;
+            previousSnapshotLineId: string | null;
+            currentSnapshotLineId: string | null;
+            /** @description sha16:-prefixed non-reversible hash of the row's match key. */
+            keyFingerprint: string;
+            /** @description sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null) when there is no previous row or it carries no path key. */
+            previousPathKeyFingerprint?: string;
+            /** @description sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null) when there is no current row or it carries no path key. */
+            currentPathKeyFingerprint?: string;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read keeps that context; `rowCount` is the length of `rows` AFTER filtering. */
+        StockPreparationSnapshotDiffRowsResult: {
+            snapshotBatchId: string;
+            baseSnapshotBatchId: string | null;
+            /** @description rows.length after any reviewStatus/diffType filter is applied. */
+            rowCount: number;
+            /** @description Count of held-reviewStatus rows over the whole pair, before filtering. */
+            heldRowCount: number;
+            rows: components["schemas"]["StockPreparationSnapshotDiffRow"][];
+        };
+        /** @description Q4c: one field mapping row of a pipeline. This is the exact shape produced by plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs) and is embedded in IntegrationPipeline.fieldMappings when the read requests it (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default). */
+        IntegrationPipelineFieldMapping: {
+            id: string;
+            pipelineId: string;
+            sourceField: string;
+            targetField: string;
+            transform?: {
+                [key: string]: unknown;
+            } | null;
+            validation?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Any JSON value persisted as the field's default; shape is caller-defined. */
+            defaultValue?: unknown;
+            sortOrder: number;
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        /** @description Q4c: read-only pipeline projection. This is the exact shape produced by plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/pipelines) and the single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds `fieldMappings` (the registry call omits it), only the single read does, and only when `includeFieldMappings` is not explicitly `false`. */
+        IntegrationPipeline: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            description?: string | null;
+            sourceSystemId: string;
+            sourceObject: string;
+            targetSystemId: string;
+            targetObject: string;
+            stagingSheetId?: string | null;
+            mode: string;
+            idempotencyKeyFields: string[];
+            options: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "draft" | "active" | "paused" | "disabled";
+            createdBy?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+            /** @description Present only on the single-pipeline read with includeFieldMappings !== 'false'; absent (not null, not []) on the list route and on a read with includeFieldMappings=false. */
+            fieldMappings?: components["schemas"]["IntegrationPipelineFieldMapping"][];
+        };
+        /** @description Q4c: public (credential-redacted) external-system projection. This is the exact shape produced by plugin-integration-core's rowToPublicExternalSystem (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the list route (GET /api/integration/external-systems) and the single-system read (GET /api/integration/external-systems/{id}). `config` has every key in that system's `kind`-specific private-config set already deleted (never redacted-in-place); raw credentials are never in this projection — only derived presence/format/fingerprint fields are. */
+        IntegrationExternalSystem: {
+            id: string;
+            connectionId?: string | null;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            kind: string;
+            /** @enum {string} */
+            role: "source" | "target" | "bidirectional";
+            /** @description Sanitized config with every private (kind-specific) key already removed. */
+            config: {
+                [key: string]: unknown;
+            };
+            capabilities: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "active" | "inactive" | "error";
+            /** Format: date-time */
+            lastTestedAt?: string | null;
+            lastError?: string | null;
+            /** @description True iff a non-empty encrypted credential blob is stored; never the credential itself. */
+            hasCredentials: boolean;
+            /** @description Detected format token of the stored ciphertext (e.g. its envelope version), never its content. */
+            credentialFormat?: string | null;
+            /** @description Non-reversible fingerprint of the stored credential, present only where the route computes one; null when it does not. */
+            credentialFingerprint?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
+        /** @description Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs) with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted: true`); an admin caller passing `includePayload=true` gets both fields back, sanitized (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for secret-shaped substrings, including on rows written before write-time scrubbing existed. */
+        IntegrationDeadLetter: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            runId: string;
+            pipelineId: string;
+            idempotencyKey?: string | null;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            sourcePayload?: unknown;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            transformedPayload?: unknown;
+            errorCode: string;
+            /** @description Free-text error, scrubbed of secret-shaped substrings at read time. */
+            errorMessage: string;
+            retryCount: number;
+            /** @enum {string} */
+            status: "open" | "replayed" | "discarded";
+            lastReplayRunId?: string | null;
+            /** @description Always true; marks that this projection is the redacted view, whichever branch produced it. */
+            payloadRedacted: boolean;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
         /**
          * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.
          * @enum {string}
@@ -15131,6 +18704,78 @@ export interface components {
             workingDays?: number[];
             /** @deprecated */
             working_days?: number[];
+            /** @description Canonical shift segments (W3 / #4556). Persisted rows when present; a legacy shift without segment rows is synthesized as segment 0 from its envelope. The legacy workStartTime/workEndTime/isOvernight fields expose the OUTER envelope of these segments for compatibility only — for a multi-segment shift (calculationMode=segments) the envelope is not payable time. */
+            segments?: components["schemas"]["AttendanceShiftSegment"][];
+            /** @enum {string} */
+            calculationMode?: "envelope" | "segments";
+            /** @description Sum of per-segment planned minutes for strict shifts (breaks between segments are never counted). For flex_required_duration this is the required duration in minutes. */
+            plannedMinutes?: number;
+            flexPolicy?: components["schemas"]["AttendanceShiftFlexPolicy"];
+            /** @description True only when the shift has exactly one segment. Multi-segment flex is rejected in v1 (OD-4556-3). */
+            flexEligible?: boolean;
+            capabilities?: components["schemas"]["AttendanceShiftCapabilities"];
+        };
+        /** @description W5 flexible attendance policy (design lock §3.3). Discriminated by mode. flex_required_duration is valid only for a one-segment shift; multi-segment flex is rejected with a typed 422 and zero writes. Absent flexPolicy on create defaults to strict. */
+        AttendanceShiftFlexPolicy: {
+            /** @enum {string} */
+            mode: "strict";
+        } | {
+            /** @enum {string} */
+            mode: "flex_required_duration";
+            requiredMinutes: number;
+            arrivalWindowBeforeMinutes: number;
+            arrivalWindowAfterMinutes: number;
+            /** @description Optional same-day core-hours start (HH:MM) in the shift timezone. */
+            coreStartTime?: string | null;
+            /** @description Optional same-day core-hours end (HH:MM) in the shift timezone. */
+            coreEndTime?: string | null;
+        };
+        AttendanceShiftSegment: {
+            /** @description Persisted segment row id; null when synthesized from the legacy envelope. */
+            id?: string | null;
+            segmentIndex?: number;
+            /** @deprecated */
+            segment_index?: number;
+            /** @description Local wall-clock start time (HH:MM) in the parent shift timezone. */
+            startTime?: string;
+            /** @deprecated */
+            start_time?: string;
+            /**
+             * @description Fixed to 0 in v1.
+             * @enum {integer}
+             */
+            startDayOffset?: 0;
+            /** @deprecated */
+            start_day_offset?: number;
+            /** @description Local wall-clock end time (HH:MM) in the parent shift timezone. */
+            endTime?: string;
+            /** @deprecated */
+            end_time?: string;
+            endDayOffset?: number;
+            /** @deprecated */
+            end_day_offset?: number;
+        };
+        /** @description One shift segment for create/update. 1..3 segments, dense indexes from 0, positive duration, ordered non-overlapping after day offsets, total <= 24h, at most one midnight crossing. Unknown properties are rejected. */
+        AttendanceShiftSegmentInput: {
+            segmentIndex?: number;
+            startTime: string;
+            endTime: string;
+            /** @enum {integer} */
+            startDayOffset?: 0;
+            endDayOffset?: number;
+        };
+        /** @description Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only. */
+        AttendanceShiftCapabilities: {
+            segmentCalculation?: {
+                enabled?: boolean;
+                /** @enum {boolean} */
+                defaultEnabled?: false;
+                authoritativeResults?: boolean;
+                /** @enum {string} */
+                multiSegmentAuthoring?: "preview_only" | "enabled";
+                /** @enum {string} */
+                flag?: "ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED";
+            };
         };
         AttendanceShiftAssignment: {
             id?: string;
@@ -15143,6 +18788,9 @@ export interface components {
             shiftId?: string;
             /** @deprecated */
             shift_id?: string;
+            slotIndex?: number;
+            /** @deprecated */
+            slot_index?: number;
             /** Format: date */
             startDate?: string;
             /**
@@ -15227,6 +18875,16 @@ export interface components {
                 radiusMeters?: number;
             } | null;
             minPunchIntervalMinutes?: number;
+            employeeQuickActionIcons?: {
+                /** @enum {string} */
+                makeup?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                leave?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                overtime?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                swap?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+            };
         };
         Spreadsheet: {
             id?: string;
@@ -15837,7 +19495,7 @@ export interface components {
             /** @description Candidate values for the in operator. */
             values?: unknown[];
         };
-        FormField: {
+        FormFieldDetailLeaf: {
             id: string;
             /** @enum {string} */
             type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment";
@@ -15851,6 +19509,80 @@ export interface components {
             };
             visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
         };
+        RecordLinkFieldProps: {
+            /**
+             * @description Pinned multitable base id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            baseId: string;
+            /**
+             * @description Pinned multitable sheet id (publish-time; filler cannot override).
+             *     Must be non-blank after trim — whitespace-only is invalid.
+             */
+            sheetId: string;
+        };
+        DepartmentFieldProps: {
+            /** @enum {string} */
+            selection: "single" | "multi";
+            /** @enum {string} */
+            display: "leaf_only" | "full_path";
+            /** @enum {string} */
+            defaultMode?: "requester_department" | "designated";
+            defaultDepartmentIds?: string[];
+            maxSelections?: number;
+        };
+        FormFieldGeneric: {
+            id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment" | "detail" | "date_range" | "explanation";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props?: {
+                [key: string]: unknown;
+            };
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+            /** @description Detail-group leaf columns (only when type=detail). Never contains record-link. */
+            columns?: components["schemas"]["FormFieldDetailLeaf"][];
+        };
+        FormFieldDepartment: {
+            id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "department";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props: components["schemas"]["DepartmentFieldProps"];
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+        };
+        FormFieldRecordLink: {
+            id: string;
+            /**
+             * @description FWB-0 Layer 2 record-link field. Pins multitable base/sheet via props and stores
+             *     exactly one `{ recordId }` value. Top-level only in v1 (never a detail leaf).
+             *      (enum property replaced by openapi-typescript)
+             * @enum {string}
+             */
+            type: "record-link";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props: components["schemas"]["RecordLinkFieldProps"];
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
+        };
+        FormField: components["schemas"]["FormFieldRecordLink"] | components["schemas"]["FormFieldDepartment"] | components["schemas"]["FormFieldGeneric"];
         FormSchema: {
             fields: components["schemas"]["FormField"][];
         };
@@ -15910,6 +19642,34 @@ export interface components {
             formSnapshot?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * @description Lock-7 OD-L7-10 (widened by Lock-7B OD-L7B-1) — the actor-scoped per-field
+             *     access map for the viewer at their claimed handler seat(s): fieldId ->
+             *     editable | readonly | hidden | required. Present ONLY on the DETAIL read
+             *     (getApproval); absent on the list. A field absent from the map is editable
+             *     (legacy default, OD-L7-9). `required` is editable plus a submit-time
+             *     obligation enforced at handler submit. Presentation only — enforcement is
+             *     server-side (a masked field write is refused regardless of what the client
+             *     renders).
+             */
+            fieldAccess?: {
+                [key: string]: "editable" | "readonly" | "hidden" | "required";
+            } | null;
+            /**
+             * @description Would the decision endpoint's own authorization predicate let THIS viewer decide the
+             *     node the instance is currently stopped on? Resolved server-side per viewer by the
+             *     dispatch door's own seat predicate (user seats, role seats, delegated seats — a
+             *     delegatee is the assignee on a real assignment row — and, inside a parallel region,
+             *     the pending branch frontier). `false` when the instance is not pending or the viewer
+             *     holds no matching active seat at a decidable node key; `true` for a pending instance
+             *     whose decisions do not go through the seat-gated door (a legacy platform row with no
+             *     published definition, a `plm:` mirror, an after-sales row), because those dispatches do
+             *     not gate on assignments and `true` is what those surfaces already do today. Present on the detail read and on the action response. ABSENT means
+             *     the server does not compute it — clients must fall back to their prior behaviour, not
+             *     read absence as `false`. Presentation only: the 403 APPROVAL_ASSIGNMENT_REQUIRED
+             *     remains the authority.
+             */
+            canDecideCurrentNode?: boolean;
             currentNodeKey?: string | null;
             /**
              * @description Parallel gateway (并行分支) runtime frontier. Present only when
@@ -16102,8 +19862,1430 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        /**
+         * @description Closed source/effect label union (parent lock 5.1; OD-W6-3).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicySourceLabel: "effective" | "org_inherited" | "preview_only" | "needs_configuration" | "conflict_action_required";
+        /**
+         * @description Closed policy-domain union (OD-W6-4).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicyDomain: "basics" | "membership" | "schedule" | "segments" | "flex" | "rules" | "punch_method" | "request_posture";
+        /**
+         * @description Closed v1 conflict inventory (OD-W6-4).
+         * @enum {string}
+         */
+        AttendanceGroupEffectivePolicyConflictCode: "CALCULATION_GROUP_MEMBERSHIP_OVERLAP" | "FIXED_SCHEDULE_CONFIGURATION_CHANGED" | "FIXED_SCHEDULE_PENDING_APPLY" | "FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW" | "SCHEDULE_STRATEGY_INCOMPLETE" | "RULE_SOURCE_MISSING" | "TIMEZONE_MISSING";
+        /** @description Closed editor reference union (OD-W6-9). `group_context_route` reuses the #4711 closed route family; `group_stage` reuses the existing group-editor stage union. No caller-supplied section IDs (red line W6-R8). */
+        AttendanceGroupEffectivePolicyEditorRef: {
+            /** @enum {string} */
+            kind: "group_stage";
+            /** @enum {string} */
+            stage: "basics" | "people" | "schedule" | "policies";
+        } | {
+            /** @enum {string} */
+            kind: "group_context_route";
+            /** @enum {string} */
+            step: "schedule" | "calendar" | "rules";
+            /**
+             * @description Closed per-step table from the #4711 lock section 3.1: step=schedule allows shifts|assignments|advanced-scheduling; step=rules allows rule-sets; step=calendar allows none.
+             * @enum {string}
+             */
+            surface?: "shifts" | "assignments" | "advanced-scheduling" | "rule-sets";
+        };
+        AttendanceGroupEffectivePolicySourceRef: {
+            /**
+             * @description Closed configuration-source kinds (config IDs only, never user IDs).
+             * @enum {string}
+             */
+            kind: "shift" | "rule_set" | "fixed_schedule_config";
+            /** Format: uuid */
+            id: string;
+        };
+        /** @description Embedded verbatim from the existing FSER effectiveness service (single source, red line W6-R4). States, reason codes, coverage, and drift keys are the FSER lock's contract, unchanged; W6 adds no reason code and no second derivation. */
+        AttendanceGroupEffectivePolicyFixedSchedule: {
+            /** @enum {string} */
+            state: "not_configured" | "pending_apply" | "effective" | "configuration_changed";
+            reasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+            desired: {
+                /** Format: uuid */
+                shiftId: string;
+                /** Format: date */
+                startDate: string;
+                /** Format: date */
+                endDate: string | null;
+                revision: number;
+            } | null;
+            coverage: {
+                targetMembers: number;
+                matchingMembers: number;
+                missingMembers: number;
+                nonMemberTargets: number;
+                differentKeyRows: number;
+            };
+            drift: {
+                unconfiguredManagedRows: number;
+                unpublishedManagedRows: number;
+                /** @description Group-safe values only (FSER lock); never user IDs. */
+                managedSets: {
+                    /** Format: uuid */
+                    shiftId: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string | null;
+                    producerKey: string;
+                    rowCount: number;
+                }[];
+            };
+            /** Format: date-time */
+            evaluatedAt: string;
+        };
+        AttendanceGroupEffectivePolicyDomainSummary: {
+            label: components["schemas"]["AttendanceGroupEffectivePolicySourceLabel"];
+            /** @description Values-free reason codes; de-duplicated, contract order. */
+            reasonCodes: string[];
+            sourceRefs?: components["schemas"]["AttendanceGroupEffectivePolicySourceRef"][];
+            editorRef: components["schemas"]["AttendanceGroupEffectivePolicyEditorRef"];
+        };
+        AttendanceGroupEffectivePolicyConflict: {
+            code: components["schemas"]["AttendanceGroupEffectivePolicyConflictCode"];
+            domain: components["schemas"]["AttendanceGroupEffectivePolicyDomain"];
+            /** @enum {string} */
+            label: "conflict_action_required";
+            /** @description Count only; never user IDs (red line W6-R2). */
+            affectedUserCount?: number;
+            editorRef: components["schemas"]["AttendanceGroupEffectivePolicyEditorRef"];
+        };
+        AttendanceGroupEffectivePolicyResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                /** Format: uuid */
+                groupId: string;
+                /**
+                 * @description Existing CHECK-constrained group type union.
+                 * @enum {string}
+                 */
+                groupType: "fixed_shift" | "scheduled_shift" | "free_time";
+                /** @description IANA zone; null surfaces TIMEZONE_MISSING. */
+                timezone: string | null;
+                activeMemberCount: number;
+                managerPosture: {
+                    ownerCount: number;
+                    subOwnerCount: number;
+                };
+                /**
+                 * @description Read-only mirror of the org W4 rollout state.
+                 * @enum {string}
+                 */
+                calculationPosture: "legacy" | "shadow" | "eligible" | "authoritative" | "suspended";
+                domains: {
+                    membership: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"];
+                    schedule: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        strategy: "fixed_shift" | "scheduled_shift" | "free_time";
+                        fixedSchedule: components["schemas"]["AttendanceGroupEffectivePolicyFixedSchedule"] | null;
+                    };
+                    segments: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"];
+                    flex: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /**
+                         * @description W5 flex mode union (w5-flex-policy.ts), read-only.
+                         * @enum {string}
+                         */
+                        mode?: "strict" | "flex_required_duration";
+                    };
+                    rules: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        source: "org_default" | "group_rule_set";
+                    };
+                    punchMethod: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /**
+                         * @description OD-4556-9 keeps punch policy org-inherited in v1.
+                         * @enum {string}
+                         */
+                        source: "org_inherited";
+                    };
+                    requestPosture: components["schemas"]["AttendanceGroupEffectivePolicyDomainSummary"] & {
+                        /** @enum {string} */
+                        overtime: "org_inherited";
+                        /** @enum {string} */
+                        makeupPunch: "org_inherited";
+                        /** @enum {string} */
+                        outdoor: "org_inherited";
+                    };
+                };
+                conflicts: components["schemas"]["AttendanceGroupEffectivePolicyConflict"][];
+                /** Format: date-time */
+                evaluatedAt: string;
+            };
+        };
+        /** Format: uuid */
+        ElearningUuid: string;
+        ElearningError: {
+            /** @description Values-free error code. No hosts, secrets, storage keys, or flag names. */
+            error: string;
+        };
+        ElearningEmptyObject: Record<string, never>;
+        /** @enum {string} */
+        ElearningObjectiveQuestionType: "single_choice" | "multiple_choice" | "true_false";
+        /** @enum {string} */
+        ElearningQuestionType: "single_choice" | "multiple_choice" | "true_false" | "short_answer";
+        ElearningCapabilityFlags: {
+            content: boolean;
+            assignment: boolean;
+            assessment: boolean;
+            /** @description Reported from ELEARNING_INCENTIVE_ENABLED. Gates L4 incentive routes; not part of V0.1 readiness. */
+            incentive: boolean;
+            /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
+            analytics: boolean;
+            media: boolean;
+            /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
+            enrollment: boolean;
+        };
+        ElearningAppInstallation: {
+            /** @enum {string} */
+            status: "not-installed" | "inactive" | "active";
+            notificationsEnabled: boolean;
+            canManage: boolean;
+        };
+        /**
+         * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
+         *     plus content, assignment, assessment, and media all true. Incentive and
+         *     analytics stay parked and must not be treated as readiness inputs.
+         */
+        ElearningCapabilities: {
+            enabled: boolean;
+            capabilities: components["schemas"]["ElearningCapabilityFlags"];
+        };
+        /** @enum {string} */
+        ElearningCreditAutomaticBehavior: "login" | "complete_course" | "complete_plan" | "pass_exam" | "submit_survey" | "complete_map" | "complete_offline";
+        ElearningCreditRulePublishRequest: {
+            requestId: string;
+            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            points: number;
+            dailyCap: number | null;
+            /** @description IANA time-zone name canonicalized by the server. */
+            timeZone: string;
+        };
+        ElearningCreditRule: {
+            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            ruleId: string;
+            version: number;
+            points: number;
+            dailyCap: number | null;
+            timeZone: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCreditRuleList: {
+            items: components["schemas"]["ElearningCreditRule"][];
+        };
+        ElearningTitleRow: {
+            id: string;
+            name: string;
+            /** Format: int32 */
+            threshold: number;
+        };
+        ElearningTitlePublishRequest: {
+            requestId: string;
+            /** @description Complete snapshot in strictly increasing threshold order after normalization. */
+            titles: components["schemas"]["ElearningTitleRow"][];
+        };
+        ElearningTitleSnapshot: {
+            revisionId: components["schemas"]["ElearningUuid"] | null;
+            /** Format: int32 */
+            version: number;
+            titles: components["schemas"]["ElearningTitleRow"][];
+            createdAt: string | null;
+        };
+        ElearningCertificateTemplatePublishRequest: {
+            requestId: string;
+            certificateId: string;
+            name: string;
+            /** @description Text template whose server-parsed placeholders use exact */
+            templateText: string;
+            backgroundImageUrl: string | null;
+        };
+        /** @description Immutable certificate-template metadata; not a rendered or downloadable artifact. */
+        ElearningCertificateTemplate: {
+            certificateId: string;
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            name: string;
+            templateText: string;
+            backgroundImageUrl: string | null;
+            placeholders: string[];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCertificateTemplateList: {
+            items: components["schemas"]["ElearningCertificateTemplate"][];
+        };
+        ElearningCertificateIssueRequest: {
+            requestId: string;
+            certificateId: string;
+            userId: string;
+            /** @description Exact placeholder-name to normalized value snapshot required by the active template. */
+            parameters: {
+                [key: string]: string;
+            };
+        };
+        /** @description Immutable issuance ledger metadata; no PDF, render, image-generation, or download payload. */
+        ElearningCertificateIssue: {
+            issueId: components["schemas"]["ElearningUuid"];
+            certificateId: string;
+            templateRevisionId: components["schemas"]["ElearningUuid"];
+            templateName: string;
+            serialNumber: components["schemas"]["ElearningUuid"];
+            parameters: {
+                [key: string]: string;
+            };
+            backgroundImageUrl: string | null;
+            /** Format: date-time */
+            issuedAt: string;
+        };
+        ElearningCertificateIssueList: {
+            items: components["schemas"]["ElearningCertificateIssue"][];
+        };
+        ElearningCreditAdjustmentRequest: {
+            requestId: string;
+            userId: string;
+            /** Format: int32 */
+            points: number;
+            reason: string;
+        };
+        ElearningCreditAdjustmentResult: {
+            adjustmentId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            /** Format: int32 */
+            points: number;
+            /** Format: int32 */
+            balancePoints: number;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Server-derived, rule-backed automatic credit decision with nonnegative points. */
+        ElearningCreditAutomaticWalletItem: {
+            decisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            behavior: "login" | "complete_course" | "complete_plan" | "pass_exam" | "submit_survey" | "complete_map" | "complete_offline";
+            /** Format: int32 */
+            awardedPoints: number;
+            /** @enum {string} */
+            status: "awarded" | "capped" | "exhausted";
+            /** Format: date-time */
+            occurredAt: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Server-recorded manual adjustment with nonzero signed int4 points. */
+        ElearningCreditManualWalletItem: {
+            decisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            behavior: "manual_adjust";
+            /** Format: int32 */
+            awardedPoints: number;
+            /** @enum {string} */
+            status: "adjusted";
+            /** Format: date-time */
+            occurredAt: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCreditWalletItem: components["schemas"]["ElearningCreditAutomaticWalletItem"] | components["schemas"]["ElearningCreditManualWalletItem"];
+        ElearningCreditWallet: {
+            userId: string;
+            /** Format: int32 */
+            balancePoints: number;
+            /** @description Dynamically resolved from the active title snapshot and current balance. */
+            currentTitle: components["schemas"]["ElearningTitleRow"] | null;
+            items: components["schemas"]["ElearningCreditWalletItem"][];
+            nextCursor: string | null;
+        };
+        ElearningLearningProfileExam: {
+            itemId: components["schemas"]["ElearningUuid"];
+            earnedScore: number;
+            totalScore: number;
+            /** Format: date-time */
+            passedAt: string;
+        };
+        ElearningLearningProfileAssessmentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "assessment";
+            /** Format: date-time */
+            completedAt: string;
+            exams: components["schemas"]["ElearningLearningProfileExam"][];
+        };
+        ElearningLearningProfileContentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "content";
+            /** Format: date-time */
+            completedAt: string;
+        };
+        ElearningLearningProfileCourse: components["schemas"]["ElearningLearningProfileAssessmentCourse"] | components["schemas"]["ElearningLearningProfileContentCourse"];
+        ElearningLearningProfileSummary: {
+            completedCourses: number;
+            assessmentCourses: number;
+            contentCourses: number;
+        };
+        ElearningLearningProfile: {
+            userId: string;
+            summary: components["schemas"]["ElearningLearningProfileSummary"];
+            courses: components["schemas"]["ElearningLearningProfileCourse"][];
+            nextCursor: string | null;
+        };
+        ElearningPortalNavigationItem: {
+            label: string;
+            /** @description Internal absolute path only; external navigation is rejected. */
+            href: string;
+        };
+        ElearningPortalEmptySettings: {
+            revisionId: null;
+            /**
+             * Format: int32
+             * @enum {integer}
+             */
+            version: 0;
+            siteName: null;
+            tagline: null;
+            bannerUrl: null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            createdAt: null;
+        };
+        ElearningPortalActiveSettings: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningPortalSettings: components["schemas"]["ElearningPortalEmptySettings"] | components["schemas"]["ElearningPortalActiveSettings"];
+        ElearningPortalPublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+        };
+        ElearningPortalPublishResult: {
+            revisionId: components["schemas"]["ElearningUuid"];
+            /** Format: int32 */
+            version: number;
+            siteName: string;
+            tagline: string | null;
+            bannerUrl: string | null;
+            navigation: components["schemas"]["ElearningPortalNavigationItem"][];
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningContentArticleRevisionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description HTML sanitized and stored by the server before it is returned to learners. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+        };
+        ElearningContentExternalLinkRevisionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+        };
+        ElearningContentRevisionRequest: components["schemas"]["ElearningContentArticleRevisionRequest"] | components["schemas"]["ElearningContentExternalLinkRevisionRequest"];
+        ElearningContentArticleRevision: {
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description Server-sanitized HTML. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+            contentDigest: string;
+        };
+        ElearningContentExternalLinkRevision: {
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+            contentDigest: string;
+        };
+        ElearningContentRevision: components["schemas"]["ElearningContentArticleRevision"] | components["schemas"]["ElearningContentExternalLinkRevision"];
+        ElearningContentCoursePublishItem: {
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningContentCoursePublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @description Ordered immutable content-revision references; position is assigned by array order. */
+            items: components["schemas"]["ElearningContentCoursePublishItem"][];
+        };
+        ElearningContentCoursePublishedItem: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            contentRevisionId: components["schemas"]["ElearningUuid"];
+            position: number;
+        };
+        ElearningContentCoursePublishResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            items: components["schemas"]["ElearningContentCoursePublishedItem"][];
+        };
+        ElearningOpenCompletionRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningContentArticleOpenResult: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "article";
+            title: string;
+            /** @description Server-sanitized HTML. */
+            articleHtml: string;
+            /** @enum {string|null} */
+            externalUrl: null;
+            /** @enum {string} */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+            /** @enum {string} */
+            assurance: "weak_server_recorded_open";
+        };
+        ElearningContentExternalLinkOpenResult: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            itemType: "external_link";
+            title: string;
+            /** @enum {string|null} */
+            articleHtml: null;
+            /** Format: uri */
+            externalUrl: string;
+            /** @enum {string} */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+            /** @enum {string} */
+            assurance: "weak_server_recorded_launch";
+        };
+        ElearningOpenCompletionResult: components["schemas"]["ElearningContentArticleOpenResult"] | components["schemas"]["ElearningContentExternalLinkOpenResult"];
+        /** @enum {string} */
+        ElearningPracticeMode: "sequential" | "random" | "wrong_book";
+        ElearningPracticeSetCreateRequest: {
+            paperId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+        };
+        ElearningPracticeSet: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active";
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningPracticeSetCreateResult: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active";
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeSetList: {
+            practiceSets: components["schemas"]["ElearningPracticeSet"][];
+        };
+        /** @description Closed public objective question. No answer key, correct option ids, explanation, or snapshot. */
+        ElearningPracticeQuestion: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningObjectiveQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+            position: number;
+        };
+        ElearningPracticeSessionStartRequest: {
+            mode: components["schemas"]["ElearningPracticeMode"];
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningPracticeSessionStartResult: {
+            sessionId: components["schemas"]["ElearningUuid"];
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            mode: components["schemas"]["ElearningPracticeMode"];
+            questions: components["schemas"]["ElearningPracticeQuestion"][];
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeAnswerRequest: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            requestId: components["schemas"]["ElearningUuid"];
+            selectedOptionIds: string[];
+        };
+        ElearningPracticeAnswerResult: {
+            answerId: components["schemas"]["ElearningUuid"];
+            sessionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            /** @description Correctness of the authenticated learner's submitted answer; never an answer key. */
+            correct: boolean;
+            /** @enum {string} */
+            wrongState: "wrong" | "resolved" | "unchanged";
+            /** Format: date-time */
+            createdAt: string;
+            duplicate: boolean;
+        };
+        ElearningPracticeWrongQuestionList: {
+            practiceSetId: components["schemas"]["ElearningUuid"];
+            questions: components["schemas"]["ElearningPracticeQuestion"][];
+        };
+        /** @enum {string} */
+        ElearningMediaRejectCode: "file_too_large" | "too_many_files" | "mime_not_allowed" | "extension_not_allowed" | "extension_mime_mismatch" | "content_mime_mismatch" | "invalid_size" | "org_quota_exceeded" | "upload_rejected";
+        ElearningMediaReject: {
+            code: components["schemas"]["ElearningMediaRejectCode"];
+        };
+        ElearningMediaRejectError: {
+            /** @enum {string} */
+            error: "rejected";
+            rejected: components["schemas"]["ElearningMediaReject"][];
+        };
+        /** @description Values-free ready media metadata. Never includes storageKey or client duration. */
+        ElearningMediaUploadReadyResult: {
+            id: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "ready";
+            /** @description Positive server-probed duration in milliseconds. */
+            durationMs: number;
+            sizeBytes: number;
+            sha256: string;
+        };
+        /** @description Values-free rejected media metadata. Never includes storageKey or client duration. */
+        ElearningMediaUploadRejectedResult: {
+            id: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "rejected";
+            /**
+             * @description Always null because rejected media has no trusted duration.
+             * @enum {integer|null}
+             */
+            durationMs: null;
+            sizeBytes: number;
+            sha256: string;
+        };
+        ElearningMediaUploadResult: components["schemas"]["ElearningMediaUploadReadyResult"] | components["schemas"]["ElearningMediaUploadRejectedResult"];
+        ElearningPublishOption: {
+            id: string;
+            text: string;
+        };
+        ElearningPublishQuestion: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            questionType: "single_choice" | "multiple_choice" | "true_false";
+            prompt: string;
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Admin-only write field. Never returned on learner exam start/submit. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Optional admin write field. Never returned on learner exam surfaces. */
+            explanation?: string | null;
+        };
+        ElearningShortAnswerQuestionWrite: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            questionType: "short_answer";
+            prompt: string;
+            /** @description Must be the empty array for a manually graded short answer. */
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Must be the empty array. No answer key is stored for short answers. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Optional admin-only guidance. Never returned on learner exam surfaces. */
+            explanation?: string | null;
+        };
+        ElearningAssessmentQuestionWrite: components["schemas"]["ElearningPublishQuestion"] | components["schemas"]["ElearningShortAnswerQuestionWrite"];
+        ElearningQuestionBankCreateRequest: {
+            title: string;
+        };
+        ElearningQuestionBankResult: {
+            bankId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningQuestionBankListItem: {
+            bankId: components["schemas"]["ElearningUuid"];
+            title: string;
+            questionCount: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ElearningQuestionBankListResult: {
+            items: components["schemas"]["ElearningQuestionBankListItem"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        ElearningQuestionBankSummary: {
+            bankId: components["schemas"]["ElearningUuid"];
+            title: string;
+        };
+        ElearningAdminQuestionRevision: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Admin-only answer key. Empty for short_answer; never returned by learner exam APIs. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Admin-only explanation. Never returned by learner exam APIs. */
+            explanation: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningQuestionBankQuestionsResult: {
+            bank: components["schemas"]["ElearningQuestionBankSummary"];
+            items: components["schemas"]["ElearningAdminQuestionRevision"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        ElearningQuestionWriteRequest: {
+            question: components["schemas"]["ElearningAssessmentQuestionWrite"];
+        };
+        ElearningQuestionRevisionResult: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+        };
+        ElearningQuestionImportResult: {
+            importedCount: number;
+        };
+        ElearningFixedPaperItem: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            points: number;
+        };
+        ElearningFixedPaperPublishRequest: {
+            title: string;
+            items: components["schemas"]["ElearningFixedPaperItem"][];
+        };
+        ElearningFixedPaperResult: {
+            paperId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            totalPoints: number;
+        };
+        /** @enum {string} */
+        ElearningExamDisclosurePolicy: "no_review" | "correctness_after_submit" | "wrong_items_after_submit" | "correctness_after_window";
+        ElearningPaperExamPublishRequest: {
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            passScore: number;
+            maxAttempts: number;
+            /** Format: date-time */
+            windowStartsAt: string | null;
+            /** Format: date-time */
+            windowEndsAt: string | null;
+            durationSeconds: number | null;
+            shuffleQuestions: boolean;
+            shuffleOptions: boolean;
+            disclosurePolicy: components["schemas"]["ElearningExamDisclosurePolicy"];
+        };
+        ElearningPaperExamResult: {
+            examId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            totalPoints: number;
+        };
+        ElearningCoursePublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            mediaId: components["schemas"]["ElearningUuid"];
+            passScore: number;
+            maxAttempts: number;
+            questions: components["schemas"]["ElearningPublishQuestion"][];
+        };
+        ElearningCoursePublishResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            videoItemId: components["schemas"]["ElearningUuid"];
+            examItemId: components["schemas"]["ElearningUuid"];
+            examId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            questionCount: number;
+            totalScore: number;
+        };
+        ElearningDirectAssignmentRequest: {
+            targetUserId: string;
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+        };
+        ElearningDirectAssignmentResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberId: components["schemas"]["ElearningUuid"];
+            duplicate: boolean;
+        };
+        ElearningBatchAssignmentRequest: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+            /**
+             * @description Duplicate selectors are canonicalized to one rule before hashing
+             *     and resolution. An empty array is structurally valid but resolves
+             *     to no members and returns 422 empty_audience.
+             */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningBatchAssignmentResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberCount: number;
+            duplicate: boolean;
+        };
+        ElearningAssignmentProgressMember: {
+            memberId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            /** @enum {string} */
+            source: "manual" | "rule" | "import";
+            /** Format: date-time */
+            assignedAt: string;
+            /** Format: date-time */
+            revokedAt: string | null;
+            overdue: boolean;
+            /** @enum {string} */
+            videoStatus: "not_started" | "in_progress" | "completed";
+            /** @enum {string} */
+            examStatus: "not_started" | "started" | "submitted" | "awaiting_manual" | "graded" | "expired";
+            passed: boolean;
+            /** @enum {string} */
+            courseStatus: "not_started" | "in_progress" | "completed";
+        };
+        ElearningAssignmentProgressResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadline: string | null;
+            members: components["schemas"]["ElearningAssignmentProgressMember"][];
+            nextCursor: components["schemas"]["ElearningUuid"] | null;
+        };
+        ElearningAssignmentRevocationRequest: {
+            reason: string;
+        };
+        ElearningAssignmentRevocationResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberId: components["schemas"]["ElearningUuid"];
+            /** @enum {boolean} */
+            revoked: true;
+            duplicate: boolean;
+        };
+        ElearningTrainingPlanPublishItem: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            required: boolean;
+        };
+        ElearningTrainingPlanPublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            items: components["schemas"]["ElearningTrainingPlanPublishItem"][];
+        };
+        ElearningTrainingPlanPublishResult: {
+            planId: components["schemas"]["ElearningUuid"];
+            planVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            duplicate: boolean;
+        };
+        ElearningTrainingPlanAssignmentRequest: {
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+            /**
+             * @description Duplicate selectors are canonicalized before hashing and the
+             *     audience is resolved exactly once for every plan item. An empty
+             *     array returns 422 empty_audience.
+             */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningTrainingPlanAssignmentResult: {
+            planAssignmentId: components["schemas"]["ElearningUuid"];
+            planVersionId: components["schemas"]["ElearningUuid"];
+            assignmentCount: number;
+            memberCount: number;
+            duplicate: boolean;
+        };
+        ElearningTrainingPlanRevocationResult: {
+            planAssignmentId: components["schemas"]["ElearningUuid"];
+            /** @enum {boolean} */
+            revoked: true;
+            revokedMemberCount: number;
+            duplicate: boolean;
+        };
+        ElearningTrainingPlanItem: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            position: number;
+            required: boolean;
+        };
+        ElearningTrainingPlanActiveVersion: {
+            planVersionId: components["schemas"]["ElearningUuid"];
+            version: number;
+            /** @enum {string} */
+            status: "published";
+            items: components["schemas"]["ElearningTrainingPlanItem"][];
+        };
+        ElearningTrainingPlan: {
+            planId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active" | "archived";
+            activeVersion: components["schemas"]["ElearningTrainingPlanActiveVersion"];
+        };
+        ElearningAdminScopeInput: {
+            departmentId: components["schemas"]["ElearningUuid"];
+            includeChildren: boolean;
+        };
+        ElearningAdminScopeReplaceRequest: {
+            reason: string;
+            /** @description Empty array revokes every active delegated management scope. */
+            scopes: components["schemas"]["ElearningAdminScopeInput"][];
+        };
+        ElearningAdminScopeReplaceResult: {
+            targetUserId: string;
+            scopeCount: number;
+            duplicate: boolean;
+        };
+        /** @enum {string} */
+        ElearningObjectAction: "assign" | "scope" | "track";
+        ElearningObjectAclReplaceRequest: {
+            reason: string;
+            /** @description Empty array revokes every active action for this collaborator. */
+            actions: components["schemas"]["ElearningObjectAction"][];
+        };
+        ElearningObjectAclReplaceResult: {
+            /** @enum {string} */
+            objectType: "course" | "training_plan";
+            objectId: components["schemas"]["ElearningUuid"];
+            granteeUserId: string;
+            actions: components["schemas"]["ElearningObjectAction"][];
+            duplicate: boolean;
+        };
+        /**
+         * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
+         *     database state. `department.subjectRef` is the directory department UUID;
+         *     only department rules may set includeChildren true. Position matches the
+         *     trimmed, case-sensitive title on an active same-org directory account.
+         *     Platform roles are not accepted until an org-scoped role-membership store
+         *     exists. `all` requires subjectRef absent/null.
+         */
+        ElearningScopeRule: {
+            /** @enum {string} */
+            subjectType: "all";
+            /** @enum {string|null} */
+            subjectRef?: null;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        } | {
+            /** @enum {string} */
+            subjectType: "department";
+            subjectRef: components["schemas"]["ElearningUuid"];
+            includeChildren?: boolean;
+        } | {
+            /** @enum {string} */
+            subjectType: "role";
+            subjectRef: string;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        } | {
+            /** @enum {string} */
+            subjectType: "position" | "user";
+            subjectRef: string;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        };
+        ElearningScopeUpdateRequest: {
+            reason: string;
+            /** @description Empty array is the explicit auditable visible-to-nobody revision. */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningScopeUpdateResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            scopeId: components["schemas"]["ElearningUuid"];
+            revisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+            ruleIds: components["schemas"]["ElearningUuid"][];
+        };
+        ElearningLearnerAssignment: {
+            /** Format: date-time */
+            deadline: string | null;
+            /** Format: date-time */
+            assignedAt: string;
+        };
+        ElearningLearnerEnrollment: {
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
+        ElearningCourseEnrollmentRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningCourseEnrollmentResult: {
+            enrollmentId: components["schemas"]["ElearningUuid"];
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
+        ElearningLearnerAccess: {
+            /** @enum {string} */
+            kind: "assignment" | "visibility";
+            /** @description True only for assignment access; visibility is optional self-study. */
+            required: boolean;
+        };
+        ElearningLearnerVideo: {
+            itemId: components["schemas"]["ElearningUuid"];
+            durationMs: number;
+            /** @enum {string} */
+            status: "not_started" | "in_progress" | "completed";
+            effectiveMs: number;
+            maxPositionMs: number;
+            /** Format: date-time */
+            completedAt: string | null;
+        };
+        ElearningLearnerExamAttempt: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "started" | "submitted" | "awaiting_manual" | "graded" | "expired";
+            /** @description Objective-question score once auto-grading has run; null before submission. */
+            autoScore: number | null;
+            /** @description Maximum score available on the frozen paper; null until final grading completes. */
+            totalScore: number | null;
+            passed: boolean | null;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** Format: date-time */
+            gradedAt: string | null;
+        };
+        ElearningLearnerExam: {
+            itemId: components["schemas"]["ElearningUuid"];
+            latestAttempt: components["schemas"]["ElearningLearnerExamAttempt"] | null;
+        };
+        ElearningLearnerAssessmentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            access: components["schemas"]["ElearningLearnerAccess"];
+            assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
+            video: components["schemas"]["ElearningLearnerVideo"];
+            exam: components["schemas"]["ElearningLearnerExam"];
+            completed: boolean;
+        };
+        ElearningLearnerContentItemNotStarted: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "not_started";
+            /** @enum {string|null} */
+            completedAt: null;
+        };
+        ElearningLearnerContentItemCompleted: {
+            itemId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            itemType: "article" | "external_link";
+            title: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "completed";
+            /** Format: date-time */
+            completedAt: string;
+        };
+        ElearningLearnerContentItem: components["schemas"]["ElearningLearnerContentItemNotStarted"] | components["schemas"]["ElearningLearnerContentItemCompleted"];
+        ElearningLearnerContentCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            access: components["schemas"]["ElearningLearnerAccess"];
+            assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
+            items: components["schemas"]["ElearningLearnerContentItem"][];
+            completed: boolean;
+        };
+        ElearningLearnerCourse: components["schemas"]["ElearningLearnerAssessmentCourse"] | components["schemas"]["ElearningLearnerContentCourse"];
+        ElearningLearnerCourseList: {
+            courses: components["schemas"]["ElearningLearnerCourse"][];
+        };
+        ElearningWatchState: {
+            sessionId: components["schemas"]["ElearningUuid"] | null;
+            /** @enum {string} */
+            status: "in_progress" | "completed";
+            lastSequence: number;
+            lastClientPositionMs: number;
+            effectiveMs: number;
+            maxPositionMs: number;
+            durationMs: number;
+            creditedMs: number;
+            duplicate: boolean;
+            challenge?: components["schemas"]["ElearningWatchChallenge"] | null;
+        };
+        ElearningWatchChallenge: {
+            challengeId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadlineAt: string;
+            ordinal: number;
+            /** @enum {string} */
+            status: "challenged" | "paused";
+            /** @enum {string} */
+            promptVersion: "raster-position-v2";
+            /** Format: byte */
+            imagePngBase64: string;
+            /** @enum {integer} */
+            imageWidth: 360;
+            /** @enum {integer} */
+            imageHeight: 260;
+            options: components["schemas"]["ElearningWatchChallengeOption"][];
+        };
+        ElearningWatchChallengeOption: {
+            optionId: components["schemas"]["ElearningUuid"];
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+        };
+        ElearningWatchChallengeAckRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            selections: components["schemas"]["ElearningUuid"][];
+        };
+        ElearningHeartbeatRequest: {
+            sequence: number;
+            positionMs: number;
+            playing: boolean;
+        };
+        /** @description Opaque HMAC playback ticket. Never includes storage keys or signing secrets. */
+        ElearningPlaybackTicket: {
+            token: string;
+            /** Format: date-time */
+            expiresAt: string;
+            ttlSeconds: number;
+            itemId: components["schemas"]["ElearningUuid"];
+            mediaId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningPublicOption: {
+            id: string;
+            text: string;
+        };
+        /** @description Learner-visible question. No answerKey, correct ids, or explanation. */
+        ElearningPublicQuestion: {
+            position: number;
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            /** @description Empty for short_answer; otherwise contains the closed objective choices. */
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+        };
+        /** @description Redacted paper. Version 1 is objective-only; version 2 contains at least one short answer. No snapshot secrets. */
+        ElearningPublicPaper: {
+            /** @enum {string} */
+            domain: "elearning.exam.paper.v1";
+            /** @enum {integer} */
+            version: 1 | 2;
+            questions: components["schemas"]["ElearningPublicQuestion"][];
+        };
+        ElearningExamStartResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "started";
+            paper: components["schemas"]["ElearningPublicPaper"];
+            /** @description Canonical own answers for every paper question. Objective answers are option-id arrays; short answers are strings. Never includes answer keys. */
+            answers: {
+                [key: string]: string[] | string;
+            };
+            /**
+             * Format: date-time
+             * @description Immutable server-issued attempt deadline, or null for an untimed attempt.
+             */
+            deadlineAt: string | null;
+            duplicate: boolean;
+        };
+        ElearningExamSubmitRequest: {
+            /** @description Map of questionRevisionId to objective option ids or short-answer text. Unknown keys and answer types that contradict the frozen paper are invalid_input. */
+            answers: {
+                [key: string]: string[] | string;
+            };
+        };
+        ElearningExamGradedSubmitResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "graded";
+            autoScore: number;
+            /** @description Maximum score available on the frozen paper. */
+            totalScore: number;
+            passed: boolean;
+            duplicate: boolean;
+        };
+        ElearningExamAwaitingManualSubmitResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "awaiting_manual";
+            /** @description Score already awarded to objective questions. */
+            autoScore: number;
+            /** @description Maximum score available on the complete frozen paper. */
+            totalScore: number;
+            /** @enum {boolean|null} */
+            passed: null;
+            duplicate: boolean;
+        };
+        ElearningExamSubmitResult: components["schemas"]["ElearningExamGradedSubmitResult"] | components["schemas"]["ElearningExamAwaitingManualSubmitResult"];
+        ElearningManualGradeRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            /** @description Whole points awarded; the frozen question maximum is enforced by the server. */
+            score: number;
+            /** @description Private grader comment; send null when absent. Empty or whitespace-only text is stored as null and is never returned by this endpoint. */
+            comment: string | null;
+        };
+        ElearningManualGradeResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            score: number;
+            maxScore: number;
+            /** @enum {string} */
+            status: "awaiting_manual" | "graded";
+            gradedQuestions: number;
+            manualQuestions: number;
+            autoScore: number;
+            manualScore: number;
+            /** @description Maximum score available on the complete frozen paper. */
+            totalScore: number;
+            /** @description Null until every short-answer question has an initial grade. */
+            passed: boolean | null;
+            duplicate: boolean;
+        };
+        ElearningManualGradingQueueItem: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            examId: components["schemas"]["ElearningUuid"];
+            examTitle: string;
+            courseId: components["schemas"]["ElearningUuid"];
+            courseTitle: string;
+            attemptNo: number;
+            /** Format: date-time */
+            submittedAt: string;
+            autoScore: number;
+            manualScore: number;
+            paperMaxScore: number;
+            gradedQuestions: number;
+            manualQuestions: number;
+        };
+        ElearningManualGradingQueueResult: {
+            items: components["schemas"]["ElearningManualGradingQueueItem"][];
+            page: number;
+            pageSize: number;
+            hasMore: boolean;
+        };
+        ElearningManualGradingQuestionGrade: {
+            score: number;
+            maxScore: number;
+            comment: string | null;
+            graderId: string;
+            /** Format: date-time */
+            gradedAt: string;
+        };
+        ElearningManualGradingQuestionDetail: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            position: number;
+            prompt: string;
+            points: number;
+            learnerAnswer: string;
+            grade: components["schemas"]["ElearningManualGradingQuestionGrade"] | null;
+        };
+        ElearningManualGradingDetail: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            examId: components["schemas"]["ElearningUuid"];
+            examTitle: string;
+            courseId: components["schemas"]["ElearningUuid"];
+            courseTitle: string;
+            attemptNo: number;
+            /** @enum {string} */
+            status: "awaiting_manual";
+            /** Format: date-time */
+            submittedAt: string;
+            autoScore: number;
+            manualScore: number;
+            paperMaxScore: number;
+            passScore: number;
+            gradedQuestions: number;
+            manualQuestions: number;
+            questions: components["schemas"]["ElearningManualGradingQuestionDetail"][];
+        };
+        /** @description Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations. */
+        ElearningExamReviewQuestion: {
+            position: number;
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningObjectiveQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+            selected: string[];
+            correct: boolean;
+            awarded: number;
+        };
+        ElearningExamReviewResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "graded";
+            /** @enum {string} */
+            disclosurePolicy: "correctness_after_submit" | "wrong_items_after_submit" | "correctness_after_window";
+            autoScore: number;
+            totalScore: number;
+            passed: boolean;
+            questions: components["schemas"]["ElearningExamReviewQuestion"][];
+        };
+        ElearningAnalyticsExportCreateRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            departmentId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            periodStart: string;
+            /** Format: date-time */
+            periodEnd: string;
+        };
+        /** @enum {string} */
+        ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
+        ElearningAnalyticsExportResult: {
+            exportId: components["schemas"]["ElearningUuid"];
+            departmentId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            periodStart: string;
+            /** Format: date-time */
+            periodEnd: string;
+            status: components["schemas"]["ElearningAnalyticsExportStatus"];
+            /** Format: date-time */
+            expiresAt: string;
+            completedAt: string | null;
+            errorCode: string | null;
+            duplicate: boolean;
+        };
     };
     responses: {
+        /** @description Values-free e-learning error `{ error: "<code>" }` */
+        ElearningError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ElearningError"];
+            };
+        };
+        /** @description Missing/invalid JWT ErrorResponse or route-level `{ error: unauthenticated }` */
+        ElearningAuthError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["ElearningError"];
+            };
+        };
         /** @description Unauthorized - Missing or invalid JWT token */
         Unauthorized: {
             headers: {
@@ -16180,7 +21362,15 @@ export interface operations {
                 workflowKey?: string;
                 businessKey?: string;
                 assignee?: string;
-                tab?: string;
+                /**
+                 * @description Inbox lens applied within the server-determined visible set. Omitted
+                 *     or empty selects the default, `pending`. Any other value outside the
+                 *     listed set is rejected with 400 APPROVAL_TAB_INVALID, and so is any
+                 *     non-single-valued form -- a repeated `tab=a&tab=b` or a bracketed
+                 *     `tab[]=a` -- which is refused rather than silently served the
+                 *     default.
+                 */
+                tab?: "pending" | "mine" | "cc" | "completed" | "processed";
                 search?: string;
                 page?: number;
                 pageSize?: number;
@@ -16202,6 +21392,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApprovalListResponse"];
                 };
             };
+            400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
@@ -16231,7 +21422,156 @@ export interface operations {
             };
             400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
+            /** @description APPROVAL_ORG_UNRESOLVED — the requester's org could not be resolved (Lock-11 arm (a)): the requester holds zero active organization memberships, or holds two or more. The request was authorized (approvals:write passed) but the org derivation refused; this is distinct from 403. The response body is values-free — it carries no org id, membership count, or user id. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: {
+                            /** @example APPROVAL_ORG_UNRESOLVED */
+                            code: string;
+                            message: string;
+                        };
+                    };
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalRecordLinkOptions: {
+        parameters: {
+            query: {
+                /** @description Pinned multitable base id from the form field props. */
+                baseId: string;
+                /** @description Pinned multitable sheet id from the form field props. */
+                sheetId: string;
+                /** @description Optional case-insensitive search against the effective display label. */
+                search?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        records: {
+                            /** @description Record id (selection value only; never used as the display label). */
+                            id: string;
+                            /** @description Human label from visible source fields, or a generic placeholder. */
+                            display: string;
+                        }[];
+                        page: {
+                            limit: number;
+                            offset: number;
+                            total: number;
+                            hasMore: boolean;
+                        };
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Forbidden - approvals:write permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example Insufficient permissions */
+                        error: string;
+                    };
+                };
+            };
+            /**
+             * @description Target sheet not found / base mismatch / unreadable (shared no-oracle shape).
+             *     Body is the same approval error envelope as other 4xx routes
+             *     (`ok: false` with nested `error.code` + `error.message`; it never
+             *     distinguishes missing from denied).
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalDirectoryDepartments: {
+        parameters: {
+            query?: {
+                /** @description Optional name or full-path search text. */
+                q?: string;
+                limit?: number;
+                mode?: "search" | "tree";
+                /** @description Parent department for tree mode; omitted to list roots. */
+                parentId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active departments from the actor's canonical integration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        departments: {
+                            /** Format: uuid */
+                            id: string;
+                            name: string;
+                            fullPath: string;
+                            /** Format: uuid */
+                            parentId?: string;
+                            hasChildren: boolean;
+                        }[];
+                        /** Format: uuid */
+                        requesterDepartmentId?: string;
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            /** @description Canonical approval directory integration could not be derived. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -16757,6 +22097,96 @@ export interface operations {
             };
         };
     };
+    getApprovalMetricsByPerson: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getApprovalMetricsByTeam: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            key?: string | null;
+                            name?: string | null;
+                            total?: number;
+                            approved?: number;
+                            rejected?: number;
+                            revoked?: number;
+                            avgDurationSeconds?: number | null;
+                            slaBreachRate?: number;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listApprovalTemplates: {
         parameters: {
             query?: {
@@ -16985,6 +22415,2565 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getAttendanceGroupEffectivePolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                groupId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Aggregate effective-policy read model */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttendanceGroupEffectivePolicyResponse"];
+                };
+            };
+            /** @description Typed validation failure. Any label/state/posture override input is rejected before aggregate SQL (red line W6-R7); malformed groupId is rejected after the transaction-bound authorization reads but before aggregate SQL. Enum-strict: unknown enum values are rejected, never defaulted (red line W6-R6). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated-but-unscoped principal or org-selector mismatch; issued before any aggregate SQL (red line W6-R3). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown, cross-org, or inaccessible group, including a delegated admin without active target-org membership; one shared values-free shape (red line W6-R3). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed installation state, without storage configuration or secrets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authoritative organization context required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing read. */
+            404: components["responses"]["ElearningError"];
+            /** @description Installation authority unavailable; no fallback enablement. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    configureElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    notificationsEnabled: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
+            /** @description Application not installed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    installElearningApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Installed state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
+            /** @description Installation authority unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getElearningCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Flag snapshot. Does not imply every HTTP surface is mounted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCapabilities"];
+                };
+            };
+            /** @description Missing or invalid JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description Master flag is not exact 'true' after registration */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "ok": false,
+                     *       "error": {
+                     *         "code": "FEATURE_DISABLED",
+                     *         "message": "Feature is disabled"
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listElearningCreditRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active automatic-behavior rules ordered by behavior. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditRuleList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCreditRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCreditRulePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published rule or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditRule"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningTitleSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active snapshot, or the explicit empty snapshot when no titles are configured. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTitleSnapshot"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningTitleSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTitlePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published snapshot or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTitleSnapshot"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized snapshot */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningCertificateTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active templates ordered by stable certificate identifier. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateTemplateList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCertificateTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCertificateTemplatePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published template revision or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateTemplate"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    issueElearningCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCertificateIssueRequest"];
+            };
+        };
+        responses: {
+            /** @description Issued ledger record or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateIssue"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Template or target membership not found, or incentive flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningCertificates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Learner-owned certificate records ordered newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCertificateIssueList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient e-learning read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    adjustElearningCredit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCreditAdjustmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Applied adjustment or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditAdjustmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Target or actor is not active in the organization, or incentive flags are off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId conflict, insufficient balance, or int4 balance overflow */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningContentRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningContentRevisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Created immutable revision or exact idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningContentRevision"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningContentCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningContentCoursePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published content-only course or exact idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningContentCoursePublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description reference_unavailable or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    openElearningContentCourseItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningOpenCompletionRequest"];
+            };
+        };
+        responses: {
+            /** @description Server-recorded completion or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningOpenCompletionResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or forbidden */
+            403: components["responses"]["ElearningError"];
+            /** @description Item not found or content surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningPracticeSet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeSetCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact idempotent replay of the original practice set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetCreateResult"];
+                };
+            };
+            /** @description Newly created practice set. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetCreateResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Published paper not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningPracticeSets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active practice sets ordered by creation identity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSetList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient learner RBAC */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningPracticeSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeSessionStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact idempotent replay of the original session. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSessionStartResult"];
+                };
+            };
+            /** @description Newly started immutable practice session. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeSessionStartResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Practice set not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningPracticeAnswer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPracticeAnswerRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended answer or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeAnswerResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Session question not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId conflict or question already answered in this session */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningWrongQuestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                practiceSetId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current unresolved wrong-question projection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPracticeWrongQuestionList"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or inactive organization membership */
+            403: components["responses"]["ElearningError"];
+            /** @description Practice set not found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getMyElearningCreditWallet: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Own balance and stable keyset-paginated history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditWallet"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getAdminElearningCreditWallet: {
+        parameters: {
+            query: {
+                userId: string;
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Same-organization target balance and history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditWallet"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getMyElearningLearningProfile: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed learner-owned archive with stable keyset pagination. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningLearningProfile"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, inactive membership, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    uploadElearningMedia: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description Exactly one `file` part. MIME must be video/mp4; extension mp4; ISO-BMFF ftyp.
+                     */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Ingest finished. `ready` after successful probe; `rejected` after probe/codec failure (no blob kept as ready). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaUploadResult"];
+                };
+            };
+            /** @description file_required, upload_failed, upload_rejected, or rejected/invalid_size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] | components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:write`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Media surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description file_too_large, too_many_files (extra parts/fields), or org_quota_exceeded */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description MIME, extension, or ISO-BMFF ftyp rejected */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description media_unavailable (missing quotas or storage) */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCoursePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published course pointers. No paper snapshot or answer keys. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCoursePublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Exam/publish surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description media_unavailable or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] & {
+                        /** @enum {string} */
+                        error?: "payload_too_large";
+                    };
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningQuestionBanks: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Organization-scoped question-bank page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankListResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningQuestionBank: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionBankCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created question-bank identifier. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningBankQuestions: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Organization-scoped latest-question page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankQuestionsResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningBankQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Stable question and immutable revision identifiers. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionRevisionResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    appendElearningQuestionRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended immutable revision. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionRevisionResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    importElearningQuestionBankXlsx: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+            };
+        };
+        responses: {
+            /** @description Number of imported stable questions. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionImportResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description XLSX body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description unsupported_media_type */
+            415: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningFixedPaper: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningFixedPaperPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published paper metadata without answer material. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningFixedPaperResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningPaperExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPaperExamPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published exam metadata without answer material. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPaperExamResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningManualGrade: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningManualGradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Current initial-grading progress or completed result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradeResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict (attempt state, duplicate question, or request-id payload mismatch) */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningManualGradingAttempts: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scope-filtered page ordered by submission time and attempt id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradingQueueResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required */
+            403: components["responses"]["ElearningError"];
+            /** @description assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningManualGradingAttempt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed short-answer grading detail for one visible pending attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradingDetail"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningDirect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningDirectAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Assignment and member ids. duplicate true on idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningDirectAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or course/user missing as mapped by service) */
+            404: components["responses"]["ElearningError"];
+            /** @description target_unavailable, course_unavailable, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningBatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningBatchAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Assignment id and bounded member count; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningBatchAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or course version missing) */
+            404: components["responses"]["ElearningError"];
+            /** @description course_unavailable or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
+            422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAssignmentProgress: {
+        parameters: {
+            query?: {
+                /** @description Exclusive member UUID keyset cursor from the previous nextCursor. */
+                cursor?: components["schemas"]["ElearningUuid"];
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                assignmentId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Assignment metadata plus one page of member progress. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAssignmentProgressResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden track ACL, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or assignment missing in this org) */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    revokeElearningAssignmentMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                assignmentId: components["schemas"]["ElearningUuid"];
+                memberId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAssignmentRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description Revoked true. duplicate true on same-reason replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAssignmentRevocationResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off, or member not on this org assignment) */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict (already revoked with a different reason) */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTrainingPlanPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published plan/version ids and item count; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanPublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_unavailable or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stable plan head plus its active immutable version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlan"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off or plan missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTrainingPlanAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Frozen plan assignment ids/counts; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off or plan missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description plan_unavailable, course_unavailable, or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
+            422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    replaceElearningAdminScopes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAdminScopeReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active scope count; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAdminScopeReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, user missing, or department missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    replaceElearningTrainingPlanCollaborator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningObjectAclReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active action set; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningObjectAclReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, plan missing, or collaborator missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    revokeElearningTrainingPlanAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planAssignmentId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAssignmentRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description Revoked true. duplicate true on same-reason replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanRevocationResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off or plan assignment missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description Already revoked with a different reason */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    replaceElearningCourseCollaborator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningObjectAclReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active action set; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningObjectAclReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, course missing, or collaborator missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    setElearningCourseScope: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningScopeUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Immutable revision and normalized rule ids now active on the course scope. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningScopeUpdateResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden scope ACL, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off, course not found, or audience subject not found */
+            404: components["responses"]["ElearningError"];
+            /** @description unsupported_subject for role rules without org-scoped role membership */
+            422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningCourses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accessible closed assessment/content course union. No answer keys or raw revision authority fields. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningLearnerCourseList"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (any of `elearning:read`, `elearning:write`, `elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Content/learner-list surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    enrollMyElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCourseEnrollmentRequest"];
+            };
+        };
+        responses: {
+            /** @description New registration, exact request replay, or existing course registration. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCourseEnrollmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Course not found or enrollment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description already_assigned or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningWatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Current watch state. Completion is server-derived. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input, unsupported_item, or unsupported_policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    recordElearningWatchHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningHeartbeatRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated watch state. Credit and completion are server-derived. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input, unsupported_item, or unsupported_policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, conflict, sequence_gap, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    acknowledgeElearningWatchChallenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+                challengeId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningWatchChallengeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated server-derived watch state; challenge is null after acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input or unsupported policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch-challenge flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    issueElearningPlaybackTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Opaque ticket for GET /api/elearning/media/playback?token= */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPlaybackTicket"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated, missing JWT, invalid_token, or token_expired */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningMediaPlayback: {
+        parameters: {
+            query: {
+                /** @description Opaque playback ticket. Multiple token values are invalid_input. */
+                token: string;
+            };
+            header?: {
+                /** @description Single HTTP byte range, e.g. bytes=0-1023 or bytes=-500. Multipart ranges are refused. */
+                Range?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Full object when Range is absent and the object fits in the 8 MiB cap. */
+            200: {
+                headers: {
+                    "Accept-Ranges"?: "bytes";
+                    "Content-Type"?: "video/mp4";
+                    "Content-Length"?: number;
+                    "Cache-Control"?: "private, no-store";
+                    "X-Content-Type-Options"?: "nosniff";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
+                };
+            };
+            /** @description Partial content. Used for every satisfiable Range header, and for absent Range when the object exceeds the 8 MiB cap. */
+            206: {
+                headers: {
+                    "Accept-Ranges"?: "bytes";
+                    "Content-Type"?: "video/mp4";
+                    "Content-Length"?: number;
+                    "Content-Range"?: string;
+                    "Cache-Control"?: "private, no-store";
+                    "X-Content-Type-Options"?: "nosniff";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
+                };
+            };
+            /** @description invalid_input, invalid_range, or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description invalid_token or token_expired */
+            401: components["responses"]["ElearningError"];
+            /** @description assignment_unavailable */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn */
+            409: components["responses"]["ElearningError"];
+            /** @description Unsatisfiable range. JSON only; Content-Range is not set. */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] & {
+                        /** @enum {string} */
+                        error?: "unsatisfiable_range";
+                    };
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable (no range store) */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Attempt plus public paper and canonical own answers. duplicate true on replay of an open attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamStartResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    saveElearningExamAnswers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningExamSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Started attempt plus public paper and canonical own answers. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamStartResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningExamSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Objective-only graded result or mixed-paper awaiting-manual result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamSubmitResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningExamReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policy-released review for the authenticated learner's own graded attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamReviewResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient permissions, or assignment_unavailable */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or review_unavailable */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed active or empty learning portal presentation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalSettings"];
+                };
+            };
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningPortalSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPortalPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published portal revision; duplicate is true on an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPortalPublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or content flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAnalyticsExportCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact replay of an existing export request. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            /** @description Export accepted for asynchronous materialization. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exportId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current closed export state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportResult"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            410: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    downloadElearningAnalyticsExport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                exportId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Formula-safe UTF-8 CSV aggregate export. */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
+            404: components["responses"]["ElearningError"];
+            409: components["responses"]["ElearningError"];
+            410: components["responses"]["ElearningError"];
+            503: components["responses"]["ElearningError"];
         };
     };
 }

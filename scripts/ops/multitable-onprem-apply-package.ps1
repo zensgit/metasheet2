@@ -7,20 +7,34 @@ param(
   [string]$BaseUrl = 'http://127.0.0.1',
   [string]$CheckNginx = '1',
   [string]$RunHealthcheck = '1',
+  [ValidateSet('0', '1')]
   [string]$InstallDeps = '1',
   [string]$BuildWeb = '0',
   [string]$BuildBackend = '0',
+  [ValidateSet('0', '1')]
   [string]$RunMigrations = '1',
   [string]$RestartService = '1',
   [string]$StagingRoot = '',
   [string]$DependencyRefreshTimeoutSec = '1800',
   [string]$DependencyRefreshHeartbeatSec = '60',
   [string]$HealthcheckAttempts = '12',
-  [string]$HealthcheckDelaySec = '5'
+  [string]$HealthcheckDelaySec = '5',
+  # 'auto' (default): when this host's app.env enables the S6-A sealed-snapshot
+  # flag, apply + verify the NTFS ACL on the artifact root and only then write the
+  # win32 artifact-ACL attestation into that same app.env. Hosts that never enable
+  # the flag are not touched. 'off' is the operator escape hatch: the step is
+  # skipped entirely, so the runtime keeps refusing to boot (fail-closed) rather
+  # than booting with an unenforced artifact root.
+  [ValidateSet('auto', 'off')]
+  [string]$S6aArtifactRootAcl = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
 $SupportedPackagePnpmVersion = '9.15.9'
+
+if ($InstallDeps -eq '0' -and $RunMigrations -ne '0') {
+  throw 'PACKAGE_NO_DEPS_REQUIRES_NO_MIGRATIONS: InstallDeps=0 requires RunMigrations=0'
+}
 
 function Resolve-NormalizedPath {
   param(
@@ -972,12 +986,19 @@ function Invoke-Healthcheck {
   }
 
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    $allUrlsHealthy = $true
     foreach ($url in $Urls) {
       Write-Info "Healthcheck attempt ${attempt}/${Attempts}: $url"
       if (Invoke-HealthcheckOnce -Url $url) {
         Write-Info "Healthcheck OK ($url)"
-        return $true
+      } else {
+        Write-Info "Healthcheck failed ($url)"
+        $allUrlsHealthy = $false
       }
+    }
+
+    if ($allUrlsHealthy) {
+      return $true
     }
 
     if ($attempt -lt $Attempts -and $DelaySec -gt 0) {
@@ -987,6 +1008,55 @@ function Invoke-Healthcheck {
   }
 
   return $false
+}
+
+function Test-S6aSealedSnapshotFlagEnabled {
+  # Same normalization as featureEnabled() in
+  # plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs
+  # (trim + lower-case). Read from the process env, which Import-AppEnvFile has
+  # already populated from the very app.env PM2 sources.
+  $raw = [string][Environment]::GetEnvironmentVariable(
+    'MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED', 'Process'
+  )
+  return ($raw.Trim().ToLowerInvariant() -eq 'true')
+}
+
+function Invoke-S6aArtifactRootAclStep {
+  param(
+    [string]$LiveRoot,
+    [string]$EnvFile,
+    [string]$Mode
+  )
+
+  # Follow-up 1 of docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md.
+  # chmod(0o700/0o600) no-ops on win32, so the S6-A runtime refuses to boot there
+  # unless MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_WIN32_ARTIFACT_ACL_ATTESTED
+  # is exactly 'true'. This step makes that attestation an ENFORCED fact rather than
+  # an operator assertion: it applies the NTFS ACL, re-reads it, and writes the
+  # attestation only when the re-read proves the control is in place.
+  #
+  # Flag-driven on purpose: hosts whose app.env does not enable the sealed-snapshot
+  # flag are never touched, and no operator has to remember a switch on the host
+  # that does enable it.
+  if ($Mode -eq 'off') {
+    Write-Info 'S6-A artifact-root ACL step skipped: -S6aArtifactRootAcl off'
+    return
+  }
+  if (-not (Test-S6aSealedSnapshotFlagEnabled)) {
+    return
+  }
+
+  $aclScript = Join-Path $LiveRoot 'scripts\ops\multitable-onprem-s6a-artifact-root-acl.ps1'
+  if (-not (Test-Path -LiteralPath $aclScript -PathType Leaf)) {
+    throw 'S6A_ARTIFACT_ROOT_ACL_HELPER_MISSING'
+  }
+
+  Write-Info 'Apply and verify the S6-A artifact-root NTFS ACL before the service restart'
+  & $aclScript -EnvFilePath $EnvFile -RootDir $LiveRoot -Mode $Mode
+  if ($LASTEXITCODE -ne 0) {
+    # The helper already emitted a values-free reason token; do not restate inputs.
+    throw 'S6A_ARTIFACT_ROOT_ACL_ATTESTATION_FAILED'
+  }
 }
 
 $resolvedRoot = Resolve-NormalizedPath -Candidate $RootDir -Label 'RootDir'
@@ -1017,6 +1087,9 @@ $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
 Write-Info "Staging base: $stagingBase"
 $extractRoot = New-ShortTempDirectory -Prefix 'mspa' -BaseRoot $stagingBase
 $rollbackRoot = $null
+$noDepsOverlayTransaction = $null
+$noDepsOverlayStarted = $false
+$preserveRollbackRoot = $false
 
 try {
   Write-Info "Package archive: $resolvedArchive"
@@ -1150,54 +1223,162 @@ try {
       Write-Info "Dependency activation succeeded but old node_modules cleanup needs manual follow-up: $($_.Exception.Message)"
     }
   } else {
-    Write-Info 'InstallDeps=0: dependency preflight and rollback transaction explicitly bypassed by operator'
-    foreach ($item in Get-ChildItem -LiteralPath $packageRoot -Force) {
-      Copy-Item -LiteralPath $item.FullName -Destination $resolvedRoot -Recurse -Force
+    Write-Info 'InstallDeps=0: preserving existing node_modules and applying a rollback-protected package overlay'
+    $rollbackRoot = New-ShortTempDirectory -Prefix 'mspb' -BaseRoot $stagingBase
+    $noDepsOverlayTransaction = New-PackageOverlayTransaction `
+      -PackageRoot $packageRoot `
+      -LiveRoot $resolvedRoot `
+      -BackupRoot $rollbackRoot
+    $noDepsOverlayStarted = $true
+    try {
+      Copy-PackageOverlay -Transaction $noDepsOverlayTransaction
+    }
+    catch {
+      $copyError = $_
+      $rollbackErrors = @()
+      try {
+        Restore-PackageOverlay -Transaction $noDepsOverlayTransaction
+        $noDepsOverlayStarted = $false
+      }
+      catch {
+        $preserveRollbackRoot = $true
+        $rollbackErrors += "package overlay rollback failed: $($_.Exception.Message)"
+      }
+
+      if ($rollbackErrors.Count -eq 0 -and $RestartService -ne '0') {
+        try {
+          $restoredStartScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
+          if (-not (Test-Path -LiteralPath $restoredStartScript)) {
+            throw "Missing restored PM2 startup helper: $restoredStartScript"
+          }
+          Write-Info 'Restart restored PM2 service after package copy rollback'
+          & $restoredStartScript -RootDir $resolvedRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw 'restored pm2 startup failed'
+          }
+        }
+        catch {
+          $preserveRollbackRoot = $true
+          $rollbackErrors += "restored service restart failed: $($_.Exception.Message)"
+        }
+      }
+
+      if ($rollbackErrors.Count -gt 0) {
+        throw "PACKAGE_NO_DEPS_ROLLBACK_FAILED after '$($copyError.Exception.Message)': $($rollbackErrors -join '; ')"
+      }
+      throw $copyError
     }
   }
 
-  Set-Location $resolvedRoot
+  try {
+    Set-Location $resolvedRoot
 
-  if ($RunMigrations -ne '0') {
-    $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
-    if (-not (Test-Path -LiteralPath $migratePath)) {
-      throw "Missing backend migration entrypoint: $migratePath"
+    if ($RunMigrations -ne '0') {
+      $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
+      if (-not (Test-Path -LiteralPath $migratePath)) {
+        throw "Missing backend migration entrypoint: $migratePath"
+      }
+      Invoke-CheckedCommand "Run database migrations ($migratePath)" {
+        node $migratePath
+      }
     }
-    Invoke-CheckedCommand "Run database migrations ($migratePath)" {
-      node $migratePath
+
+    # Must precede the restart: the attestation is written into the same app.env
+    # the PM2 startup helper re-imports, so the service can only ever start with an
+    # attestation that this run just proved.
+    Invoke-S6aArtifactRootAclStep `
+      -LiveRoot $resolvedRoot `
+      -EnvFile $resolvedEnvFile `
+      -Mode $S6aArtifactRootAcl
+
+    if ($RestartService -ne '0') {
+      $startScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
+      if (-not (Test-Path -LiteralPath $startScript)) {
+        throw "Missing PM2 startup helper: $startScript"
+      }
+
+      Write-Info 'Start or restart PM2 service'
+      & $startScript -RootDir $resolvedRoot
+      if ($LASTEXITCODE -ne 0) {
+        throw 'pm2 startup failed'
+      }
+    }
+
+    if ($RunHealthcheck -ne '0') {
+      $healthUrl = ($BaseUrl.TrimEnd('/')) + '/health'
+      $pluginsUrl = ($ApiBase.TrimEnd('/')) + '/plugins'
+      $healthcheckAttemptsValue = Convert-PositiveInt -Value $HealthcheckAttempts -Label 'HealthcheckAttempts'
+      $healthcheckDelayValue = Convert-PositiveInt -Value $HealthcheckDelaySec -Label 'HealthcheckDelaySec'
+      if (-not (Invoke-Healthcheck -Urls @($healthUrl, $pluginsUrl) -Attempts $healthcheckAttemptsValue -DelaySec $healthcheckDelayValue)) {
+        throw "Healthcheck failed for $healthUrl and $pluginsUrl"
+      }
     }
   }
+  catch {
+    $postApplyError = $_
+    if ($InstallDeps -eq '0' -and $noDepsOverlayStarted) {
+      $rollbackErrors = @()
+      Write-Info 'No-dependency apply failed after overlay; restoring pre-change package files'
+      try {
+        Restore-PackageOverlay -Transaction $noDepsOverlayTransaction
+        $noDepsOverlayStarted = $false
+      }
+      catch {
+        $preserveRollbackRoot = $true
+        $rollbackErrors += "package overlay rollback failed: $($_.Exception.Message)"
+      }
 
-  if ($RestartService -ne '0') {
-    $startScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
-    if (-not (Test-Path -LiteralPath $startScript)) {
-      throw "Missing PM2 startup helper: $startScript"
-    }
+      if ($rollbackErrors.Count -eq 0 -and $RestartService -ne '0') {
+        try {
+          $restoredStartScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
+          if (-not (Test-Path -LiteralPath $restoredStartScript)) {
+            throw "Missing restored PM2 startup helper: $restoredStartScript"
+          }
+          Write-Info 'Restart restored PM2 service after package rollback'
+          & $restoredStartScript -RootDir $resolvedRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw 'restored pm2 startup failed'
+          }
+        }
+        catch {
+          $rollbackErrors += "restored service restart failed: $($_.Exception.Message)"
+        }
+      }
 
-    Write-Info 'Start or restart PM2 service'
-    & $startScript -RootDir $resolvedRoot
-    if ($LASTEXITCODE -ne 0) {
-      throw 'pm2 startup failed'
+      if ($rollbackErrors.Count -eq 0 -and $RunHealthcheck -ne '0') {
+        try {
+          $restoredHealthUrl = ($BaseUrl.TrimEnd('/')) + '/health'
+          $restoredPluginsUrl = ($ApiBase.TrimEnd('/')) + '/plugins'
+          $restoredHealthcheckAttempts = Convert-PositiveInt -Value $HealthcheckAttempts -Label 'HealthcheckAttempts'
+          $restoredHealthcheckDelay = Convert-PositiveInt -Value $HealthcheckDelaySec -Label 'HealthcheckDelaySec'
+          if (-not (Invoke-Healthcheck -Urls @($restoredHealthUrl, $restoredPluginsUrl) -Attempts $restoredHealthcheckAttempts -DelaySec $restoredHealthcheckDelay)) {
+            throw 'restored runtime healthcheck failed'
+          }
+        }
+        catch {
+          $rollbackErrors += "restored runtime healthcheck failed: $($_.Exception.Message)"
+        }
+      }
+
+      if ($rollbackErrors.Count -gt 0) {
+        throw "PACKAGE_NO_DEPS_ROLLBACK_FAILED after '$($postApplyError.Exception.Message)': $($rollbackErrors -join '; ')"
+      }
     }
+    throw $postApplyError
   }
 
-  if ($RunHealthcheck -ne '0') {
-    $healthUrl = ($BaseUrl.TrimEnd('/')) + '/health'
-    $pluginsUrl = ($ApiBase.TrimEnd('/')) + '/plugins'
-    $healthcheckAttemptsValue = Convert-PositiveInt -Value $HealthcheckAttempts -Label 'HealthcheckAttempts'
-    $healthcheckDelayValue = Convert-PositiveInt -Value $HealthcheckDelaySec -Label 'HealthcheckDelaySec'
-    if (-not (Invoke-Healthcheck -Urls @($healthUrl, $pluginsUrl) -Attempts $healthcheckAttemptsValue -DelaySec $healthcheckDelayValue)) {
-      throw "Healthcheck failed for $healthUrl and $pluginsUrl"
-    }
-  }
-
+  $noDepsOverlayStarted = $false
   Write-Info "Package deploy complete"
   Write-Info "Archive applied: $resolvedArchive"
   Write-Info "Root: $resolvedRoot"
 }
 finally {
   if ($null -ne $rollbackRoot -and (Test-Path -LiteralPath $rollbackRoot)) {
-    Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($preserveRollbackRoot) {
+      Write-Info "Rollback backup preserved for manual recovery: $rollbackRoot"
+    } else {
+      Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
   if (Test-Path -LiteralPath $extractRoot) {
     Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue

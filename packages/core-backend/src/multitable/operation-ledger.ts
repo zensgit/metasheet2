@@ -170,14 +170,16 @@ export async function sealOperation(query: LedgerQuery, ledger: OperationLedger)
 }
 
 /**
- * H2 (owner hardening) — whole-operation retention. Atomically prunes ONE sealed operation: the DB function
+ * H2 (owner hardening) — whole-operation retention. Prunes ONE sealed operation: the DB function
  * `meta_record_history_operations_prune` deletes the operation's events across BOTH event tables AND its
  * endpoint row in ONE statement group, under a transaction-local GUC that the ledger's BEFORE-DELETE reject
- * trigger honours (an ordinary DELETE of an endpoint stays fail-closed — H1). A partial prune is impossible:
- * dropping only the endpoint leaves events referencing a vanished endpoint (the DEFERRABLE FK RAISES at
- * COMMIT); dropping only the events leaves an orphan endpoint. A younger / still-referenced operation is
- * untouched (keyed on the exact operation_id). Call inside the caller's own transaction so the prune commits
- * atomically with any surrounding retention bookkeeping.
+ * trigger honours (an ordinary DELETE of an endpoint stays fail-closed — H1). Torn-prune protection is
+ * DIRECTION-ASYMMETRIC (owner review 2026-07-17): endpoint-gone-but-events-remain is DB-enforced (the
+ * DEFERRABLE FK RAISES at COMMIT); events-gone-but-endpoint-remains (an orphan endpoint) has NO FK guard and
+ * relies on the function's own implementation plus its golden coverage. A younger / still-referenced
+ * operation is untouched (keyed on the exact operation_id). Call inside the caller's own transaction so the
+ * prune commits atomically with any surrounding retention bookkeeping; the function's trailing GUC-off reset
+ * (G2-pinned, load-bearing) restores H1 for the remainder of that caller transaction.
  */
 export async function pruneSealedOperation(query: LedgerQuery, sheetId: string, operationId: string): Promise<void> {
   await query(`SELECT meta_record_history_operations_prune($1, $2::uuid)`, [sheetId, operationId])

@@ -14,11 +14,13 @@ import {
 import { validateLongTextValue } from './field-codecs'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
+import { getMultitableRequestMetadataCache } from './request-metadata-cache'
 import {
   MultitableRecordDeleteCapExceededError,
   MultitableRecordLockedError,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  MultitableRecordVersionConflictError,
 } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
@@ -30,6 +32,20 @@ import {
   resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
+import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromFields,
+} from './field-schema-fence-recheck'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  enterRecordLinkDeleteFencePlan,
+  LinkWriterFencePlanChangedError,
+  prepareLinkWriterFencePlan,
+  prepareRecordLinkDeleteFencePlan,
+  type RecordLinkDeleteFencePlan,
+} from './link-writer-fence'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -46,6 +62,7 @@ export {
   MultitableRecordDeleteCapExceededError,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  MultitableRecordVersionConflictError,
 } from './record-errors'
 export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
 export {
@@ -87,6 +104,7 @@ export type PatchMultitableRecordInput = {
   sheetId: string
   recordId: string
   changes: Record<string, unknown>
+  expectedVersion?: number
 }
 
 export type CreatedMultitableRecord = {
@@ -311,6 +329,7 @@ async function validateLinkIds(
   fieldId: string,
   config: LinkFieldConfig,
   ids: string[],
+  fencePlanActive = false,
 ): Promise<void> {
   if (config.limitSingleRecord && ids.length > 1) {
     throw new MultitableRecordValidationError(`Only one linked record is allowed: ${fieldId}`)
@@ -328,6 +347,9 @@ async function validateLinkIds(
   const found = new Set((exists.rows as any[]).map((row: any) => String(row.id)))
   const missing = ids.filter((id) => !found.has(id))
   if (missing.length > 0) {
+    if (fencePlanActive) {
+      throw new LinkWriterFencePlanChangedError('Linked records changed concurrently; retry the write')
+    }
     throw new MultitableRecordValidationError(
       `Linked record(s) not found in sheet ${config.foreignSheetId}: ${missing.join(', ')}`,
     )
@@ -338,6 +360,7 @@ async function buildNormalizedPatch(
   query: MultitableRecordsQueryFn,
   fields: LoadedMultitableField[],
   data: Record<string, unknown>,
+  fencePlanActive = false,
 ): Promise<{
   patch: Record<string, unknown>
   linkUpdates: Map<string, string[]>
@@ -367,7 +390,7 @@ async function buildNormalizedPatch(
         )
       }
       const ids = normalizeLinkIds(rawValue)
-      await validateLinkIds(query, fieldId, config, ids)
+      await validateLinkIds(query, fieldId, config, ids, fencePlanActive)
       patch[fieldId] = ids
       linkUpdates.set(fieldId, ids)
       continue
@@ -402,12 +425,19 @@ async function replaceRecordLinks(
     }
 
     for (const foreignId of toInsert) {
-      await query(
-        `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT DO NOTHING`,
-        [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
-      )
+      try {
+        await query(
+          `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
+        )
+      } catch (error) {
+        if (isRetryableLiveLinkDatabaseConflict(error)) {
+          throw new MultitableRecordValidationError('Linked records changed concurrently; retry the write')
+        }
+        throw error
+      }
     }
   }
 }
@@ -419,18 +449,47 @@ async function loadSheetAndFields(
   sheet: Awaited<ReturnType<typeof loadSheetRow>>
   fields: LoadedMultitableField[]
 }> {
-  const sheet = await loadSheetRow(query, sheetId)
+  // W8-4 (L1): the WRITE segment's copy of the same two constant reads the QUERY segment
+  // (`query-service.ts`) already did for this row — measured at 2x `meta_fields` + 2x `meta_sheets`
+  // per created row on 222. `getMultitableRequestMetadataCache()` is `undefined` unless a caller
+  // explicitly opened a request scope AND the flag is on, so the default path is the same two
+  // statements as before.
+  const cache = getMultitableRequestMetadataCache()
+  const sheet = await loadSheetRow(query, sheetId, cache?.sheets)
   if (!sheet) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }
-  const fields = await loadFieldsForSheet({ query }, sheetId)
+  const fields = await loadFieldsForSheet({ query }, sheetId, cache?.fields)
   if (fields.length === 0) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }
   return { sheet, fields }
 }
 
+/**
+ * Plugin-SDK record read (#5833). Same sheet-liveness contract as patch/create/delete in this file:
+ * a soft-deleted (`deleted_at IS NOT NULL`) or absent sheet throws the same
+ * `MultitableRecordNotFoundError('Sheet not found: …')` BEFORE the record SELECT runs, so a plugin that
+ * resolves a stale sheet id (e.g. after-sales' derived-id fallback) cannot read records back out of a
+ * deleted sheet. Only the liveness half of `loadSheetAndFields` is applied: the zero-fields refusal is a
+ * write precondition and a live field-less sheet keeps its prior read behaviour.
+ */
 export async function getRecord(
+  input: GetMultitableRecordInput,
+): Promise<LoadedMultitableRecord> {
+  const sheet = await loadSheetRow(input.query, input.sheetId, getMultitableRequestMetadataCache()?.sheets)
+  if (!sheet) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
+  }
+  return loadRecordRowForLiveSheet(input)
+}
+
+/**
+ * Raw record read with NO sheet-liveness check. Only for callers that have already proven liveness in
+ * the same flow (`patchRecord` runs `loadSheetAndFields` first); keeps that path's statement sequence
+ * unchanged. Not exported — plugins must go through `getRecord`.
+ */
+async function loadRecordRowForLiveSheet(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const recordRes = await input.query(
@@ -491,41 +550,85 @@ async function guardRecordNotLockedForPlugin(
 export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
+  if (
+    input.expectedVersion !== undefined
+    && (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
+  ) {
+    throw new MultitableRecordValidationError('expectedVersion must be a positive safe integer')
+  }
   const query = input.query
-  // W0-1 L4 (canonical fence): the plugin-SDK patch runs its OWN UPDATE (not via RecordService) inside the
-  // SDK-provided transaction — fence + durable-block check first. No-op & byte-identical when
-  // MULTITABLE_ENABLE_WRITER_FENCE is off.
-  await fenceWriterEntry(query, input.sheetId)
+  const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+    query,
+    input.sheetId,
+    Object.keys(input.changes),
+  )
+  // Flag ON derives every link target before taking any lock, then enters the complete sorted fence set.
+  // Flag OFF makes the preflight query-inert and preserves the existing no-op fenceWriterEntry path.
+  if (linkWriterFencePlan) {
+    await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+  } else {
+    await fenceWriterEntry(query, input.sheetId)
+  }
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
+  if (linkWriterFencePlan) {
+    assertLinkWriterFencePlanMatchesFieldGuards(
+      linkWriterFencePlan,
+      new Map(fields.map((field) => [field.id, {
+        type: field.type,
+        link: readLinkFieldConfig(field),
+      }])),
+    )
+  }
+  // Field retype slice 3a (ADR §3.11 row 2): `fields` may come from the request-scoped metadata cache, i.e. a
+  // snapshot older than the fence. Re-read the touched fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on
+  // any type / option drift. No query unless the conversion flag AND the writer fence are both on.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.changes),
+  )
 
-  const existing = await getRecord({
+  // Liveness already proven by loadSheetAndFields above in this same flow.
+  const existing = await loadRecordRowForLiveSheet({
     query,
     sheetId: input.sheetId,
     recordId: input.recordId,
   })
+  if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
+    throw new MultitableRecordVersionConflictError()
+  }
   // Record-lock guard (rank-8 review M1; decision d/e). The plugin SDK carries no per-record actor
   // identity → `ensureRecordNotLocked(null, …)` makes a locked record hard read-only to plugins.
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
-  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.changes)
+  const { patch, linkUpdates } = await buildNormalizedPatch(
+    query,
+    fields,
+    input.changes,
+    linkWriterFencePlan !== null,
+  )
   const nextData = {
     ...existing.data,
     ...patch,
   }
 
-  // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
-  // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') @559.
+  const updateParams: unknown[] = [JSON.stringify(nextData), input.recordId, input.sheetId]
+  const versionPredicate = input.expectedVersion === undefined ? '' : ' AND version = $4'
+  if (input.expectedVersion !== undefined) updateParams.push(input.expectedVersion)
   const updated = await query(
+    // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+    // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') below.
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
-     WHERE id = $2 AND sheet_id = $3
+     WHERE id = $2 AND sheet_id = $3${versionPredicate}
      RETURNING version`,
-    [JSON.stringify(nextData), input.recordId, input.sheetId],
+    updateParams,
   )
 
   // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
-  // `existing` above was read via `getRecord` (a plain SELECT, no `FOR UPDATE`) and
+  // `existing` above was read via `loadRecordRowForLiveSheet` (a plain SELECT, no `FOR UPDATE`) and
   // `guardRecordNotLockedForPlugin` likewise takes no row lock — so this UPDATE is the FIRST point in
   // this function that actually locks the row, and a concurrent DELETE of this exact record IS reachable
   // in the window between those reads and this statement (unlike the form-submit EDIT branch fixed in
@@ -540,6 +643,9 @@ export async function patchRecord(
   // `nextVersion` can be synthesized. Proven under genuine two-connection lock contention (not a sleep
   // heuristic) by the concurrent-delete golden in the real-DB suite.
   if ((updated.rows as unknown[]).length === 0) {
+    if (input.expectedVersion !== undefined) {
+      throw new MultitableRecordVersionConflictError()
+    }
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
 
@@ -599,23 +705,46 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
-  // W0-1 L4cov (close the plugin-create PARTIAL gap — L4 map's records.ts:592). The sheet-write fence is
-  // acquired UNCONDITIONALLY: it predates L4 as the auto-number allocation-serialization lock (it serialises
-  // record-create against CREATE-FIELD auto-number backfill — see auto-number-service.ts), so gating it behind
-  // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
-  // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
-  // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
-  // if a recovery holds a durable `{fencing,applying,paused_retryable}` block on this sheet, refuse with
-  // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
-  // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
-  // preserve the pre-existing unconditional fence.
-  await acquireAutoNumberSheetWriteLock(query, input.sheetId)
-  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
+  const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+    query,
+    input.sheetId,
+    Object.keys(input.data),
+  )
+  // Plugin create has always taken the source fence unconditionally for auto-number serialization. Flag OFF
+  // preserves that exact path. Flag ON replaces the single-source entry with the planned source+target batch,
+  // which includes the same source key and performs every durable-block check after the ordered fences.
+  if (linkWriterFencePlan) {
+    await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+  } else {
+    await acquireAutoNumberSheetWriteLock(query, input.sheetId)
+    if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
+  }
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
+  if (linkWriterFencePlan) {
+    assertLinkWriterFencePlanMatchesFieldGuards(
+      linkWriterFencePlan,
+      new Map(fields.map((field) => [field.id, {
+        type: field.type,
+        link: readLinkFieldConfig(field),
+      }])),
+    )
+  }
+  // Field retype slice 3a (ADR §3.11 row 3): same cached-snapshot hazard as patchRecord above.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.data),
+  )
 
-  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
+  const { patch, linkUpdates } = await buildNormalizedPatch(
+    query,
+    fields,
+    input.data,
+    linkWriterFencePlan !== null,
+  )
   Object.assign(patch, await allocateAutoNumberValues(query, input.sheetId, fields.map((field) => ({
     id: field.id,
     type: field.type,
@@ -646,9 +775,10 @@ export async function createRecord(
   // W0 slice ② (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1/OD-3, §0/§7a site A5): this INSERT
   // created a brand-new `meta_records` row with NO revision — `reconstructRecordsAtT` derives record
   // EXISTENCE purely from `meta_record_revisions`, so the record was invisible to it at every T, and a
-  // Reset-to-T at any T after this create could not distinguish "created after T" from "created before T
-  // but never captured" — `computeSheetReset` would push it into the unconditional delete-set and DESTROY
-  // a record that legitimately existed at T (§0.5's corrected CREATE risk). Emitted in the SAME
+  // Reset at an exact anchor after this create could not distinguish "created after the anchor" from
+  // "created before the anchor but never captured" — the exact-anchor Reset planner would push it into
+  // the created-after-anchor delete-set and DESTROY a record that legitimately existed at the anchor
+  // (§0.5's corrected CREATE risk). Emitted in the SAME
   // transaction as the INSERT above (`index.ts` wraps every plugin-SDK `createRecord` call in
   // `poolManager.get().transaction(...)`, re-verified for THIS slice via the real
   // `MetaSheetServer.createCoreAPI()` entry point). source='plugin' (OD-2). actorId=null (OD-3 — the
@@ -691,6 +821,7 @@ export async function createRecord(
  */
 async function deleteRecordWithRecoverability(
   input: DeleteMultitableRecordInput,
+  linkDeleteFencePlan: RecordLinkDeleteFencePlan | null,
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
 
@@ -702,9 +833,11 @@ async function deleteRecordWithRecoverability(
   await assertTransactionalQuery(query, 'plugin')
   // W0-1 L4 (canonical fence): the recoverable plugin delete runs inside a txn (asserted above) — fence +
   // durable-block check before the destructive read/write. No-op & byte-identical when the L4 flag is off.
-  // (The flag-off, non-transactional D-1 delete branch in `deleteRecord` cannot hold a txn-scoped advisory
-  // lock; it is enumerated as an L4-SEAM in the PR matrix — fencing it needs the txn wrap that path lacks.)
-  await fenceWriterEntry(query, input.sheetId)
+  // (The D-1 delete branch in `deleteRecord` is fenced too as of L4-cov-services: with the flag ON it
+  // enforces the OD-7 transactional-query contract, takes this same fence, and mints/seals its operation —
+  // the former "L4-SEAM: needs the txn wrap" enumeration is closed, not merely recorded.)
+  if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+  else await fenceWriterEntry(query, input.sheetId)
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
 
@@ -854,11 +987,32 @@ export async function deleteRecord(
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
 
+  const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+    query,
+    input.sheetId,
+    input.recordId,
+  )
+
   // D-2 (side-door delete recoverability, #4004): opt-in recoverability parity with the UI path. Default
   // OFF ⇒ fall through to the D-1 code below, byte-identically (§1.9).
   if (isSideDoorDeleteTrashEnabled()) {
-    return await deleteRecordWithRecoverability(input)
+    return await deleteRecordWithRecoverability(input, linkDeleteFencePlan)
   }
+
+  // W0-1 L4-cov-services (owner directive: fold the deferred D-1 delete branch into H1-DELETE's
+  // IMPLEMENTATION matrix, so it can never again sit in "recorded gap" state): with the L4 fence flag ON
+  // this branch now (a) enforces the transactional-`query` contract OD-7 already pins on the sole
+  // production wiring (index.ts plugin-SDK txn wrap), (b) takes the canonical fence + durable-block check,
+  // and (c) mints a sealed operation below so the delete revision is ledger-tagged — its sealed endpoint is
+  // then H1-immutable (UPDATE/DELETE-reject triggers) exactly like every other delete sink's. With the flag
+  // OFF: the guard is not reached, `mintOperation` returns the inert ledger, `ledger: op` tags nothing, and
+  // `sealOperation` no-ops — this branch stays byte-identical D-1 behaviour (§1.9).
+  if (isWriterFenceEnabled()) {
+    await assertTransactionalQuery(query, 'plugin')
+    if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+    else await fenceWriterEntry(query, input.sheetId)
+  }
+  const op = await mintOperation(query, input.sheetId)
 
   // D-1 (destruction-path gap audit, owner-ratified): read the row BEFORE destroying anything so the
   // delete revision below can carry the record's final snapshot. PIT/as-of-T existence is derived
@@ -907,7 +1061,12 @@ export async function deleteRecord(
     changedFieldIds: [],
     patch: {},
     snapshot: snapshotRow?.data ?? null,
+    ledger: op,
   })
+
+  // W0-1 L6-a / L4-cov-services: seal the operation LAST (endpoint row after its tagged event, satisfying
+  // the deferred FK + endpoint-validation trigger at COMMIT). No-op when the ledger is inert (flag off).
+  await sealOperation(query, op)
 
   return {
     id: input.recordId,

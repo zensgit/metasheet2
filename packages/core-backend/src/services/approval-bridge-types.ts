@@ -1,3 +1,4 @@
+import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
 /**
  * Unified approval bridge types.
  *
@@ -7,7 +8,8 @@
 
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
-import type { FormSchema } from '../types/approval-product'
+import type { ApprovalNodeType, FormSchema, NodeFieldAccess } from '../types/approval-product'
+import type { EffectiveNodeOperations } from './approval-effective-node-operations'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -34,11 +36,127 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the current node's TYPE (from the frozen runtime graph). The member 待办 surface
+   * reads it to withhold approve/reject on a 办理 (handler) task. Absent ≡ not-a-handler.
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
+   * Lock-7 OD-L7-10 — the ACTOR-SCOPED per-field access map for THIS viewer at their claimed
+   * seat(s): fieldId → one NodeFieldAccess value. Present ONLY on the DETAIL read
+   * (`getApproval`) — the list DTO stays byte-identical. Derived from the SAME
+   * `resolveFieldAccessAtNodes` the write mask uses, so a field reported `editable` OR `required` here
+   * is exactly a field the write path accepts (Lock-7B §2.2 widens the write mask to the SAME
+   * `editable ∪ required` set this map is derived from — never over-reports: a seatless / role-only
+   * viewer gets no map, and multi-seat is most-restrictive). Absent from the map ≡ `editable`
+   * (OD-L7-9). The FE grid uses it to render `readonly` fields read-only; it is presentation only —
+   * enforcement is server-side.
+   */
+  fieldAccess?: Record<string, NodeFieldAccess> | null
+  /**
+   * Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective per-node operation policy for THIS viewer
+   * at their claimed seat(s). Present ONLY on the DETAIL read (`getApproval`) — the list DTO stays
+   * byte-identical — and absent for a seatless viewer, mirroring `fieldAccess` above.
+   *
+   * Every field is a DECIDED value, not a config echo: the server resolves it with the SAME
+   * `resolveEffectiveNodeOperations` the dispatch choke's predicate is built from, so the FE mirror
+   * is not a second predicate (§2.3's "the FE mirror derives from the SAME config the server
+   * enforces"). Presentation only — the 409 `APPROVAL_NODE_OPERATION_DISABLED` refusal remains the
+   * authority, and hiding a button is never the guard.
+   */
+  nodeOperations?: EffectiveNodeOperations | null
+  /**
+   * Would the decision endpoint's own authorization predicate let THIS viewer decide the node the
+   * instance is currently stopped on? Server-resolved per viewer, by the door's OWN predicate
+   * (`approval-seat-authorization.ts`: `assignmentMatchesActor` over `decidableNodeKeysForInstance`),
+   * so the client renders rather than re-derives and cannot drift from the server's answer.
+   *
+   * `false` when the instance is not pending, when the viewer holds no matching active seat at a
+   * decidable node key, and when no viewer identity was supplied. `true` for a pending instance
+   * whose decisions do NOT go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row): those dispatches do not gate on assignments,
+   * so `false` would hide controls the server accepts — and `true` is what those surfaces already
+   * do today.
+   *
+   * Presentation only — the 403 `APPROVAL_ASSIGNMENT_REQUIRED` remains the authority, and hiding a
+   * button is never the guard. ABSENT means "this backend does not compute it" (an older server),
+   * and clients must fall back to their pre-existing behaviour rather than reading absence as
+   * `false`.
+   */
+  canDecideCurrentNode?: boolean
+  /**
+   * May THIS viewer stage process evidence (过程附件) on the comment action of this instance right
+   * now? Server-resolved per viewer as the conjunction of two existing answers from
+   * `approval-seat-authorization.ts` — `decisionDoorIsSeatGated(instance)` AND
+   * `resolveCanDecideCurrentNode(...)` — and nothing else.
+   *
+   * WHY NOT `canDecideCurrentNode` ITSELF: that field reports `true` for a pending instance whose
+   * decisions do not go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row), because there is no seat predicate to mirror
+   * there. Process evidence is bound only by the template-runtime dispatch (the comment action's
+   * `attachmentIds` rider), so on those instances an uploader would be an affordance nothing can
+   * complete. The first conjunct removes exactly that case; the second is the door's own seat
+   * answer, so USER seats, ROLE seats, delegated seats and the pending branch frontier of a
+   * parallel region are covered the same way the door covers them.
+   *
+   * `false` when the instance is not pending, when no viewer identity was supplied, when the
+   * viewer holds no matching active seat at a decidable node key, and on every instance whose
+   * decisions do not go through the seat-gated door.
+   *
+   * Independent of the attachments feature flag: the value says who holds the seat, not whether
+   * the pipeline is on. Clients gate the uploader on the flag AND this field. Presentation only —
+   * the upload route's own seat check and the bind-time 403 `APPROVAL_ASSIGNMENT_REQUIRED` remain
+   * the authority. ABSENT means "this backend does not compute it" (an older server); unlike
+   * `canDecideCurrentNode` there is no wider prior behaviour worth restoring, so clients read
+   * absence as "no uploader".
+   */
+  canAttachProcessEvidence?: boolean
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」 — the
+   * 呈现 channel, DEFAULT CONTRACT (⚠️ owner 待裁, 按默认值; the alternatives are listed with the
+   * type in `core/attendance-cancellation-execution-port.ts`).
+   *
+   * Present on the response of the approve action that REDEEMED a 撤销 round, AND — since the
+   * owner's 2026-09-20 ruling — on `getApproval`, read back from the approve audit row that
+   * committed in the same transaction as the cancellation. `undefined` on every other approval and
+   * every other action, so no existing consumer's shape changes by a byte. Values-free: a status
+   * token plus integer counters — no ids, no names, no free text.
+   *
+   * ⚠️ CORRECTED 2026-09-20 (this docblock previously claimed two things that were false; both are
+   * recorded rather than silently rewritten):
+   *  - 「`getApproval` does NOT project it, so a later `GET /approvals/:id` omits it」 — true when
+   *    written, no longer true: `getApproval` now whitelist-projects it, which is exactly the
+   *    「呈现 must also survive a reload」 branch this text had left as an open owner decision. The
+   *    owner ruled it must: 「呈现默认值不能替代持久读取能力」.
+   *  - 「carried verbatim by `UnifiedApprovalHistoryDTO.metadata`」 — MEASURED FALSE on the HTTP
+   *    surface (`verify-c2-history-dto-cancellation-outcome-20260920.md` §3.1, real-DB + real
+   *    HTTP). `loadLocalHistory` does carry `metadata` verbatim onto that DTO, but its only
+   *    production call site sits inside `routes/approval-history.ts`'s `plm:` branch, and a
+   *    platform (bare-UUID) cancel-round id never enters it — so for platform instances that DTO
+   *    is never constructed and the promised durable read did not exist. What the platform history
+   *    surface carries today is a per-key-path WHITELIST (`cancellationOutcome`,
+   *    `cancelRoundCloseReason`, plus Lock-9's `attachmentIds`), never verbatim `metadata`.
+   */
+  cancellationOutcome?: CancelRoundCancellationOutcomeV1 | null
+  /**
+   * The bounded close-reason token of a cancel round the system CLOSED without redeeming —
+   * `round_expired` (窗口/策略已关) or `business_blocked:<code>` (业务不可逆) — whitelist-projected
+   * from the system-closure audit row's `metadata.cancelRoundCloseReason`.
+   *
+   * Owner ruling 2026-09-20. Before it, a 驳回 by the system closure and a 驳回 by a human approver
+   * were byte-identical on this surface (same `status`, same version fields; the only difference
+   * was the sentinel `actor_id`, which reaches no rendered field) — and `expired` vs `blocked` were
+   * indistinguishable from each other too (§4.2 of the verification MD, measured). `undefined` on
+   * every approval that is not a system-closed cancel round.
+   *
+   * The adapter's finer free-text cause (`cancelRoundBlockDetail`) is deliberately NOT carried.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state for the 待我处理 (pending) tab — `true` once the
@@ -96,6 +214,32 @@ export interface UnifiedApprovalHistoryDTO {
 
 // ── Query Options ──
 
+/**
+ * The list feed's tab values, as ONE definition. The route's admission check and the query
+ * option's own type are both derived from this tuple, so a tab added here cannot be accepted by
+ * one and rejected by the other, and a hand-typed array in the route can no longer drift from the
+ * union the service branches on.
+ *
+ * `tab` is a FILTER WITHIN the server-determined visibility scope, never the thing that decides
+ * whether a scope is applied at all — see `buildApprovalListScopeCondition` in
+ * `ApprovalBridgeService.ts`, which is conjoined into every list query regardless of this value.
+ */
+export const APPROVAL_LIST_TABS = ['pending', 'mine', 'cc', 'completed', 'processed'] as const
+
+export type ApprovalListTab = (typeof APPROVAL_LIST_TABS)[number]
+
+export function isApprovalListTab(value: string): value is ApprovalListTab {
+  return (APPROVAL_LIST_TABS as readonly string[]).includes(value)
+}
+
+/**
+ * The tab a list request with NO `tab` parameter is served with. `pending` (待我处理) is the
+ * inbox's own landing tab — `apps/web/src/approvals/store.ts` never issues a tab-less request, and
+ * its first fetch is `fetchPending` — so the documented default matches what the only in-repo
+ * client already asks for on load, rather than inventing an "everything" mode with no UI behind it.
+ */
+export const APPROVAL_LIST_DEFAULT_TAB: ApprovalListTab = 'pending'
+
 export interface ApprovalQueryOptions {
   sourceSystem?: string
   status?: string
@@ -117,7 +261,16 @@ export interface ApprovalQueryOptions {
    * for (a reverse lookup on `actor_id`), regardless of the instance's CURRENT status — unlike
    * `completed`, which is scoped to non-pending instances.
    */
-  tab?: 'pending' | 'mine' | 'cc' | 'completed' | 'processed'
+  tab?: ApprovalListTab
+  /**
+   * TRUE when `tab` carries `APPROVAL_LIST_DEFAULT_TAB` because the request supplied none, as
+   * opposed to naming that same value explicitly. The ONLY thing it changes is the legacy "a tab
+   * implies the platform feed" source conjunct in `listApprovals`: a request that named no tab
+   * keeps the mixed platform+plm feed it has always been served, instead of being narrowed to
+   * platform rows as a side effect of the tab defaulting. Absent/false ⇒ the legacy rule applies,
+   * so every existing caller (including a direct service call naming a tab) is unaffected.
+   */
+  tabDefaulted?: boolean
   includeExternalTabSources?: boolean
   actorId?: string
   actorRoles?: string[]
@@ -160,6 +313,10 @@ export const APPROVAL_ERROR_CODES = {
   INVALID_STATUS_TRANSITION: 'INVALID_STATUS_TRANSITION',
   REJECT_COMMENT_REQUIRED: 'REJECT_COMMENT_REQUIRED',
   APPROVAL_NOT_FOUND: 'APPROVAL_NOT_FOUND',
+  /** A non-empty `tab` value that is not in `APPROVAL_LIST_TABS`. An EMPTY `tab` is absent, not
+   *  invalid — matching how `sourceSystem` / `templateId` / `createdFrom` / `createdTo` already
+   *  treat a cleared filter chip, so clearing a tab degrades to the default rather than 400ing. */
+  TAB_INVALID: 'APPROVAL_TAB_INVALID',
 } as const
 
 // ── DB Row Types (internal, not exposed via API) ──

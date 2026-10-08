@@ -11,12 +11,21 @@ import type {
   ConditionOperator,
   WorkflowJobStatus,
 } from '../types'
+import {
+  automationBusinessTimezone,
+  isUtcTriggerTimezone,
+  utcTimeOfDayInZone,
+  type CronSwitchImpact,
+  type DateReminderExample,
+  type LegacyUtcSwitchImpact,
+} from './automation-trigger-timezone'
+import { isTemporalConditionFieldType } from './automation-condition-values'
 
 // Legacy execution/step statuses (success/failed/skipped) + the converged C1
 // WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
 export type AutomationStatus = AutomationExecution['status'] | WorkflowJobStatus
 
-// Keep in sync with MetaAutomationRuleEditor.vue ConditionValueWidget.
+// The value control of an automation condition row (automation-condition-values.ts conditionValueWidget).
 export type AutomationConditionValueWidget =
   | 'text'
   | 'number'
@@ -26,6 +35,8 @@ export type AutomationConditionValueWidget =
   | 'booleanMultiSelect'
   | 'select'
   | 'multiSelect'
+  | 'person'
+  | 'link'
 
 export type AutomationTriggerCondition = 'any' | 'equals' | 'changed_to'
 
@@ -62,6 +73,13 @@ export type AutomationLabelKey =
   | 'log.retry'
   | 'log.loading'
   | 'log.empty'
+  // 客户反馈 2026-09-24 #3 final review F1: the rule log panel labels a skipped run 已跳过 (stats + badge) and
+  // renders the backend's values-free step reason codes as sentences, never as the raw internal code.
+  | 'log.skipped'
+  | 'log.statusSkipped'
+  | 'log.reason.targetRecordMissing'
+  | 'log.reason.targetRecordMissingNoop'
+  | 'log.reason.backwriteTargetRecordMissing'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -119,6 +137,14 @@ export type AutomationLabelKey =
   | 'condition.addCondition'
   | 'condition.addGroup'
   | 'condition.removeConditionTitle'
+  | 'condition.selectFieldFirst'
+  | 'condition.booleanTrue'
+  | 'condition.booleanFalse'
+  | 'condition.pickDate'
+  | 'condition.pickPeople'
+  | 'condition.pickRecords'
+  | 'condition.removeValueTitle'
+  | 'condition.fieldMissing'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
   | 'actionConfig.targetSheetManualToggle'
@@ -130,6 +156,16 @@ export type AutomationLabelKey =
   | 'actionConfig.message'
   | 'actionConfig.notificationMessagePlaceholder'
   | 'actionConfig.recipients'
+  | 'actionConfig.recipientsPlaceholder'
+  | 'actionConfig.recipientSearch'
+  | 'actionConfig.recipientSearchPlaceholder'
+  | 'actionConfig.recipientSearching'
+  | 'actionConfig.recipientNoMatch'
+  | 'actionConfig.recipientUnresolved'
+  | 'actionConfig.recipientRemove'
+  | 'actionConfig.recipientInactive'
+  | 'actionConfig.recipientIdsManual'
+  | 'actionConfig.recipientIdsManualPlaceholder'
   | 'actionConfig.emailRecipientsHint'
   | 'actionConfig.subjectTemplate'
   | 'actionConfig.emailSubjectPlaceholder'
@@ -137,6 +173,14 @@ export type AutomationLabelKey =
   | 'actionConfig.emailBodyPlaceholder'
   | 'actionConfig.deleteRecordWarning'
   | 'actionConfig.deleteRecordAck'
+  | 'actionConfig.deleteRecordWarningCrossBase'
+  | 'actionConfig.deleteRecordAckCrossBase'
+  | 'actionConfig.deletedTriggerSelfMutation'
+  | 'actionConfig.crossBaseTargetWarning'
+  | 'actionConfig.crossBaseTargetIncomplete'
+  | 'actionConfig.crossBaseCreateTargetWarning'
+  | 'actionConfig.crossBaseCreateTargetIncomplete'
+  | 'actionConfig.crossBaseCreateSheetScoped'
   | 'actionConfig.deleteRecordTestRunHint'
   | 'actionConfig.lockRecord'
   | 'actionConfig.waitForCallbackHint'
@@ -166,6 +210,7 @@ export type AutomationLabelKey =
   | 'testRun.confirmSuffix'
   | 'testRun.confirmTitle'
   | 'testRun.unsavedHint'
+  | 'testRun.savedDirtyHint'
   | 'testRun.button'
   | 'testRun.running'
   | 'manager.title'
@@ -190,6 +235,8 @@ export type AutomationLabelKey =
   | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
+  // #6155: non-blocking notice on a rule that is on (or being switched on) with an action that can only no-op.
+  | 'manager.deletedTriggerSkipNotice'
   | 'manager.allowedAudiencePrefix'
   | 'manager.statOk'
   | 'manager.statFail'
@@ -206,6 +253,27 @@ export type AutomationLabelKey =
   | 'manager.testRunning'
   | 'manager.testRunningDingTalkWarning'
   | 'manager.testRunAtLeastOneActionFailed'
+  // #5817 follow-up: test-run button refusals, keyed by the route's error code
+  // (MetaAutomationManager.vue TEST_RUN_ERROR_LABELS). The server's English message is never shown.
+  | 'manager.testRunError.forbidden'
+  | 'manager.testRunError.unauthenticated'
+  | 'manager.testRunError.sheetDeleted'
+  | 'manager.testRunError.notFound'
+  | 'manager.testRunError.ruleNotFound'
+  | 'manager.testRunError.serviceUnavailable'
+  | 'manager.testRunError.permissionCheckFailed'
+  | 'manager.testRunError.invalidMode'
+  | 'manager.testRunError.confirmSideEffectsRequired'
+  | 'manager.testRunError.sampleRecordRequired'
+  | 'manager.testRunError.invalidRecordId'
+  | 'manager.testRunError.sampleRecordReadFailed'
+  | 'manager.testRunError.sampleRecordDataInvalid'
+  | 'manager.testRunError.invalidOperationId'
+  | 'manager.testRunError.actionUnsupported'
+  | 'manager.testRunError.recordWriteProtectionDisabled'
+  | 'manager.testRunError.outboundProtectionDisabled'
+  | 'manager.testRunError.failed'
+  | 'manager.testRunError.generic'
   | 'dingtalk.preset'
   | 'dingtalk.addGroups'
   | 'dingtalk.addGroupOption'
@@ -316,7 +384,48 @@ export type AutomationLabelKey =
   | 'runs.resumeError.ruleChanged'
   | 'runs.resumeError.ruleMissingOrDisabled'
   | 'runs.resumeError.recordGone'
+  // #5803: the rule's sheet is soft-deleted; nothing ran and the resume token was not consumed.
+  | 'runs.resumeError.sheetDeleted'
+  | 'runs.resumeError.executionGone'
+  | 'runs.resumeError.suspensionCursorInvalid'
   | 'runs.resumeError.generic'
+  // P3-4: whole-execution re-run button (distinct from Resume above, which only continues a
+  // suspended step's remaining actions). Confirm dialog enumerates the consequences from data
+  // already loaded on the row/detail (no extra fetch).
+  | 'runs.rerun'
+  | 'runs.rerunConfirmTitle'
+  | 'runs.rerunConfirmRuleLabel'
+  | 'runs.rerunConfirmSheetLabel'
+  | 'runs.rerunConfirmActionsLabel'
+  | 'runs.rerunConfirmFooter'
+  | 'runs.rerunConfirmNoSheet'
+  | 'runs.rerunConfirmUnknownActions'
+  // Round-2 B3: the consequence list is NOT always derivable (a null/unusable ruleSnapshot on the
+  // loaded detail). That case gets an honest "cannot enumerate" line plus a SECOND explicit
+  // acknowledgement, never a boilerplate sentence that reads like a real enumeration.
+  | 'runs.rerunUnknownActionsAckTitle'
+  | 'runs.rerunUnknownActionsAckMessage'
+  | 'runs.rerunUnknownActionsAckConfirm'
+  | 'runs.rerunSuccessPrefix'
+  | 'runs.rerunSuccessGeneric'
+  | 'runs.rerunError.notFound'
+  | 'runs.rerunError.notRetryable'
+  | 'runs.rerunError.testRunNotRetryable'
+  | 'runs.rerunError.missingTriggerEvent'
+  | 'runs.rerunError.retryWindowExpired'
+  | 'runs.rerunError.approvalAlreadyCreated'
+  | 'runs.rerunError.ruleMissingOrDisabled'
+  | 'runs.rerunError.ruleChanged'
+  | 'runs.rerunError.ledgerEvidenceMissing'
+  // #5803: the rule's sheet is soft-deleted; nothing ran or was recorded.
+  | 'runs.rerunError.sheetDeleted'
+  // 客户反馈 2026-09-24 #3 final review F2: every step was skipped because the trigger record is gone.
+  | 'runs.rerunError.targetRecordMissing'
+  // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
+  // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
+  // string would otherwise render verbatim in a zh session.
+  | 'runs.rerunError.adminRequired'
+  | 'runs.rerunError.generic'
   // W7 start_approval approval-result writeback pickers.
   | 'resultWriteback.title'
   | 'resultWriteback.hint'
@@ -326,6 +435,17 @@ export type AutomationLabelKey =
   | 'resultWriteback.none'
   | 'resultWriteback.markUnknown'
   | 'resultWriteback.markIncompatible'
+  // #5742 outcome → written-value mapping (optional; empty row = write the raw outcome literal).
+  | 'resultWriteback.outcomeValuesTitle'
+  | 'resultWriteback.outcomeValuesHint'
+  | 'resultWriteback.onNonApproved'
+  | 'resultWriteback.rawValuePrefix'
+  | 'resultWriteback.outcome.approved'
+  | 'resultWriteback.outcome.rejected'
+  | 'resultWriteback.outcome.revoked'
+  | 'resultWriteback.outcome.cancelled'
+  | 'resultWriteback.markUnknownOption'
+  | 'resultWriteback.optionMissingBlocker'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.title',
@@ -338,6 +458,11 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.retry',
   'log.loading',
   'log.empty',
+  'log.skipped',
+  'log.statusSkipped',
+  'log.reason.targetRecordMissing',
+  'log.reason.targetRecordMissingNoop',
+  'log.reason.backwriteTargetRecordMissing',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -395,6 +520,14 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.addCondition',
   'condition.addGroup',
   'condition.removeConditionTitle',
+  'condition.selectFieldFirst',
+  'condition.booleanTrue',
+  'condition.booleanFalse',
+  'condition.pickDate',
+  'condition.pickPeople',
+  'condition.pickRecords',
+  'condition.removeValueTitle',
+  'condition.fieldMissing',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
   'actionConfig.targetSheetManualToggle',
@@ -406,11 +539,27 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.message',
   'actionConfig.notificationMessagePlaceholder',
   'actionConfig.recipients',
+  'actionConfig.recipientsPlaceholder',
+  'actionConfig.recipientSearch',
+  'actionConfig.recipientSearchPlaceholder',
+  'actionConfig.recipientSearching',
+  'actionConfig.recipientNoMatch',
+  'actionConfig.recipientUnresolved',
+  'actionConfig.recipientRemove',
+  'actionConfig.recipientInactive',
+  'actionConfig.recipientIdsManual',
+  'actionConfig.recipientIdsManualPlaceholder',
   'actionConfig.emailRecipientsHint',
   'actionConfig.subjectTemplate',
   'actionConfig.emailSubjectPlaceholder',
   'actionConfig.bodyTemplate',
   'actionConfig.emailBodyPlaceholder',
+  // Cross-base CREATE copy (#5756 follow-up). Listed here — unlike the older
+  // `crossBaseTarget*`/`deleteRecord*` keys, which predate this list and are still missing from it —
+  // so meta-automation-labels.spec.ts's "fully readable in both locales" loop actually covers them.
+  'actionConfig.crossBaseCreateTargetWarning',
+  'actionConfig.crossBaseCreateTargetIncomplete',
+  'actionConfig.crossBaseCreateSheetScoped',
   'actionConfig.lockRecord',
   'actionConfig.waitForCallbackHint',
   'conditionBranch.readOnly',
@@ -439,6 +588,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'testRun.confirmSuffix',
   'testRun.confirmTitle',
   'testRun.unsavedHint',
+  'testRun.savedDirtyHint',
   'testRun.button',
   'testRun.running',
   'manager.title',
@@ -463,6 +613,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'recipe.fieldChangedUpdateDesc',
   'manager.enabled',
   'manager.disabled',
+  'manager.deletedTriggerSkipNotice',
   'manager.allowedAudiencePrefix',
   'manager.statOk',
   'manager.statFail',
@@ -479,6 +630,25 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.testRunning',
   'manager.testRunningDingTalkWarning',
   'manager.testRunAtLeastOneActionFailed',
+  'manager.testRunError.forbidden',
+  'manager.testRunError.unauthenticated',
+  'manager.testRunError.sheetDeleted',
+  'manager.testRunError.notFound',
+  'manager.testRunError.ruleNotFound',
+  'manager.testRunError.serviceUnavailable',
+  'manager.testRunError.permissionCheckFailed',
+  'manager.testRunError.invalidMode',
+  'manager.testRunError.confirmSideEffectsRequired',
+  'manager.testRunError.sampleRecordRequired',
+  'manager.testRunError.invalidRecordId',
+  'manager.testRunError.sampleRecordReadFailed',
+  'manager.testRunError.sampleRecordDataInvalid',
+  'manager.testRunError.invalidOperationId',
+  'manager.testRunError.actionUnsupported',
+  'manager.testRunError.recordWriteProtectionDisabled',
+  'manager.testRunError.outboundProtectionDisabled',
+  'manager.testRunError.failed',
+  'manager.testRunError.generic',
   'dingtalk.preset',
   'dingtalk.addGroups',
   'dingtalk.addGroupOption',
@@ -589,7 +759,36 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.resumeError.ruleChanged',
   'runs.resumeError.ruleMissingOrDisabled',
   'runs.resumeError.recordGone',
+  'runs.resumeError.sheetDeleted',
+  'runs.resumeError.executionGone',
+  'runs.resumeError.suspensionCursorInvalid',
   'runs.resumeError.generic',
+  'runs.rerun',
+  'runs.rerunConfirmTitle',
+  'runs.rerunConfirmRuleLabel',
+  'runs.rerunConfirmSheetLabel',
+  'runs.rerunConfirmActionsLabel',
+  'runs.rerunConfirmFooter',
+  'runs.rerunConfirmNoSheet',
+  'runs.rerunConfirmUnknownActions',
+  'runs.rerunUnknownActionsAckTitle',
+  'runs.rerunUnknownActionsAckMessage',
+  'runs.rerunUnknownActionsAckConfirm',
+  'runs.rerunSuccessPrefix',
+  'runs.rerunSuccessGeneric',
+  'runs.rerunError.notFound',
+  'runs.rerunError.notRetryable',
+  'runs.rerunError.testRunNotRetryable',
+  'runs.rerunError.missingTriggerEvent',
+  'runs.rerunError.retryWindowExpired',
+  'runs.rerunError.approvalAlreadyCreated',
+  'runs.rerunError.ruleMissingOrDisabled',
+  'runs.rerunError.ruleChanged',
+  'runs.rerunError.ledgerEvidenceMissing',
+  'runs.rerunError.sheetDeleted',
+  'runs.rerunError.targetRecordMissing',
+  'runs.rerunError.adminRequired',
+  'runs.rerunError.generic',
   'resultWriteback.title',
   'resultWriteback.hint',
   'resultWriteback.statusField',
@@ -598,6 +797,16 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'resultWriteback.none',
   'resultWriteback.markUnknown',
   'resultWriteback.markIncompatible',
+  'resultWriteback.outcomeValuesTitle',
+  'resultWriteback.outcomeValuesHint',
+  'resultWriteback.onNonApproved',
+  'resultWriteback.rawValuePrefix',
+  'resultWriteback.outcome.approved',
+  'resultWriteback.outcome.rejected',
+  'resultWriteback.outcome.revoked',
+  'resultWriteback.outcome.cancelled',
+  'resultWriteback.markUnknownOption',
+  'resultWriteback.optionMissingBlocker',
 ]
 
 const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
@@ -611,6 +820,24 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'log.retry': { en: 'Retry', zh: '重试' },
   'log.loading': { en: 'Loading logs...', zh: '正在加载日志...' },
   'log.empty': { en: 'No execution logs found.', zh: '暂无执行日志。' },
+  // Stats-bar column (capitalised like Total / Success / Failed) and the run/step badge + filter wording.
+  'log.skipped': { en: 'Skipped', zh: '已跳过' },
+  'log.statusSkipped': { en: 'skipped', zh: '已跳过' },
+  // Values-free reason codes (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). The skipped step:
+  'log.reason.targetRecordMissing': {
+    en: 'The trigger record no longer exists; skipped (nothing was changed).',
+    zh: '触发记录已不存在，已跳过（未做任何修改）',
+  },
+  // …the update_record no-op, which keeps its `success` status (so it does not say "skipped"):
+  'log.reason.targetRecordMissingNoop': {
+    en: 'The trigger record no longer exists; nothing was changed.',
+    zh: '触发记录已不存在，未做任何修改',
+  },
+  // …and a same-base approval-result writeback whose record was gone (`backwriteSkipped`):
+  'log.reason.backwriteTargetRecordMissing': {
+    en: 'Approval result not written back: the trigger record no longer exists (nothing was changed).',
+    zh: '审批结果未写回：触发记录已不存在（未做任何修改）',
+  },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
   'support.clipboardUnavailable': { en: 'Clipboard unavailable', zh: '剪贴板不可用' },
@@ -688,6 +915,20 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.addCondition': { en: '+ Add condition', zh: '+ 添加条件' },
   'condition.addGroup': { en: '+ Add group', zh: '+ 添加条件组' },
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
+  // 客户反馈 2026-09-24 #4b: typed condition values (ConditionValueInput.vue). A checkbox value reads 是 / 否,
+  // never the raw `true` / `false`; a row with no field yet asks for one instead of showing an operator.
+  'condition.selectFieldFirst': { en: 'Select a field first', zh: '请先选择字段' },
+  'condition.booleanTrue': { en: 'Yes', zh: '是' },
+  'condition.booleanFalse': { en: 'No', zh: '否' },
+  'condition.pickDate': { en: 'Pick a date', zh: '选择日期' },
+  'condition.pickPeople': { en: 'Choose people', zh: '选择人员' },
+  'condition.pickRecords': { en: 'Choose records', zh: '选择记录' },
+  'condition.removeValueTitle': { en: 'Remove', zh: '移除' },
+  // A condition_branch row whose field the sheet no longer has (the backend refuses it on every save).
+  'condition.fieldMissing': {
+    en: 'This condition uses a field that was deleted (or hidden). Choose another field or remove this condition.',
+    zh: '该条件引用的字段已删除（或已被隐藏），请重新选择字段或删除此条件。',
+  },
   // W1 G-10: '工作表' was a fifth term (neither old nor ratified) that visually collides with
   // '工作区' (Base) — the label noun follows the dictionary; the ID value itself stays raw.
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标数据表 ID' },
@@ -703,6 +944,18 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.message': { en: 'Message', zh: '消息' },
   'actionConfig.notificationMessagePlaceholder': { en: 'Notification message', zh: '通知内容' },
   'actionConfig.recipients': { en: 'Recipients', zh: '收件人' },
+  'actionConfig.recipientsPlaceholder': { en: 'User IDs, comma or newline separated', zh: '用户 ID，逗号或换行分隔' },
+  // Notification recipient picker (send_notification): the author searches sheet members by name or
+  // email and picks them; only the user id is stored (actionConfig.userIds), never the name/email.
+  'actionConfig.recipientSearch': { en: 'Search users by name or email', zh: '按姓名或邮箱搜索用户' },
+  'actionConfig.recipientSearchPlaceholder': { en: 'Type a name or email to search', zh: '输入姓名或邮箱搜索' },
+  'actionConfig.recipientSearching': { en: 'Searching users…', zh: '正在搜索用户…' },
+  'actionConfig.recipientNoMatch': { en: 'No matching users', zh: '没有匹配的用户' },
+  'actionConfig.recipientUnresolved': { en: 'No matching user for this ID', zh: '未匹配到用户' },
+  'actionConfig.recipientRemove': { en: 'Remove', zh: '移除' },
+  'actionConfig.recipientInactive': { en: 'Inactive users cannot be added', zh: '不能添加已停用用户' },
+  'actionConfig.recipientIdsManual': { en: 'User IDs (manual entry, optional)', zh: '手动填写用户 ID（可选）' },
+  'actionConfig.recipientIdsManualPlaceholder': { en: 'Comma or newline separated user IDs, for users the search cannot find', zh: '搜索不到时可直接填写用户 ID，逗号或换行分隔' },
   'actionConfig.emailRecipientsHint': { en: 'Use comma or newline separated email addresses. Delivery uses the NotificationService email channel.', zh: '使用逗号或换行分隔邮箱地址。投递使用 NotificationService 邮件通道。' },
   'actionConfig.subjectTemplate': { en: 'Subject template', zh: '主题模板' },
   'actionConfig.emailSubjectPlaceholder': { en: '{{record.title}} needs attention', zh: '{{record.title}} 需要处理' },
@@ -743,6 +996,63 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'I understand this permanently deletes the trigger record.',
     zh: '我确认此动作会永久删除触发记录。',
   },
+  // #5739 泛化 round-2 — a loaded delete_record/update_record/lock_record may carry the cross-base target
+  // triple (targetBaseId/targetSheetId/targetRecordId). The editor does not author it but now PRESERVES it
+  // on save, so the screen must stop claiming the action hits "the trigger record in this table".
+  'actionConfig.deleteRecordWarningCrossBase': {
+    en: 'Deletes the TARGET record in another base — not the trigger record in this table. This is permanent and cannot be undone.',
+    zh: '将删除另一个 base 中的目标记录，而不是本表的触发记录。该操作是永久性的，无法撤销。',
+  },
+  'actionConfig.deleteRecordAckCrossBase': {
+    en: 'I understand this permanently deletes the target record in another base.',
+    zh: '我确认此动作会永久删除另一个 base 中的目标记录。',
+  },
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): under a `record.deleted` trigger the trigger record is already gone,
+  // so a same-base update/delete/lock of it can only no-op (and used to self-chain into three execution logs).
+  // The zh sentence is byte-identical to the backend refusal message (automation-service.ts
+  // DELETED_TRIGGER_SELF_MUTATION_MESSAGE) so the inline hint and the 400 read the same.
+  'actionConfig.deletedTriggerSelfMutation': {
+    en: 'When a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked. Pick another action, or another trigger.',
+    zh: '记录删除时触发记录已不存在，不能再修改/删除/锁定它。请改用其他动作，或换一个触发条件。',
+  },
+  'actionConfig.crossBaseTargetWarning': {
+    en: 'This action targets a record in ANOTHER base, not the trigger record in this table. The target below is kept exactly as loaded — this editor cannot change it.',
+    zh: '此动作指向另一个 base 中的记录，而不是本表的触发记录。下方目标按加载时原样保留——本编辑器无法修改。',
+  },
+  'actionConfig.crossBaseTargetIncomplete': {
+    en: 'This cross-base target is incomplete: targetSheetId and targetRecordId are both required once targetBaseId is set. The server refuses to save it and a run would fail — fix the rule through the API.',
+    zh: '跨 base 目标不完整：设置 targetBaseId 后必须同时有 targetSheetId 与 targetRecordId。服务端会拒绝保存、运行也会失败——请通过 API 修复该规则。',
+  },
+  // create_record opts into a cross-base write with `targetBaseId` ALONE (automation-actions.ts
+  // CreateRecordConfig; automation-service.ts validateCrossBaseWriteConfig deliberately skips
+  // create_record), and the target sheet is its own `sheetId`, not a `targetSheetId` sibling — so the
+  // mutate wording above ("a record in ANOTHER base", "kept exactly as loaded") is wrong twice for it:
+  // there is no target RECORD yet, and the sheet id IS editable here.
+  // round-3 (refuter R1/R2): this copy states what the EXECUTOR does, which is NOT "targetBaseId decides
+  // the destination". automation-executor.ts executeCreateRecord: `targetSheetId = config.sheetId ||
+  // context.sheetId`, then evaluateCrossBaseWriteGate resolves the REAL base of that sheet and returns
+  // `{crossBase:false}` as soon as it equals the trigger base - BEFORE the declared claim is looked at.
+  // So a blank/local sheet id creates the record HERE and SUCCEEDS (pinned by
+  // multitable-cross-base-automation-write.test.ts XW-3b: same-base create carrying targetBaseId, run by
+  // an actor with base-write nowhere, asserts success); only a sheet whose real base differs reaches the
+  // claim==truth + base-write checks. "The run fails" / "creates in ANOTHER base" would be a false
+  // promise in the dominant case, and would also mis-describe the legal same-base shape XW-3b pins.
+  'actionConfig.crossBaseCreateTargetWarning': {
+    en: 'This action carries a cross-base declaration (targetBaseId below), kept exactly as loaded — this editor cannot change it. It does not by itself send the record to that base: the executor creates the record in the sheet named by the target sheet id, and only gates the write when that sheet really lives in another base (then targetBaseId must equal that base and the rule owner needs write access there). A target sheet in THIS base is created here and the declaration is ignored.',
+    zh: '此动作带有跨 base 声明（下方 targetBaseId），按加载时原样保留——本编辑器无法修改。它本身并不会把记录写到那个 base：执行器按“目标数据表 ID”指向的数据表创建记录，只有当该数据表确实属于另一个 base 时才会走跨 base 写入门（此时 targetBaseId 必须与之一致，且规则所有者需要对该 base 有写权限）。若目标数据表就在本 base，记录会创建在本 base，该声明被忽略。',
+  },
+  'actionConfig.crossBaseCreateTargetIncomplete': {
+    en: 'This cross-base create has no target sheet id, so it does not say WHERE to create the record. The server accepts the save (it only validates the update/delete/lock triple) and the run does NOT fail: the executor falls back to the trigger sheet in THIS table, the record is created here and targetBaseId is never checked. Set the target sheet id if the record belongs in another base.',
+    zh: '此跨 base 创建没有目标数据表 ID，等于没说明在哪里创建记录。服务端仍会接受保存（它只校验 update/delete/lock 三元组），运行也不会失败：执行器会退回本表的触发数据表，记录创建在本 base，targetBaseId 根本不会被校验。若记录应落在另一个 base，请填写目标数据表 ID。',
+  },
+  // round-3 (refuter R2/R3): the dropdown is no longer WITHHELD for a cross-base create - the roster rows
+  // do carry a base (GET /api/multitable/sheets returns `baseId`, MetaSheet.baseId), only
+  // automationTargetSheetOptions drops it - so the editor scopes the list to the declared base instead of
+  // taking the control away. Withholding it also broke the legal "targetBaseId == this base" shape.
+  'actionConfig.crossBaseCreateSheetScoped': {
+    en: 'This list is scoped to the declared target base: only sheets you can read whose base equals targetBaseId above are offered, so a pick is provably in that base. If none of your readable sheets are in it, the field stays a text box — type the id.',
+    zh: '此列表已按声明的目标 base 筛选：只提供你可读且 base 等于上方 targetBaseId 的数据表，因此所选项可证属于那个 base。若你可读的数据表里没有属于它的，该字段保持为文本框——请直接输入 ID。',
+  },
   'actionConfig.deleteRecordTestRunHint': {
     en: 'Test Run uses a synthetic record and will not delete a real record.',
     zh: '测试运行使用合成记录，不会删除真实记录。',
@@ -767,6 +1077,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
   'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
+  'testRun.savedDirtyHint': { en: 'Test Run uses the last saved version. Save your changes first.', zh: '测试运行使用的是最后一次保存的版本，请先保存当前改动。' },
   'testRun.button': { en: 'Test Run', zh: '测试运行' },
   'testRun.running': { en: 'Running...', zh: '正在运行...' },
   'manager.title': { en: 'Automations', zh: '自动化' },
@@ -791,6 +1102,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
+  // #6155: shown (never blocking) on the automation panel card of a rule that is on or being switched on while its
+  // trigger is record.deleted and its action updates/deletes/locks the trigger record — the same shape the editor
+  // refuses to save ('actionConfig.deletedTriggerSelfMutation'). An existing rule of it runs, and each such action
+  // changes no table record: a delete_record step ends as skipped, an update_record / lock_record step as success,
+  // and the rule's other actions still run — so the sentence names no run status, and it reads the same for one
+  // such action or several.
+  'manager.deletedTriggerSkipNotice': {
+    en: 'This rule runs when a record is deleted, so any update, delete or lock action in it aimed at that deleted record has no effect. If that is not intended, change the action or the trigger.',
+    zh: '此规则在记录删除时运行，所以其中针对这条已删除记录的修改、删除或锁定动作不会生效。如非预期，请改用其他动作，或换一个触发条件。',
+  },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
   'manager.statOk': { en: 'ok', zh: '成功' },
   'manager.statFail': { en: 'fail', zh: '失败' },
@@ -807,6 +1128,25 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
   'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
   'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
+  'manager.testRunError.forbidden': { en: 'You do not have permission to test-run automations on this sheet.', zh: '你没有在此表上测试运行自动化的权限。' },
+  'manager.testRunError.unauthenticated': { en: 'Your session has expired. Sign in again and retry.', zh: '登录已失效，请重新登录后重试。' },
+  'manager.testRunError.sheetDeleted': { en: 'This sheet has been deleted, so the test did not run. Restore the sheet and try again.', zh: '该表已被删除，测试未运行。请先恢复该表后重试。' },
+  'manager.testRunError.notFound': { en: 'The sheet or the sample record was not found.', zh: '表或样例记录不存在。' },
+  'manager.testRunError.ruleNotFound': { en: 'The rule was not found or is disabled. Enable it, or refresh and try again.', zh: '规则不存在或已停用。请确认规则已启用，或刷新后重试。' },
+  'manager.testRunError.serviceUnavailable': { en: 'The service is temporarily unavailable. Try again later.', zh: '服务暂时不可用，请稍后重试。' },
+  'manager.testRunError.permissionCheckFailed': { en: 'Your permissions could not be verified. Try again later.', zh: '无法校验你的权限，请稍后重试。' },
+  'manager.testRunError.invalidMode': { en: 'The test run mode is invalid.', zh: '测试运行模式无效。' },
+  'manager.testRunError.confirmSideEffectsRequired': { en: 'A real test run requires confirming its side effects.', zh: '真实测试运行需要先确认其副作用。' },
+  'manager.testRunError.sampleRecordRequired': { en: 'A real test run requires a readable sample record.', zh: '真实测试运行需要一条可读的样例记录。' },
+  'manager.testRunError.invalidRecordId': { en: 'The sample record ID is invalid.', zh: '样例记录 ID 无效。' },
+  'manager.testRunError.sampleRecordReadFailed': { en: 'The sample record could not be read. Try again later.', zh: '读取样例记录失败，请稍后重试。' },
+  'manager.testRunError.sampleRecordDataInvalid': { en: 'The sample record data is unavailable.', zh: '样例记录数据不可用。' },
+  'manager.testRunError.invalidOperationId': { en: 'The test run request is invalid. Refresh and try again.', zh: '测试运行请求无效，请刷新后重试。' },
+  'manager.testRunError.actionUnsupported': { en: 'This rule has actions that cannot run in a real test run.', zh: '该规则包含不支持真实测试运行的动作。' },
+  'manager.testRunError.recordWriteProtectionDisabled': { en: 'Real test runs of record-changing actions are off until duplicate-write protection is enabled.', zh: '记录写入类动作的重复执行保护未开启，暂不能真实测试运行。' },
+  'manager.testRunError.outboundProtectionDisabled': { en: 'Real test runs of outbound message actions are off until duplicate-send protection is enabled.', zh: '外发消息类动作的重复发送保护未开启，暂不能真实测试运行。' },
+  'manager.testRunError.failed': { en: 'The test run failed on the server. Try again later.', zh: '测试运行在服务端失败，请稍后重试。' },
+  'manager.testRunError.generic': { en: 'Test run request failed. Try again later.', zh: '测试运行请求失败，请稍后重试。' },
   'dingtalk.preset': { en: 'Message preset', zh: '消息预设' },
   'dingtalk.addGroups': { en: 'Add DingTalk groups', zh: '添加钉钉群' },
   'dingtalk.addGroupOption': { en: '-- add DingTalk group --', zh: '-- 添加钉钉群 --' },
@@ -920,7 +1260,54 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
   'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
   'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
+  'runs.resumeError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was resumed. Restore the sheet and try again.", zh: '规则所在的表已被删除，未恢复执行。请先恢复该表后重试。' },
+  'runs.resumeError.executionGone': { en: 'The suspended execution record no longer exists; cannot resume.', zh: '挂起的执行记录已不存在，无法恢复。' },
+  'runs.resumeError.suspensionCursorInvalid': { en: 'The suspension resume cursor is invalid; cannot resume safely. Trigger the rule again.', zh: '挂起游标无效，无法安全恢复，请重新触发该规则。' },
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
+  // P3-4 — whole-execution re-run. Textually distinct from the load-error "Retry" (log.retry, which
+  // only reloads the list) and from Resume above (which continues one suspended step).
+  'runs.rerun': { en: 'Re-run execution', zh: '重新执行整条流程' },
+  'runs.rerunConfirmTitle': { en: 'Re-run this execution?', zh: '重新执行该执行？' },
+  'runs.rerunConfirmRuleLabel': { en: 'Rule:', zh: '规则：' },
+  'runs.rerunConfirmSheetLabel': { en: 'Target sheet:', zh: '目标表：' },
+  'runs.rerunConfirmActionsLabel': { en: 'Actions that will run again:', zh: '将重新执行的动作：' },
+  'runs.rerunConfirmFooter': {
+    en: 'This creates a NEW execution and runs these actions again with live data, using the current rule and the original trigger.',
+    zh: '这将创建一次新的执行，并使用当前规则和原始触发数据重新执行以上动作。',
+  },
+  'runs.rerunConfirmNoSheet': { en: '(no target sheet)', zh: '（无目标表）' },
+  // Round-2 B3 — honest "cannot enumerate", not a boilerplate stand-in that reads like a list.
+  'runs.rerunConfirmUnknownActions': {
+    en: 'CANNOT BE LISTED — this execution has no usable rule snapshot.',
+    zh: '无法列出 —— 该执行没有可用的规则快照。',
+  },
+  'runs.rerunUnknownActionsAckTitle': {
+    en: 'Re-run without knowing which actions will run?',
+    zh: '在无法确认动作的情况下重新执行？',
+  },
+  'runs.rerunUnknownActionsAckMessage': {
+    en: "This execution's actions cannot be listed, so you cannot preview what re-running does. It may write records, call webhooks, or send emails and notifications again. Confirm only if you accept running side effects you cannot see.",
+    zh: '无法列出该执行的动作，因此无法预览重新执行的后果。它可能会再次写入记录、调用 Webhook，或再次发送邮件与通知。仅在你接受执行无法预览的副作用时确认。',
+  },
+  'runs.rerunUnknownActionsAckConfirm': { en: 'Run unlisted actions', zh: '执行无法列出的动作' },
+  'runs.rerunSuccessPrefix': { en: 'Re-run started as new execution:', zh: '重新执行已发起，新执行 ID：' },
+  'runs.rerunSuccessGeneric': { en: 'Re-run started.', zh: '重新执行已发起。' },
+  'runs.rerunError.notFound': { en: 'Execution not found.', zh: '执行不存在。' },
+  'runs.rerunError.notRetryable': { en: 'Only failed or skipped executions can be re-run.', zh: '只有失败或已跳过的执行才能重新执行。' },
+  'runs.rerunError.testRunNotRetryable': { en: 'Manual test runs cannot be re-run.', zh: '手动测试运行不能重新执行。' },
+  'runs.rerunError.missingTriggerEvent': { en: 'The original trigger data is unavailable; cannot re-run.', zh: '原始触发数据不可用，无法重新执行。' },
+  'runs.rerunError.retryWindowExpired': { en: 'This execution is outside the retry evidence window.', zh: '该执行已超出重试证据保留窗口。' },
+  'runs.rerunError.approvalAlreadyCreated': { en: 'This execution already created an approval; it cannot be re-run.', zh: '该执行已创建审批，无法重新执行。' },
+  'runs.rerunError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot re-run.', zh: '规则缺失或已停用，无法重新执行。' },
+  'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
+  'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
+  'runs.rerunError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again.", zh: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
+  'runs.rerunError.targetRecordMissing': {
+    en: 'Every step was skipped because the trigger record no longer exists; re-running cannot change that.',
+    zh: '触发记录已不存在，该执行的所有步骤均已跳过，重新执行也不会有任何变化。',
+  },
+  'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
+  'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
   'resultWriteback.hint': {
     en: 'On approval, write the outcome back onto the source record. Each field is optional.',
@@ -932,6 +1319,26 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'resultWriteback.none': { en: '(not written)', zh: '（不写回）' },
   'resultWriteback.markUnknown': { en: 'unknown field', zh: '未知字段' },
   'resultWriteback.markIncompatible': { en: 'incompatible', zh: '不兼容' },
+  'resultWriteback.outcomeValuesTitle': { en: 'Approval outcome → written value', zh: '审批结果 → 写入值' },
+  'resultWriteback.outcomeValuesHint': {
+    en: 'Optional. Leave a row empty to write the raw outcome (approved / rejected / …). Pick a value so a single-select status field keeps its own options.',
+    zh: '可选。留空则写入英文原文（approved / rejected / …）。选择写入值后，单选状态字段就不必再新增名为 approved 的选项。',
+  },
+  'resultWriteback.onNonApproved': { en: 'Also write non-approved outcomes', zh: '非通过结果也写回' },
+  'resultWriteback.rawValuePrefix': { en: 'Write the raw value', zh: '写入原文' },
+  'resultWriteback.outcome.approved': { en: 'Approved', zh: '通过' },
+  'resultWriteback.outcome.rejected': { en: 'Rejected', zh: '拒绝' },
+  'resultWriteback.outcome.revoked': { en: 'Revoked', zh: '撤销' },
+  'resultWriteback.outcome.cancelled': { en: 'Cancelled', zh: '取消' },
+  // The marked entry in an OUTCOME-value picker is a written VALUE, not a field — 'markUnknown' above
+  // ("unknown field") belongs to the three FIELD pickers and would mislabel it.
+  'resultWriteback.markUnknownOption': { en: 'not an option', zh: '不在选项中' },
+  // #5742 save blocker — the client mirror of the backend's select-option check. Placeholders are filled by
+  // automationResultWritebackOptionMissingMessage below (field name / written value / outcome label).
+  'resultWriteback.optionMissingBlocker': {
+    en: 'Status field "{field}" has no option "{value}" ({outcome}) — pick the value to write below.',
+    zh: '状态字段「{field}」的选项不含「{value}」（{outcome}），请在下方选择要写入的选项',
+  },
 }
 
 type UnknownAutomationString = string & Record<never, never>
@@ -939,6 +1346,36 @@ type UnknownAutomationString = string & Record<never, never>
 export function automationLabel(key: AutomationLabelKey, isZh: boolean): string {
   const entry = LABELS[key]
   return isZh ? entry.zh : entry.en
+}
+
+/** #5742: the four terminal approval outcomes a result-writeback can carry, in editor order. */
+export const AUTOMATION_RESULT_WRITEBACK_OUTCOMES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+export type AutomationResultWritebackOutcome = typeof AUTOMATION_RESULT_WRITEBACK_OUTCOMES[number]
+
+export function automationResultWritebackOutcomeLabel(
+  outcome: AutomationResultWritebackOutcome | UnknownAutomationString,
+  isZh: boolean,
+): string {
+  if (outcome === 'approved') return automationLabel('resultWriteback.outcome.approved', isZh)
+  if (outcome === 'rejected') return automationLabel('resultWriteback.outcome.rejected', isZh)
+  if (outcome === 'revoked') return automationLabel('resultWriteback.outcome.revoked', isZh)
+  if (outcome === 'cancelled') return automationLabel('resultWriteback.outcome.cancelled', isZh)
+  return String(outcome)
+}
+
+/**
+ * #5742 save blocker text: the client mirror of the backend select-option check
+ * (resultWritebackFieldTypeError). Names the field, the value that WOULD be written (the resolved
+ * outcomeValues mapping, or the raw outcome when no mapping is declared) and which outcome it is for.
+ */
+export function automationResultWritebackOptionMissingMessage(
+  params: { fieldName: string; value: string; outcome: AutomationResultWritebackOutcome | UnknownAutomationString },
+  isZh: boolean,
+): string {
+  return automationLabel('resultWriteback.optionMissingBlocker', isZh)
+    .replace('{field}', params.fieldName)
+    .replace('{value}', params.value)
+    .replace('{outcome}', automationResultWritebackOutcomeLabel(params.outcome, isZh))
 }
 
 export function automationStatusLabel(status: AutomationStatus | UnknownAutomationString, isZh: boolean): string {
@@ -953,6 +1390,48 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'rejected') return automationLabel('status.rejected', isZh)
   if (status === 'errored') return automationLabel('status.errored', isZh)
   return String(status)
+}
+
+/** The backend's values-free "trigger record is gone" code (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). */
+const TARGET_RECORD_MISSING_REASON = 'target_record_missing'
+
+export interface AutomationStepOutputView {
+  /** Localised sentence for a recognised values-free reason code in the step output, else null. */
+  reason: string | null
+  /** The output with the recognised marker keys removed (null when nothing is left), else the output as-is. */
+  output: unknown
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 final review F1 — a step's `output` is rendered as one-line JSON, so the backend's
+ * internal reason codes reached a zh customer verbatim ("reason":"target_record_missing"). This recognises the
+ * three values-free markers the #3 fix writes and returns a sentence for each, plus the output WITHOUT those
+ * keys (ids and any other keys stay raw — this module's scope keeps ids raw). Anything else is untouched:
+ *   { reason: 'target_record_missing', noop: true } → update_record no-op (status stays success)
+ *   { reason: 'target_record_missing' }             → skipped same-base delete of a vanished trigger record
+ *   { backwriteSkipped: 'target_record_missing' }   → same-base approval-result writeback found its record gone
+ * A cross-base `backwriteSkipped` carries an error sentence, not this code, and is left raw on purpose.
+ */
+export function automationStepOutputView(output: unknown, isZh: boolean): AutomationStepOutputView {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return { reason: null, output }
+  const record = output as Record<string, unknown>
+  let key: AutomationLabelKey | null = null
+  let strip: string[] = []
+  if (record.reason === TARGET_RECORD_MISSING_REASON) {
+    if (record.noop === true) {
+      key = 'log.reason.targetRecordMissingNoop'
+      strip = ['reason', 'noop']
+    } else {
+      key = 'log.reason.targetRecordMissing'
+      strip = ['reason']
+    }
+  } else if (record.backwriteSkipped === TARGET_RECORD_MISSING_REASON) {
+    key = 'log.reason.backwriteTargetRecordMissing'
+    strip = ['backwriteSkipped']
+  }
+  if (!key) return { reason: null, output }
+  const rest = Object.fromEntries(Object.entries(record).filter(([k]) => !strip.includes(k)))
+  return { reason: automationLabel(key, isZh), output: Object.keys(rest).length > 0 ? rest : null }
 }
 
 export function automationActionTypeLabel(type: AutomationActionType | UnknownAutomationString, isZh: boolean): string {
@@ -986,6 +1465,9 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
       return isZh ? '条件分支' : 'Condition branch'
     case 'parallel_branch':
       return isZh ? '并行分支' : 'Parallel branch'
+    case 'write_approval_form_values':
+      // Product copy: create-from-approval (FWB-1). Technical action id remains write_approval_form_values.
+      return isZh ? '审批数据回写' : 'Write back approval data'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:
@@ -1037,16 +1519,64 @@ export function automationTriggerConditionLabel(condition: AutomationTriggerCond
   }
 }
 
-export function automationCronPresetLabel(value: AutomationCronPresetValue | UnknownAutomationString, isZh: boolean): string {
+// ---------------------------------------------------------------------------------------------------------
+// A7a (客户反馈 2026-09-24 #4c): schedule-trigger time copy. Every string that names a time says WHICH
+// clock it is on. A rule on the business timezone never mentions UTC; a legacy rule still on UTC says so
+// and shows the business-time equivalent. The time math lives in automation-trigger-timezone.ts.
+// ---------------------------------------------------------------------------------------------------------
+
+/** Human name of a trigger timezone: Asia/Shanghai → 北京时间 / Beijing time; UTC → UTC; else the IANA id. */
+export function automationTimezoneDisplayName(timezone: string, isZh: boolean): string {
+  if (timezone === 'Asia/Shanghai') return isZh ? '北京时间' : 'Beijing time'
+  if (isUtcTriggerTimezone(timezone)) return 'UTC'
+  return timezone
+}
+
+function dayShiftPrefix(dayShift: number, isZh: boolean): string {
+  if (dayShift > 0) return isZh ? '次日 ' : 'next day '
+  if (dayShift < 0) return isZh ? '前一天 ' : 'previous day '
+  return ''
+}
+
+/** "00:00 (北京时间)" / "00:00 UTC (北京时间 08:00)" — a wall-clock time labelled with its clock. */
+function automationClockTimeLabel(time: string, timezone: string, isZh: boolean): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (timezone === business) return isZh ? `${time}（${businessName}）` : `${time} (${businessName})`
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const inBusiness = utcTimeOfDayInZone(time, business)
+    const prefix = dayShiftPrefix(inBusiness.dayShift, isZh)
+    return isZh
+      ? `${time} UTC（${businessName} ${prefix}${inBusiness.time}）`
+      : `${time} UTC (${prefix}${inBusiness.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `${time}（${name}）` : `${time} (${name})`
+}
+
+/**
+ * Cron preset labels. The two wall-clock presets name their clock (A7a: the old "每天午夜 / Daily at
+ * midnight" was untrue for the UTC rules the editor used to save — `0 0 * * *` fired at 08:00 Beijing).
+ * `timezone` = the rule's effective timezone; omitted = the business timezone new rules are saved with.
+ */
+export function automationCronPresetLabel(
+  value: AutomationCronPresetValue | UnknownAutomationString,
+  isZh: boolean,
+  timezone: string = automationBusinessTimezone(),
+): string {
   switch (value) {
     case '*/5 * * * *':
       return isZh ? '每 5 分钟' : 'Every 5 minutes'
     case '0 * * * *':
       return isZh ? '每小时' : 'Every hour'
-    case '0 0 * * *':
-      return isZh ? '每天午夜' : 'Daily at midnight'
-    case '0 0 * * 1':
-      return isZh ? '每周一' : 'Weekly (Monday)'
+    case '0 0 * * *': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每天 ${at}` : `Daily at ${at}`
+    }
+    case '0 0 * * 1': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每周一 ${at}` : `Weekly, Monday ${at}`
+    }
     case 'custom':
       return isZh ? '自定义' : 'Custom'
     default:
@@ -1054,7 +1584,257 @@ export function automationCronPresetLabel(value: AutomationCronPresetValue | Unk
   }
 }
 
-export function automationConditionOperatorLabel(operator: ConditionOperator | UnknownAutomationString, isZh: boolean): string {
+/** The cron section's clock line. */
+export function automationCronTimezoneHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `执行时间按${name}计算（24 小时制）。` : `Run times are on ${name} (24-hour clock).`
+}
+
+/** Label above the reminder-time picker: plain "提醒时间" on the business timezone, else names the clock. */
+export function automationReminderTimeLabel(timezone: string, isZh: boolean): string {
+  if (timezone === automationBusinessTimezone()) return isZh ? '提醒时间' : 'Reminder time'
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `提醒时间（${name}）` : `Reminder time (${name})`
+}
+
+/** Placeholder of the reminder-time picker (an empty value = the backend's 09:00 default). */
+export function automationReminderTimePlaceholder(isZh: boolean): string {
+  return isZh ? '09:00（默认）' : '09:00 (default)'
+}
+
+export function automationReminderTimeHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `每天到这个时间（${name}）检查一次，到期的记录会收到提醒；系统重启错过了，当天会补发。`
+    : `Checked once a day at this time (${name}); records that are due get their reminder. If a restart misses it, it is sent later the same day.`
+}
+
+const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function exampleDay(day: { year: number; month: number; day: number }, anchorYear: number, isZh: boolean): string {
+  if (isZh) return day.year === anchorYear ? `${day.month}月${day.day}日` : `${day.year}年${day.month}月${day.day}日`
+  const base = `${EN_MONTHS[day.month - 1]} ${day.day}`
+  return day.year === anchorYear ? base : `${base}, ${day.year}`
+}
+
+/** The live example line: "例：日期为 9月30日、提前 3 天 → 9月27日 09:00 提醒". */
+export function automationDateReminderExampleText(
+  example: DateReminderExample,
+  timezone: string,
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const anchorYear = example.anchor.year
+  const anchor = exampleDay(example.anchor, anchorYear, isZh)
+  const reminderDay = exampleDay(example.reminder, anchorYear, isZh)
+  const offset = example.offsetDays === 0
+    ? (isZh ? '当天' : 'same day')
+    : example.direction === 'after'
+      ? (isZh ? `延后 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} after`)
+      : (isZh ? `提前 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} before`)
+  if (timezone === business) {
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} 提醒`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time}`
+  }
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const businessName = automationTimezoneDisplayName(business, isZh)
+    const businessDay = exampleDay(example.business, anchorYear, isZh)
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} UTC 提醒（即${businessName} ${businessDay} ${example.business.time}）`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} UTC (${businessDay} ${example.business.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time}（${name}）提醒`
+    : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} (${name})`
+}
+
+function offsetDurationText(offsetMinutes: number, isZh: boolean): string {
+  const abs = Math.abs(offsetMinutes)
+  const hours = Math.floor(abs / 60)
+  const minutes = abs % 60
+  if (isZh) return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+  const h = `${hours} hour${hours === 1 ? '' : 's'}`
+  return minutes ? `${h} ${minutes} minutes` : h
+}
+
+/** Business-clock run times of a cron rule, "次日 " / "next day " marked only when the expression restricts days. */
+function cronRunTimesText(
+  runs: Array<{ time: string; dayShift: number }>,
+  restrictsDays: boolean,
+  isZh: boolean,
+): { text: string; marked: boolean } {
+  // A daily expression has no "day" to be relative to: clock order. A day-restricted one: same-day runs first.
+  const sorted = [...runs].sort((a, b) =>
+    (restrictsDays ? a.dayShift - b.dayShift : 0) || a.time.localeCompare(b.time))
+  let marked = false
+  const items = sorted.map((run) => {
+    if (!restrictsDays || run.dayShift === 0) return run.time
+    marked = true
+    return `${dayShiftPrefix(run.dayShift, isZh)}${run.time}`
+  })
+  return { text: items.join(isZh ? '、' : ', '), marked }
+}
+
+function cronDayMarkNote(isZh: boolean): string {
+  return isZh ? '（“次日”指表达式所写日期的第二天）' : ' ("next day" = the day after the date the expression names)'
+}
+
+/** Notice on a legacy rule that is still on UTC (saved before the editor wrote a timezone). */
+export function automationLegacyUtcScheduleNotice(
+  input:
+    | { triggerType: 'schedule.date_field'; timeOfDay: string }
+    | { triggerType: 'schedule.cron'; cron: CronSwitchImpact },
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (input.triggerType === 'schedule.date_field') {
+    const at = automationClockTimeLabel(input.timeOfDay, 'UTC', isZh)
+    return isZh
+      ? `这条规则创建较早，按 UTC 计时：当前提醒时间 ${at}。可一键改为${businessName}。`
+      : `This rule was created earlier and runs on UTC: the reminder time is ${at}. You can switch it to ${businessName}.`
+  }
+  const { cron } = input
+  const quoted = cron.expression ? (isZh ? `“${cron.expression}”` : ` "${cron.expression}"`) : ''
+  if (cron.runs) {
+    const before = cronRunTimesText(cron.runs.map((run) => ({ time: run.before, dayShift: run.beforeDayShift })), cron.restrictsDays, isZh)
+    const note = before.marked ? cronDayMarkNote(isZh) : ''
+    return isZh
+      ? `这条规则创建较早，cron 表达式${quoted}按 UTC 计时，实际在${businessName} ${before.text} 执行${note}。可一键改为${businessName}。`
+      : `This rule was created earlier and its cron expression${quoted} runs on UTC, i.e. at ${before.text} ${businessName}${note}. You can switch it to ${businessName}.`
+  }
+  const duration = offsetDurationText(cron.offsetMinutes, isZh)
+  const sign = cron.offsetMinutes >= 0
+  return isZh
+    ? `这条规则创建较早，cron 表达式${quoted}按 UTC 计时，表达式里的时间${sign ? '加' : '减'} ${duration}才是${businessName}。可一键改为${businessName}。`
+    : `This rule was created earlier and its cron expression${quoted} runs on UTC: ${sign ? 'add' : 'subtract'} ${duration} to the times in it to get ${businessName}. You can switch it to ${businessName}.`
+}
+
+export function automationSwitchToBusinessTimezoneLabel(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}` : `Switch to ${name}`
+}
+
+export function automationSwitchToBusinessTimezoneTitle(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}？` : `Switch to ${name}?`
+}
+
+const ZH_DAY_COUNT = ['零', '一', '两', '三']
+
+/** A whole-day shift of a reminder: 0 = same moment, < 0 = earlier, > 0 = later. */
+function reminderShiftText(days: number, isZh: boolean): string {
+  const abs = Math.abs(days)
+  if (isZh) {
+    if (days === 0) return '提醒时刻不变'
+    return `会比原来${days < 0 ? '早' : '晚'}${ZH_DAY_COUNT[abs] ?? String(abs)}天提醒`
+  }
+  if (days === 0) return 'fire at the same moment as before'
+  return `fire ${abs === 1 ? 'one day' : `${abs} days`} ${days < 0 ? 'earlier' : 'later'} than before`
+}
+
+/**
+ * Confirm text for the explicit UTC → business-timezone switch. Every sentence is generated from the computed
+ * impact (automation-trigger-timezone.ts legacyUtcSwitchImpact / analyzeCronForBusinessSwitch), which mirrors
+ * the backend's day-bucketing; the web spec cross-checks it against the backend function. `fieldType` = the
+ * rule's date field type when known (the backend buckets a `date` field by its literal day and a `dateTime`
+ * field by the zone's calendar day); unknown → both sentences.
+ */
+export function automationSwitchToBusinessTimezoneConfirm(
+  input:
+    | { triggerType: 'schedule.date_field'; impact: LegacyUtcSwitchImpact; fieldType?: string | null }
+    | { triggerType: 'schedule.cron'; cron: CronSwitchImpact },
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (input.triggerType === 'schedule.cron') {
+    const { cron } = input
+    const quoted = isZh ? `“${cron.expression}”` : `"${cron.expression}"`
+    const duration = offsetDurationText(cron.offsetMinutes, isZh)
+    const direction = cron.offsetMinutes >= 0 ? (isZh ? '早' : 'earlier') : (isZh ? '晚' : 'later')
+    if (cron.runs) {
+      const before = cronRunTimesText(cron.runs.map((run) => ({ time: run.before, dayShift: run.beforeDayShift })), cron.restrictsDays, isZh)
+      const after = cronRunTimesText(cron.runs.map((run) => ({ time: run.after, dayShift: 0 })), cron.restrictsDays, isZh)
+      const note = before.marked ? cronDayMarkNote(isZh) : ''
+      return isZh
+        ? `cron 表达式${quoted}不变，改按${businessName}计时：原来在${businessName} ${before.text} 执行${note}，改后在${businessName} ${after.text} 执行，每次都比原来${direction} ${duration}。保存后生效。`
+        : `The cron expression ${quoted} stays the same but runs on ${businessName}: it used to run at ${before.text} ${businessName}${note} and will run at ${after.text} ${businessName}, ${duration} ${direction} each time. Takes effect after saving.`
+    }
+    return isZh
+      ? `cron 表达式${quoted}不变，改按${businessName}计时，每次执行都会比原来${direction} ${duration}。保存后生效。`
+      : `The cron expression ${quoted} stays the same but runs on ${businessName}, so every run moves ${duration} ${direction}. Takes effect after saving.`
+  }
+
+  const { impact } = input
+  const showDate = input.fieldType !== 'dateTime'
+  const showDateTime = input.fieldType !== 'date' && impact.dateTimeWindow !== null
+  const parts: string[] = []
+  const crossed = impact.dayShift > 0
+    ? (isZh ? '（跨到次日）' : ' (the next day)')
+    : impact.dayShift < 0
+      ? (isZh ? '（跨到前一天）' : ' (the previous day)')
+      : ''
+  parts.push(isZh
+    ? `提醒时间将由 ${impact.fromTimeOfDay} UTC 换算为${businessName} ${impact.toTimeOfDay}${crossed}。`
+    : `The reminder time will be converted from ${impact.fromTimeOfDay} UTC to ${impact.toTimeOfDay} ${businessName}${crossed}.`)
+  let anyShift = false
+  if (showDate) {
+    const days = impact.dateFieldShiftDays
+    if (days !== 0) anyShift = true
+    const abs = Math.abs(days)
+    parts.push(isZh
+      ? `“日期”字段：${days === 0 ? '每条提醒的时刻不变' : `每条提醒都会比原来${days < 0 ? '早' : '晚'}${ZH_DAY_COUNT[abs] ?? String(abs)}天`}。`
+      : `On a "date" field, every reminder ${days === 0 ? 'fires at the same moment as before' : `fires ${abs === 1 ? 'one day' : `${abs} days`} ${days < 0 ? 'earlier' : 'later'} than before`}.`)
+  }
+  if (showDateTime && impact.dateTimeWindow) {
+    const { start, end } = impact.dateTimeWindow
+    const inside = impact.dateTimeInsideShiftDays
+    const outside = impact.dateTimeOutsideShiftDays
+    if (inside !== 0 || outside !== 0) anyShift = true
+    const windowText = start === '00:00'
+      ? (isZh ? `${start} 至 ${end} 之前` : `before ${end}`)
+      : (isZh ? `${start} 及以后` : `${start} or later`)
+    parts.push(isZh
+      ? `“日期时间”字段：${businessName} ${windowText}的记录${reminderShiftText(inside, true)}，其余记录${reminderShiftText(outside, true)}。`
+      : `On a "date & time" field, records whose ${businessName} is ${windowText} ${reminderShiftText(inside, false)}; all other records ${reminderShiftText(outside, false)}.`)
+  }
+  if (anyShift) {
+    parts.push(isZh
+      ? '提醒日变了的记录，保存后可能会多提醒一次。'
+      : 'Records whose reminder day changes may get one extra reminder after you save.')
+  }
+  return parts.join(isZh ? '' : ' ')
+}
+
+/**
+ * Operator label. With a `fieldType` of a date / date-time field (客户反馈 2026-09-24 #4b) the ordering
+ * operators read in time — 晚于 / 早于 (after / before), 不早于 / 不晚于 (on or after / on or before) — instead
+ * of 大于 / 小于; the stored operator CODES are unchanged. Which types are temporal is decided in ONE place,
+ * automation-condition-values.ts `isTemporalConditionFieldType`, built on the same date-time type predicate the
+ * value coercion uses, so the labels and the saved value shape cannot disagree on what is a date-time.
+ */
+export function automationConditionOperatorLabel(
+  operator: ConditionOperator | UnknownAutomationString,
+  isZh: boolean,
+  fieldType?: string | null,
+): string {
+  if (fieldType && isTemporalConditionFieldType(fieldType)) {
+    switch (operator) {
+      case 'greater_than':
+        return isZh ? '晚于' : 'After'
+      case 'less_than':
+        return isZh ? '早于' : 'Before'
+      case 'greater_or_equal':
+        return isZh ? '不早于' : 'On or after'
+      case 'less_or_equal':
+        return isZh ? '不晚于' : 'On or before'
+      default:
+        break
+    }
+  }
   switch (operator) {
     case 'equals':
       return isZh ? '等于' : 'Equals'
@@ -1090,6 +1870,8 @@ export function automationConditionValuePlaceholder(widget: AutomationConditionV
   if (widget === 'number') return isZh ? '数字' : 'Number'
   if (widget === 'date') return 'YYYY-MM-DD'
   if (widget === 'dateTime') return isZh ? '日期和时间' : 'Date and time'
+  if (widget === 'person') return isZh ? '人员' : 'People'
+  if (widget === 'link') return isZh ? '关联记录' : 'Linked records'
   return isZh ? '值' : 'Value'
 }
 
@@ -1113,7 +1895,9 @@ export function automationCardActionSummary(
   fieldName: string,
   isZh: boolean,
 ): string {
-  if (actionType === 'update_field') {
+  // F9: `update_field` folded into `update_record`, so a single-field update still names its field
+  // here instead of degrading to the bare action label. No field name ⇒ the plain label, as before.
+  if (actionType === 'update_field' || actionType === 'update_record') {
     const rawField = fieldName.trim()
     if (!rawField) return automationActionTypeLabel(actionType, isZh)
     return isZh ? `更新“${rawField}”` : `Update "${rawField}"`

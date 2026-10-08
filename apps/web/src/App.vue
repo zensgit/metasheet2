@@ -2,7 +2,7 @@
   <div id="app">
     <nav class="app-nav" v-if="showNav">
       <div class="nav-brand">
-        <span class="brand-text">{{ brandText }}</span>
+        <router-link :to="brandHomePath" class="brand-text brand-link" data-testid="nav-brand-link">{{ brandText }}</router-link>
       </div>
       <div class="nav-links">
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -12,14 +12,54 @@
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <!-- P1b slice 1: the 待办 badge is a SIBLING of the link, never a child of it, so the
+                 nav link's own text stays exactly the label (see approvalNavTodoBadge.spec.ts).
+                 The two are wrapped in ONE flex item so `.nav-links`' 8px gap falls between this
+                 pair and the NEXT entry, not between the label and its own badge.
+                 Round 2: the badge mounts inside ShellChromeBoundary (a failure there renders the
+                 nav WITHOUT the badge instead of blanking the shell) and only off a public route
+                 (item 5 — mirroring this component's own onMounted network suppression). Neither
+                 wrapper is a DOM element, so the badge's parent is still this flex item. -->
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
+            <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
+                 badge above is now DATA-wired to the todo center's own aggregate, but that alone
+                 left the page it aggregates into reachable only by typing /todo — no nav entry
+                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
+                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
+                 made the badge's own href — deliberately, so this addition cannot regress the
+                 existing "badge is a sibling of the link, never a child of it" contract the P1b
+                 comment above and approvalNavTodoBadge.spec.ts already pin. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
+                 failure cannot blank the shell, and gated
+                 on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
+            <span v-if="canUseTasks" class="nav-tasks">
+              <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+              <ShellChromeBoundary>
+                <TasksTodoBadge v-if="!isPublicRoute" :label="navLabels.tasksTodo" />
+              </ShellChromeBoundary>
+            </span>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -34,9 +74,25 @@
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
+            <!-- P1b slice 3 / round-2 item 1: the admin 批量转交 page. The gate is CONJUNCTIVE —
+                 `canManageUsers` (token-derived, the same gate its sibling admin entries use, and
+                 what keeps an ordinary user's shell from issuing the read at all) AND the SERVER's
+                 own DB-backed approval-administrator capability, which the entry component
+                 resolves. The two predicates genuinely differ; the list scope binds the second, so
+                 the second is what decides whether this page can show another approver's queue. -->
+            <ShellChromeBoundary v-if="canManageUsers && !isPublicRoute">
+              <ApprovalBatchTransferNavEntry :label="navLabels.approvalBatchTransfer" />
+            </ShellChromeBoundary>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
-            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
-            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
+            <!-- O2 / R-11: the nav link is a control like any other — it follows the route's own gate
+                 (stock-prep:read), not the Data Factory's integration:write. Left on canUseIntegration
+                 it would be a link that renders for a principal the guard immediately redirects: the
+                 "visible but not actionable" failure moved from the page into the navigation. -->
+            <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
+            <!-- 整合切片 (2026-09-09): the 外接数据源 nav entry is gone — that page is now the
+                 连接管理 section of 数据工厂 above, and '/data-sources' redirects there. The
+                 zh/en `navLabels.dataSources` entries are kept in both label maps below, but
+                 this shell has no consumer for them any more. -->
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -58,7 +114,17 @@
           </select>
         </label>
         <template v-if="isLoggedIn">
-          <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+          <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
+          <!-- P1b slice 2: the SELF-SERVICE delegation entry. `/my-delegation` is requiresAuth-only
+               (the delegator is forced to the actor server-side), but until now its only entry point
+               in the whole app was TemplateCenterView's 委托管理 button — which is gated on
+               `approval-templates:manage` and points at the ADMIN surface `/approval-delegations`.
+               An ordinary approver therefore had no way to reach their own delegation page except by
+               typing the URL. This is the account-area (user menu) counterpart; the admin button is
+               left exactly as it was. Deliberately narrowed to approvals:read holders — the same
+               gate the 审批中心 link uses — so the account area stays quiet for principals who
+               cannot see approvals at all. -->
+          <router-link v-if="canUseApprovals" to="/my-delegation" class="nav-link" data-testid="nav-my-delegation">{{ navLabels.myDelegation }}</router-link>
           <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -77,14 +143,20 @@ import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
+import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
+import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
+import { canReachStockPrepWorkbench } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
+import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures, resolveHomePath } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
@@ -110,9 +182,27 @@ const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
 })
+// O2 / R-11: `/stock-prep` reachability is exactly the workbench's own gate — `satisfiesStockPrepAccess`
+// over this principal, via `canReachStockPrepWorkbench` — NOT the app-wide `hasPermission` probe:
+// that probe expands `stock-prep:*` / `*:*` / `:write` and treats `users:write` as admin, none of which
+// the server does, so the link used to render for three principals every panel behind it refuses and to
+// stay hidden from a bare `integration:admin` the server serves in full. The route guard
+// (`buildStockPrepAwarePermissionProbe`) now asks the same question, so nav and guard cannot drift.
+const canUseStockPreparation = computed(() => {
+  void route.fullPath
+  return canReachStockPrepWorkbench(getAccessSnapshot())
+})
 const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
+})
+// The tasks feature must be switched on (session `tasks`, from the server's TASKS_ENABLED) AND the
+// caller must hold tasks:read. Without the feature check an administrator saw 任务 with a "!" badge
+// on a server where /api/tasks is not mounted, and every page load issued a 404 pending-count read.
+// The feature is checked first so that, while it is off, nothing about tasks renders or polls.
+const canUseTasks = computed(() => {
+  void route.fullPath
+  return hasFeature('tasks') && hasPermission('tasks:read')
 })
 const isLoggedIn = computed(() => {
   void route.fullPath
@@ -126,6 +216,10 @@ const navLabels = computed(() => {
       multitable: '多维表',
       workflows: '流程',
       approvals: '审批中心',
+      // Values-free: names the surface, never the count or any row content.
+      approvalTodo: '待办审批',
+      // B-2: the nav entry point into the cross-source todo center page (/todo).
+      todoCenter: '待办中心',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -133,6 +227,10 @@ const navLabels = computed(() => {
       adminAudit: '管理审计',
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
+      approvalBatchTransfer: '批量转交',
+      tasks: '任务',
+      // Values-free: names the surface, never the count.
+      tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -140,6 +238,7 @@ const navLabels = computed(() => {
       plm: 'PLM',
       audit: '审计',
       plmWorkbench: 'PLM 工作台',
+      myDelegation: '我的委托',
       mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
@@ -150,6 +249,8 @@ const navLabels = computed(() => {
     multitable: 'Multitable',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    approvalTodo: 'Pending approvals',
+    todoCenter: 'Todo Center',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
@@ -157,6 +258,9 @@ const navLabels = computed(() => {
     adminAudit: 'Admin Audit',
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
+    approvalBatchTransfer: 'Batch Transfer',
+    tasks: 'Tasks',
+    tasksTodo: 'Pending tasks',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',
@@ -164,6 +268,7 @@ const navLabels = computed(() => {
     plm: 'PLM',
     audit: 'Audit',
     plmWorkbench: 'PLM Workbench',
+    myDelegation: 'My Delegation',
     mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
@@ -176,12 +281,32 @@ const brandText = computed(() => {
   return 'MetaSheet'
 })
 
+// Owner request (2026-09-14): the top-left brand is the way back to the landing page. It goes
+// through resolveHomePath() so the two FOCUSED product modes keep their own home ('/attendance' /
+// '/plm') and the router guard still decides reachability. For the ordinary platform mode this is
+// a top-nav entry to '/home' (我的应用) — superseding the #5392 note that '/home' had none.
+const brandHomePath = computed(() => {
+  void attendanceFocused.value
+  void plmWorkbenchFocused.value
+  return resolveHomePath()
+})
+
 const documentTitle = computed(() => resolveRouteDocumentTitle(route.meta, isZh.value))
 
 const accountEmail = computed(() => {
   void route.fullPath
   return getAccessSnapshot().email
 })
+
+// The header keeps this narrow (nav-user's max-width / flex-shrink); a plain end-ellipsis
+// hides the suffix that actually distinguishes long account identifiers (every
+// 'synth-w4w7-<org>-u<NN>@w4w7-soak.synthetic' staging account shares the same 20-char
+// domain, so a plain trailing-N-chars truncation keeps only the domain and collapses every
+// account to the same text). truncateAccountIdentity() drops the domain for email-shaped
+// values that need truncating and keeps the identity-bearing local-part tail instead — the
+// only browser-measured candidate that survives down to the narrowest tested viewport (see
+// PR body). The full value is still on the title attribute above.
+const accountEmailDisplay = computed(() => truncateAccountIdentity(accountEmail.value))
 
 async function logout(): Promise<void> {
   const token = getToken()
@@ -278,6 +403,16 @@ html, body {
   white-space: nowrap;
 }
 
+.brand-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.brand-link:hover,
+.brand-link:focus-visible {
+  text-decoration: underline;
+}
+
 .nav-links {
   display: flex;
   flex: 1 1 auto;
@@ -288,6 +423,15 @@ html, body {
   scrollbar-width: none;
 }
 
+/* P1b slice 1: groups the 审批中心 link with its 待办 badge into a single `.nav-links` flex item.
+   Without it the badge is a peer entry — `.nav-links` puts its 8px gap on BOTH sides of it, so the
+   badge sits as far from its own label as from the next nav entry. */
+.nav-approvals {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
 .nav-links::-webkit-scrollbar {
   display: none;
 }
@@ -295,7 +439,18 @@ html, body {
 .nav-actions {
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
+  /* flex-shrink: 0 (not 1). .nav-links is the sibling built to absorb width loss — it has
+     its own overflow-x: auto and scrolls internally. If .nav-actions were allowed to
+     shrink (flex: 0 1 auto), the flex algorithm can squeeze this container narrower than
+     its content's post-floor width (nav-locale + nav-user's 14ch min-width + gaps), and
+     since .nav-actions itself has no overflow clipping, that content spills past the
+     container edge into page-level horizontal scroll (browser-measured: 14/67/84 px of
+     document.documentElement.scrollWidth overhang at 900/800/769 px with the 5-link zh
+     nav, 190 px at 769 with the ~17-link admin nav). flex: 0 0 auto keeps .nav-actions at
+     its natural content width and pushes the crunch onto .nav-links instead, which
+     already handles it via internal scroll — re-verified zero page-level scroll at
+     1440/1024/900/800/769 for both navsets after this change. */
+  flex: 0 0 auto;
   gap: 12px;
   min-width: 0;
 }
@@ -304,7 +459,15 @@ html, body {
   color: #6b7280;
   font-size: 13px;
   max-width: clamp(120px, 18vw, 260px);
-  min-width: 0;
+  /* Without a floor, flex-shrink (nav-user is the only shrinkable child of nav-actions —
+     its siblings are all flex: 0 0/1 auto) can crush this to 0 px well before the
+     clamp()'s 120 px minimum is ever reached (measured: 0 px at 800/900px-narrower
+     viewports with a normal nav-link count). 14ch is browser-measured sufficient to keep
+     the truncateAccountIdentity() output ('…' + up to 12 local-part chars, 13 chars) fully
+     on screen for the self-service nav (1-link and 5-link) down to 769 px — re-measure if
+     used behind a much wider nav (e.g. the ~17-link admin nav). Pair with .nav-actions's
+     flex: 0 0 auto (below) so this floor doesn't just push overflow out to the page. */
+  min-width: 14ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

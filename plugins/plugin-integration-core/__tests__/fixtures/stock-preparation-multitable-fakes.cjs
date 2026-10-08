@@ -28,12 +28,26 @@ const { createHash } = require('node:crypto')
 const path = require('node:path')
 
 const {
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-templates.cjs'))
 
+// The canonical MAIN template rides too: W4 carry's applyCarryViaConfirm AND the 按项目导出物料
+// Excel export both need their scoped records API to resolve the canonical sheet's logical field
+// ids exactly like the MVP tables' — mirroring the production MVP_TEMPLATE_BY_OBJECT_ID registry.
+// Purely ADDITIVE relative to the original MVP-only map: does not change resolution for any objectId
+// already registered.
 const TEMPLATE_BY_OBJECT_ID = new Map(
-  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => [template.objectId, template]),
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
+    .map((template) => [template.objectId, template]),
 )
+
+// Byte-for-byte the platform's derivation for a SHEET (stableMetaId + getObjectSheetId).
+function derivedSheetId(projectId, objectId) {
+  const digest = createHash('sha1').update([projectId, objectId].join(':')).digest('hex').slice(0, 24)
+  return `sheet_${digest}`.slice(0, 50)
+}
 
 // Byte-for-byte the platform's derivation (multitable/provisioning.ts stableMetaId + getObjectFieldId).
 function physicalFieldId(projectId, objectId, fieldId) {
@@ -71,8 +85,8 @@ function assertKnownFieldIds(projectId, objectId, keys) {
 // Fake provisioning over a { objectId -> sheetId } registry, scoped to ONE staging project (a lookup
 // with any other projectId misses, mirroring the real provisioning scope). `missing` marks objectIds
 // that are not provisioned even under the staging project.
-function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = new Set() } = {}) {
-  const calls = { findObjectSheet: [], resolveFieldIds: [] }
+function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = new Set(), sheetOwnerBySheetId = null } = {}) {
+  const calls = { findObjectSheet: [], resolveFieldIds: [], isSheetOwnedByProject: [], getObjectSheetId: [] }
   return {
     calls,
     async findObjectSheet({ projectId, objectId } = {}) {
@@ -85,6 +99,28 @@ function makeFakeProvisioning({ sheetIdByObjectId, stagingProjectId, missing = n
     async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
       calls.resolveFieldIds.push({ projectId, objectId, fieldIds })
       return resolveFieldIdsFor(projectId, objectId, fieldIds)
+    },
+    // IS THIS SHEET OWNED BY THIS PROJECT — the host port backed by
+    // `plugin_multitable_object_registry` (sheet_id -> project_id), the one place a sheet's project
+    // is actually recorded. A BOOLEAN, never the owner: returning the owner would hand one tenant's
+    // caller another tenant's project id (see the type's doc).
+    //
+    // The default models the ordinary single-tenant deployment: every sheet this fake knows about
+    // was provisioned by THIS staging project. A suite that needs two tenants overrides
+    // `sheetOwnerBySheetId` — the shape the wall is really decided by, and the shape a
+    // single-project fake cannot express.
+    async isSheetOwnedByProject(sheetId, projectId) {
+      calls.isSheetOwnedByProject.push({ sheetId, projectId })
+      if (sheetOwnerBySheetId) {
+        return Object.prototype.hasOwnProperty.call(sheetOwnerBySheetId, sheetId)
+          && sheetOwnerBySheetId[sheetId] === projectId
+      }
+      return Object.values(sheetIdByObjectId).includes(sheetId) && projectId === stagingProjectId
+    },
+    // The platform's own pure derivation (provisioning.ts getObjectSheetId).
+    getObjectSheetId(projectId, objectId) {
+      calls.getObjectSheetId.push({ projectId, objectId })
+      return derivedSheetId(projectId, objectId)
     },
   }
 }
@@ -101,7 +137,10 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
   const createCalls = []
   const queryCalls = []
   const patchCalls = []
+  const unitOfWorkCalls = []
   let seq = 0
+  let unitOfWorkDepth = 0
+  let recordsCallsOutsideUnitOfWork = 0
 
   function objectIdFor(sheetId) {
     const objectId = objectIdBySheetId[sheetId]
@@ -109,11 +148,18 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
     return objectId
   }
 
-  return {
+  const api = {
     store,
     createCalls,
     queryCalls,
     patchCalls,
+    unitOfWorkCalls,
+    get inUnitOfWork() {
+      return unitOfWorkDepth > 0
+    },
+    get recordsCallsOutsideUnitOfWork() {
+      return recordsCallsOutsideUnitOfWork
+    },
     get patchCallCount() {
       return patchCalls.length
     },
@@ -121,6 +167,7 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
       return (store.get(sheetId) || []).map((row) => ({ ...row, data: { ...row.data } }))
     },
     async createRecord(input = {}) {
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
       const { sheetId, data = {} } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(data))
       createCalls.push({ sheetId, data: { ...data } })
@@ -132,6 +179,7 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
       return { ...record, data: { ...record.data } }
     },
     async queryRecords(input = {}) {
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
       const { sheetId, filters = {} } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(filters))
       queryCalls.push({ sheetId, filters: { ...filters } })
@@ -141,19 +189,61 @@ function makeStrictRecordsApi({ objectIdBySheetId, stagingProjectId, rowsBySheet
         .map((record) => ({ ...record, data: { ...record.data } }))
     },
     async patchRecord(input = {}) {
-      const { sheetId, recordId, changes = {} } = input
+      if (unitOfWorkDepth === 0) recordsCallsOutsideUnitOfWork += 1
+      const { sheetId, recordId, changes = {}, expectedVersion } = input
       assertKnownFieldIds(stagingProjectId, objectIdFor(sheetId), Object.keys(changes))
-      patchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      patchCalls.push({ sheetId, recordId, changes: { ...changes }, expectedVersion })
       const rows = store.get(sheetId) || []
       const record = rows.find((row) => row.id === recordId)
       if (!record) throw new Error(`Record not found: ${recordId}`)
+      // OPTIMISTIC CONCURRENCY, exactly like records.ts patchRecord: when the caller states the
+      // version it decided against, a row that moved since fails the write instead of clobbering it
+      // (`MultitableRecordVersionConflictError`, code VERSION_CONFLICT — checked in code AND pinned
+      // in the UPDATE's SQL predicate there). Without this the fake would accept a patch the real
+      // service refuses, and any test asserting the no-overwrite guarantee would be vacuous.
+      if (expectedVersion !== undefined && (record.version || 1) !== expectedVersion) {
+        const error = new Error('Record version conflict')
+        error.name = 'MultitableRecordVersionConflictError'
+        error.code = 'VERSION_CONFLICT'
+        throw error
+      }
       // Merge semantics, exactly like records.ts patchRecord (`nextData = { ...existing, ...patch }`):
       // an explicit null SETS null — it does not remove the key.
       Object.assign(record.data, changes)
       record.version = (record.version || 1) + 1
       return { ...record, data: { ...record.data } }
     },
+    async runStockPreparationPersistUnitOfWork(input, operation) {
+      unitOfWorkCalls.push(structuredClone(input))
+      const beforeStore = new Map(
+        [...store.entries()].map(([sheetId, rows]) => [
+          sheetId,
+          rows.map((row) => ({ ...row, data: { ...row.data } })),
+        ]),
+      )
+      const beforeSeq = seq
+      const beforeCalls = {
+        create: createCalls.length,
+        query: queryCalls.length,
+        patch: patchCalls.length,
+      }
+      unitOfWorkDepth += 1
+      try {
+        return await operation(this)
+      } catch (error) {
+        store.clear()
+        for (const [sheetId, rows] of beforeStore) store.set(sheetId, rows)
+        seq = beforeSeq
+        createCalls.length = beforeCalls.create
+        queryCalls.length = beforeCalls.query
+        patchCalls.length = beforeCalls.patch
+        throw error
+      } finally {
+        unitOfWorkDepth -= 1
+      }
+    },
   }
+  return api
 }
 
 // Seed helper: turn LOGICAL test rows into the PHYSICAL-keyed rows the substrate really stores.
@@ -176,6 +266,7 @@ function logicalData(projectId, objectId, data) {
 }
 
 module.exports = {
+  derivedSheetId,
   physicalFieldId,
   physicalFieldIdSet,
   templateFieldIds,

@@ -68,4 +68,38 @@ describe('useAttendanceAdminUsers', () => {
     expect(adminForbidden.value).toBe(true)
     expect(users.statusMessage.value).toBe('Admin permissions required')
   })
+
+  it('fails closed without an org and follows the reactive org for attendance-scoped search', async () => {
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data: { items: [] } }))
+    const orgId = ref<string | undefined>(undefined)
+    const users = useAttendanceAdminUsers({
+      apiFetch,
+      endpoint: '/api/attendance-admin/users/search',
+      orgId,
+      tr: (en: string) => en,
+    })
+
+    await users.loadUsers('alice')
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(users.statusMessage.value).toBe('Select an organization first')
+
+    orgId.value = 'org-a'
+    await users.loadUsers('alice')
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-admin/users/search?q=alice&orgId=org-a')
+  })
+
+  it('uses explicit global scope only when the caller identifies a platform administrator', async () => {
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data: { items: [] } }))
+    const globalScope = ref(true)
+    const users = useAttendanceAdminUsers({
+      apiFetch,
+      endpoint: '/api/attendance-admin/users/search',
+      globalScope,
+      tr: (en: string) => en,
+    })
+
+    await users.loadUsers('alice')
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance-admin/users/search?q=alice&scope=global')
+  })
 })

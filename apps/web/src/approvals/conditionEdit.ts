@@ -124,16 +124,32 @@ export function approvalFormulaInsertOptions(formSchema: FormSchema): FormulaIns
   const options: FormulaInsertOption[] = []
   for (const field of formSchema.fields) {
     if (!field.id) continue
-    options.push({ token: `{${field.id}}`, label: field.label || field.id })
+    // record-link is not formula-eligible (server type-unsupported / v1 fail-closed).
+    if (field.type === 'record-link') continue
+    // Lock-8 L8-B (§1.2): date_range's value `{ start, end }` is non-scalar for the SAME reason
+    // record-link is excluded — graph condition rules/formulas compare with `===`/`gt`/`lt`, which
+    // would silently never match. OD-L8-5 admits date_range endpoints ONLY into field-level
+    // visibility (a separate mechanism); it stays excluded from condition branches entirely.
+    if (field.type === 'date_range') continue
+    // Lock-8 L8-A (§1.1): explanation carries no value at all — a stricter case than date_range's
+    // non-scalar exclusion (there is nothing to compare, ever). Excluded from condition rules AND
+    // formulas the same way.
+    if (field.type === 'explanation') continue
+    // Lock-2 L2-A: department is an array of directory-backed objects, not a scalar predicate.
+    if (field.type === 'department') continue
     if (field.type === 'detail') {
+      // Detail only contributes aggregate column tokens, not a bare top-level `{detailId}`.
       for (const column of field.columns ?? []) {
         if (!column.id) continue
+        if (column.type === 'record-link') continue
         options.push({
           token: `{${field.id}.${column.id}}`,
           label: `${field.label || field.id}.${column.label || column.id}`,
         })
       }
+      continue
     }
+    options.push({ token: `{${field.id}}`, label: field.label || field.id })
   }
   return options
 }
@@ -267,6 +283,26 @@ export function validateConditionEdits(
 ): string[] {
   const errors: string[] = []
   const fieldIds = new Set(formSchema.fields.map((field) => field.id))
+  // FWB-0 Layer 2 P1-2: record-link object values must not enter simple conditions/visibility (v1).
+  const recordLinkFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'record-link').map((field) => field.id),
+  )
+  // Lock-8 L8-B (§1.2): date_range's `{ start, end }` value is non-scalar for the same reason —
+  // excluded from condition branches entirely (OD-L8-5 admits its endpoints into field visibility
+  // only, a separate mechanism). FE PREVIEW mirror of the backend
+  // `validateNonScalarFieldsNotUsedInConditions` guard.
+  const dateRangeFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'date_range').map((field) => field.id),
+  )
+  // Lock-8 L8-A (§1.1): explanation carries no value at all — excluded from condition
+  // branches/formulas entirely, same mechanism as record-link/date_range above. FE PREVIEW mirror
+  // of the backend `validateNonScalarFieldsNotUsedInConditions` guard.
+  const explanationFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'explanation').map((field) => field.id),
+  )
+  const departmentFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'department').map((field) => field.id),
+  )
   // Outgoing edge keys per node key (edges whose `source` is that node) — the legal targets for a
   // branch/default edge of that condition node.
   const outgoingByNode = new Map<string, Set<string>>()
@@ -284,7 +320,39 @@ export function validateConditionEdits(
           errors.push(`${formulaLabel} 需要填写`)
         }
         errors.push(...validateFormulaReferences(branch.formulaExpression, formSchema, formulaLabel))
+        for (const fieldId of recordLinkFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用关联记录字段 ${fieldId}（v1）`)
+          }
+        }
+        for (const fieldId of dateRangeFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用日期区间字段 ${fieldId}（v1）`)
+          }
+        }
+        for (const fieldId of explanationFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用说明字段 ${fieldId}（无值）`)
+          }
+        }
+        for (const fieldId of departmentFieldIds) {
+          const re = new RegExp(`\\{\\s*${fieldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`)
+          if (re.test(branch.formulaExpression)) {
+            errors.push(`${formulaLabel} 不能引用部门字段 ${fieldId}（v1）`)
+          }
+        }
         return
+      }
+      // A rules-mode branch with ZERO rules is never legitimate: the runtime evaluates
+      // `rules.every(...)`, vacuously TRUE over `[]`, so an empty branch would silently capture ALL
+      // traffic (first-match-wins) and dead-code the default edge — the fall-through "else" is the
+      // node's `defaultEdgeKey`, a separate mechanism, never an empty branch. Fail closed here so a
+      // legacy/hand-built `rules: []` branch can never reach save looking green.
+      if (branch.rules.length === 0) {
+        errors.push(`条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 需要至少一条规则`)
       }
       branch.rules.forEach((rule, ruleIndex) => {
         const ruleLabel = `条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 规则 ${ruleIndex + 1}`
@@ -293,6 +361,14 @@ export function validateConditionEdits(
           errors.push(`${ruleLabel} 需要选择字段`)
         } else if (!fieldIds.has(fieldId)) {
           errors.push(`${ruleLabel} 引用的字段 ${fieldId} 不存在`)
+        } else if (recordLinkFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用关联记录字段（v1）`)
+        } else if (dateRangeFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用日期区间字段（v1）`)
+        } else if (explanationFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用说明字段（无值）`)
+        } else if (departmentFieldIds.has(fieldId)) {
+          errors.push(`${ruleLabel} 不能引用部门字段（v1）`)
         }
         if (!isConditionRuleOperator(rule.operator)) {
           errors.push(`${ruleLabel} 的运算符无效`)

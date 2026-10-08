@@ -38,10 +38,31 @@ function normalizeQueryArg(
 
 const DEFAULT_VIEW_CACHE = new Map<string, MultitableViewConfig>()
 
+/**
+ * `cache` mirrors `loadFieldsForSheet`'s long-standing optional memo and has the same contract:
+ * caller-owned, caller-scoped, opt-in. Only a FOUND row is memoized — a miss stays a miss and is
+ * re-queried, so a sheet created (or undeleted) after a negative probe is never masked by a
+ * remembered `null`. There is no module-level default map here on purpose: the only supplier today
+ * is the request-scoped memo in `request-metadata-cache.ts`, which dies with its request.
+ *
+ * NOTE what a hit means: the query filters `deleted_at IS NULL`, so a memoized row records "this
+ * sheet existed and was not soft-deleted AT FIRST READ". A soft delete during the caller's scope is
+ * not seen by that scope — enumerated as trade-off (4) in `request-metadata-cache.ts`.
+ *
+ * CALLERS MUST TREAT THE RETURNED OBJECT AS READ-ONLY. On a hit every caller in the scope gets the
+ * SAME object, so an in-place edit would leak across rows. Same for `loadFieldsForSheet` below: on
+ * a hit it hands back the same array and the same field objects, not fresh `serializeFieldRow`
+ * output. Current consumers only read (`fields.map` / `fields.some` in `records.ts` and
+ * `query-service.ts`); anything that wants to normalize a field must copy first.
+ */
 export async function loadSheetRow(
   poolOrQuery: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },
   sheetId: string,
+  cache?: Map<string, MultitableSheetRow>,
 ): Promise<MultitableSheetRow | null> {
+  const cached = cache?.get(sheetId)
+  if (cached) return cached
+
   const query = normalizeQueryArg(poolOrQuery)
   const result = await query(
     'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
@@ -49,12 +70,14 @@ export async function loadSheetRow(
   )
   const row = (result.rows as any[])[0]
   if (!row) return null
-  return {
+  const sheet: MultitableSheetRow = {
     id: String(row.id),
     baseId: typeof row.base_id === 'string' ? row.base_id : null,
     name: String(row.name),
     description: typeof row.description === 'string' ? row.description : null,
   }
+  cache?.set(sheetId, sheet)
+  return sheet
 }
 
 export async function loadFieldsForSheet(

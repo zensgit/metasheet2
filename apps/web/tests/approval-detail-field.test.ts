@@ -47,19 +47,22 @@ const detailField: FormField = {
 }
 
 describe('detailField — leaf-type guard', () => {
-  it('exposes exactly the 8 leaf types (no detail, no attachment)', () => {
+  it('exposes exactly the 8 leaf types (no detail, no attachment, no record-link)', () => {
     expect([...DETAIL_LEAF_FIELD_TYPES].sort()).toEqual(
       ['date', 'datetime', 'multi-select', 'number', 'select', 'text', 'textarea', 'user'].sort(),
     )
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('detail')
     expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('attachment')
+    // FWB-0 Layer 2: record-link is top-level only (mirrors backend DETAIL_LEAF exclusion).
+    expect(DETAIL_LEAF_FIELD_TYPES).not.toContain('record-link')
   })
 
-  it('isDetailLeafFieldType rejects detail/attachment, accepts leaves', () => {
+  it('isDetailLeafFieldType rejects detail/attachment/record-link, accepts leaves', () => {
     expect(isDetailLeafFieldType('text')).toBe(true)
     expect(isDetailLeafFieldType('multi-select')).toBe(true)
     expect(isDetailLeafFieldType('detail')).toBe(false)
     expect(isDetailLeafFieldType('attachment')).toBe(false)
+    expect(isDetailLeafFieldType('record-link')).toBe(false)
   })
 
   it('isDetailField only true for type detail', () => {
@@ -405,6 +408,27 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(unparsable[0].value).toBe('not-a-date')
   })
 
+  // Lock-8 L8-B (PR #4964 gate F2): `formatDisplayValue`'s date_range arm was reachable but
+  // untested — removing it silently falls through to the `default: String(value)` case, which
+  // prints the JS-internal "[object Object]" placeholder to the APPROVER reading a submitted
+  // date_range via ApprovalDetailView.vue (M8 honesty regression, no value leak but a real one).
+  it('date_range renders "start ~ end" via formatDisplayDate on both endpoints, never falls through to "[object Object]"', () => {
+    const schema: FormSchema = {
+      fields: [{ id: 'fld_trip', type: 'date_range', label: '行程日期' }],
+    }
+    const fields = buildDisplayFields(schema, {
+      fld_trip: { start: '2026-01-02T03:04:05Z', end: '2026-01-05T03:04:05Z' },
+    })
+    expect(fields[0].value).toBe(
+      `${new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN')} ~ ${new Date('2026-01-05T03:04:05Z').toLocaleString('zh-CN')}`,
+    )
+    expect(fields[0].value).not.toBe('[object Object]')
+
+    // A malformed value (missing start or end) renders the fallback dash, not "[object Object]".
+    const malformed = buildDisplayFields(schema, { fld_trip: { start: '2026-01-02' } })
+    expect(malformed[0].value).toBe('-')
+  })
+
   it('appends snapshot keys absent from the schema after schema-ordered entries, using the raw key as label', () => {
     const fields = buildDisplayFields(displaySchema, {
       fld_reason: '原因内容',
@@ -421,6 +445,45 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     const fields = buildDisplayFields(displaySchema, { items: [{ x: '1' }], fld_reason: 'r' })
     expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
     expect(fields.some((f) => f.key === 'items')).toBe(false)
+  })
+
+  it('flag OFF (default): renders legacy attachment string/object values inline without the refs pipeline', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    // string legacy value (B2-28 era notes frozen into the snapshot)
+    const asString = buildDisplayFields(schema, {
+      fld_reason: '出差',
+      files: 'legacy-file-reference',
+    })
+    expect(asString).toEqual([
+      { key: 'fld_reason', label: '事由', value: '出差' },
+      { key: 'files', label: '附件', value: 'legacy-file-reference' },
+    ])
+    // object legacy value with a fileName
+    const asObject = buildDisplayFields(schema, {
+      files: { fileName: 'scan.pdf', size: 12 },
+    })
+    expect(asObject.find((f) => f.key === 'files')?.value).toBe('scan.pdf')
+  })
+
+  it('flag ON: excludes attachment fields from scalar display (refs block owns them)', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'fld_reason', type: 'text', label: '事由' },
+        { id: 'files', type: 'attachment', label: '附件' },
+      ],
+    }
+    const fields = buildDisplayFields(
+      schema,
+      { fld_reason: 'x', files: ['att_1'] },
+      { attachmentPipelineEnabled: true },
+    )
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+    expect(fields.some((f) => f.key === 'files')).toBe(false)
   })
 
   it('renders null/undefined/empty-string scalar values as \'-\' regardless of field type', () => {
@@ -568,7 +631,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000 }, { item_name: '', amount: 500 }],
-    })
+    }, true)
     expect(violations).toEqual(['"报销明细" 第 2 行缺少 "项目"'])
   })
 
@@ -576,7 +639,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '', amount: undefined }, { item_name: '酒店', amount: 300 }],
-    })
+    }, true)
     expect(violations).toEqual([
       '"报销明细" 第 1 行缺少 "项目"',
       '"报销明细" 第 1 行缺少 "金额"',
@@ -587,26 +650,26 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000, note: '' }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
   it('a non-detail field (even top-level required) is never checked here — that is el-form’s job', () => {
-    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] })
+    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] }, true)
     expect(violations).toEqual([])
   })
 
   it('no rows at all (empty array, or missing entirely) -> no violations', () => {
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x' })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' })).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x' }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' }, true)).toEqual([])
   })
 
   it('a detail field with no required columns is skipped without inspecting rows', () => {
     const noRequiredSchema: FormSchema = {
       fields: [{ id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] }],
     }
-    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] })).toEqual([])
+    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] }, true)).toEqual([])
   })
 
   it('a cell hidden for THIS row by its own visibilityRule is never flagged, even if required and empty', () => {
@@ -625,7 +688,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // an 'other' row -> flagged.
     const violations = validateDetailRows(gatedSchema, {
       items: [{ kind: 'normal', note: undefined }, { kind: 'other', note: undefined }],
-    })
+    }, true)
     expect(violations).toEqual(['"明细" 第 2 行缺少 "备注"'])
   })
 
@@ -652,7 +715,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // into it directly, so it must never be the reported violation even though it's still empty.
     const violations = validateDetailRows(derivedSchema, {
       items: [{ qty: 2, price: 10, subtotal: undefined }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
@@ -665,7 +728,19 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
         columns: [{ id: 'col_a', type: 'text', label: '', required: true }],
       }],
     }
-    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] })
+    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] }, true)
     expect(violations).toEqual(['"items" 第 1 行缺少 "col_a"'])
+  })
+})
+
+// O-8 / F8-1: the same violation in English (ApprovalNewView follows the shell locale).
+describe('validateDetailRows — en (O-8 / F8-1)', () => {
+  it('names the table, the 1-based row and the column in English', () => {
+    const schema: FormSchema = {
+      fields: [{ id: 'items', type: 'detail', label: 'Expenses', columns: [{ id: 'amount', type: 'number', label: 'Amount', required: true }] }],
+    }
+    const violations = validateDetailRows(schema, { items: [{ amount: 1 }, { amount: undefined }] }, false)
+    expect(violations).toEqual(['"Expenses" row 2 is missing "Amount"'])
+    expect(violations.join(' ')).not.toMatch(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/)
   })
 })

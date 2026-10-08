@@ -24,6 +24,10 @@
 // Optional:
 //   SMOKE_TOKEN=<admin bearer> ORG_ID=default RUN_DATE=2026-06-12
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -473,7 +477,20 @@ async function cleanup() {
   await q('DELETE FROM attendance_scheduler_scopes WHERE org_id = $1 AND (created_by = $2 OR updated_by = $2)', [ORG_ID, STAMP]).catch((error) => console.error(`  delete scopes failed: ${error?.message || error}`))
   await q('DELETE FROM attendance_shift_assignments WHERE org_id = $1 AND (user_id = ANY($2::text[]) OR shift_id = ANY($3::uuid[]))', [ORG_ID, ALL_USERS, shiftIds]).catch((error) => console.error(`  delete assignments failed: ${error?.message || error}`))
   await q('DELETE FROM attendance_events WHERE org_id = $1 AND user_id = ANY($2::text[])', [ORG_ID, ALL_USERS]).catch((error) => console.error(`  delete events failed: ${error?.message || error}`))
-  await q('DELETE FROM attendance_records WHERE org_id = $1 AND user_id = ANY($2::text[])', [ORG_ID, ALL_USERS]).catch((error) => console.error(`  delete records failed: ${error?.message || error}`))
+  const retirementToken = adminToken || (typeof TOKEN !== 'undefined' ? TOKEN : '') || process.env.TOKEN || process.env.ADMIN_TOKEN || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+    baseUrl: BASE_URL,
+    token: retirementToken,
+    commandSeed: '00000000-0000-5000-8000-0000000000a2',
+    ticket: 'STAGING-AUTO-SHIFT',
+  })
+  await cleanupStagingAttendanceScope({ query: async (sql, params) => {
+    const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+    return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+  } }, { orgId: ORG_ID, userIds: ALL_USERS }, { retireRecord: opsRetirementExecutor })
   await q('DELETE FROM attendance_group_members WHERE org_id = $1 AND (group_id = ANY($2::uuid[]) OR user_id = ANY($3::text[]))', [ORG_ID, groupIds, ALL_USERS]).catch((error) => console.error(`  delete group members failed: ${error?.message || error}`))
   await q('DELETE FROM attendance_groups WHERE org_id = $1 AND (id = ANY($2::uuid[]) OR description = $3 OR name LIKE $4)', [ORG_ID, groupIds, STAMP, `${STAMP}%`]).catch((error) => console.error(`  delete groups failed: ${error?.message || error}`))
   await q('DELETE FROM attendance_shifts WHERE org_id = $1 AND (id = ANY($2::uuid[]) OR name LIKE $3)', [ORG_ID, shiftIds, `${STAMP}%`]).catch((error) => console.error(`  delete shifts failed: ${error?.message || error}`))

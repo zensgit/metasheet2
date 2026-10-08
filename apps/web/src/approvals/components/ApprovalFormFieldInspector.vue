@@ -1,0 +1,1777 @@
+<template>
+  <aside
+    class="approval-form-field-inspector"
+    data-testid="approval-form-field-inspector"
+  >
+    <p class="approval-form-field-inspector__title">字段设置</p>
+
+    <p
+      v-if="!field"
+      class="approval-form-field-inspector__empty"
+      data-testid="approval-form-field-inspector-empty"
+    >
+      选择一个字段进行设置
+    </p>
+
+    <p
+      v-else-if="readOnly"
+      class="approval-form-field-inspector__empty"
+      data-testid="approval-form-field-inspector-readonly"
+    >
+      只读模式下不可编辑字段设置
+    </p>
+
+    <form v-else class="approval-form-field-inspector__form" @submit.prevent>
+      <label class="approval-form-field-inspector__row">
+        <span class="approval-form-field-inspector__label">字段类型</span>
+        <select
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-type"
+          :value="field.type"
+          @change="onTypeChange($event)"
+        >
+          <option
+            v-for="option in typeOptions"
+            :key="option.type"
+            :value="option.type"
+          >
+            {{ option.label }}
+          </option>
+        </select>
+      </label>
+
+      <label class="approval-form-field-inspector__row">
+        <span class="approval-form-field-inspector__label">字段名称</span>
+        <input
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-label"
+          type="text"
+          :value="textValue('label')"
+          @input="onTextInput('label', $event)"
+          @blur="commitTextBuffer('label')"
+          @keydown.enter.prevent="commitTextBuffer('label')"
+        />
+      </label>
+
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row approval-form-field-inspector__row--inline"
+      >
+        <input
+          type="checkbox"
+          data-testid="approval-form-field-inspector-required"
+          :checked="field.required"
+          @change="onRequiredChange($event)"
+        />
+        <span class="approval-form-field-inspector__label">必填</span>
+      </label>
+
+      <label
+        v-if="field.type !== 'explanation'"
+        class="approval-form-field-inspector__row"
+      >
+        <span class="approval-form-field-inspector__label">提示文字</span>
+        <input
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-placeholder"
+          type="text"
+          :value="textValue('placeholder')"
+          @input="onTextInput('placeholder', $event)"
+          @blur="commitTextBuffer('placeholder')"
+          @keydown.enter.prevent="commitTextBuffer('placeholder')"
+        />
+      </label>
+
+      <!-- options (select / multi-select): one logical row action = one commit -->
+      <section
+        v-if="field.type === 'select' || field.type === 'multi-select'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-options"
+      >
+        <p class="approval-form-field-inspector__label">选项</p>
+        <div
+          v-for="(row, index) in optionRows"
+          :key="`${index}-${row.value}`"
+          class="approval-form-field-inspector__option-row"
+        >
+          <input
+            class="approval-form-field-inspector__control"
+            :data-testid="`approval-form-field-inspector-option-label-${index}`"
+            type="text"
+            :value="optionLabelValue(index)"
+            :aria-label="`选项 ${index + 1} 名称`"
+            @input="onOptionLabelInput(index, $event)"
+            @blur="commitOptionLabel(index)"
+            @keydown.enter.prevent="commitOptionLabel(index)"
+          />
+          <button
+            type="button"
+            class="approval-form-field-inspector__minor-action"
+            :data-testid="`approval-form-field-inspector-option-remove-${index}`"
+            :aria-label="`删除选项 ${index + 1}`"
+            @click="removeOption(index)"
+          >
+            删除
+          </button>
+        </div>
+        <button
+          type="button"
+          class="approval-form-field-inspector__minor-action"
+          data-testid="approval-form-field-inspector-option-add"
+          @click="addOption"
+        >
+          添加选项
+        </button>
+      </section>
+
+      <section
+        v-if="field.type === 'department'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-department"
+      >
+        <p class="approval-form-field-inspector__label">部门设置</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-selection"
+            :value="field.departmentSelection"
+            @change="onDepartmentSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">展示格式</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-display"
+            :value="field.departmentDisplay"
+            @change="onDepartmentDisplayChange($event)"
+          >
+            <option value="leaf_only">仅末级名称</option>
+            <option value="full_path">完整部门路径</option>
+          </select>
+        </label>
+        <label v-if="field.departmentSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-max"
+            inputmode="numeric"
+            :value="textValue('departmentMaxSelectionsText')"
+            @input="onTextInput('departmentMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('departmentMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('departmentMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-department-default-mode"
+            :value="field.departmentDefaultMode"
+            @change="onDepartmentDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester_department">申请人所在部门</option>
+            <option value="designated">指定部门</option>
+          </select>
+        </label>
+        <ApprovalDepartmentPicker
+          v-if="field.departmentDefaultMode === 'designated'"
+          :model-value="departmentDefaultValue"
+          :selection="field.departmentSelection"
+          :display="field.departmentDisplay"
+          :max-selections="departmentMaxSelections"
+          aria-label="选择默认部门"
+          @update:model-value="onDepartmentDefaultIdsChange"
+        />
+      </section>
+
+      <section
+        v-if="field.type === 'user'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-user"
+      >
+        <p class="approval-form-field-inspector__label">联系人设置</p>
+        <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-user-allow-self"
+            :checked="field.userAllowSelf"
+            @change="onUserAllowSelfChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">允许选择申请人本人</span>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">选择数量</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-selection"
+            :value="field.userSelection"
+            @change="onUserSelectionChange($event)"
+          >
+            <option value="single">单选</option>
+            <option value="multi">多选</option>
+          </select>
+        </label>
+        <label v-if="field.userSelection === 'multi'" class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">最多可选</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-max"
+            inputmode="numeric"
+            :value="textValue('userMaxSelectionsText')"
+            @input="onTextInput('userMaxSelectionsText', $event)"
+            @blur="commitTextBuffer('userMaxSelectionsText')"
+            @keydown.enter.prevent="commitTextBuffer('userMaxSelectionsText')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">默认值</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-user-default-mode"
+            :value="field.userDefaultMode"
+            @change="onUserDefaultModeChange($event)"
+          >
+            <option value="">不设置</option>
+            <option value="requester">申请人</option>
+            <option value="designated">指定人员</option>
+          </select>
+        </label>
+        <template v-if="field.userDefaultMode === 'designated'">
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">搜索人员</span>
+            <input
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-search"
+              type="search"
+              autocomplete="off"
+              @input="onUserDirectorySearch($event)"
+            />
+          </label>
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">默认人员</span>
+            <select
+              class="approval-form-field-inspector__control"
+              data-testid="approval-form-field-inspector-user-default-ids"
+              :multiple="field.userSelection === 'multi'"
+              :value="field.userSelection === 'multi' ? field.userDefaultIds : field.userDefaultIds[0] ?? ''"
+              :aria-busy="userDirectory.usersLoading.value"
+              @focus="onUserDefaultPickerFocus"
+              @change="onUserDefaultIdsChange($event)"
+            >
+              <option value="">不设置</option>
+              <option
+                v-for="(user, index) in authorUserOptions"
+                :key="user.id"
+                :value="user.id"
+                :disabled="!user.name.trim() && !field.userDefaultIds.includes(user.id)"
+              >
+                {{ authorUserLabel(user, index) }}
+              </option>
+            </select>
+          </label>
+          <p v-if="userDirectory.statusMessage.value" class="approval-form-field-inspector__hint" role="status">
+            {{ userDirectory.statusMessage.value }}
+          </p>
+        </template>
+      </section>
+
+      <section
+        v-if="field.type === 'number'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-number-format"
+      >
+        <p class="approval-form-field-inspector__label">格式化数字</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">货币符号</span>
+          <select
+            class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+            data-testid="approval-form-field-inspector-number-currency"
+            :value="field.numberCurrencySymbol"
+            @change="onNumberCurrencyChange($event)"
+          >
+            <option value="">不显示</option>
+            <option value="¥">¥ 人民币</option>
+            <option value="$">$ 美元</option>
+            <option value="€">€ 欧元</option>
+            <option value="£">£ 英镑</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-thousands"
+            :checked="field.numberThousandsSeparator"
+            @change="onNumberThousandsChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示千位分隔符</span>
+        </label>
+        <label class="approval-form-field-inspector__row--inline">
+          <input
+            type="checkbox"
+            data-testid="approval-form-field-inspector-number-uppercase"
+            :checked="field.numberUppercaseCny"
+            @change="onNumberUppercaseChange($event)"
+          />
+          <span class="approval-form-field-inspector__hint">显示中文大写</span>
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          格式化数字仅用于展示（货币符号、千位分隔符、中文大写回显），不改变提交的数值。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'date_range'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-date-range"
+      >
+        <p class="approval-form-field-inspector__label">日期区间</p>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">日期类型（必选）</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-type"
+            :value="field.dateRangeDateType"
+            @change="onDateRangeDateTypeChange($event)"
+          >
+            <option value="" disabled>请选择日期类型</option>
+            <option value="date">年-月-日</option>
+            <option value="date_half_day">年-月-日 上午/下午</option>
+            <option value="date_minute">年-月-日 时:分</option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">起始控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-start-label"
+            type="text"
+            :value="textValue('dateRangeStartLabel')"
+            @input="onTextInput('dateRangeStartLabel', $event)"
+            @blur="commitTextBuffer('dateRangeStartLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeStartLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">结束控件名称（必填）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-end-label"
+            type="text"
+            :value="textValue('dateRangeEndLabel')"
+            @input="onTextInput('dateRangeEndLabel', $event)"
+            @blur="commitTextBuffer('dateRangeEndLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeEndLabel')"
+          />
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">时长控件名称（可选）</span>
+          <input
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-date-range-duration-label"
+            type="text"
+            :value="textValue('dateRangeDurationLabel')"
+            @input="onTextInput('dateRangeDurationLabel', $event)"
+            @blur="commitTextBuffer('dateRangeDurationLabel')"
+            @keydown.enter.prevent="commitTextBuffer('dateRangeDurationLabel')"
+          />
+        </label>
+        <p class="approval-form-field-inspector__hint">
+          时长由起始、结束自动计算并展示，不可编辑；提交时以系统计算结果为准。
+        </p>
+      </section>
+
+      <section
+        v-if="field.type === 'explanation'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-explanation"
+      >
+        <p class="approval-form-field-inspector__label">说明内容</p>
+        <textarea
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-explanation-text"
+          aria-label="说明内容"
+          rows="3"
+          :value="textValue('explanationText')"
+          @input="onTextInput('explanationText', $event)"
+          @blur="commitTextBuffer('explanationText')"
+        ></textarea>
+        <p class="approval-form-field-inspector__hint">
+          说明为纯展示控件，不收集任何提交值，不可设置必填、占位文本或选项。
+        </p>
+      </section>
+
+      <!-- detail columns -->
+      <section
+        v-if="field.type === 'detail'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-detail"
+      >
+        <p class="approval-form-field-inspector__label">子字段</p>
+        <div
+          v-for="column in field.detailColumns"
+          :key="column.localId"
+          class="approval-form-field-inspector__column-row"
+          :data-column-local-id="column.localId"
+        >
+          <input
+            class="approval-form-field-inspector__control"
+            :data-testid="`approval-form-field-inspector-column-label-${column.localId}`"
+            type="text"
+            :value="columnLabelValue(column)"
+            aria-label="子字段名称"
+            @input="onColumnLabelInput(column.localId, $event)"
+            @blur="commitColumnLabel(column.localId)"
+            @keydown.enter.prevent="commitColumnLabel(column.localId)"
+          />
+          <select
+            class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+            :data-testid="`approval-form-field-inspector-column-type-${column.localId}`"
+            aria-label="子字段类型"
+            :value="column.type"
+            @change="onColumnTypeChange(column.localId, $event)"
+          >
+            <option
+              v-for="option in columnTypeOptions"
+              :key="option.type"
+              :value="option.type"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+          <label class="approval-form-field-inspector__row--inline">
+            <input
+              type="checkbox"
+              :data-testid="`approval-form-field-inspector-column-required-${column.localId}`"
+              :checked="column.required"
+              aria-label="子字段必填"
+              @change="onColumnRequiredChange(column.localId, $event)"
+            />
+            <span class="approval-form-field-inspector__hint">必填</span>
+          </label>
+          <button
+            type="button"
+            class="approval-form-field-inspector__minor-action"
+            :data-testid="`approval-form-field-inspector-column-remove-${column.localId}`"
+            aria-label="删除子字段"
+            @click="removeColumn(column.localId)"
+          >
+            删除
+          </button>
+        </div>
+        <button
+          type="button"
+          class="approval-form-field-inspector__minor-action"
+          data-testid="approval-form-field-inspector-column-add"
+          @click="addColumn"
+        >
+          添加子字段
+        </button>
+        <div class="approval-form-field-inspector__option-row">
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">最少行数</span>
+            <input
+              class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+              data-testid="approval-form-field-inspector-min-rows"
+              type="text"
+              inputmode="numeric"
+              :value="textValue('minRowsText')"
+              @input="onTextInput('minRowsText', $event)"
+              @blur="commitTextBuffer('minRowsText')"
+              @keydown.enter.prevent="commitTextBuffer('minRowsText')"
+            />
+          </label>
+          <label class="approval-form-field-inspector__row">
+            <span class="approval-form-field-inspector__hint">最多行数</span>
+            <input
+              class="approval-form-field-inspector__control approval-form-field-inspector__control--narrow"
+              data-testid="approval-form-field-inspector-max-rows"
+              type="text"
+              inputmode="numeric"
+              :value="textValue('maxRowsText')"
+              @input="onTextInput('maxRowsText', $event)"
+              @blur="commitTextBuffer('maxRowsText')"
+              @keydown.enter.prevent="commitTextBuffer('maxRowsText')"
+            />
+          </label>
+        </div>
+      </section>
+
+      <!-- record-link: values-free summary only; the typed base/sheet pickers
+           stay with the parent-owned catalog and arrive at the F4 mount. -->
+      <section
+        v-if="field.type === 'record-link'"
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-record-link"
+      >
+        <p class="approval-form-field-inspector__hint">
+          {{ recordLinkConfigured ? '已选择目标空间与目标表。' : '尚未选择目标空间与目标表。' }}
+        </p>
+      </section>
+
+      <!-- visibility rule -->
+      <section
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-visibility"
+      >
+        <p class="approval-form-field-inspector__label">显示条件</p>
+        <select
+          class="approval-form-field-inspector__control"
+          data-testid="approval-form-field-inspector-visibility-depends"
+          aria-label="依赖字段"
+          :value="field.visibility.dependsOnFieldId"
+          @change="onVisibilityDependsChange($event)"
+        >
+          <option value="">始终显示</option>
+          <option
+            v-for="option in visibilityOptions"
+            :key="option.id"
+            :value="option.id"
+          >
+            {{ option.label }}
+          </option>
+        </select>
+        <template v-if="field.visibility.dependsOnFieldId">
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-visibility-operator"
+            aria-label="条件"
+            :value="field.visibility.operator"
+            @change="onVisibilityOperatorChange($event)"
+          >
+            <option
+              v-for="option in VISIBILITY_OPERATOR_OPTIONS"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+          <input
+            v-if="visibilityNeedsValue"
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-visibility-value"
+            type="text"
+            aria-label="条件值"
+            :value="textValue('valueText')"
+            @input="onTextInput('valueText', $event)"
+            @blur="commitTextBuffer('valueText')"
+            @keydown.enter.prevent="commitTextBuffer('valueText')"
+          />
+        </template>
+      </section>
+
+      <!-- reference / dependency summary (FB-D6 provider, business labels only) -->
+      <section
+        class="approval-form-field-inspector__section"
+        data-testid="approval-form-field-inspector-references"
+      >
+        <p class="approval-form-field-inspector__label">引用情况</p>
+        <p v-if="referenceSummaries.length === 0" class="approval-form-field-inspector__hint">
+          暂无其他配置使用此字段
+        </p>
+        <ul v-else class="approval-form-field-inspector__reference-list">
+          <li v-for="entry in referenceSummaries" :key="entry.kind">
+            {{ entry.label }}<template v-if="entry.count > 1">（{{ entry.count }} 处）</template>
+          </li>
+        </ul>
+      </section>
+
+      <div class="approval-form-field-inspector__actions">
+        <button
+          type="button"
+          class="approval-form-field-inspector__danger-action"
+          data-testid="approval-form-field-inspector-remove-field"
+          @click="removeSelectedField"
+        >
+          删除字段
+        </button>
+      </div>
+    </form>
+
+    <p
+      class="approval-form-field-inspector__status"
+      role="status"
+      aria-live="polite"
+      data-testid="approval-form-field-inspector-status"
+    >
+      {{ statusMessage }}
+    </p>
+  </aside>
+</template>
+
+<script lang="ts">
+import type {
+  FormDependencyKind,
+  FormDetailColumnPropertyPatch,
+  FormFieldDependency,
+  FormFieldPropertyPatch,
+} from '../approvalFormCommands'
+import type { FormFieldType as InspectorFormFieldType } from '../../types/approval'
+
+/** Typed command surface the inspector may request (FB-D4 single path). */
+export type FormFieldInspectorCommand =
+  | {
+      kind: 'update-properties'
+      localId: string
+      patch: FormFieldPropertyPatch
+    }
+  | { kind: 'retype'; localId: string; nextType: InspectorFormFieldType }
+  | { kind: 'remove-field'; localId: string }
+  | { kind: 'add-detail-column'; fieldLocalId: string }
+  | {
+      kind: 'update-detail-column'
+      fieldLocalId: string
+      columnLocalId: string
+      patch: FormDetailColumnPropertyPatch
+    }
+  | {
+      kind: 'retype-detail-column'
+      fieldLocalId: string
+      columnLocalId: string
+      nextType: InspectorFormFieldType
+    }
+  | {
+      kind: 'remove-detail-column'
+      fieldLocalId: string
+      columnLocalId: string
+    }
+
+/**
+ * F3 values-free inspector copy (FB-D6/FB-D7/§8). Refusals map dependency
+ * KINDS to business labels; no field values, labels, internal locations, or
+ * persistent/local IDs ever enter this copy. Exported for exact spec pins.
+ */
+export const INSPECTOR_INVALID_BUFFER_MESSAGE =
+  '当前字段设置未完成，请先修正后再继续。'
+export const INSPECTOR_GENERIC_RETRY_MESSAGE = '操作未完成，请重试。'
+export const INSPECTOR_LAST_FIELD_MESSAGE = '表单至少需要保留一个字段。'
+export const INSPECTOR_LAST_DETAIL_COLUMN_MESSAGE =
+  '明细字段至少需要保留一个子字段。'
+export const INSPECTOR_RETYPE_REFUSAL_PREFIX =
+  '暂不能修改字段类型，以下配置正在使用此字段，请先调整后重试：'
+export const INSPECTOR_DELETE_REFUSAL_PREFIX =
+  '暂不能删除，以下配置正在使用此字段，请先调整后重试：'
+
+/** Business labels for every dependency kind (never internal locations/IDs). */
+export const DEPENDENCY_KIND_BUSINESS_LABELS: Record<FormDependencyKind, string> = {
+  visibility_rule: '字段显示条件',
+  step_assignee_source: '审批步骤的审批人来源',
+  step_field_permission: '审批步骤的表单权限',
+  condition_rule: '条件分支规则',
+  condition_formula: '条件公式',
+  approval_node_assignee_source: '审批节点的审批人来源',
+  preserved_graph_reference: '流程图配置',
+  amount_consistency_mapping: '金额一致性校验',
+  external_reference: '外部引用',
+  detail_config: '明细字段配置',
+  record_link_config: '关联记录配置',
+  attachment_boundary: '附件能力边界',
+}
+
+/** Values-free refusal copy: prefix + deduped business kind labels. */
+export function describeDependencyRefusal(
+  prefix: string,
+  dependencies: readonly FormFieldDependency[],
+): string {
+  const labels = Array.from(
+    new Set(
+      dependencies.map((entry) => DEPENDENCY_KIND_BUSINESS_LABELS[entry.kind]),
+    ),
+  )
+  return `${prefix}${labels.join('、')}`
+}
+</script>
+
+<script setup lang="ts">
+/**
+ * F3 Designer 2.0 selected-field inspector (delta §3.4, FB-D6/FB-D7) — the
+ * NEW builder's property pane, SEPARATE from the extracted flag-OFF
+ * `ApprovalFormInlineEditor` fallback. Composed by `ApprovalFormBuilder`
+ * (standalone until the F4 production mount behind `approvalCanvasV2`).
+ *
+ * Contract highlights:
+ * - ONE command path (FB-D4): every edit is a typed `FormFieldInspectorCommand`
+ *   run through the injected `execute` seam — the builder maps each to exactly
+ *   one `approvalFormAuthoringAdapter` call. This component NEVER mutates the
+ *   draft or field objects itself.
+ * - Committed edits only (FB-D7): text inputs buffer locally and commit on
+ *   blur/Enter; selects/toggles commit on change; one logical option/detail
+ *   row action = one command = one history entry. Typing a character NEVER
+ *   issues a command (per-keystroke undo entries are forbidden).
+ * - `settlePendingEdits()` commits one valid dirty buffer as ONE command, or
+ *   blocks (returns false) on an invalid buffer with values-free copy — the
+ *   builder calls it before every selection switch; a dirty buffer is never
+ *   silently discarded.
+ * - Type change = the typed retype command; a named
+ *   `field_type_incompatible_with_references` refusal renders VALUES-FREE
+ *   business copy listing the dependency kinds and reverts the control. The
+ *   legacy silent `invalidateStaleRecordLinkDependencies` cleanup is never
+ *   called from this path.
+ * - Option rows: a new option receives a generated OPAQUE value
+ *   (`optionValueFactory` seam); existing hand-authored values are preserved
+ *   and never regenerated (§3.4).
+ * - No persistent/local IDs in any rendered copy; `localId` appears only in
+ *   non-visible data-* attributes/test ids (§8).
+ */
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import type { FormAdapterResult } from '../approvalFormAuthoringAdapter'
+// NOTE: FormFieldPropertyPatch / FormDetailColumnPropertyPatch and the
+// dependency types are imported in the sibling <script> block above; the two
+// blocks share one module scope, so they must not be imported twice.
+import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from '../detailField'
+import type { FormFieldType } from '../../types/approval'
+import type {
+  AuthorableFieldType,
+  FieldAuthoringDraft,
+  FieldVisibilityDraft,
+} from '../templateAuthoring'
+import {
+  APPROVAL_FORM_FIELD_TYPE_LABELS,
+  APPROVAL_FORM_PALETTE_GROUPS,
+} from './ApprovalFormPalette.vue'
+import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
+import { useApprovalDirectory, type DirectoryUserOption } from '../useApprovalDirectory'
+
+const props = withDefaults(
+  defineProps<{
+    /** The selected field (read-only view model), or null when none. */
+    field: FieldAuthoringDraft | null
+    /** FB-D6 current-draft reference set for the selected field. */
+    references?: readonly FormFieldDependency[]
+    /** Business options for the visibility depends-on picker (no self/record-link/detail). */
+    visibilityOptions?: readonly { id: string; label: string }[]
+    readOnly?: boolean
+    /**
+     * FB-D4 seam: run one typed command through the ONE adapter path. Returns
+     * the adapter result, or null when the surface is read-only/unavailable.
+     */
+    execute: (command: FormFieldInspectorCommand) => FormAdapterResult | null
+    /** Opaque value seam for NEW options (§3.4); injectable for determinism. */
+    optionValueFactory?: () => string
+  }>(),
+  {
+    references: () => [],
+    visibilityOptions: () => [],
+    readOnly: false,
+    optionValueFactory: undefined,
+  },
+)
+
+const VISIBILITY_OPERATOR_OPTIONS: readonly {
+  value: FieldVisibilityDraft['operator']
+  label: string
+}[] = [
+  { value: 'eq', label: '等于' },
+  { value: 'neq', label: '不等于' },
+  { value: 'in', label: '包含任一（每行一个值）' },
+  { value: 'isEmpty', label: '为空' },
+  { value: 'notEmpty', label: '不为空' },
+]
+
+const typeOptions = APPROVAL_FORM_PALETTE_GROUPS.flatMap(
+  (group) => group.entries,
+)
+const columnTypeOptions = DETAIL_LEAF_FIELD_TYPES.map((type) => ({
+  type,
+  label: APPROVAL_FORM_FIELD_TYPE_LABELS[type as AuthorableFieldType],
+}))
+
+const field = computed(() => props.field)
+const userDirectory = useApprovalDirectory()
+const authorUserOptions = computed<DirectoryUserOption[]>(() => {
+  const fetched = userDirectory.users.value
+  const seen = new Set(fetched.map((user) => user.id))
+  const missing = (field.value?.userDefaultIds ?? [])
+    .filter((id) => id.trim().length > 0 && !seen.has(id))
+    .map((id) => ({ id, name: '', email: '' }))
+  return missing.length > 0 ? [...missing, ...fetched] : fetched
+})
+const departmentDefaultValue = computed(() => (
+  field.value?.departmentDefaultIds.map((id) => ({ id })) ?? []
+))
+const departmentMaxSelections = computed<number | undefined>(() => {
+  const text = field.value?.departmentMaxSelectionsText.trim() ?? ''
+  const value = Number(text)
+  return text && Number.isInteger(value) && value > 0 ? value : undefined
+})
+
+onMounted(() => {
+  if (field.value?.type === 'user' && field.value.userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+})
+
+const recordLinkConfigured = computed(
+  () =>
+    Boolean(field.value) &&
+    field.value!.recordLinkBaseId.trim() !== '' &&
+    field.value!.recordLinkSheetId.trim() !== '',
+)
+const visibilityNeedsValue = computed(() => {
+  const operator = field.value?.visibility.operator
+  return operator === 'eq' || operator === 'neq' || operator === 'in'
+})
+
+const referenceSummaries = computed(() => {
+  const counts = new Map<FormDependencyKind, number>()
+  for (const entry of props.references) {
+    counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1)
+  }
+  return Array.from(counts.entries()).map(([kind, count]) => ({
+    kind,
+    label: DEPENDENCY_KIND_BUSINESS_LABELS[kind],
+    count,
+  }))
+})
+
+// --- local edit buffer (FB-D7) ----------------------------------------------
+
+type TextBufferKey =
+  | 'label'
+  | 'placeholder'
+  | 'valueText'
+  | 'minRowsText'
+  | 'maxRowsText'
+  | 'dateRangeStartLabel'
+  | 'dateRangeEndLabel'
+  | 'dateRangeDurationLabel'
+  | 'explanationText'
+  | 'departmentMaxSelectionsText'
+  | 'userMaxSelectionsText'
+
+interface EditBuffer {
+  text: Partial<Record<TextBufferKey, string>>
+  /** Option row label edits keyed by row index. */
+  optionLabels: Record<number, string>
+  /** Detail column label edits keyed by column localId. */
+  columnLabels: Record<string, string>
+}
+
+const buffer = reactive<EditBuffer>({
+  text: {},
+  optionLabels: {},
+  columnLabels: {},
+})
+const statusMessage = ref('')
+
+function clearBuffer(): void {
+  buffer.text = {}
+  buffer.optionLabels = {}
+  buffer.columnLabels = {}
+}
+
+// A NEW selection gets a clean buffer. The builder settles/blocks the old
+// buffer BEFORE switching (FB-D7) — this watcher only resets state for the
+// newly selected field; it never discards a still-pending buffer for the SAME
+// field.
+watch(
+  () => props.field?.localId,
+  () => {
+    clearBuffer()
+    statusMessage.value = ''
+  },
+)
+
+function committedText(key: TextBufferKey): string {
+  const current = field.value
+  if (!current) return ''
+  if (key === 'valueText') return current.visibility.valueText
+  return current[key]
+}
+
+function textValue(key: TextBufferKey): string {
+  return buffer.text[key] ?? committedText(key)
+}
+
+function isDirty(): boolean {
+  return (
+    Object.keys(buffer.text).length > 0 ||
+    Object.keys(buffer.optionLabels).length > 0 ||
+    Object.keys(buffer.columnLabels).length > 0
+  )
+}
+
+// --- option rows over `optionsText` (values preserved; §3.4) ----------------
+
+interface OptionRow {
+  label: string
+  value: string
+}
+
+function parseOptionRows(text: string): OptionRow[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf(':')
+      if (separator === -1) return { label: line, value: line }
+      return {
+        label: line.slice(0, separator).trim(),
+        value: line.slice(separator + 1).trim(),
+      }
+    })
+}
+
+function serializeOptionRows(rows: readonly OptionRow[]): string {
+  return rows.map((row) => `${row.label}:${row.value}`).join('\n')
+}
+
+/**
+ * The ONE implementation of §3.4 option-label editing (F3 gate P2-3): apply
+ * pending label edits by row index while PRESERVING each row's hand-authored/
+ * generated `value` — a label edit must never regenerate a value. Both commit
+ * paths (blur/Enter via `commitOptionLabel` and the selection-switch settle via
+ * `settlePendingEdits`) route through here so the preservation rule cannot
+ * drift between them.
+ */
+function applyOptionLabelEdits(
+  rows: readonly OptionRow[],
+  edits: Readonly<Record<number, string>>,
+): OptionRow[] {
+  return rows.map((row, rowIndex) => {
+    const pending = edits[rowIndex]
+    return pending !== undefined && pending !== row.label
+      ? { label: pending.trim(), value: row.value }
+      : row
+  })
+}
+
+const optionRows = computed<OptionRow[]>(() =>
+  field.value ? parseOptionRows(field.value.optionsText) : [],
+)
+
+function optionLabelValue(index: number): string {
+  return buffer.optionLabels[index] ?? optionRows.value[index]?.label ?? ''
+}
+
+function defaultOptionValue(): string {
+  if (props.optionValueFactory) return props.optionValueFactory()
+  const bytes = new Uint8Array(8)
+  const cryptoApi = (globalThis as { crypto?: Crypto }).crypto
+  if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  let token = ''
+  for (let index = 0; index < bytes.length; index += 1) {
+    token += bytes[index]!.toString(16).padStart(2, '0')
+  }
+  return `opt_${token}`
+}
+
+// --- command execution ------------------------------------------------------
+
+function runCommand(command: FormFieldInspectorCommand): boolean {
+  const result = props.execute(command)
+  if (result === null) return false
+  if (result.ok) {
+    statusMessage.value = ''
+    return true
+  }
+  if (result.reason === 'last_field_removal_forbidden') {
+    statusMessage.value = INSPECTOR_LAST_FIELD_MESSAGE
+  } else if (result.reason === 'last_detail_column_removal_forbidden') {
+    statusMessage.value = INSPECTOR_LAST_DETAIL_COLUMN_MESSAGE
+  } else if (result.reason === 'field_type_incompatible_with_references') {
+    statusMessage.value = describeDependencyRefusal(
+      INSPECTOR_RETYPE_REFUSAL_PREFIX,
+      result.dependencies,
+    )
+  } else if (result.reason === 'field_is_referenced') {
+    statusMessage.value = describeDependencyRefusal(
+      INSPECTOR_DELETE_REFUSAL_PREFIX,
+      result.dependencies,
+    )
+  } else {
+    statusMessage.value = INSPECTOR_GENERIC_RETRY_MESSAGE
+  }
+  return false
+}
+
+function commitPatch(patch: FormFieldPropertyPatch): boolean {
+  const current = field.value
+  if (!current) return false
+  return runCommand({
+    kind: 'update-properties',
+    localId: current.localId,
+    patch,
+  })
+}
+
+// --- text buffer commit/validation (FB-D7) ----------------------------------
+
+function isRowCountText(value: string): boolean {
+  return value.trim() === '' || /^\d+$/.test(value.trim())
+}
+
+/** null = valid; otherwise the buffer blocks with values-free copy. */
+function bufferValidationError(): string | null {
+  const current = field.value
+  if (!current) return null
+  const label = buffer.text.label
+  if (label !== undefined && label.trim() === '') {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  if (
+    dateRangeStartLabel !== undefined &&
+    dateRangeStartLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  if (
+    dateRangeEndLabel !== undefined &&
+    dateRangeEndLabel.trim() === ''
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const explanationText = buffer.text.explanationText
+  if (explanationText !== undefined && explanationText.trim() === '') {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  const minRows = buffer.text.minRowsText ?? current.minRowsText
+  const maxRows = buffer.text.maxRowsText ?? current.maxRowsText
+  const departmentMaxSelections =
+    buffer.text.departmentMaxSelectionsText ?? current.departmentMaxSelectionsText
+  const userMaxSelections =
+    buffer.text.userMaxSelectionsText ?? current.userMaxSelectionsText
+  if (
+    current.type === 'department' &&
+    departmentMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(departmentMaxSelections.trim()) || Number(departmentMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  if (
+    current.type === 'user' &&
+    userMaxSelections.trim() !== '' &&
+    (!/^\d+$/.test(userMaxSelections.trim()) || Number(userMaxSelections.trim()) < 1)
+  ) {
+    return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  if (
+    buffer.text.minRowsText !== undefined ||
+    buffer.text.maxRowsText !== undefined
+  ) {
+    if (!isRowCountText(minRows) || !isRowCountText(maxRows)) {
+      return INSPECTOR_INVALID_BUFFER_MESSAGE
+    }
+    if (
+      minRows.trim() !== '' &&
+      maxRows.trim() !== '' &&
+      Number(minRows.trim()) > Number(maxRows.trim())
+    ) {
+      return INSPECTOR_INVALID_BUFFER_MESSAGE
+    }
+  }
+  for (const value of Object.values(buffer.optionLabels)) {
+    if (value.trim() === '') return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  for (const value of Object.values(buffer.columnLabels)) {
+    if (value.trim() === '') return INSPECTOR_INVALID_BUFFER_MESSAGE
+  }
+  return null
+}
+
+function onTextInput(key: TextBufferKey, event: Event): void {
+  // Buffer only — NEVER a command per keystroke (FB-D7).
+  buffer.text = {
+    ...buffer.text,
+    [key]: (event.target as HTMLInputElement | HTMLTextAreaElement).value,
+  }
+}
+
+function textPatchFor(
+  key: TextBufferKey,
+  value: string,
+  current: FieldAuthoringDraft,
+): FormFieldPropertyPatch {
+  if (key === 'valueText') {
+    return { visibility: { ...current.visibility, valueText: value } }
+  }
+  return { [key]: value }
+}
+
+function commitTextBuffer(key: TextBufferKey): void {
+  const current = field.value
+  if (!current) return
+  const value = buffer.text[key]
+  if (value === undefined) return
+  if (value === committedText(key)) {
+    // Value-identical buffer: drop it without a command (zero history).
+    const { [key]: _dropped, ...rest } = buffer.text
+    buffer.text = rest
+    return
+  }
+  const error = keyBlocksCommit(key) ? bufferValidationError() : null
+  if (error) {
+    statusMessage.value = error
+    return
+  }
+  if (commitPatch(textPatchFor(key, value, current))) {
+    const { [key]: _committed, ...rest } = buffer.text
+    buffer.text = rest
+  }
+}
+
+function keyBlocksCommit(key: TextBufferKey): boolean {
+  return (
+    key === 'label' ||
+    key === 'minRowsText' ||
+    key === 'maxRowsText' ||
+    key === 'dateRangeStartLabel' ||
+    key === 'dateRangeEndLabel' ||
+    key === 'explanationText' ||
+    key === 'departmentMaxSelectionsText' ||
+    key === 'userMaxSelectionsText'
+  )
+}
+
+// --- select/toggle commits (commit on change) -------------------------------
+
+function onTypeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const nextType = select.value as FormFieldType
+  if (nextType === current.type) return
+  if (!settlePendingEdits()) {
+    // A retype must not hide an invalid buffer from the previous field type.
+    select.value = current.type
+    return
+  }
+  const committed = runCommand({
+    kind: 'retype',
+    localId: current.localId,
+    nextType,
+  })
+  if (!committed) {
+    // Rejection = zero mutation; snap the control back to the real type.
+    select.value = current.type
+  }
+}
+
+function onRequiredChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const checked = (event.target as HTMLInputElement).checked
+  if (!commitPatch({ required: checked })) {
+    ;(event.target as HTMLInputElement).checked = current.required
+  }
+}
+
+function onNumberCurrencyChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  if (!commitPatch({ numberCurrencySymbol: select.value })) {
+    select.value = current.numberCurrencySymbol
+  }
+}
+
+function onDepartmentSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentSelection = select.value as FieldAuthoringDraft['departmentSelection']
+  const patch: FormFieldPropertyPatch = departmentSelection === 'single'
+    ? {
+        departmentSelection,
+        departmentMaxSelectionsText: '',
+        departmentDefaultIds: current.departmentDefaultIds.slice(0, 1),
+      }
+    : { departmentSelection }
+  if (!commitPatch(patch)) select.value = current.departmentSelection
+}
+
+function onDepartmentDisplayChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDisplay = select.value as FieldAuthoringDraft['departmentDisplay']
+  if (!commitPatch({ departmentDisplay })) select.value = current.departmentDisplay
+}
+
+function onDepartmentDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const departmentDefaultMode = select.value as FieldAuthoringDraft['departmentDefaultMode']
+  const patch: FormFieldPropertyPatch = departmentDefaultMode === 'designated'
+    ? { departmentDefaultMode }
+    : { departmentDefaultMode, departmentDefaultIds: [] }
+  if (!commitPatch(patch)) select.value = current.departmentDefaultMode
+}
+
+function onDepartmentDefaultIdsChange(value: Array<{ id: string }>): void {
+  commitPatch({ departmentDefaultIds: value.map((entry) => entry.id) })
+}
+
+function onUserAllowSelfChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  const patch: FormFieldPropertyPatch = input.checked
+    ? { userAllowSelf: true }
+    : {
+        userAllowSelf: false,
+        ...(current.userDefaultMode === 'requester'
+          ? { userDefaultMode: '', userDefaultIds: [] }
+          : {}),
+      }
+  if (!commitPatch(patch)) input.checked = current.userAllowSelf
+}
+
+function onUserSelectionChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userSelection = select.value as FieldAuthoringDraft['userSelection']
+  const patch: FormFieldPropertyPatch = userSelection === 'single'
+    ? {
+        userSelection,
+        userMaxSelectionsText: '',
+        userDefaultIds: current.userDefaultIds.slice(0, 1),
+      }
+    : { userSelection }
+  if (!commitPatch(patch)) select.value = current.userSelection
+}
+
+function onUserDefaultModeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const userDefaultMode = select.value as FieldAuthoringDraft['userDefaultMode']
+  const patch: FormFieldPropertyPatch = userDefaultMode === 'designated'
+    ? { userDefaultMode }
+    : {
+        userDefaultMode,
+        userDefaultIds: [],
+        ...(userDefaultMode === 'requester' ? { userAllowSelf: true } : {}),
+      }
+  if (!commitPatch(patch)) {
+    select.value = current.userDefaultMode
+  } else if (userDefaultMode === 'designated') {
+    void userDirectory.searchUsers('')
+  }
+}
+
+function onUserDefaultIdsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const ids = current.userSelection === 'multi'
+    ? Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean)
+    : select.value ? [select.value] : []
+  commitPatch({ userDefaultIds: ids })
+}
+
+function onUserDirectorySearch(event: Event): void {
+  void userDirectory.searchUsers((event.target as HTMLInputElement).value)
+}
+
+function onUserDefaultPickerFocus(): void {
+  void userDirectory.searchUsers('')
+}
+
+function authorUserLabel(user: DirectoryUserOption, index: number): string {
+  const primary = user.name.trim() || `成员 ${index + 1}`
+  const email = user.email.trim()
+  return email ? `${primary} · ${email}` : primary
+}
+
+function onNumberThousandsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberThousandsSeparator: input.checked })) {
+    input.checked = current.numberThousandsSeparator
+  }
+}
+
+function onNumberUppercaseChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const input = event.target as HTMLInputElement
+  if (!commitPatch({ numberUppercaseCny: input.checked })) {
+    input.checked = current.numberUppercaseCny
+  }
+}
+
+function onDateRangeDateTypeChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const dateRangeDateType =
+    select.value as FieldAuthoringDraft['dateRangeDateType']
+  if (!commitPatch({ dateRangeDateType })) {
+    select.value = current.dateRangeDateType
+  }
+}
+
+function onVisibilityDependsChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const value = (event.target as HTMLSelectElement).value
+  const visibility: FieldVisibilityDraft = value
+    ? { ...current.visibility, dependsOnFieldId: value }
+    : { dependsOnFieldId: '', operator: 'eq', valueText: '' }
+  if (!commitPatch({ visibility })) {
+    ;(event.target as HTMLSelectElement).value =
+      current.visibility.dependsOnFieldId
+  }
+}
+
+function onVisibilityOperatorChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const value = (event.target as HTMLSelectElement)
+    .value as FieldVisibilityDraft['operator']
+  if (!commitPatch({ visibility: { ...current.visibility, operator: value } })) {
+    ;(event.target as HTMLSelectElement).value = current.visibility.operator
+  }
+}
+
+// --- option row actions (one logical action = one commit) -------------------
+
+function onOptionLabelInput(index: number, event: Event): void {
+  buffer.optionLabels = {
+    ...buffer.optionLabels,
+    [index]: (event.target as HTMLInputElement).value,
+  }
+}
+
+function commitOptionLabel(index: number): void {
+  const current = field.value
+  if (!current) return
+  const value = buffer.optionLabels[index]
+  if (value === undefined) return
+  const rows = optionRows.value
+  if (value === rows[index]?.label) {
+    const { [index]: _dropped, ...rest } = buffer.optionLabels
+    buffer.optionLabels = rest
+    return
+  }
+  if (value.trim() === '') {
+    statusMessage.value = INSPECTOR_INVALID_BUFFER_MESSAGE
+    return
+  }
+  // Value PRESERVED: only the label changes; the hand-authored/generated
+  // value is never regenerated (§3.4) — one shared rule, see
+  // `applyOptionLabelEdits`.
+  const next = applyOptionLabelEdits(rows, { [index]: value })
+  if (commitPatch({ optionsText: serializeOptionRows(next) })) {
+    const { [index]: _committed, ...rest } = buffer.optionLabels
+    buffer.optionLabels = rest
+  }
+}
+
+function addOption(): void {
+  const current = field.value
+  if (!current) return
+  const rows = optionRows.value
+  const next = [
+    ...rows,
+    { label: `选项 ${rows.length + 1}`, value: defaultOptionValue() },
+  ]
+  commitPatch({ optionsText: serializeOptionRows(next) })
+}
+
+function removeOption(index: number): void {
+  const current = field.value
+  if (!current) return
+  const next = optionRows.value.filter((_row, rowIndex) => rowIndex !== index)
+  commitPatch({ optionsText: serializeOptionRows(next) })
+}
+
+// --- detail column actions --------------------------------------------------
+
+function columnLabelValue(column: DetailColumnDraft): string {
+  return buffer.columnLabels[column.localId] ?? column.label
+}
+
+function onColumnLabelInput(columnLocalId: string, event: Event): void {
+  buffer.columnLabels = {
+    ...buffer.columnLabels,
+    [columnLocalId]: (event.target as HTMLInputElement).value,
+  }
+}
+
+function commitColumnLabel(columnLocalId: string): void {
+  const current = field.value
+  if (!current) return
+  const value = buffer.columnLabels[columnLocalId]
+  if (value === undefined) return
+  const column = current.detailColumns.find(
+    (candidate) => candidate.localId === columnLocalId,
+  )
+  if (!column || value === column.label) {
+    const { [columnLocalId]: _dropped, ...rest } = buffer.columnLabels
+    buffer.columnLabels = rest
+    return
+  }
+  if (value.trim() === '') {
+    statusMessage.value = INSPECTOR_INVALID_BUFFER_MESSAGE
+    return
+  }
+  const committed = runCommand({
+    kind: 'update-detail-column',
+    fieldLocalId: current.localId,
+    columnLocalId,
+    patch: { label: value },
+  })
+  if (committed) {
+    const { [columnLocalId]: _committed, ...rest } = buffer.columnLabels
+    buffer.columnLabels = rest
+  }
+}
+
+function onColumnTypeChange(columnLocalId: string, event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const column = current.detailColumns.find(
+    (candidate) => candidate.localId === columnLocalId,
+  )
+  if (!column) return
+  const nextType = select.value as FormFieldType
+  if (nextType === column.type) return
+  const committed = runCommand({
+    kind: 'retype-detail-column',
+    fieldLocalId: current.localId,
+    columnLocalId,
+    nextType,
+  })
+  if (!committed) select.value = column.type
+}
+
+function onColumnRequiredChange(columnLocalId: string, event: Event): void {
+  const current = field.value
+  if (!current) return
+  const checked = (event.target as HTMLInputElement).checked
+  const column = current.detailColumns.find(
+    (candidate) => candidate.localId === columnLocalId,
+  )
+  const committed = runCommand({
+    kind: 'update-detail-column',
+    fieldLocalId: current.localId,
+    columnLocalId,
+    patch: { required: checked },
+  })
+  if (!committed && column) {
+    ;(event.target as HTMLInputElement).checked = column.required
+  }
+}
+
+function addColumn(): void {
+  const current = field.value
+  if (!current) return
+  runCommand({ kind: 'add-detail-column', fieldLocalId: current.localId })
+}
+
+function removeColumn(columnLocalId: string): void {
+  const current = field.value
+  if (!current) return
+  runCommand({
+    kind: 'remove-detail-column',
+    fieldLocalId: current.localId,
+    columnLocalId,
+  })
+}
+
+// --- delete field -----------------------------------------------------------
+
+function removeSelectedField(): void {
+  const current = field.value
+  if (!current) return
+  runCommand({ kind: 'remove-field', localId: current.localId })
+}
+
+// --- selection-switch settlement (FB-D7) ------------------------------------
+
+/**
+ * Commit one valid dirty buffer as ONE history entry, or block (false) on an
+ * invalid buffer with values-free copy. Never silently discards edits.
+ */
+function settlePendingEdits(): boolean {
+  const current = field.value
+  if (!current || !isDirty()) return true
+  const error = bufferValidationError()
+  if (error) {
+    statusMessage.value = error
+    return false
+  }
+
+  // All dirty FIELD-LEVEL buffers combine into ONE update-properties command
+  // (one history entry). Dirty option labels fold into the same optionsText
+  // patch; visibility valueText folds into the same visibility patch.
+  const patch: {
+    label?: string
+    placeholder?: string
+    optionsText?: string
+    minRowsText?: string
+    maxRowsText?: string
+    dateRangeStartLabel?: string
+    dateRangeEndLabel?: string
+    dateRangeDurationLabel?: string
+    explanationText?: string
+    departmentMaxSelectionsText?: string
+    visibility?: FieldVisibilityDraft
+  } = {}
+  if (buffer.text.label !== undefined && buffer.text.label !== current.label) {
+    patch.label = buffer.text.label
+  }
+  if (
+    buffer.text.placeholder !== undefined &&
+    buffer.text.placeholder !== current.placeholder
+  ) {
+    patch.placeholder = buffer.text.placeholder
+  }
+  if (
+    buffer.text.minRowsText !== undefined &&
+    buffer.text.minRowsText !== current.minRowsText
+  ) {
+    patch.minRowsText = buffer.text.minRowsText
+  }
+  if (
+    buffer.text.maxRowsText !== undefined &&
+    buffer.text.maxRowsText !== current.maxRowsText
+  ) {
+    patch.maxRowsText = buffer.text.maxRowsText
+  }
+  if (
+    buffer.text.dateRangeStartLabel !== undefined &&
+    buffer.text.dateRangeStartLabel !== current.dateRangeStartLabel
+  ) {
+    patch.dateRangeStartLabel = buffer.text.dateRangeStartLabel
+  }
+  if (
+    buffer.text.dateRangeEndLabel !== undefined &&
+    buffer.text.dateRangeEndLabel !== current.dateRangeEndLabel
+  ) {
+    patch.dateRangeEndLabel = buffer.text.dateRangeEndLabel
+  }
+  if (
+    buffer.text.dateRangeDurationLabel !== undefined &&
+    buffer.text.dateRangeDurationLabel !== current.dateRangeDurationLabel
+  ) {
+    patch.dateRangeDurationLabel = buffer.text.dateRangeDurationLabel
+  }
+  if (
+    buffer.text.explanationText !== undefined &&
+    buffer.text.explanationText !== current.explanationText
+  ) {
+    patch.explanationText = buffer.text.explanationText
+  }
+  if (
+    buffer.text.departmentMaxSelectionsText !== undefined &&
+    buffer.text.departmentMaxSelectionsText !== current.departmentMaxSelectionsText
+  ) {
+    patch.departmentMaxSelectionsText = buffer.text.departmentMaxSelectionsText
+  }
+  if (
+    buffer.text.valueText !== undefined &&
+    buffer.text.valueText !== current.visibility.valueText
+  ) {
+    patch.visibility = {
+      ...current.visibility,
+      valueText: buffer.text.valueText,
+    }
+  }
+  if (Object.keys(buffer.optionLabels).length > 0) {
+    // Same value-preserving rule as the blur/Enter path (P2-3): one shared
+    // implementation, so the settle path cannot silently regenerate values.
+    const rows = applyOptionLabelEdits(optionRows.value, buffer.optionLabels)
+    const nextText = serializeOptionRows(rows)
+    if (nextText !== current.optionsText) patch.optionsText = nextText
+  }
+  if (Object.keys(patch).length > 0 && !commitPatch(patch)) return false
+
+  // Dirty COLUMN labels are separate logical edits (one command each; in
+  // practice blur commits them before a switch, so at most one is pending).
+  for (const [columnLocalId, pending] of Object.entries(buffer.columnLabels)) {
+    const column = field.value?.detailColumns.find(
+      (candidate) => candidate.localId === columnLocalId,
+    )
+    if (!column || pending === column.label) continue
+    const committed = runCommand({
+      kind: 'update-detail-column',
+      fieldLocalId: current.localId,
+      columnLocalId,
+      patch: { label: pending },
+    })
+    if (!committed) return false
+  }
+
+  clearBuffer()
+  statusMessage.value = ''
+  return true
+}
+
+defineExpose({ settlePendingEdits, isDirty })
+</script>
+
+<style scoped>
+.approval-form-field-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 12px;
+}
+
+.approval-form-field-inspector__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.approval-form-field-inspector__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+
+.approval-form-field-inspector__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-form-field-inspector__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.approval-form-field-inspector__row--inline {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.approval-form-field-inspector__label {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+
+.approval-form-field-inspector__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+
+.approval-form-field-inspector__control {
+  min-height: 40px;
+  padding: 4px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+}
+
+.approval-form-field-inspector__control--narrow {
+  max-width: 140px;
+}
+
+.approval-form-field-inspector__control:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
+}
+
+.approval-form-field-inspector__section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.approval-form-field-inspector__option-row,
+.approval-form-field-inspector__column-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.approval-form-field-inspector__option-row .approval-form-field-inspector__control,
+.approval-form-field-inspector__column-row .approval-form-field-inspector__control {
+  flex: 1;
+  min-width: 120px;
+}
+
+.approval-form-field-inspector__minor-action {
+  min-height: 40px;
+  min-width: 40px;
+  padding: 4px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.approval-form-field-inspector__minor-action:hover,
+.approval-form-field-inspector__minor-action:focus-visible {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+
+.approval-form-field-inspector__minor-action:focus-visible,
+.approval-form-field-inspector__danger-action:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
+.approval-form-field-inspector__reference-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+
+.approval-form-field-inspector__actions {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.approval-form-field-inspector__danger-action {
+  min-height: 40px;
+  padding: 4px 12px;
+  border: 1px solid var(--el-color-danger);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  color: var(--el-color-danger);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.approval-form-field-inspector__status {
+  min-height: 18px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+</style>

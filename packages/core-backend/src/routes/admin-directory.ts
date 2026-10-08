@@ -3,7 +3,9 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
+  DirectorySyncFrozenByTransferError,
   DirectorySyncInProgressError,
+  DirectorySyncRunReplayError,
   DirectoryTenantChangeBlockedError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
@@ -13,6 +15,7 @@ import {
   bindDirectoryAccount,
   createDirectoryIntegration,
   getDirectorySyncScheduleSnapshot,
+  getDirectorySyncRun,
   getDirectoryAccountSummary,
   getDirectoryReviewItem,
   listDirectoryIntegrationAccounts,
@@ -40,6 +43,15 @@ import {
   saveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
+import {
+  compensateSupersededDenyGrant,
+  listDeprovisionEffects,
+  listDeprovisionEvents,
+  previewDeprovisionForUser,
+  readDeprovisionRuntimeFlags,
+  restoreDeprovisionEvent,
+} from '../directory/deprovision-evidence-api'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -50,6 +62,7 @@ import { isValidDirectoryScheduleTimezone, resolveDirectoryScheduleTimezone } fr
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutes')
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
   const normalized = typeof value === 'string' ? value.trim() : ''
@@ -523,9 +536,17 @@ export function adminDirectoryRouter(): Router {
     // where the pull outlives any sane request timeout) ask for 202 + runId and poll the
     // runs endpoint.
     if (req.body?.async === true) {
+      const requestedRunId = typeof req.body?.runId === 'string' ? req.body.runId.trim() : ''
+      if (requestedRunId && !UUID_SHAPE_RE.test(requestedRunId)) {
+        jsonError(res, 400, 'DIRECTORY_SYNC_RUN_ID_INVALID', 'runId must be a UUID')
+        return
+      }
       try {
         const runId = await new Promise<string>((resolve, reject) => {
-          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', { onRunStarted: resolve })
+          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', {
+            onRunStarted: resolve,
+            requestedRunId: requestedRunId || undefined,
+          })
             .then((result) => {
               logger.info(`Async directory sync finished for ${req.params.integrationId} (run ${result.run.id})`)
             })
@@ -541,6 +562,16 @@ export function adminDirectoryRouter(): Router {
         jsonOk(res, { accepted: true, runId, integrationId: req.params.integrationId })
         return
       } catch (error) {
+        if (error instanceof DirectorySyncRunReplayError) {
+          res.status(202)
+          jsonOk(res, {
+            accepted: true,
+            runId: error.runId,
+            integrationId: req.params.integrationId,
+            replayed: true,
+          })
+          return
+        }
         // DT-HARDEN-05: the lease conflict is thrown by the claim, BEFORE onRunStarted
         // ever fires, so it always lands in this catch — and it is the same benign
         // "already running" state as in the non-async branch below. Map it identically:
@@ -549,6 +580,14 @@ export function adminDirectoryRouter(): Router {
           jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
           return
         }
+        // T2 (§12.2): an active org transfer freezes this source integration's sync — a
+        // deliberate admin-visible state, not a failure. 409 + the transfer id.
+        if (error instanceof DirectorySyncFrozenByTransferError) {
+          jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
+          return
+        }
+        // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
+        if (sendIfRecoveryConflict(res, error)) return
         const message = readErrorMessage(error, 'Failed to start directory sync')
         jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
         return
@@ -565,6 +604,13 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
         return
       }
+      // T2 (§12.2): same deliberate frozen state as the async branch above.
+      if (error instanceof DirectorySyncFrozenByTransferError) {
+        jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
+        return
+      }
+      // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
     }
@@ -611,6 +657,26 @@ export function adminDirectoryRouter(): Router {
       })
     } catch (error) {
       jsonError(res, 500, 'DIRECTORY_RUNS_FAILED', readErrorMessage(error, 'Failed to load sync runs'))
+    }
+  })
+
+  router.get('/integrations/:integrationId/runs/:runId', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!UUID_SHAPE_RE.test(req.params.runId)) {
+      jsonError(res, 400, 'DIRECTORY_SYNC_RUN_ID_INVALID', 'runId must be a UUID')
+      return
+    }
+
+    try {
+      const run = await getDirectorySyncRun(req.params.integrationId, req.params.runId)
+      if (!run) {
+        jsonError(res, 404, 'DIRECTORY_RUN_NOT_FOUND', 'Directory sync run not found')
+        return
+      }
+      jsonOk(res, { run })
+    } catch (error) {
+      jsonError(res, 500, 'DIRECTORY_RUN_FAILED', readErrorMessage(error, 'Failed to load sync run'))
     }
   })
 
@@ -836,6 +902,8 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { account: result.account })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the bind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to bind directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -883,6 +951,8 @@ export function adminDirectoryRouter(): Router {
             name: result.user.name,
             mobile: result.user.mobile,
             generatedPassword: typeof result.temporaryPassword === 'string',
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
         auditLog({
@@ -903,6 +973,8 @@ export function adminDirectoryRouter(): Router {
             externalUserId: result.account.externalUserId,
             corpId: result.account.corpId,
             mode: 'manual_admission',
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
       ])
@@ -912,9 +984,14 @@ export function adminDirectoryRouter(): Router {
         user: result.user,
         temporaryPassword: result.temporaryPassword,
         inviteToken: result.inviteToken,
+        // Null when pending — do not invent login/temp-password messaging.
         onboarding: result.onboarding,
+        activationStatus: result.activationStatus,
+        enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the admission write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -979,6 +1056,8 @@ export function adminDirectoryRouter(): Router {
         failed: outcome.failed,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from a bind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1023,6 +1102,8 @@ export function adminDirectoryRouter(): Router {
             generatedPassword: typeof result.temporaryPassword === 'string',
             mode: 'bulk_manual_admission',
             selectionSize: accountIds.length,
+            activationStatus: result.activationStatus,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
           },
         }),
         auditLog({
@@ -1042,7 +1123,10 @@ export function adminDirectoryRouter(): Router {
             localUserUsername: result.user.username,
             externalUserId: result.account.externalUserId,
             corpId: result.account.corpId,
-            enableDingTalkGrant,
+            // Actual applied value (pending forces false), not the request echo.
+            enableDingTalkGrant: result.enableDingTalkGrantApplied,
+            enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
+            activationStatus: result.activationStatus,
             mode: 'bulk_manual_admission',
             selectionSize: accountIds.length,
           },
@@ -1052,6 +1136,10 @@ export function adminDirectoryRouter(): Router {
       if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
         throw new Error(outcome.failed[0].error)
       }
+
+      // Report applied grant (truthful); request may have been forced off in pending mode.
+      const enableDingTalkGrantApplied = outcome.succeeded[0]?.enableDingTalkGrantApplied
+        ?? false
 
       jsonOk(res, {
         items: outcome.succeeded.map((result) => result.account),
@@ -1063,14 +1151,21 @@ export function adminDirectoryRouter(): Router {
           username: result.user.username,
           mobile: result.user.mobile,
           temporaryPassword: result.temporaryPassword ?? '',
+          // Null when pending — no "管理员单独告知" / login URL packet.
           onboarding: result.onboarding,
+          activationStatus: result.activationStatus,
+          enableDingTalkGrantApplied: result.enableDingTalkGrantApplied,
         })),
         updatedCount: outcome.succeeded.length,
         failedCount: outcome.failed.length,
         failed: outcome.failed,
-        enableDingTalkGrant,
+        enableDingTalkGrantRequested: enableDingTalkGrant,
+        enableDingTalkGrant: enableDingTalkGrantApplied,
+        enableDingTalkGrantApplied,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from an admission write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1112,6 +1207,8 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { account: result.account })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from the unbind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to unbind directory account')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1167,6 +1264,8 @@ export function adminDirectoryRouter(): Router {
         disableDingTalkGrant,
       })
     } catch (error) {
+      // O2-S2: named retryable RecoveryConflictError from an unbind write → retryable 409.
+      if (sendIfRecoveryConflict(res, error)) return
       const message = readErrorMessage(error, 'Failed to batch unbind directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
@@ -1209,6 +1308,418 @@ export function adminDirectoryRouter(): Router {
       jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ALERT_ACK_FAILED', message)
     }
   })
+
+  // ── D7 evidence chain: flags / plan preview / events / restore ────────────
+
+  type DeprovisionEventStatus =
+    | 'applied'
+    | 'fully_resolved'
+    | 'superseded'
+
+  function readDeprovisionEventStatus(
+    value: unknown,
+  ): DeprovisionEventStatus | undefined | null {
+    if (value === undefined || value === null || value === '') return undefined
+    if (
+      value === 'applied'
+      || value === 'fully_resolved'
+      || value === 'superseded'
+    ) {
+      return value
+    }
+    return null
+  }
+
+  function readDeprovisionEventLimit(value: unknown): number | null {
+    if (value === undefined) return 50
+    if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return null
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed <= 200 ? parsed : null
+  }
+
+  function readCompatibilityRestoreMode(
+    value: unknown,
+  ): 'rehire' | 'admin_force' | null {
+    if (value === undefined) return 'rehire'
+    if (typeof value !== 'string') return null
+    const mode = value.trim()
+    return mode === 'rehire' || mode === 'admin_force' ? mode : null
+  }
+
+  function validateDeprovisionEventId(req: Request, res: Response): boolean {
+    if (UUID_SHAPE_RE.test(req.params.eventId)) return true
+    jsonError(res, 400, 'DEPROVISION_EVENT_ID_INVALID', 'eventId must be a UUID')
+    return false
+  }
+
+  async function listDeprovisionEventsForRequest(
+    req: Request,
+    res: Response,
+    integrationId?: string,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const status = readDeprovisionEventStatus(req.query.status)
+    if (status === null) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_EVENT_STATUS_INVALID',
+        'status must be applied, fully_resolved, or superseded',
+      )
+      return
+    }
+    const queryIntegrationId = req.query.integrationId
+    if (
+      queryIntegrationId !== undefined
+      && (
+        typeof queryIntegrationId !== 'string'
+        || !UUID_SHAPE_RE.test(queryIntegrationId)
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_INVALID',
+        'integrationId must be a UUID',
+      )
+      return
+    }
+    if (
+      integrationId !== undefined
+      && queryIntegrationId !== undefined
+      && queryIntegrationId !== integrationId
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_MISMATCH',
+        'integrationId query must match the route integrationId',
+      )
+      return
+    }
+    const rawIntegrationId = integrationId ?? queryIntegrationId
+    if (
+      rawIntegrationId !== undefined
+      && (
+        typeof rawIntegrationId !== 'string'
+        || !UUID_SHAPE_RE.test(rawIntegrationId)
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_INTEGRATION_ID_INVALID',
+        'integrationId must be a UUID',
+      )
+      return
+    }
+    const requestedIntegrationId = typeof rawIntegrationId === 'string'
+      ? rawIntegrationId
+      : undefined
+    const limit = readDeprovisionEventLimit(req.query.limit)
+    if (limit === null) {
+      jsonError(
+        res,
+        400,
+        'DEPROVISION_EVENT_LIMIT_INVALID',
+        'limit must be an integer between 1 and 200',
+      )
+      return
+    }
+    try {
+      const items = await listDeprovisionEvents({
+        integrationId: requestedIntegrationId,
+        localUserId:
+          typeof req.query.userId === 'string'
+            ? req.query.userId
+            : undefined,
+        limit,
+        status,
+      })
+      jsonOk(res, { items, flags: readDeprovisionRuntimeFlags() })
+    } catch {
+      jsonError(
+        res,
+        500,
+        'DEPROVISION_EVENTS_FAILED',
+        'List events failed',
+      )
+    }
+  }
+
+  async function restoreDeprovisionEventForRequest(
+    req: Request,
+    res: Response,
+    mode: 'rehire' | 'admin_force',
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    const requestedMode = req.body?.mode
+    if (
+      requestedMode !== undefined
+      && (
+        typeof requestedMode !== 'string'
+        || requestedMode.trim() !== mode
+      )
+    ) {
+      jsonError(
+        res,
+        400,
+        'RESTORE_MODE_INVALID',
+        `mode must match the ${mode} route`,
+      )
+      return
+    }
+    if (!validateDeprovisionEventId(req, res)) return
+    try {
+      const result = await restoreDeprovisionEvent({
+        eventId: req.params.eventId,
+        mode,
+        adminUserId,
+        confirm: req.body?.confirm === true,
+        note:
+          typeof req.body?.note === 'string'
+            ? req.body.note
+            : undefined,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'directory-deprovision-event',
+        resourceId: req.params.eventId,
+        meta: {
+          restoreMode: mode,
+          restoredEffectCount: result.restoredEffectCount,
+          localUserId: result.localUserId,
+          noteLength: result.note ? result.note.length : 0,
+        },
+      })
+      jsonOk(res, result)
+    } catch (error) {
+      // O2-S2: restoreDeprovisionEvent re-raises a marker 40001 as the named retryable
+      // RecoveryConflictError → uniform retryable 409. Every coded mapping below is
+      // unchanged (RECOVERY_AUTHORITY_BUSY is not in its lists, so it previously fell
+      // to the unclassified 500).
+      if (sendIfRecoveryConflict(res, error)) return
+      const errorCode = (error as { code?: unknown })?.code
+      const code = typeof errorCode === 'string' ? errorCode : ''
+      const knownStatus =
+        code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND'
+          ? 404
+          : code === 'DRIFT_CONFLICT'
+              || code === 'SOURCE_INACTIVE'
+              || code === 'NO_EFFECTS'
+              || code === 'NOT_APPLIED'
+              || code === 'EVENT_NOT_APPLIED'
+            ? 409
+            : code === 'FORCE_CONFIRM_REQUIRED'
+                || code === 'FORCE_NOTE_REQUIRED'
+              ? 400
+              : null
+      jsonError(
+        res,
+        knownStatus ?? 500,
+        knownStatus === null ? 'DEPROVISION_RESTORE_FAILED' : code,
+        knownStatus === null
+          ? 'Restore failed'
+          : (error as Error)?.message || 'Restore failed',
+      )
+    }
+  }
+
+  async function listDeprovisionEffectsForRequest(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!validateDeprovisionEventId(req, res)) return
+    try {
+      const items = await listDeprovisionEffects(req.params.eventId)
+      jsonOk(res, { items })
+    } catch {
+      jsonError(
+        res,
+        500,
+        'DEPROVISION_EFFECTS_FAILED',
+        'List effects failed',
+      )
+    }
+  }
+
+  async function compensateSupersededDenyGrantForRequest(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!UUID_SHAPE_RE.test(req.params.eventId)) {
+      jsonError(res, 400, 'COMPENSATION_EVENT_ID_INVALID', 'eventId must be a UUID')
+      return
+    }
+    try {
+      const result = await compensateSupersededDenyGrant({
+        eventId: req.params.eventId,
+        adminUserId,
+        confirm: req.body?.confirm === true,
+        note: typeof req.body?.note === 'string' ? req.body.note : undefined,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'directory-deprovision-event',
+        resourceId: req.params.eventId,
+        meta: {
+          compensationMode: result.compensationMode,
+          effectId: result.effectId,
+          localUserId: result.localUserId,
+          grantRow: result.grantRow,
+          alreadyCompensated: result.alreadyCompensated,
+          noteLength: result.note.length,
+        },
+      })
+      jsonOk(res, result)
+    } catch (error) {
+      // O2-S2: compensateSupersededDenyGrant re-raises a marker 40001 as the named
+      // retryable RecoveryConflictError → uniform retryable 409; mappings below unchanged.
+      if (sendIfRecoveryConflict(res, error)) return
+      const errorCode =
+        (error as { code?: string })?.code
+        || 'DEPROVISION_COMPENSATION_FAILED'
+      const status =
+        errorCode === 'EVENT_NOT_FOUND' || errorCode === 'USER_NOT_FOUND'
+          ? 404
+          : errorCode === 'COMPENSATION_CONFIRM_REQUIRED'
+              || errorCode === 'COMPENSATION_NOTE_REQUIRED'
+              || errorCode === 'COMPENSATION_ACTOR_REQUIRED'
+            ? 400
+            : errorCode === 'DRIFT_CONFLICT'
+                || errorCode === 'COMPENSATION_EVENT_NOT_SUPERSEDED'
+                || errorCode === 'COMPENSATION_NOT_APPLICABLE'
+                || errorCode === 'COMPENSATION_USER_INACTIVE'
+                || errorCode === 'COMPENSATION_SOURCE_INACTIVE'
+                || errorCode === 'COMPENSATION_SOURCE_BUSY'
+                || errorCode === 'COMPENSATION_MEMBERSHIP_INACTIVE'
+                || errorCode === 'COMPENSATION_LIVE_EVIDENCE'
+              ? 409
+              : 500
+      const responseCode = status === 500
+        ? 'DEPROVISION_COMPENSATION_FAILED'
+        : errorCode
+      jsonError(
+        res,
+        status,
+        responseCode,
+        status === 500
+          ? 'Deny-row compensation failed'
+          : (error as Error)?.message || 'Deny-row compensation failed',
+      )
+    }
+  }
+
+  router.get('/deprovision/flags', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    jsonOk(res, readDeprovisionRuntimeFlags())
+  })
+
+  router.get('/deprovision/preview/:userId', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    try {
+      const integrationId = typeof req.query.integrationId === 'string'
+        ? req.query.integrationId.trim()
+        : ''
+      if (!integrationId) {
+        jsonError(res, 400, 'INTEGRATION_ID_REQUIRED', 'integrationId is required')
+        return
+      }
+      if (!UUID_SHAPE_RE.test(integrationId)) {
+        jsonError(
+          res,
+          400,
+          'DEPROVISION_INTEGRATION_ID_INVALID',
+          'integrationId must be a UUID',
+        )
+        return
+      }
+      const data = await previewDeprovisionForUser(req.params.userId, integrationId)
+      jsonOk(res, data)
+    } catch (error) {
+      const code = (error as { code?: string })?.code
+      if (code === 'USER_NOT_FOUND' || code === 'INTEGRATION_NOT_FOUND') {
+        jsonError(res, 404, code, (error as Error).message)
+        return
+      }
+      jsonError(res, 500, 'DEPROVISION_PREVIEW_FAILED', 'Preview failed')
+    }
+  })
+
+  router.get('/deprovision/events', async (req: Request, res: Response) => {
+    await listDeprovisionEventsForRequest(req, res)
+  })
+
+  router.get(
+    '/integrations/:integrationId/deprovision-events',
+    async (req: Request, res: Response) => {
+      await listDeprovisionEventsForRequest(
+        req,
+        res,
+        req.params.integrationId,
+      )
+    },
+  )
+
+  router.get(
+    '/deprovision-events/:eventId/effects',
+    async (req: Request, res: Response) => {
+      await listDeprovisionEffectsForRequest(req, res)
+    },
+  )
+
+  router.get('/deprovision/events/:eventId/effects', async (req: Request, res: Response) => {
+    await listDeprovisionEffectsForRequest(req, res)
+  })
+
+  router.post('/deprovision/events/:eventId/restore', async (req: Request, res: Response) => {
+    const mode = readCompatibilityRestoreMode(req.body?.mode)
+    if (mode === null) {
+      const adminUserId = await ensurePlatformAdmin(req, res)
+      if (!adminUserId) return
+      jsonError(
+        res,
+        400,
+        'RESTORE_MODE_INVALID',
+        'mode must be rehire or admin_force',
+      )
+      return
+    }
+    await restoreDeprovisionEventForRequest(req, res, mode)
+  })
+
+  router.post(
+    '/deprovision-events/:eventId/reactivate',
+    async (req: Request, res: Response) => {
+      await restoreDeprovisionEventForRequest(req, res, 'rehire')
+    },
+  )
+
+  router.post(
+    '/deprovision-events/:eventId/force-reactivate',
+    async (req: Request, res: Response) => {
+      await restoreDeprovisionEventForRequest(req, res, 'admin_force')
+    },
+  )
+
+  router.post(
+    '/deprovision-events/:eventId/compensate-orphan-deny',
+    async (req: Request, res: Response) => {
+      await compensateSupersededDenyGrantForRequest(req, res)
+    },
+  )
 
   return router
 }

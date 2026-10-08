@@ -16,18 +16,46 @@ const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsFor
  * The invariant asserted here: if the requested grant cannot be honored, the
  * function must throw BEFORE any `users` row is written.
  */
-function fakeClient() {
+function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
   const queries: string[] = []
+  const aliasOwners = new Map<string, string>()
   return {
     queries,
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
+      if (/INSERT INTO user_login_aliases/i.test(sql)) {
+        aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
+        return { rows: [] as Array<Record<string, unknown>> }
+      }
+      if (/SELECT user_id FROM user_login_aliases/i.test(sql)) {
+        const ownerId = aliasOwners.get(String(params?.[0] ?? ''))
+        return { rows: (ownerId ? [{ user_id: ownerId }] : []) as Array<Record<string, unknown>> }
+      }
+      if (/FROM directory_accounts account/.test(sql)) {
+        return {
+          rows: [{
+            ...account,
+            integration_provider: account.provider,
+            integration_corp_id: 'corpA',
+          }] as Array<Record<string, unknown>>,
+        }
+      }
+      // W4-PRE-1: createDirectoryAdmittedUserInTransaction now resolves the admission org via
+      // `SELECT org_id FROM directory_integrations WHERE id = $1` (§3.3) before writing
+      // user_orgs. This fixture's account.integration_id must resolve to SOME org for the
+      // grant-feasibility scenarios below to reach the INSERT INTO users assertions they exist
+      // to prove — everything else keeps the previous always-empty-rows behavior.
+      if (/SELECT org_id\s+FROM directory_integrations/.test(sql)) {
+        return { rows: [{ org_id: 'orgA' }] as Array<Record<string, unknown>> }
+      }
       return { rows: [] as Array<Record<string, unknown>> }
     },
   }
 }
 
 const CORP_ACCOUNT_WITHOUT_OPENID = {
+  // #4651: the bind path re-reads the account under lock and refuses an inactive one.
+  is_active: true,
   id: '11111111-1111-1111-1111-111111111111',
   integration_id: '22222222-2222-2222-2222-222222222222',
   provider: 'dingtalk',
@@ -39,6 +67,7 @@ const CORP_ACCOUNT_WITHOUT_OPENID = {
   name: '张三',
   email: null,
   mobile: null,
+  is_active: true,
 }
 
 const baseOptions = {
@@ -88,15 +117,31 @@ describe('DT-HARDEN-02 auto-admission orphan guard', () => {
   })
 
   it('still grants a corp account that has an openId', async () => {
-    const client = fakeClient()
+    const account = { ...CORP_ACCOUNT_WITHOUT_OPENID, open_id: 'open-1' }
+    const client = fakeClient(account)
 
     await createDirectoryAdmittedUserInTransaction(client, {
       ...baseOptions,
-      account: { ...CORP_ACCOUNT_WITHOUT_OPENID, open_id: 'open-1' },
+      account,
       enableDingTalkGrant: true,
     })
 
     expect(insertedUsers(client.queries)).toHaveLength(1)
     expect(client.queries.some((sql) => /user_external_auth_grants/i.test(sql))).toBe(true)
+  })
+
+  it('rolls back the admitted user when the authoritative account is not corp-pinned', async () => {
+    const account = { ...CORP_ACCOUNT_WITHOUT_OPENID, corp_id: null }
+    const client = fakeClient(account)
+
+    await expect(
+      createDirectoryAdmittedUserInTransaction(client, {
+        ...baseOptions,
+        account,
+        enableDingTalkGrant: false,
+      }),
+    ).rejects.toThrow(/tenant scope is inconsistent/i)
+
+    expect(client.queries.some((sql) => /ROLLBACK TO SAVEPOINT directory_admit_user/i.test(sql))).toBe(true)
   })
 })

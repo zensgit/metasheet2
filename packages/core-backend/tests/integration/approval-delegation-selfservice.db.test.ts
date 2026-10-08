@@ -44,6 +44,20 @@ async function req(base: string, path: string, token: string, opts: { method?: s
 
 const WINDOW = { startAt: new Date(Date.now() - 3600_000).toISOString(), endAt: new Date(Date.now() + 3600_000).toISOString() }
 
+// P7-R1 gate P2-1 closure — Anti-skip-green sentinel (mirrors approval-realdb-handler /
+// approval-field-edit-enforcement.db.test.ts): the approval-realdb-p7r1-sweep job (in
+// .github/workflows/approval-realdb-p7r1-coverage-repair.yml) sets
+// EXPECT_DB=1, so a broken/missing DATABASE_URL there REDS the run instead of the whole file
+// silently reporting skipped-green. Ordinary no-DB collection (EXPECT_DB unset) skips this test
+// cleanly — it never runs in the required no-DB `test (20.x)` job. This file's own in-describe
+// "sentinel: DATABASE_URL is set" test does NOT substitute for this: it lives inside
+// describeIfDatabase, so it is itself skip-greened (not run at all, not failed) when
+// DATABASE_URL is absent — vacuous exactly when it matters.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 describeIfDatabase('delegation (委托) self-service — real-DB API', () => {
   let server: MetaSheetServer | undefined
   let base = ''

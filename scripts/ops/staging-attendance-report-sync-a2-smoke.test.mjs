@@ -265,6 +265,11 @@ test('source shape: cleanup DELETEs cover every table this helper seeds INTO (du
     deletedTables.add(REPORT_SYNC_JOB_TABLE)
   }
   for (const table of insertedTables) {
+    if (table === 'attendance_records') {
+      assert.match(script, /cleanupStagingAttendanceScope/)
+      assert.doesNotMatch(script, /DELETE FROM attendance_records/)
+      continue
+    }
     assert.ok(deletedTables.has(table), `table "${table}" is INSERTed by a seed helper but has no matching DELETE FROM in cleanup()`)
   }
   // plugin_attendance_report_sync_jobs is never INSERTed by this helper directly (the runner creates

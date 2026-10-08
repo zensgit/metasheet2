@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -13,7 +14,12 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
+    // this fixture keeps its own notion of which sheets exist.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }

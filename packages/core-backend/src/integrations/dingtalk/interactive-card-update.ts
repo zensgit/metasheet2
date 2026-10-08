@@ -43,8 +43,10 @@ export const DINGTALK_APPROVAL_CARD_SYSTEM_UNAVAILABLE_TEXT = '暂时无法处�
 export type DingTalkApprovalCardTerminalUpdate = {
   /** The ledger delivery id — identical to the card's outTrackId (B-2 anchor). */
   outTrackId: string
-  /** Terminal status copy; the ONLY card param a B-4 update may change. */
+  /** Terminal or retryable status copy. */
   statusText: string
+  /** False only when the approval/card state is genuinely terminal. */
+  actionsVisible?: false
 }
 
 export type DingTalkApprovalCardUpdateSender = (update: DingTalkApprovalCardTerminalUpdate) => Promise<void>
@@ -139,10 +141,15 @@ export function buildDingTalkApprovalCardTerminalUpdate(
       return {
         outTrackId: result.deliveryId,
         statusText: name ? `已由 ${name} 同意 · ${time}` : `已同意 · ${time}`,
+        actionsVisible: false,
       }
     }
     case 'stale':
-      return { outTrackId: result.deliveryId, statusText: staleStatusText(result.summary) }
+      return {
+        outTrackId: result.deliveryId,
+        statusText: staleStatusText(result.summary),
+        actionsVisible: false,
+      }
     case 'engine_rejected': {
       const permissionDenied = result.httpStatus === 403 || result.code === 'APPROVAL_ASSIGNMENT_REQUIRED'
       return {

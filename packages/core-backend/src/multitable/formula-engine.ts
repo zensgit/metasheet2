@@ -7,6 +7,9 @@
 import { FormulaEngine, type CellValue, type FormulaContext } from '../formula/engine'
 import type { MultitableField } from './field-codecs'
 import type { MultitableRecordsQueryFn } from './records'
+import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
+import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from './derived-write-fence'
+import { DerivedMergeTargetRetypedError } from './field-schema-fence-recheck'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('MultitableFormulaEngine')
@@ -270,6 +273,8 @@ export class MultitableFormulaEngine {
 
       return await this.recalculateRecordFromData(query, sheetId, recordId, data, fields, onlyFormulaFieldIds)
     } catch (error) {
+      // The typed fenced-write failure must cross this wrapper too (bulk recompute enters here).
+      if (error instanceof FormulaFencedWriteError) throw error
       logger.error('recalculateRecord failed:', error as Error)
       return null
     }
@@ -342,14 +347,71 @@ export class MultitableFormulaEngine {
       // version bump: formula values are derived, not an authoritative user edit.
       // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS).
       // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read.
-      await query(
-        `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
-        [JSON.stringify(updates), recordId, sheetId],
-      )
+      //
+      // W0-1 L4-cov-services: the FORMULA writer class joins the canonical fence (flag-gated no-op when
+      // `MULTITABLE_ENABLE_WRITER_FENCE` is off). Even a derived-value write must not land inside a
+      // recovery's applying window — a materialization computed from PRE-recovery inputs would clobber the
+      // just-recovered `data`. TOCTOU root fix (owner ruling 2026-07-17): the fence-check→UPDATE PAIR runs in
+      // its OWN short transaction so `pg_advisory_xact_lock` is held from acquisition to COMMIT (a bare
+      // autocommit query released it per statement, leaving a block-check→UPDATE window). The
+      // fence+UPDATE plumbing lives in the SHARED derived-write seam (`derived-write-fence.ts`,
+      // post-merge review of #4438 — the relation-aggregation materializations join the same seam) —
+      // callers still pass their ordinary (pool) query for the READS above (preserving per-record
+      // independence: each record's materialization commits/rolls back on its own, exactly the
+      // partial-progress the bulk-recompute contract depends on), and the fence's txn-scope is no
+      // longer a caller obligation. Flag OFF stays byte-identical on the passed query (mocks honored).
+      //
+      // Failure-class split (owner GF8-ON review, 2026-07-17 — #4451, preserved across the seam refactor):
+      //  • a durable recovery BLOCK is the BENIGN skip — the F1 contract: the seam's txn rolled back,
+      //    nothing materialized, return null so a user write/PATCH never fails on a derived value.
+      //  • any OTHER failure inside the flag-ON fenced txn is an INFRA failure whose write did NOT land —
+      //    swallowing it to null made the bulk executor mislabel it `taintSkipped` with `failed:false`
+      //    (a silent lie in the recompute report). Propagate it TYPED so the bulk chunk loop aborts
+      //    with `failed:true` (B6) while the record itself stays zero-committed (its txn rolled back).
+      //  • flag OFF: a raw error keeps its legacy path (outer catch → logged → null), byte-identical.
+      try {
+        await applyFencedDerivedDataMerge(
+          query as unknown as DerivedMergeQueryFn,
+          sheetId,
+          recordId,
+          updates,
+        )
+      } catch (error) {
+        if (error instanceof SheetWriterBlockedError) {
+          logger.error(
+            error instanceof DerivedMergeTargetRetypedError
+              ? 'recalculateRecordFromData skipped: target field is no longer a derived field:'
+              : 'recalculateRecordFromData skipped under recovery block:',
+            error as Error,
+          )
+          return null
+        }
+        if (isWriterFenceEnabled()) {
+          throw new FormulaFencedWriteError(sheetId, recordId, error)
+        }
+        throw error
+      }
       return { ...data, ...updates }
     } catch (error) {
+      // The typed fenced-write failure MUST cross this boundary (see the fenced-txn catch above) — it is
+      // the one failure class the caller may not treat as "no materialization, carry on".
+      if (error instanceof FormulaFencedWriteError) throw error
       logger.error('recalculateRecordFromData failed:', error as Error)
       return null
     }
+  }
+}
+
+/**
+ * A NON-block failure inside the flag-ON fenced materialization transaction (owner GF8-ON review,
+ * 2026-07-17). The record's fence+UPDATE txn rolled back — ZERO writes for that record — but the failure is
+ * infrastructure, not a recovery block, so it must reach the bulk-recompute executor as a failure
+ * (`failed:true`, remaining chunks aborted) instead of being silently absorbed into `taintSkipped`.
+ * Flag OFF is untouched: the direct-UPDATE branch throws raw into the caller exactly as before.
+ */
+export class FormulaFencedWriteError extends Error {
+  constructor(readonly sheetId: string, readonly recordId: string, readonly cause: unknown) {
+    super(`formula fenced materialization failed for record ${recordId} on sheet ${sheetId}: ${(cause as Error)?.message ?? String(cause)}`)
+    this.name = 'FormulaFencedWriteError'
   }
 }

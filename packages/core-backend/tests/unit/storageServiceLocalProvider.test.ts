@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { storeAttachment } from '../../src/multitable/attachment-service'
 import {
   StorageServiceImpl,
   toSafeStorageBasename,
@@ -32,6 +33,69 @@ afterEach(async () => {
 function makeService(): StorageServiceImpl {
   return StorageServiceImpl.createLocalService(basePath, BASE_URL)
 }
+
+describe('archive attachment content-addressed sources', () => {
+  it.each(['true', 'false'])('persists the upload-time source key only with both exact flags: %s', async (flag) => {
+    const previousArchive = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    const previousFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    try {
+      process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = flag
+      process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+      const service = makeService()
+      let persisted: unknown[] = []
+      const result = await storeAttachment({
+        storage: service, sheetId: 'synthetic-sheet', recordId: null, fieldId: null,
+        uploaderId: 'synthetic-user', idGenerator: () => 'synthetic-attachment',
+        file: { buffer: Buffer.from('owned'), originalname: 'display.txt', mimetype: 'text/plain', size: 5 },
+        query: async (_text, params) => { persisted = params ?? []; return { rows: [{ id: 'synthetic-attachment' }] } },
+      })
+      expect(persisted[9]).toBe(result.uploaded.path)
+      expect(persisted[5]).toBe('display.txt')
+      if (flag === 'true') {
+        expect((await makeService().readContentAddressed(result.uploaded.path)).bytes).toEqual(Buffer.from('owned'))
+      } else {
+        expect(result.uploaded.path).not.toContain('/sha256-')
+        expect(await service.downloadByKey(result.uploaded.path)).toEqual(Buffer.from('owned'))
+      }
+    } finally {
+      if (previousArchive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = previousArchive
+      if (previousFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFence
+    }
+  })
+
+  it('binds identity at upload and reads the exact bytes after reopening the provider', async () => {
+    const service = makeService()
+    const source = Buffer.from('synthetic-source-bytes')
+    const uploaded = await service.uploadContentAddressed(source, { filename: '../shown.txt', contentType: 'text/plain' })
+    expect(uploaded.path).toMatch(/^[0-9a-f-]{36}\/sha256-[0-9a-f]{64}$/)
+    const read = await makeService().readContentAddressed(uploaded.path)
+    expect(read.bytes).toEqual(source)
+    expect(read.immutableVersion).toBe(`sha256:${uploaded.path.split('sha256-')[1]}`)
+    expect(read.contentSha256).toBe(uploaded.path.split('sha256-')[1])
+    expect(read.sizeBytes).toBe(source.length)
+    await expect(service.uploadByKey(uploaded.path, Buffer.from('overwrite'))).rejects.toThrow()
+  })
+
+  it('rejects modified or missing bytes instead of deriving a fresh identity at read time', async () => {
+    const service = makeService()
+    const uploaded = await service.uploadContentAddressed(Buffer.from('original'), { filename: 'file' })
+    await fs.writeFile(path.join(basePath, uploaded.path), 'tampered')
+    await expect(service.readContentAddressed(uploaded.path)).rejects.toThrow('ATTACHMENT_SOURCE_DRIFTED')
+    await fs.unlink(path.join(basePath, uploaded.path))
+    await expect(service.readContentAddressed(uploaded.path)).rejects.toThrow('ATTACHMENT_SOURCE_UNAVAILABLE')
+  })
+
+  it('refuses legacy and malformed source keys without upgrading them by hashing', async () => {
+    const service = makeService()
+    const legacy = await service.upload(Buffer.from('legacy'), { filename: 'legacy.txt' })
+    for (const key of [legacy.path, '../outside', 'sha256-' + '0'.repeat(64)]) {
+      await expect(service.readContentAddressed(key)).rejects.toThrow('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    }
+    expect(await service.downloadByKey(legacy.path)).toEqual(Buffer.from('legacy'))
+  })
+})
 
 describe('toSafeStorageBasename (G1)', () => {
   it('keeps a plain filename, strips any directory component and traversal', () => {
@@ -196,5 +260,54 @@ describe('LocalStorageProvider.deleteByKey (GF5-2 — index-free, idempotent, co
     await fs.mkdir(path.join(basePath, dirKey), { recursive: true })
 
     await expect(svc.deleteByKey(dirKey)).rejects.toThrow()
+  })
+})
+
+/**
+ * B3-07 §7 — `uploadByKey`, the key-addressed WRITE that completes the by-key triple alongside
+ * `downloadByKey`/`deleteByKey`. It is security-load-bearing for the same reason its siblings are:
+ * it takes a caller-chosen key, so containment (G2) must be re-asserted, and it must never silently
+ * overwrite an existing object. Added to the F3 canary lane because it is a new write path into the
+ * shared storage root.
+ */
+describe('LocalStorageProvider.uploadByKey (B3-07 key-addressed write)', () => {
+  it('writes at the EXACT caller key and reads back index-free through downloadByKey', async () => {
+    const svc = makeService()
+    const key = 'approval-attachments/2026-07/fixed-key.pdf'
+    await svc.uploadByKey(key, Buffer.from('%PDF-by-key'))
+
+    // the physical layout is exactly the key — no uuid dir, no client-filename segment appended
+    expect((await fs.readFile(path.join(basePath, key))).toString()).toBe('%PDF-by-key')
+    expect((await svc.downloadByKey(key)).toString()).toBe('%PDF-by-key')
+
+    // and a FRESH service (cold index, as a separate process would have) still reads it
+    expect((await makeService().downloadByKey(key)).toString()).toBe('%PDF-by-key')
+  })
+
+  it('re-asserts containment (G2): a traversal / absolute key is refused and writes NOTHING', async () => {
+    const svc = makeService()
+    const outside = path.join(root, 'escaped.txt')
+    for (const bad of ['../escaped.txt', '../../escaped.txt', 'a/../../escaped.txt']) {
+      await expect(svc.uploadByKey(bad, Buffer.from('pwned'))).rejects.toThrow()
+    }
+    // nothing escaped the base path
+    await expect(fs.access(outside)).rejects.toThrow()
+  })
+
+  it('is exclusive-create: writing an existing key REJECTS instead of silently overwriting', async () => {
+    const svc = makeService()
+    const key = 'approval-attachments/2026-07/no-overwrite.pdf'
+    await svc.uploadByKey(key, Buffer.from('original'))
+    await expect(svc.uploadByKey(key, Buffer.from('overwritten'))).rejects.toThrow()
+    // POSITIVE CONTROL: the original bytes survived the refused second write
+    expect((await svc.downloadByKey(key)).toString()).toBe('original')
+  })
+
+  it('enforces the service upload limit (a by-key caller cannot bypass the size cap)', async () => {
+    const svc = makeService()
+    svc.setUploadLimit(8)
+    await expect(svc.uploadByKey('approval-attachments/big.bin', Buffer.alloc(9))).rejects.toThrow(/exceeds limit/)
+    // POSITIVE CONTROL: at-limit still writes
+    await expect(svc.uploadByKey('approval-attachments/ok.bin', Buffer.alloc(8))).resolves.toBeUndefined()
   })
 })

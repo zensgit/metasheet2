@@ -1,11 +1,47 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-// Bumped for T2-1+2 admin handover: the action CHECK constraint now also
-// permits 'reassign' (mirrors migration
-// zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts). The version
-// marker re-runs the DDL on an already-bootstrapped test DB.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260702-admin-reassign'
+// Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
+// idempotent DDL. The current bump (F3-D1, 2026-10-01) is a relabel only, with no DDL change:
+// owner ruling Q9 ④ renamed the `approval_form_drafts` migration so it sorts after main's newest
+// migration, and this marker now carries the same date as the renamed migration file.
+// The bump before that (P3-3 fix round, gate P3-5) adds the `approval_fd_signature_*`
+// CHECKs (non-blank + 8192-byte bound) to `approval_form_drafts.signature`, which previously had NO
+// bound at all — matches the amended production migration
+// zzzz20261001120000_create_approval_form_drafts.ts (owner-gated DDL, not applied anywhere outside
+// CI/throwaway test DBs). A DB already bootstrapped under the PRIOR P3-3 version (below) would
+// otherwise keep running with the old, unbounded `signature` column forever — this bump's ALTER
+// TABLE ... ADD CONSTRAINT statements are what force it to converge.
+// The bump before that (P3-3) added the `approval_form_drafts` table itself — matches the same
+// production migration (this bootstrap converges any such DB to the migration's shape without
+// requiring `db:migrate` to have run first).
+// The bump before that (S3b, P3-6 carried-hardening item) NAMES the `approval_comments
+// .instance_id` FK as `approval_cmt_instance_fk`, converging the bootstrap's DDL text with the
+// production migration's — before this bump the bootstrap's `CREATE TABLE`'s FK was UNNAMED
+// (`REFERENCES approval_instances(id) ON DELETE CASCADE` with no `CONSTRAINT` clause), so the two
+// texts could never converge on a virgin DB even though the migration itself was already named.
+// SOURCE-TEXT CAVEAT (do not read this as a behavioral claim): the bootstrap's `CREATE TABLE IF
+// NOT EXISTS` means an ALREADY-bootstrapped test DB keeps whatever FK name it materialized under
+// an EARLIER bootstrap version — including Postgres's auto-generated
+// `approval_comments_instance_id_fkey`, from back when the bootstrap's FK was unnamed — and the
+// name never converges there; only a FRESH (never-before-bootstrapped) DB gets the named
+// constraint from this version onward. See `approval-admin-jump-migration.test.ts`'s own P3-6
+// parity test for the structural (THROW-on-missing-anchor) comparison this bump makes meaningful.
+// The previous bump added fix-round gate P2-1's `approval_cmt_tombstone_mentions_cleared` CHECK
+// (mirrors `approval_cmt_tombstone_body_cleared`'s treatment for the `mentions` column) — matches
+// the production migration zzzz20260822120000_create_approval_comments.ts.
+// The bump before that added Lock-10 (S2)'s `approval_comments` table (D2(b1) mutable
+// comment storage + tombstone) — matches the production migration
+// zzzz20260822120000_create_approval_comments.ts.
+// The previous bump added Lock-10 (S1) OD-S1-9(a)'s `approval_instances.org_id`
+// column PLUS the non-blank-when-present CHECK (`approval_instance_org_nonblank`) — nullable, NO
+// DEFAULT (Phase 1 only; matches the production migration
+// zzzz20260821100000_add_approval_instance_org_id.ts). The Phase-3 presence CHECK
+// (`approval_instance_org_present`, OD-S1-18(b)) is a separate, later migration, not landed here.
+// The bump before that added Lock-5's `policy_denied` action to the approval_records CHECK so the
+// per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
+// migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20261001-f3d1-approval-form-drafts'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -111,6 +147,14 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS request_no TEXT`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS form_snapshot JSONB`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS current_node_key TEXT`)
+    await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0`)
+    // Lock-10 (S1) OD-S1-9(a): nullable, NO DEFAULT, non-blank-when-present CHECK — Phase 1 only
+    // (matches production migration zzzz20260821100000_add_approval_instance_org_id.ts).
+    // Deliberately not backfilled here; the G-S1-12 partial gate only asserts the column exists
+    // with a NULL default. No Phase-3 presence CHECK yet (OD-S1-18(b) — a separate migration).
+    await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id TEXT`)
+    await client.query(`ALTER TABLE approval_instances DROP CONSTRAINT IF EXISTS approval_instance_org_nonblank`)
+    await client.query(`ALTER TABLE approval_instances ADD CONSTRAINT approval_instance_org_nonblank CHECK (org_id ~ '[!-~]')`)
     await client.query(`
       UPDATE approval_instances
       SET source_system = COALESCE(source_system, 'platform'),
@@ -181,7 +225,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign', 'handle', 'policy_denied'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)
@@ -200,6 +244,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       )
     `)
     await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS node_key TEXT`)
+    await client.query(`ALTER TABLE approval_assignments ADD COLUMN IF NOT EXISTS entry_epoch INTEGER`)
     await client.query(`
       DO $$
       DECLARE
@@ -233,6 +278,35 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_reads_user_read_at ON approval_reads(user_id, read_at DESC)`)
 
+    // Lock-10 (S2) D2(b1) — mutable approval_comments table + tombstone. Idempotent convergence
+    // matches the production migration zzzz20260822120000_create_approval_comments.ts.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_comments (
+        id           text PRIMARY KEY,
+        instance_id  text NOT NULL
+                       CONSTRAINT approval_cmt_instance_fk
+                       REFERENCES approval_instances(id) ON DELETE CASCADE,
+        parent_id    text REFERENCES approval_comments(id) ON DELETE CASCADE,
+        author_id    text NOT NULL,
+        body         text,
+        mentions     jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at   timestamptz NOT NULL DEFAULT now(),
+        updated_at   timestamptz NOT NULL DEFAULT now(),
+        edited_at    timestamptz,
+        deleted_at   timestamptz
+      )
+    `)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_author_nonblank`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_author_nonblank CHECK (author_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_tombstone_body_cleared`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_tombstone_body_cleared CHECK ((deleted_at IS NULL AND body IS NOT NULL) OR (deleted_at IS NOT NULL AND body IS NULL))`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_tombstone_mentions_cleared`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_tombstone_mentions_cleared CHECK ((deleted_at IS NULL) OR (deleted_at IS NOT NULL AND mentions = '[]'::jsonb))`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_no_self_parent`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_no_self_parent CHECK (parent_id IS NULL OR parent_id <> id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_comments_instance_created ON approval_comments (instance_id, created_at)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_comments_parent ON approval_comments (parent_id) WHERE parent_id IS NOT NULL`)
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_templates (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -258,6 +332,20 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (template_id, version)
       )
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS restored_from_version_id UUID
+        REFERENCES approval_template_versions(id) ON DELETE SET NULL
+    `)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_approval_template_versions_restored_from
+      ON approval_template_versions(restored_from_version_id)
+      WHERE restored_from_version_id IS NOT NULL
+    `)
+    await client.query(`
+      ALTER TABLE approval_template_versions
+      ADD COLUMN IF NOT EXISTS publish_note TEXT
     `)
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_published_definitions (
@@ -405,6 +493,67 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       END $$;
     `)
 
+    // Lock-7 OD-L7-6(a) — the append-only per-field revision ledger (matches production migration
+    // zzzz20260817130000_create_approval_form_field_revisions). Before/after VALUES live here (behind
+    // the mask-aware read), and MAX(audit_record_id) is the 内容变更 dedup ordinal (G-16).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_form_field_revisions (
+        id BIGSERIAL PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        node_key TEXT NOT NULL,
+        field_id TEXT NOT NULL,
+        before_value JSONB,
+        after_value JSONB,
+        actor_id TEXT NOT NULL,
+        node_entry_epoch INTEGER,
+        audit_record_id BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_field_revisions_instance ON approval_form_field_revisions(instance_id, id)`)
+
+    // P3-3 — `approval_form_drafts` (server-side approval form draft storage). Idempotent
+    // convergence matches the production migration zzzz20261001120000_create_approval_form_drafts.ts
+    // (owner-gated DDL — not applied anywhere outside CI/throwaway test DBs). NO org_id column
+    // (contract §2) and deliberately NO FK to approval_templates (id-type mismatch + templates are
+    // deletable) — see the migration's own docblock for the full reasoning.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_form_drafts (
+        id           text PRIMARY KEY,
+        user_id      text NOT NULL,
+        template_id  text NOT NULL,
+        signature    text NOT NULL,
+        data         jsonb NOT NULL,
+        saved_at     timestamptz NOT NULL DEFAULT now()
+      )
+    `)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_user_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_user_nonblank CHECK (user_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_template_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_template_nonblank CHECK (template_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_payload_bounds`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_payload_bounds CHECK (octet_length(data::text) <= 262144)`)
+    // FIX 5 (gate P3-5) — signature previously had no bound at all; give it the same non-blank +
+    // size-bound shape as user_id/template_id/data.
+    // Gate2 P3-A: adding a CHECK to a table that already has a row violating it throws — and this
+    // bootstrap runs in `beforeAll` for every one of the ~85 approval real-DB suites, so ONE
+    // violating row anywhere (e.g. left over from pre-fix test code, or from a gate's own
+    // constructed oversized-signature probe row — both real, measured shapes) would take all of
+    // them down together. This is the TEST bootstrap on a throwaway/reused test DB, not the
+    // production migration (which does not get this treatment — see its own docblock: on a real
+    // table, deleting rows to force a migration through would be its own hazard, so that path is
+    // owner-gated instead) — there is nothing here worth preserving, so DELETE-before-ADD is safe
+    // and self-healing. `NOT VALID` + a separate `VALIDATE CONSTRAINT` (the right call when rows
+    // must not be deleted) would just be extra bootstrap machinery for no benefit in that context.
+    await client.query(
+      `DELETE FROM approval_form_drafts WHERE signature !~ '[!-~]' OR octet_length(signature) > 8192`,
+    )
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_signature_nonblank`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_signature_nonblank CHECK (signature ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_form_drafts DROP CONSTRAINT IF EXISTS approval_fd_signature_bounds`)
+    await client.query(`ALTER TABLE approval_form_drafts ADD CONSTRAINT approval_fd_signature_bounds CHECK (octet_length(signature) <= 8192)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_drafts_user_saved ON approval_form_drafts (user_id, saved_at DESC)`)
+
     await client.query(
       `INSERT INTO approval_test_schema_bootstrap_state (key, version, completed_at)
        VALUES ($1, $2, now())
@@ -425,4 +574,103 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
   } finally {
     client.release()
   }
+}
+
+/**
+ * Grants the database-backed approval-create authority expected by positive
+ * integration fixtures. Production deliberately ignores JWT-only wildcards at
+ * the final write boundary, so tests must seed durable authority explicitly.
+ */
+export async function grantApprovalWriteForIntegrationActor(userId: string): Promise<void> {
+  const pool = poolManager.get()
+  const hasNameColumn = (
+    await pool.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'permissions'
+           AND column_name = 'name'
+       ) AS present`,
+    )
+  ).rows[0]?.present === true
+  if (hasNameColumn) {
+    await pool.query(
+      `INSERT INTO permissions (code, name, description)
+       VALUES ('approvals:write', 'Approvals Write', 'Create approval instances')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+  } else {
+    await pool.query(
+      `INSERT INTO permissions (code, description)
+       VALUES ('approvals:write', 'Create approval instances')
+       ON CONFLICT (code) DO NOTHING`,
+    )
+  }
+  await pool.query(
+    `INSERT INTO user_permissions (user_id, permission_code)
+     VALUES ($1, 'approvals:write')
+     ON CONFLICT DO NOTHING`,
+    [userId],
+  )
+  await grantApprovalOrgMembership(userId)
+}
+
+/**
+ * Lock-11 §10 arm (a) fixture delta (§11 "Class A"): every integration fixture mints its identity
+ * through `GET /api/auth/dev-token`, which writes no `user_orgs` row (§11 root cause). Under arm
+ * (a), a requester with zero active `user_orgs` memberships 422s (`APPROVAL_ORG_UNRESOLVED`) at
+ * create — so every fixture that reaches `POST /api/approvals` / `startApproval` needs exactly
+ * ONE active membership, matching the POST-(D-8β) production shape the ordering in Lock-11 §10.2
+ * requires before this writer slice may merge (the zero-membership population is emptied first).
+ *
+ * Folded into `grantApprovalWriteForIntegrationActor` (called above) rather than added at each of
+ * the ~44 call sites individually — see the Lock-11 W-1/W-2 implementation spec §11 "Recommended
+ * fixture delta". Exported separately too: a handful of suites seed `approvals:write` inline
+ * (not via `grantApprovalWriteForIntegrationActor`) and call this directly instead (see e.g.
+ * `approval-record-link.db.test.ts`).
+ *
+ * `ON CONFLICT ... DO UPDATE SET is_active = TRUE` (not DO NOTHING): a suite that previously
+ * deactivated this same (user, org) pair to test some OTHER negative must not leave a stale
+ * inactive row here that silently reintroduces a zero-membership fixture.
+ *
+ * Deliberately NOT folded into the production `dev-token` route (routes/auth.ts) — that is
+ * production code, and doing so would re-import the very admission-by-default this slice's arm
+ * (a) refuses (W4-PRE-1 posture). This is a TEST-ONLY fixture helper.
+ */
+export async function grantApprovalOrgMembership(userId: string, orgId = 'default'): Promise<void> {
+  const pool = poolManager.get()
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [userId, orgId],
+  )
+}
+
+/**
+ * Lock §2-G3 fixture delta (Codex review 2026-09-19 finding 1): every integration fixture mints its
+ * identity through `GET /api/auth/dev-token`, which writes NO `users` row (it only signs a JWT and
+ * calls `createUserSession`). Cancel-round creation now re-qualifies every seat against the
+ * directory using the shared login gate (`evaluateUserAuthenticationGate`), and — exactly like the
+ * precedent it reuses, `validateAndFreezeRequesterChoices`'s company-scope baseline — an id with no
+ * `users` row is NOT in the eligible set and therefore fails closed. Production approvers always
+ * have a `users` row (they had to authenticate to approve), so the honest fix is to make the
+ * fixtures production-shaped rather than to let absence through.
+ *
+ * Defaults do the rest of the work: `role` defaults to `'user'`, `is_active` to TRUE,
+ * `activation_status` to `'activated'` (migration
+ * `zzzz20260723140000_add_users_activation_status_and_local_password_set`), i.e. an eligible account.
+ *
+ * `ON CONFLICT (id) DO NOTHING` — a suite that deliberately deactivated this same id to exercise a
+ * negative must not have its mutation silently undone by a later `ensureLocalUserRow` call.
+ *
+ * TEST-ONLY. Deliberately NOT folded into the production `dev-token` route, for the same reason
+ * `grantApprovalOrgMembership` is not: that route is production code.
+ */
+export async function ensureLocalUserRow(userId: string): Promise<void> {
+  const pool = poolManager.get()
+  await pool.query(
+    `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`,
+    [userId, `${userId}@example.test`],
+  )
 }

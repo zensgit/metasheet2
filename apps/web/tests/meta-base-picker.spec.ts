@@ -28,7 +28,9 @@ describe('MetaBasePicker', () => {
     activeBaseId?: string
     onSelect?: (baseId: string) => void
     onToggleFavorite?: (baseId: string) => void
+    onRename?: (baseId: string, name: string) => void
     canCreate?: boolean
+    canManageFields?: boolean
   }) {
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -39,8 +41,10 @@ describe('MetaBasePicker', () => {
       ],
       activeBaseId: options?.activeBaseId ?? 'base_ops',
       canCreate: options?.canCreate,
+      canManageFields: options?.canManageFields,
       onSelect: options?.onSelect,
       onToggleFavorite: options?.onToggleFavorite,
+      onRename: options?.onRename,
     })
     app.mount(container)
     return container
@@ -123,5 +127,128 @@ describe('MetaBasePicker', () => {
 
     expect(root.textContent).toContain('未找到工作区')
     expect(root.textContent).not.toContain('No bases found')
+  })
+
+  // Rename affordance (feat/multitable-rename). Hiding is UX only: the server is the real
+  // enforcement (PATCH /api/multitable/bases/:id gates on canManageFields).
+  describe('rename affordance', () => {
+    async function openPicker(root: HTMLElement): Promise<void> {
+      root.querySelector<HTMLElement>('.meta-base-picker__current')?.click()
+      await flushUi()
+    }
+
+    it('canManageFields=false (or absent) renders NO rename affordance at all', async () => {
+      const rootAbsent = mountPicker({ canManageFields: undefined })
+      await openPicker(rootAbsent)
+      expect(rootAbsent.querySelector('[data-testid="base-picker-rename"]')).toBeNull()
+
+      const rootFalse = mountPicker({ canManageFields: false })
+      await openPicker(rootFalse)
+      expect(rootFalse.querySelector('[data-testid="base-picker-rename"]')).toBeNull()
+    })
+
+    it('canManageFields=true renders one rename button per base', async () => {
+      const root = mountPicker({ canManageFields: true })
+      await openPicker(root)
+      expect(root.querySelectorAll('[data-testid="base-picker-rename"]').length).toBe(2)
+    })
+
+    it('clicking rename swaps the row into an input and does NOT select the base', async () => {
+      const onSelect = vi.fn()
+      const root = mountPicker({ canManageFields: true, onSelect })
+      await openPicker(root)
+
+      const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]'))
+      buttons[0].click() // Sales Base (first item)
+      await flushUi()
+
+      expect(onSelect).not.toHaveBeenCalled()
+      const input = root.querySelector<HTMLInputElement>('[data-testid="base-picker-rename-input"]')
+      expect(input).toBeTruthy()
+      expect(input!.value).toBe('Sales Base')
+    })
+
+    it('confirming with Enter emits rename with the TRIMMED name, and does not select the base', async () => {
+      const onSelect = vi.fn()
+      const onToggleFavorite = vi.fn()
+      const onRename = vi.fn()
+      const root = mountPicker({ canManageFields: true, onSelect, onToggleFavorite, onRename })
+      await openPicker(root)
+
+      const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]'))
+      buttons[0].click()
+      await flushUi()
+
+      const input = root.querySelector<HTMLInputElement>('[data-testid="base-picker-rename-input"]')!
+      input.value = '  Sales Base Renamed  '
+      input.dispatchEvent(new Event('input'))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(onRename).toHaveBeenCalledTimes(1)
+      expect(onRename).toHaveBeenCalledWith('base_sales', 'Sales Base Renamed')
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(onToggleFavorite).not.toHaveBeenCalled()
+      expect(root.querySelector('[data-testid="base-picker-rename-input"]')).toBeNull()
+    })
+
+    it('confirming with an unchanged name does NOT emit rename', async () => {
+      const onRename = vi.fn()
+      const root = mountPicker({ canManageFields: true, onRename })
+      await openPicker(root)
+
+      const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]'))
+      buttons[0].click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-testid="base-picker-rename-confirm"]')?.click()
+      await flushUi()
+
+      expect(onRename).not.toHaveBeenCalled()
+    })
+
+    it('a whitespace-only name disables the confirm button', async () => {
+      const root = mountPicker({ canManageFields: true })
+      await openPicker(root)
+
+      root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]')[0].click()
+      await flushUi()
+      const input = root.querySelector<HTMLInputElement>('[data-testid="base-picker-rename-input"]')!
+      input.value = '   '
+      input.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      expect(root.querySelector<HTMLButtonElement>('[data-testid="base-picker-rename-confirm"]')?.disabled).toBe(true)
+    })
+
+    it('Escape cancels the rename without emitting', async () => {
+      const onRename = vi.fn()
+      const root = mountPicker({ canManageFields: true, onRename })
+      await openPicker(root)
+
+      root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]')[0].click()
+      await flushUi()
+      const input = root.querySelector<HTMLInputElement>('[data-testid="base-picker-rename-input"]')!
+      input.value = 'Should not be saved'
+      input.dispatchEvent(new Event('input'))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(onRename).not.toHaveBeenCalled()
+      expect(root.querySelector('[data-testid="base-picker-rename-input"]')).toBeNull()
+    })
+
+    it('the ✗ cancel button cancels without emitting', async () => {
+      const onRename = vi.fn()
+      const root = mountPicker({ canManageFields: true, onRename })
+      await openPicker(root)
+
+      root.querySelectorAll<HTMLButtonElement>('[data-testid="base-picker-rename"]')[0].click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-testid="base-picker-rename-cancel"]')?.click()
+      await flushUi()
+
+      expect(onRename).not.toHaveBeenCalled()
+      expect(root.querySelector('[data-testid="base-picker-rename-input"]')).toBeNull()
+    })
   })
 })

@@ -76,6 +76,7 @@ function baseInput(overrides = {}) {
       targetSystemId: 'target_1',
       targetObject: 'target_items',
       createdBy: 'owner-7',
+      options: { source: { filters: { approvedSlice: 'fixture' } } },
       fieldMappings: [
         { sourceField: 'code', targetField: 'externalId', validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'name', validation: [{ type: 'required' }] },
@@ -165,6 +166,158 @@ async function testReadyDryRunIssuesTokenAndStaysValuesFree() {
   assert.equal(evidenceText.includes('Widget'), false, 'evidence must not include source names')
   assert.equal(evidenceText.includes(result.dryRunToken), false, 'evidence must not include the bearer dry-run token')
   assert.equal(result.evidence.dryRunTokenPresent, true)
+}
+
+async function testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness() {
+  const reads = []
+  const filterValue = 'PRIVATE-FILTER-SENTINEL'
+  const persistedFilters = {
+    zString: filterValue,
+    aNull: null,
+    mNumber: 7,
+    bBoolean: true,
+  }
+  const { input } = baseInput({
+    input: {
+      maxRows: 3,
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: persistedFilters } },
+      },
+    },
+    sourceRead: (readInput) => {
+      reads.push(JSON.parse(JSON.stringify(readInput)))
+      if (!readInput.filters) {
+        return {
+          records: [
+            { code: 'P-001', name: 'Widget', status: 'new' },
+            { code: 'P-002', name: 'Gadget', status: 'old' },
+            { code: 'P-003', name: 'Third', status: 'new' },
+          ],
+          done: false,
+          nextCursor: '3',
+        }
+      }
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const result = await dryRunExternalWrite(input)
+  assert.equal(result.status, 'ready', 'persisted filter changes the unfiltered truncated RED plan to ready')
+  assert.deepEqual(reads, [{
+    object: 'items',
+    filters: { aNull: null, bBoolean: true, mNumber: 7, zString: filterValue },
+    limit: 3,
+    cursor: null,
+  }])
+  const publicText = JSON.stringify(result)
+  assert.equal(publicText.includes(filterValue), false, 'filter values never enter public result/evidence')
+  assert.equal(publicText.includes('zString'), false, 'filter keys never enter public result/evidence')
+}
+
+async function testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree() {
+  for (const [filters, expectedCode] of [
+    [undefined, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{}, 'C6_WRITE_SOURCE_FILTERS_REQUIRED'],
+    [{ secretField: { $operator: 'PRIVATE-ERROR-SENTINEL' } }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ 'invalid-key-PRIVATE': 'PRIVATE-KEY-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [{ $or: 'PRIVATE-OPERATOR-SENTINEL' }, 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+    [JSON.parse('{"__proto__":"PRIVATE-PROTO-SENTINEL"}'), 'C6_WRITE_SOURCE_FILTERS_INVALID'],
+  ]) {
+    let reads = 0
+    const { input, calls } = baseInput({
+      input: {
+        pipeline: {
+          ...baseInput().input.pipeline,
+          options: filters === undefined ? {} : { source: { filters } },
+        },
+      },
+      sourceRead: () => { reads += 1; return { records: [], done: true, nextCursor: null } },
+    })
+    await assert.rejects(
+      () => dryRunExternalWrite(input),
+      (error) => {
+        const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+        return error && error.code === expectedCode
+          && [
+            'secretField',
+            'PRIVATE-ERROR-SENTINEL',
+            'invalid-key-PRIVATE',
+            'PRIVATE-KEY-SENTINEL',
+            '$or',
+            'PRIVATE-OPERATOR-SENTINEL',
+            '__proto__',
+            'PRIVATE-PROTO-SENTINEL',
+          ].every((sentinel) => !text.includes(sentinel))
+      },
+    )
+    assert.equal(reads, 0, 'invalid/missing persisted filter fails before source contact')
+    assert.equal(calls.test.length, 0, 'invalid/missing persisted filter also fails before target capability contact')
+  }
+}
+
+async function testSqlFilterDriverFailuresAreRedactedForDryRunAndApply() {
+  const filterKey = 'privateFilterColumn'
+  const filterValue = 'PRIVATE-FILTER-LITERAL'
+  const driverLeak = `invalid input for ${filterKey}: ${filterValue}`
+  let failRead = true
+  const { input } = baseInput({
+    input: {
+      dryRunUser: 'user_write',
+      pipeline: {
+        ...baseInput().input.pipeline,
+        options: { source: { filters: { [filterKey]: filterValue } } },
+      },
+    },
+    sourceRead: () => {
+      if (failRead) throw new Error(driverLeak)
+      return {
+        records: [
+          { code: 'P-001', name: 'Widget', status: 'new' },
+          { code: 'P-002', name: 'Gadget', status: 'old' },
+        ],
+        done: true,
+        nextCursor: null,
+      }
+    },
+  })
+  const assertRedacted = (error) => {
+    const text = JSON.stringify({ code: error.code, message: error.message, details: error.details })
+    return error && error.code === 'C6_WRITE_SOURCE_READ_FAILED'
+      && error.status === 502
+      && !text.includes(filterKey)
+      && !text.includes(filterValue)
+      && !text.includes(driverLeak)
+  }
+
+  await assert.rejects(() => dryRunExternalWrite(input), assertRedacted)
+
+  failRead = false
+  const dryRun = await dryRunExternalWrite(input)
+  failRead = true
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    assertRedacted,
+    'Apply recomputation uses the same values-free filtered-read failure boundary',
+  )
+}
+
+async function testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite() {
+  const { input, calls } = baseInput({ input: { dryRunUser: 'user_write' } })
+  const dryRun = await dryRunExternalWrite(input)
+  input.pipeline.options.source.filters.approvedSlice = 'changed-after-dry-run'
+  await assert.rejects(
+    () => applyExternalWrite({ ...input, dryRunToken: dryRun.dryRunToken, applyUser: 'user_write' }),
+    (error) => error && error.code === 'C6_WRITE_DRY_RUN_TOKEN_MISMATCH',
+  )
+  assert.equal(calls.insertRows.length, 0, 'stored filter revision mismatch fails before insert')
+  assert.equal(calls.updateRows.length, 0, 'stored filter revision mismatch fails before update')
 }
 
 async function testApplyConsumesTokenRecomputesAndWritesEligibleRows() {
@@ -628,6 +781,7 @@ async function testAmbiguousTargetKeyHoldsAndDoesNotIssueToken() {
 
 async function testTruncatedSourceReadDoesNotIssueToken() {
   const { input } = baseInput({
+    input: { maxRows: 1 },
     sourceRead: () => ({ records: [{ code: 'P-001', name: 'Widget', status: 'new' }], done: false, nextCursor: 'next-page' }),
   })
   const result = await dryRunExternalWrite(input)
@@ -708,6 +862,336 @@ function fakeWriteProfile() {
     assertSafeCapabilityState(state) {
       if (state.ok !== true) throw new Error('fake target capability state is unsafe')
     },
+  }
+}
+
+function k3ExactTwoAcceptanceInput(overrides = {}) {
+  const fixture = baseInput({
+    test: () => ({ success: true, capabilityState: { ok: true } }),
+    lookupByKey: () => ({ data: [], metadata: {} }),
+    ...overrides,
+  })
+  fixture.input.targetWriteProfile = {
+    ...fakeWriteProfile(),
+    kind: 'erp:k3-wise-webapi',
+  }
+  fixture.input.targetSystem = {
+    id: 'target_1',
+    kind: 'erp:k3-wise-webapi',
+    config: {
+      dataSourceId: 'k3-save-only',
+      object: 'material',
+      keyFields: ['externalId'],
+      writableFields: ['name', 'status'],
+      acceptancePolicy: {
+        profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+      },
+    },
+  }
+  return fixture
+}
+
+// CONVERTED (E4 / HG v1.2 §10, error code K3_WISE_EXTERNAL_WRITE_DISABLED). Every K3-target
+// fixture in this file used to end in a real apply. K3 external write-back is now permanently
+// refused at four independent layers, and layer 2 lives in the module this suite drives — so the
+// apply half of each K3 case becomes a refusal assertion with `insertRows`/`updateRows` at zero.
+// The PLAN half of each case is untouched: the acceptance policy still evaluates, the counts and
+// rowErrorTypes are still asserted, and the strictAbsence binding is still proven. That split is
+// deliberate — E4-05 requires the read/plan path to keep working, and a blanket deny that stopped
+// the planner from running would be a FAIL, not a pass.
+async function testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan() {
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'not_applyable', 'E4: a K3 plan is never "ready" — no apply follows from it')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null, 'E4: no apply authorisation is minted for a K3 target')
+  assert.deepEqual(dryRun.evidence.externalWriteApply, {
+    permanentlyRefused: true,
+    refusalCode: 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    authority: 'E4',
+  })
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 2)
+  assert.equal(dryRun.counts.update, 0)
+  assert.equal(dryRun.counts.skip, 0)
+  assert.equal(dryRun.counts.held, 0)
+  assert.equal(dryRun.counts.failed, 0)
+  assert.deepEqual(dryRun.evidence.acceptancePolicy, {
+    profile: __internals.K3_TEST_ONLY_EXACT_TWO_ADD_PROFILE,
+    expectedRows: 2,
+    ready: true,
+    cleanupRequired: true,
+  })
+
+  // The persisted exact-two acceptance policy is EXACTLY the kind of "policy object" §10.1 says
+  // cannot unlock the write. It still evaluates and still reports ready — and still buys nothing.
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true, 'exact-two add-only binds strict absence into planner policy')
+  assert.equal(calls.lookupByKey.length, 2, 'the planner still performs its per-row target lookups')
+
+  const refusal = await applyExternalWrite({
+    ...input,
+    dryRunToken: 'a-token-that-would-otherwise-be-valid',
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two',
+  }).then(() => null, (error) => error)
+  assert.ok(refusal, 'E4: apply must refuse')
+  assert.equal(refusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(refusal.status, 403)
+  assert.equal(calls.insertRows.length, 0, 'E4: zero Save calls')
+  assert.equal(calls.updateRows.length, 0, 'E4: zero update calls')
+  assert.equal(calls.lookupByKey.length, 2, 'E4: the refusal precedes the apply-side planner recompute entirely')
+}
+
+async function testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure() {
+  const deadLetters = []
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    insertRows: () => {
+      throw new Error('K3 Save failed with private row values')
+    },
+  })
+  // CONVERTED (E4). This proved that the FIRST Save failure stops the batch instead of enlarging
+  // the partial-write set, and that the resulting evidence + dead letter stay values-free. With
+  // zero Saves possible there is no first failure to stop after — so the surviving, stronger
+  // claim is asserted instead: ZERO Saves, ZERO dead letters, and a refusal that carries none of
+  // the private row values the old evidence had to be scrubbed of.
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.dryRunToken, null)
+  const refusal = await applyExternalWrite({
+    ...input,
+    dryRunToken: 'a-token-that-would-otherwise-be-valid',
+    applyUser: 'user_read',
+    runId: 'run_k3_exact_two_first_save_failure',
+    deadLetterStore: {
+      async createDeadLetter(entry) {
+        deadLetters.push(entry)
+        return { ...entry, id: `dl_${deadLetters.length}` }
+      },
+    },
+  }).then(() => null, (error) => error)
+
+  assert.equal(refusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(calls.insertRows.length, 0, 'E4: not even the first Save is attempted')
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(deadLetters.length, 0, 'E4: a refused apply writes no dead letters — there is no failed row')
+  const evidence = JSON.stringify({ code: refusal.code, message: refusal.message, details: refusal.details })
+  for (const privateValue of ['P-001', 'P-002', 'Widget', 'Gadget']) {
+    assert.equal(evidence.includes(privateValue), false, `the refusal stays values-free (${privateValue})`)
+  }
+}
+
+async function testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    sourceRows: [
+      { code: ' MAT-001 ', name: 'Widget', status: 'new' },
+      { code: 'mat-001', name: 'Gadget', status: 'old' },
+    ],
+  })
+  input.pipeline.fieldMappings = input.pipeline.fieldMappings.map((mapping) => (
+    mapping.targetField === 'externalId'
+      ? { ...mapping, targetField: 'FNumber' }
+      : mapping
+  ))
+  input.targetSystem.config.keyFields = ['FNumber']
+
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.canApply, false)
+  assert.equal(dryRun.dryRunToken, null)
+  assert.equal(dryRun.counts.sourceRows, 2)
+  assert.equal(dryRun.counts.planned, 2)
+  assert.equal(dryRun.counts.add, 1)
+  assert.equal(dryRun.counts.held, 1)
+  assert.equal(dryRun.evidence.acceptancePolicy.ready, false)
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('duplicate_target_key'))
+  assert.ok(dryRun.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+  assert.equal(calls.lookupByKey.length, 1, 'the duplicate key is refused before a second target lookup')
+  assert.equal(input.tokenStore.map.size, 0, 'a duplicate target key never mints an Apply token')
+
+  // CONVERTED (E4): the duplicate-key plan already minted no token, and the apply used to fail
+  // with C6_WRITE_DRY_RUN_TOKEN_REQUIRED. The E4 fence is the FIRST statement of
+  // applyExternalWrite, ahead of the token check, so a K3 apply now reports the write-disabled
+  // code instead. The plan-side duplicate-key assertions above are untouched.
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: dryRun.dryRunToken,
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  )
+  assert.equal(calls.insertRows.length, 0, 'the duplicate-key plan cannot reach K3 Save')
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality() {
+  for (const fixture of [
+    k3ExactTwoAcceptanceInput({
+      lookupByKey: ({ key }) => key.externalId === 'P-002'
+        ? { data: [{ externalId: 'P-002', name: 'old', status: 'old' }] }
+        : { data: [] },
+    }),
+    k3ExactTwoAcceptanceInput({ sourceRows: [{ code: 'P-001', name: 'Widget', status: 'new' }] }),
+  ]) {
+    const result = await dryRunExternalWrite(fixture.input)
+    assert.equal(result.status, 'not_applyable')
+    assert.equal(result.canApply, false)
+    assert.equal(result.dryRunToken, null)
+    assert.equal(result.evidence.acceptancePolicy.ready, false)
+    assert.ok(result.evidence.rowErrorTypes.includes('acceptance_policy_mismatch'))
+    assert.equal(fixture.calls.insertRows.length, 0)
+    assert.equal(fixture.calls.updateRows.length, 0)
+  }
+}
+
+async function testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound() {
+  const invalid = k3ExactTwoAcceptanceInput()
+  invalid.input.targetSystem.config.acceptancePolicy.extra = true
+  await assert.rejects(
+    () => dryRunExternalWrite(invalid.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(invalid.calls.test.length, 0, 'invalid persisted policy fails before target capability/network work')
+
+  const nonK3 = k3ExactTwoAcceptanceInput()
+  nonK3.input.targetSystem.kind = 'data-source:sql-write-gated'
+  nonK3.input.targetWriteProfile = {
+    ...nonK3.input.targetWriteProfile,
+    kind: 'data-source:sql-write-gated',
+  }
+  await assert.rejects(
+    () => dryRunExternalWrite(nonK3.input),
+    (error) => error && error.code === 'C6_WRITE_ACCEPTANCE_POLICY_INVALID',
+  )
+  assert.equal(nonK3.calls.test.length, 0, 'K3-only persisted policy fails closed on a non-K3 target')
+
+  // CONVERTED (E4). The two closed-shape checks above are UNCHANGED and still live — they run in
+  // the planner, which K3 targets still reach. The third leg used the revision fence
+  // (C6_WRITE_DRY_RUN_TOKEN_MISMATCH) to prove that removing the persisted policy after the
+  // dry-run invalidates the approval; for K3 that branch is unreachable because no token is
+  // minted. The revision fence itself is NOT weakened — it stays covered for the SQL and
+  // multitable profiles elsewhere in this same file.
+  const { input, calls } = k3ExactTwoAcceptanceInput()
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.dryRunToken, null, 'E4: no token, so nothing to invalidate')
+  delete input.targetSystem.config.acceptancePolicy
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: 'a-token-that-would-otherwise-be-valid',
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    'with or without the persisted policy, a K3 apply is refused',
+  )
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+}
+
+async function testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent() {
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      const error = new Error('K3 read business response failed')
+      error.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }
+      throw error
+    },
+  })
+  await assert.rejects(
+    () => dryRunExternalWrite(input),
+    (error) => error && error.details && error.details.code === 'K3_WISE_READ_BUSINESS_ERROR',
+  )
+  assert.equal(input.tokenStore.map.size, 0, 'a generic K3 business-read error never mints a token under exact-two')
+  assert.equal(calls.insertRows.length, 0)
+  assert.equal(calls.updateRows.length, 0)
+  assert.equal(calls.lookupByKey[0].policy.strictAbsence, true)
+}
+
+async function testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange() {
+  let lookups = 0
+  const { input, calls } = k3ExactTwoAcceptanceInput({
+    lookupByKey: () => {
+      lookups += 1
+      if (lookups <= 4) return { data: [], metadata: {} }
+      return { data: [{ externalId: 'now-present' }], metadata: {} }
+    },
+  })
+  // CONVERTED (E4). The strict add-only TOCTOU preflight runs INSIDE applyExternalWrite, after
+  // the token is consumed and the plan recomputed — layer 2 refuses long before it, so the
+  // preflight is unreachable for K3. Its purpose (a post-plan existence change must not become a
+  // silent overwrite) is subsumed: the write cannot happen at all, whatever the target does
+  // between plan and apply. The values-free assertion is kept and now covers the refusal.
+  const dryRun = await dryRunExternalWrite(input)
+  assert.equal(dryRun.status, 'not_applyable')
+  assert.equal(dryRun.dryRunToken, null)
+  assert.equal(lookups, 2, 'dry-run still plans two absent rows — the read path is untouched')
+
+  await assert.rejects(
+    () => applyExternalWrite({
+      ...input,
+      dryRunToken: 'a-token-that-would-otherwise-be-valid',
+      applyUser: 'user_read',
+    }),
+    (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  )
+  assert.equal(lookups, 2, 'E4: apply performs NO recompute lookups — the refusal precedes the planner')
+  assert.equal(calls.insertRows.length, 0, 'zero Save')
+  assert.equal(calls.updateRows.length, 0)
+  const leaked = JSON.stringify(calls) + JSON.stringify(dryRun.evidence)
+  assert.equal(leaked.includes('now-present'), false, 'evidence stays values-free')
+}
+
+async function testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave() {
+  for (const fixture of [
+    {
+      reason: 'ambiguous_target_key',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { data: [{ externalId: 'a' }, { externalId: 'b' }], metadata: {} }
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          throw new Error('lookup exploded')
+        }
+      })(),
+    },
+    {
+      reason: 'lookup_error',
+      lookupByKey: (() => {
+        let lookups = 0
+        return () => {
+          lookups += 1
+          if (lookups <= 4) return { data: [], metadata: {} }
+          return { metadata: {} }
+        }
+      })(),
+    },
+  ]) {
+    // CONVERTED (E4), same disposition as the sibling preflight test above: the preflight's
+    // ambiguous / lookup-error refusals live past layer 2 and are unreachable for K3. Each
+    // fixture still runs its plan and each still ends in zero Save — now unconditionally.
+    const { input, calls } = k3ExactTwoAcceptanceInput({ lookupByKey: fixture.lookupByKey })
+    const dryRun = await dryRunExternalWrite(input)
+    assert.equal(dryRun.dryRunToken, null, `${fixture.reason}: no token minted for a K3 target`)
+    await assert.rejects(
+      () => applyExternalWrite({
+        ...input,
+        dryRunToken: 'a-token-that-would-otherwise-be-valid',
+        applyUser: 'user_read',
+      }),
+      (error) => error && error.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    )
+    assert.equal(calls.insertRows.length, 0, `${fixture.reason}: zero Save`)
+    assert.equal(calls.updateRows.length, 0)
   }
 }
 
@@ -806,8 +1290,20 @@ async function testWriteSourceSeamIsolatesRowFailureValuesFree() {
 
 async function main() {
   await testReadyDryRunIssuesTokenAndStaysValuesFree()
+  await testServerBoundSqlEqualityFiltersForwardAndDiscriminateCompleteness()
+  await testMissingOrInvalidSqlFiltersFailBeforeSourceContactValuesFree()
+  await testSqlFilterDriverFailuresAreRedactedForDryRunAndApply()
+  await testStoredFilterChangeInvalidatesDryRunRevisionBeforeWrite()
   await testWriteSourceSeamGeneralizesLifecycleOffSqlProfile()
   await testWriteSourceSeamIsolatesRowFailureValuesFree()
+  await testK3ExactTwoAcceptancePolicyAllowsOnlyExactAddPlan()
+  await testK3ExactTwoAcceptanceStopsAfterFirstSaveFailure()
+  await testK3ExactTwoAcceptancePolicyRejectsDuplicateMaterialKeysBeforeApply()
+  await testK3ExactTwoAcceptancePolicyBlocksUpdateOrWrongCardinality()
+  await testK3ExactTwoAcceptancePolicyIsClosedAndRevisionBound()
+  await testK3ExactTwoAcceptancePolicyDoesNotTreatLookupBusinessErrorAsAbsent()
+  await testK3ExactTwoApplyPreflightRefusesBatchAfterPlannerLookupStateChange()
+  await testK3ExactTwoApplyPreflightRefusesAmbiguousOrLookupErrorWithZeroSave()
   await testAmbiguousTargetKeyHoldsAndDoesNotIssueToken()
   await testTruncatedSourceReadDoesNotIssueToken()
   await testRejectsNonC6Target()
@@ -835,3 +1331,43 @@ main().catch((error) => {
   console.error(error)
   process.exitCode = 1
 })
+
+// --- Ownership-guard codes survive as themselves (Codex review follow-up) ---------------
+// The multitable ownership guard refuses to write a protected column, and refuses when it
+// cannot verify ownership at all. Both are TARGET-CONFIGURATION facts: an operator must be
+// able to tell "this target is misconfigured" from "this write flaked". Before these tokens
+// were registered in SAFE_WRITE_ERROR_CODES they collapsed into an opaque WRITE_FAILED.
+// The tokens are read from the guard module rather than retyped, so a rename over there
+// fails this test instead of silently un-registering the codes.
+{
+  const { __internals } = require('../lib/external-write-dry-run.cjs')
+  const guard = require('../lib/adapters/multitable-ownership-guard.cjs')
+  const { valuesFreeErrorCode } = __internals
+
+  const guardSource = require('node:fs').readFileSync(
+    require.resolve('../lib/adapters/multitable-ownership-guard.cjs'),
+    'utf8',
+  )
+  const declared = [...guardSource.matchAll(/'(METASHEET_MULTITABLE_OWNERSHIP_[A-Z_]+)'/g)].map((m) => m[1])
+  assert.ok(declared.length >= 2, 'expected the guard to declare its ownership refusal codes')
+
+  for (const code of new Set(declared)) {
+    assert.strictEqual(
+      valuesFreeErrorCode({ code }),
+      code,
+      `ownership refusal ${code} must survive as itself, not collapse to WRITE_FAILED`,
+    )
+  }
+
+  // Negative control: an unregistered code still collapses, so the assertion above is not
+  // passing because valuesFreeErrorCode became a pass-through.
+  assert.strictEqual(valuesFreeErrorCode({ code: 'METASHEET_MULTITABLE_OWNERSHIP_NOT_A_REAL_CODE' }), 'WRITE_FAILED')
+  assert.strictEqual(valuesFreeErrorCode({ code: 'SOME_UNREGISTERED_ERROR' }), 'WRITE_FAILED')
+
+  // Values-free: the codes carry no operator data by construction.
+  for (const code of new Set(declared)) {
+    assert.ok(/^[A-Z0-9_]+$/.test(code), `${code} must be a closed token`)
+  }
+  void guard
+  console.log('OK ownership refusal codes survive valuesFreeErrorCode')
+}

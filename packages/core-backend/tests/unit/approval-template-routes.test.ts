@@ -1,6 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 type TemplateRow = {
   id: string
@@ -25,6 +26,7 @@ type TemplateVersionRow = {
   approval_graph: Record<string, unknown>
   /** B3-09 — recorded at publish time; null everywhere else (mirrors the nullable column). */
   publish_note: string | null
+  restored_from_version_id: string | null
   created_at: Date
   updated_at: Date
 }
@@ -125,6 +127,7 @@ const routeState = vi.hoisted(() => {
         ],
       },
       publish_note: null,
+      restored_from_version_id: null,
       created_at: timestamp,
       updated_at: timestamp,
       ...overrides,
@@ -287,7 +290,8 @@ const routeState = vi.hoisted(() => {
 
     if (normalized.startsWith('INSERT INTO approval_template_versions')) {
       const timestamp = now()
-      const hasExplicitVersionParam = params.length === 4
+      const hasExplicitVersionParam = params.length >= 4
+      const isRestore = normalized.includes('restored_from_version_id')
       const row: TemplateVersionRow = {
         id: `ver-${state.versionSeq++}`,
         template_id: String(params[0]),
@@ -295,6 +299,8 @@ const routeState = vi.hoisted(() => {
         status: 'draft',
         form_schema: parseJson(hasExplicitVersionParam ? params[2] : params[1]),
         approval_graph: parseJson(hasExplicitVersionParam ? params[3] : params[2]),
+        publish_note: null,
+        restored_from_version_id: isRestore ? String(params[4]) : null,
         created_at: timestamp,
         updated_at: timestamp,
       }
@@ -437,6 +443,8 @@ vi.mock('../../src/middleware/auth', () => ({
 
 import { approvalsRouter } from '../../src/routes/approvals'
 
+const pinned = usePinnedServer()
+
 describe('approval template routes', () => {
   beforeEach(() => {
     routeState.reset()
@@ -454,8 +462,9 @@ describe('approval template routes', () => {
 
   it('creates a template and its first draft version', async () => {
     const app = createApp()
+    pinned.setApp(app)
 
-    const response = await request(app)
+    const response = await request(pinned.url())
       .post('/api/approval-templates')
       .send({
         key: 'expense-approval',
@@ -520,8 +529,9 @@ describe('approval template routes', () => {
 
   it('creates and patches template visibility scope metadata without rotating versions', async () => {
     const app = createApp()
+    pinned.setApp(app)
 
-    const createResponse = await request(app)
+    const createResponse = await request(pinned.url())
       .post('/api/approval-templates')
       .send({
         key: 'dept-expense',
@@ -547,7 +557,7 @@ describe('approval template routes', () => {
     expect(createResponse.body.visibilityScope).toEqual({ type: 'dept', ids: ['finance', 'ops'] })
     const originalVersionId = createResponse.body.latestVersionId
 
-    const patchResponse = await request(app)
+    const patchResponse = await request(pinned.url())
       .patch(`/api/approval-templates/${createResponse.body.id}`)
       .send({
         visibilityScope: { type: 'role', ids: ['manager'] },
@@ -565,7 +575,8 @@ describe('approval template routes', () => {
     template.latest_version_id = version.id
 
     const app = createApp()
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .patch(`/api/approval-templates/${template.id}`)
       .send({
         name: 'Travel Request v2',
@@ -618,7 +629,8 @@ describe('approval template routes', () => {
     template.latest_version_id = version.id
 
     const app = createApp()
-    const response = await request(app)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
       .post(`/api/approval-templates/${template.id}/publish`)
       .send({
         policy: {
@@ -664,13 +676,14 @@ describe('approval template routes', () => {
     routeState.state.publishedDefinitions.set(publishedDefinition.id, publishedDefinition)
 
     const app = createApp()
+    pinned.setApp(app)
 
-    const listResponse = await request(app).get('/api/approval-templates?page=1&pageSize=20')
+    const listResponse = await request(pinned.url()).get('/api/approval-templates?page=1&pageSize=20')
     expect(listResponse.status).toBe(200)
     expect(listResponse.body.total).toBe(1)
     expect(listResponse.body.data[0].id).toBe(template.id)
 
-    const versionResponse = await request(app).get(`/api/approval-templates/${template.id}/versions/${version.id}`)
+    const versionResponse = await request(pinned.url()).get(`/api/approval-templates/${template.id}/versions/${version.id}`)
     expect(versionResponse.status).toBe(200)
     expect(versionResponse.body.id).toBe(version.id)
     expect(versionResponse.body.runtimeGraph.policy.allowRevoke).toBe(false)
@@ -685,7 +698,8 @@ describe('approval template routes', () => {
       template.active_version_id = version.id
 
       const app = createApp()
-      const response = await request(app).post(`/api/approval-templates/${template.id}/archive`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).post(`/api/approval-templates/${template.id}/archive`)
 
       expect(response.status).toBe(200)
       expect(response.body.status).toBe('archived')
@@ -698,7 +712,8 @@ describe('approval template routes', () => {
       template.latest_version_id = version.id
 
       const app = createApp()
-      const response = await request(app).post(`/api/approval-templates/${template.id}/archive`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).post(`/api/approval-templates/${template.id}/archive`)
 
       expect(response.status).toBe(409)
       expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS')
@@ -713,7 +728,8 @@ describe('approval template routes', () => {
       template.active_version_id = version.id
 
       const app = createApp()
-      const response = await request(app).post(`/api/approval-templates/${template.id}/unarchive`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).post(`/api/approval-templates/${template.id}/unarchive`)
 
       expect(response.status).toBe(200)
       expect(response.body.status).toBe('published')
@@ -727,7 +743,8 @@ describe('approval template routes', () => {
       template.active_version_id = version.id
 
       const app = createApp()
-      const response = await request(app).post(`/api/approval-templates/${template.id}/unarchive`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).post(`/api/approval-templates/${template.id}/unarchive`)
 
       expect(response.status).toBe(409)
       expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS')
@@ -736,11 +753,12 @@ describe('approval template routes', () => {
 
     it('404s archiving/unarchiving a template that does not exist', async () => {
       const app = createApp()
-      const archiveResponse = await request(app).post('/api/approval-templates/tpl-missing/archive')
+      pinned.setApp(app)
+      const archiveResponse = await request(pinned.url()).post('/api/approval-templates/tpl-missing/archive')
       expect(archiveResponse.status).toBe(404)
       expect(archiveResponse.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
 
-      const unarchiveResponse = await request(app).post('/api/approval-templates/tpl-missing/unarchive')
+      const unarchiveResponse = await request(pinned.url()).post('/api/approval-templates/tpl-missing/unarchive')
       expect(unarchiveResponse.status).toBe(404)
       expect(unarchiveResponse.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
     })
@@ -755,7 +773,8 @@ describe('approval template routes', () => {
       routeState.createInstanceFixture(otherTemplate.id, { status: 'pending' })
 
       const app = createApp()
-      const response = await request(app).get(`/api/approval-templates/${template.id}/usage`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(`/api/approval-templates/${template.id}/usage`)
 
       expect(response.status).toBe(200)
       expect(response.body).toEqual({
@@ -769,7 +788,8 @@ describe('approval template routes', () => {
       const template = routeState.createTemplateFixture({ status: 'published' })
 
       const app = createApp()
-      const response = await request(app).get(`/api/approval-templates/${template.id}/usage`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(`/api/approval-templates/${template.id}/usage`)
 
       expect(response.status).toBe(200)
       expect(response.body).toEqual({
@@ -781,7 +801,8 @@ describe('approval template routes', () => {
 
     it('404s usage for a template that does not exist', async () => {
       const app = createApp()
-      const response = await request(app).get('/api/approval-templates/tpl-missing/usage')
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get('/api/approval-templates/tpl-missing/usage')
       expect(response.status).toBe(404)
       expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
     })
@@ -801,8 +822,9 @@ describe('approval template routes', () => {
     it('persists a trimmed publish note and returns it on the version detail', async () => {
       const { template, version } = publishableTemplate()
       const app = createApp()
+      pinned.setApp(app)
 
-      const response = await request(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/publish`)
         .send({ policy: validPolicy, note: '  修复报销金额上限条件  ' })
 
@@ -814,8 +836,9 @@ describe('approval template routes', () => {
     it('publishes without a note exactly as before (publishNote null)', async () => {
       const { template, version } = publishableTemplate()
       const app = createApp()
+      pinned.setApp(app)
 
-      const response = await request(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/publish`)
         .send({ policy: validPolicy })
 
@@ -827,8 +850,9 @@ describe('approval template routes', () => {
     it('rejects an over-length note with 400 BEFORE opening a transaction (fail-fast, nothing written)', async () => {
       const { template, version } = publishableTemplate()
       const app = createApp()
+      pinned.setApp(app)
 
-      const response = await request(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/publish`)
         .send({ policy: validPolicy, note: 'x'.repeat(2001) })
 
@@ -846,7 +870,8 @@ describe('approval template routes', () => {
       template.latest_version_id = version.id
 
       const app = createApp()
-      const response = await request(app)
+      pinned.setApp(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/publish`)
         .send({ policy: validPolicy })
 
@@ -860,8 +885,9 @@ describe('approval template routes', () => {
     it('rejects a non-string note with 400', async () => {
       const { template } = publishableTemplate()
       const app = createApp()
+      pinned.setApp(app)
 
-      const response = await request(app)
+      const response = await request(pinned.url())
         .post(`/api/approval-templates/${template.id}/publish`)
         .send({ policy: validPolicy, note: 42 })
 
@@ -893,7 +919,8 @@ describe('approval template routes', () => {
       routeState.createVersionFixture(other.id, { version: 9 })
 
       const app = createApp()
-      const response = await request(app).get(`/api/approval-templates/${template.id}/versions`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(`/api/approval-templates/${template.id}/versions`)
 
       expect(response.status).toBe(200)
       expect(response.body.versions).toHaveLength(2)
@@ -918,6 +945,7 @@ describe('approval template routes', () => {
         'id',
         'publishNote',
         'publishedDefinitionId',
+        'restoredFromVersionId',
         'status',
         'templateId',
         'updatedAt',
@@ -927,7 +955,8 @@ describe('approval template routes', () => {
 
     it('404s the versions list for a template that does not exist', async () => {
       const app = createApp()
-      const response = await request(app).get('/api/approval-templates/tpl-missing/versions')
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get('/api/approval-templates/tpl-missing/versions')
       expect(response.status).toBe(404)
       expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
     })
@@ -944,9 +973,159 @@ describe('approval template routes', () => {
       }
 
       const app = createApp()
-      const response = await request(app).get(`/api/approval-templates/${template.id}/versions`)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(`/api/approval-templates/${template.id}/versions`)
 
       expect(response.status).toBe(403)
+    })
+
+    it('restores a historical snapshot as a new draft without switching the active published version', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      const v1 = routeState.createVersionFixture(template.id, {
+        version: 1,
+        status: 'published',
+        form_schema: { fields: [{ id: 'legacy', type: 'text', label: 'Legacy' }] },
+      })
+      const v2 = routeState.createVersionFixture(template.id, {
+        version: 2,
+        status: 'draft',
+        form_schema: { fields: [{ id: 'current', type: 'number', label: 'Current' }] },
+      })
+      template.active_version_id = v1.id
+      template.latest_version_id = v2.id
+
+      const app = createApp()
+      pinned.setApp(app)
+      const response = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v2.id })
+
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({
+        templateId: template.id,
+        version: 3,
+        status: 'draft',
+        restoredFromVersionId: v1.id,
+        formSchema: v1.form_schema,
+        runtimeGraph: null,
+        publishedDefinitionId: null,
+      })
+      expect(response.body.id).not.toBe(v1.id)
+      expect(routeState.state.templates.get(template.id)).toMatchObject({
+        latest_version_id: response.body.id,
+        active_version_id: v1.id,
+        status: 'published',
+      })
+      expect(routeState.state.versions.get(v1.id)).toMatchObject({
+        status: 'published',
+        form_schema: v1.form_schema,
+      })
+    })
+
+    it('403s version restore for a non-admin before writing a new version', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+      authState.currentUser = {
+        id: 'plain-user',
+        sub: 'plain-user',
+        name: 'Plain User',
+        email: 'plain@example.com',
+        permissions: ['approvals:read', 'approvals:write'],
+        roles: ['user'],
+      }
+
+      const app = createApp()
+      pinned.setApp(app)
+      const response = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v2.id })
+
+      expect(response.status).toBe(403)
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
+    it('does not restore a version that belongs to another template', async () => {
+      const template = routeState.createTemplateFixture()
+      const latest = routeState.createVersionFixture(template.id, { version: 1 })
+      template.latest_version_id = latest.id
+      const otherTemplate = routeState.createTemplateFixture()
+      const foreignVersion = routeState.createVersionFixture(otherTemplate.id, { version: 1 })
+      otherTemplate.latest_version_id = foreignVersion.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      pinned.setApp(app)
+      const response = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${foreignVersion.id}/restore`)
+        .send({ expectedLatestVersionId: latest.id })
+
+      expect(response.status).toBe(404)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(latest.id)
+    })
+
+    it('rejects a stale restore without creating a new version', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      pinned.setApp(app)
+      const response = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v1.id })
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_STALE')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
+    it('rejects a restore that omits the optimistic concurrency anchor', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      pinned.setApp(app)
+      const missing = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({})
+      const blank = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: '   ' })
+
+      expect(missing.status).toBe(400)
+      expect(missing.body.error.code).toBe('VALIDATION_ERROR')
+      expect(blank.status).toBe(400)
+      expect(blank.body.error.code).toBe('VALIDATION_ERROR')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
+    it('rejects restoring the latest version as a redundant copy', async () => {
+      const template = routeState.createTemplateFixture()
+      const latest = routeState.createVersionFixture(template.id)
+      template.latest_version_id = latest.id
+
+      const app = createApp()
+      pinned.setApp(app)
+      const response = await request(pinned.url())
+        .post(`/api/approval-templates/${template.id}/versions/${latest.id}/restore`)
+        .send({ expectedLatestVersionId: latest.id })
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_ALREADY_LATEST')
+      expect(routeState.state.versions.size).toBe(1)
     })
   })
 })

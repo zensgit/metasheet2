@@ -12,6 +12,26 @@ import type {
   MultitableProvisioningViewDescriptor,
 } from '../multitable/contracts'
 import type { CollectionDefinition } from './collection'
+import type {
+  ReserveAttendanceLegacyImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-legacy-plan-reservation-host'
+import type {
+  ReserveAttendanceLegacyImportPlanJobResultV1,
+} from '../attendance/w4c3a-legacy-plan-enqueue'
+import type {
+  CommitAttendanceSyncImportPlanFromHostInputV1,
+} from '../attendance/w4c3a-sync-import-host'
+import type {
+  AttendanceSyncImportResponseV1,
+} from '../attendance/w4c3a-sync-import-kernel'
+import type {
+  AttendanceImportAttributionFreezeBuildResultV1,
+  AttendanceImportPolicySourceProjectionInputV1,
+  AttendanceImportPolicySourceProofV1,
+} from '../attendance/w4c3a-import-proof'
+import type {
+  AttendanceImportFrozenAttributionBuildInputV1,
+} from '../attendance/w4c2-frozen-attribution'
 
 export type {
   MultitableProvisioningFieldDescriptor,
@@ -352,9 +372,83 @@ export interface CoreAPI {
   vision?: VisionApi
 }
 
+// W2/P2-3: the scoped provisioning surface handed to a repair callback that runs
+// inside ONE host transaction (see runObjectFieldsRepairTransaction). Every method is
+// bound to the same tx query, so a thrown verify rolls the additive write back.
+export interface MultitableRepairTransactionSurface {
+  findObjectSheet(input: {
+    projectId: string
+    objectId: string
+  }): Promise<{
+    id: string
+    baseId: string | null
+    name: string
+    description: string | null
+  } | null>
+  resolveExistingObjectFieldIds(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, string>>
+  readObjectFieldsContent(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>>
+  ensureMissingObjectFields(input: {
+    projectId: string
+    objectId: string
+    fields: MultitableProvisioningFieldDescriptor[]
+  }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+}
+
+/** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
+export type MultitableRelabelDisplayNameStatus =
+  | 'renamed'
+  | 'would_rename'
+  | 'already_target'
+  | 'skipped_name_changed'
+  | 'skipped_name_taken'
+  | 'missing'
+
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  /**
+   * IS THIS SHEET OWNED BY THIS PROJECT — the only tenancy fact about a sheet that is recorded.
+   *
+   * `meta_sheets` carries no project column; a sheet's project appears only inside its DERIVED id
+   * (`sheet_ + sha1(projectId:objectId)`), which is one-way and, more importantly, is not an
+   * invariant any consumer maintains: `sheetId` and `objectId` are independent fields on a table
+   * action, and a deployment may legitimately point an objectId at a sheet created under a different
+   * one. Reversing the hash is therefore neither possible nor sufficient.
+   *
+   * What IS recorded is `plugin_multitable_object_registry`, written by plugin-scoped
+   * `provisioning.ensureObject` and keyed by `sheet_id`. This asks that row a YES/NO question.
+   *
+   * DELIBERATELY A BOOLEAN, never the owning project id. The plugin-scope wrapper can only narrow by
+   * PROJECT NAMESPACE, and every tenant of one plugin shares that namespace
+   * (`tenant-a:integration-core` and `tenant-b:integration-core` both end in `integration-core`), so
+   * a port that RETURNED the owner would hand one tenant's caller another tenant's project id and
+   * pass the namespace guard while doing it. A boolean cannot: the caller must already know the
+   * project it is asking about, and learns nothing about any other.
+   *
+   * False means "not provably owned by that project" and covers both "owned by someone else" and
+   * "not in the registry at all" — the two are not distinguishable here, and deliberately so. A
+   * caller deciding a tenancy question must treat false as a failure to prove ownership, never as
+   * permission.
+   */
+  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
+  /**
+   * The deterministic id of one of a provisioned object's views — the read-only sibling of
+   * `getObjectSheetId` and `getFieldId`, and derived by the same content hash.
+   *
+   * PURE: it performs no IO and touches no view. It does NOT assert that the view exists, grant any
+   * access to it, or say anything about who may open it — it composes an id, exactly as the two
+   * accessors beside it do. A caller that needs existence must prove it separately (the stock-prep
+   * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
+   */
+  getObjectViewId(projectId: string, objectId: string, viewId: string): string
   findObjectSheet(input: {
     projectId: string
     objectId: string
@@ -369,10 +463,66 @@ export interface MultitableProvisioningAPI {
     objectId: string
     fieldIds: string[]
   }): Promise<Record<string, string>>
+  // W2: DB-backed existence read — {logicalId: physicalId} only for fields that
+  // physically exist (drives the additive repair's missing-field discovery).
+  resolveExistingObjectFieldIds(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, string>>
+  // W2: DB-backed field CONTENT read (repair's before/after mutation snapshot).
+  readObjectFieldsContent(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>>
+  // W2: additive-only field provisioning (ON CONFLICT DO NOTHING) — adds missing
+  // template columns to an already-provisioned object without overwriting existing ones.
+  ensureMissingObjectFields(input: {
+    projectId: string
+    objectId: string
+    fields: MultitableProvisioningFieldDescriptor[]
+  }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  // Default-view provisioning. A sheet with ZERO views cannot be opened and blocks its
+  // whole base, so a managed table must be created WITH one. Creates a single grid view
+  // ONLY when the sheet has no views at all; a sheet that already has any view (e.g. the
+  // role views a customer pack created) is left completely alone — never appended to,
+  // renamed or reordered. Idempotent: a re-ensure writes nothing.
+  ensureObjectDefaultView(input: {
+    projectId: string
+    objectId: string
+    name: string
+    type?: string
+  }): Promise<{ created: boolean; viewId: string | null; existingViewCount: number }>
+  // W2/P2-3 (round-5 review): run a repair's read → additive-write → re-read → verify
+  // sequence inside ONE host transaction. If `fn` throws (mutated/incomplete/race), the
+  // additive write ROLLS BACK — atomic fail-close, not a post-commit detection canary.
+  runObjectFieldsRepairTransaction<T>(
+    fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
+  ): Promise<T>
+  /**
+   * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL) so a plugin's
+   * managed tables need not land in the shared `base_legacy`. The plugin-scope wrapper enforces
+   * `baseId` starts with `base_<pluginSlug>_` (MultitableBaseScopeError otherwise); core refuses
+   * `base_legacy`, malformed ids and blank/oversized names (MultitableSystemBaseInputError), and
+   * FAILS CLOSED on adopting an owned / workspace-scoped / soft-deleted row
+   * (409 MULTITABLE_BASE_ADOPTION_REFUSED). OPTIONAL like `findObjectView`: a plugin newer than
+   * its host must degrade, never crash.
+   */
+  ensureSystemBase?(input: { baseId: string; name: string }): Promise<{ baseId: string; created: boolean }>
   ensureObject(input: {
     projectId: string
     baseId?: string | null
     descriptor: MultitableProvisioningObjectDescriptor
+    /**
+     * P0-S S3: destructive-reconcile mode for this ONE call. Omit (the normal case) to get
+     * the fail-closed default — re-ensuring an EXISTING field whose name/type/property/order
+     * the descriptor would change throws MultitableEnsureFieldsRefusedError instead of
+     * silently overwriting the tenant's row. Additive evolution (a brand-new field id) and
+     * first installs are unaffected either way. Pass 'overwrite' ONLY if this plugin owns
+     * the columns it re-derives; prefer ensureMissingObjectFields for additive repair.
+     */
+    overwriteMode?: 'refuse' | 'overwrite' | 'observe' | 'preserve'
   }): Promise<{
     baseId: string
     sheet: {
@@ -405,6 +555,30 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   }>
+  /**
+   * READ-ONLY sibling of `ensureView`: does this provisioned view EXIST, and with what shape?
+   * Null when it does not. `getObjectViewId` only COMPOSES an id, so a plugin that deep-links to
+   * one of its own provisioned views had no way to tell a provisioned view from a composed id.
+   *
+   * OPTIONAL on purpose: a plugin newer than its host must degrade ("cannot prove it exists"),
+   * never crash. It grants nothing `ensureView` does not already grant — same project namespace,
+   * same object scope, and an id derived from the caller's own project + object.
+   */
+  findObjectView?(input: {
+    projectId: string
+    objectId: string
+    viewId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: string
+    filterInfo: Record<string, unknown>
+    sortInfo: Record<string, unknown>
+    groupInfo: Record<string, unknown>
+    hiddenFieldIds: string[]
+    config: Record<string, unknown>
+  } | null>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string
@@ -417,6 +591,45 @@ export interface MultitableProvisioningAPI {
     type: MultitableProvisioningFieldType
     property: Record<string, unknown>
     order: number
+  }>
+  /**
+   * RELABEL an already-provisioned object's DISPLAY NAMES — compare-and-set, one transaction, one
+   * `meta_config_revisions` row per rename (multitable/object-display-name-relabel.ts).
+   *
+   * Renames a field (or the sheet) ONLY while its current name equals `expectedName`; a name a
+   * person already changed is reported `skipped_name_changed` and left alone, and a target another
+   * field on the sheet already carries is `skipped_name_taken` (for the sheet: a sibling sheet in
+   * the same base, or a name in `takenSheetNames`). Nothing but `name` is written: the field id,
+   * type, property, order and permissions are untouched.
+   *
+   * `apply` must be exactly `true` to write; anything else is a dry run that writes nothing and
+   * answers a `planDigest`. The write leg is DEFAULT OFF — it refuses (409
+   * MULTITABLE_RELABEL_APPLY_DISABLED) unless `MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED` is exactly
+   * 'true' — and it REQUIRES `expectedPlanDigest` equal to the plan it recomputes under its own
+   * locks (409 MULTITABLE_RELABEL_PLAN_CHANGED otherwise), so nothing un-previewed is written.
+   *
+   * Scoped like every other write here — project namespace, then object scope — and the host
+   * additionally refuses unless the plugin object registry binds the derived sheet to this very
+   * (project, object). OPTIONAL like `ensureSystemBase`: a plugin newer than its host must degrade.
+   */
+  relabelObjectDisplayNames?(input: {
+    projectId: string
+    objectId: string
+    sheetName?: { expectedName: string; nextName: string } | null
+    fields: Array<{ fieldId: string; expectedName: string; nextName: string }>
+    takenSheetNames?: string[] | null
+    apply?: boolean
+    expectedPlanDigest?: string | null
+    actorId?: string | null
+  }): Promise<{
+    present: boolean
+    applied: boolean
+    sheetId: string
+    sheetName: { status: MultitableRelabelDisplayNameStatus } | null
+    fields: Array<{ fieldId: string; status: MultitableRelabelDisplayNameStatus }>
+    planDigest: string
+    revisionCount: number
+    batchId: string | null
   }>
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {
@@ -446,7 +659,18 @@ export interface MultitableRecordsAPI {
   }>>
   queryRecords(input: {
     sheetId: string
-    filters?: Record<string, string | number | boolean | null>
+    /**
+     * W9: a value may be a LIST of candidates, which matches a row whose key equals ANY element —
+     * the set form of the single-value equality, answering in one statement what N single-value
+     * queries answer one at a time. An empty list matches nothing (and costs no query). A `null`
+     * ELEMENT is refused: `null` as the whole value means "the key is JSON null", which set
+     * equality cannot express, so the two are never mixed silently.
+     *
+     * ONLY use it when `supportsFilterValueLists` is true on this API — an older host rejects a
+     * list as an unsupported filter value, and there is no way to tell that apart from a real
+     * validation failure after the fact.
+     */
+    filters?: Record<string, string | number | boolean | null | Array<string | number | boolean>>
     search?: string
     orderBy?: {
       fieldId?: string
@@ -482,6 +706,7 @@ export interface MultitableRecordsAPI {
     sheetId: string
     recordId: string
     changes: Record<string, unknown>
+    expectedVersion?: number
   }): Promise<{
     id: string
     sheetId: string
@@ -496,7 +721,64 @@ export interface MultitableRecordsAPI {
     sheetId: string
     version: number
   }>
+  /**
+   * W8-4 (L1) request-scoped table-metadata memo. Runs `operation` in a scope where the sheet row,
+   * the field list and the sheet-scope assertion for a given sheetId are loaded ONCE instead of
+   * once per records call — the shape a chunked bulk write needs (measured on 222: 2x `meta_fields`
+   * + 2x registry + 3x `meta_sheets` per created row). The scope holds schema metadata only, never
+   * record values, and is never shared with another request: it is not a process cache.
+   *
+   * READ THIS BEFORE CALLING IT. The scope's length is YOURS, not the host's, and inside it two
+   * things stop being re-derived per call:
+   *   - the sheet row and field list are FROZEN at first read, so a field added, dropped or
+   *     retyped, or the sheet soft-deleted, mid-scope is not seen until the scope ends;
+   *   - an ownership assertion that already PASSED for a `(plugin, sheet)` pair is not repeated,
+   *     so a registry change that revokes your access is not seen until the scope ends either.
+   * Keep `operation` no longer than one request — one chunk of a bulk write is the intended shape.
+   * The host caps it regardless (a scope older than its deadline silently stops memoizing and every
+   * call re-reads and re-asserts), but the cap is a backstop, not a licence to hold a scope open.
+   * Do not run schema changes or open a unit of work inside it.
+   *
+   * `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE` gates the whole mechanism and is OFF by default:
+   * while it is off this call is a plain passthrough that memoizes nothing. Optional on the type,
+   * so a host that does not provide it simply is not memoized — call it only if it is present.
+   */
+  withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
+   * W9 capability probe: `true` iff this host's `queryRecords` understands an ARRAY filter value
+   * (see `filters` above). Absent or `false` on every older host, and on any records surface that
+   * did not forward the declaration — a caller must then ask one key at a time. It is a plain
+   * declaration, not a switch: nothing turns it on, and a records surface that wraps another one
+   * may only forward it when the surface underneath declares it, never assert it on its own.
+   */
+  supportsFilterValueLists?: boolean
+  /**
+   * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
+   * receives only the records methods needed by the existing persist algorithm.
+   */
+  runStockPreparationPersistUnitOfWork?<T>(
+    input: StockPreparationPersistUnitOfWorkInput,
+    operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
+  ): Promise<T>
 }
+
+export interface StockPreparationPersistUnitOfWorkInput {
+  tenantId: string
+  sheetIds: string[]
+  project: {
+    sheetId: string
+    projectId: string
+  }
+  batch: {
+    sheetId: string
+    snapshotBatchId: string
+  }
+}
+
+export type MultitableRecordsWriteUnitOfWorkAPI = Pick<
+  MultitableRecordsAPI,
+  'queryRecords' | 'createRecord' | 'patchRecord'
+>
 
 export interface MultitableAPI {
   provisioning: MultitableProvisioningAPI
@@ -977,6 +1259,759 @@ export interface PluginServices {
         nonCountingWindows: Array<{ startMinuteOfDay: number; endMinuteOfDay: number; daysOfWeek?: number[] }>
       } | null>
     }): (() => void)
+  }
+  /**
+   * S7-1..S7-4 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
+   * approval-assignee kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级
+   * `manager_at_level`), per the RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d).
+   * It mirrors `workdayCalendar` above but runs the OPPOSITE direction: core-backend is the PROVIDER,
+   * plugin-attendance is the CONSUMER (it checks `context?.services?.approvalAssigneeResolver?.<member>`
+   * before use). The plugin NEVER takes a runtime dependency on the whole core package and NEVER copies
+   * the kernel resolver logic; when this port is absent the plugin fail-closes (authoring 422 / runtime
+   * block), never the legacy admin fallback (§4.1).
+   *
+   * - `maxManagerChainLevels` is the host-resolved `MAX_MANAGER_CHAIN_LEVELS` constant
+   *   (`ApprovalDirectoryOrg` — env `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`, default 10, hard ceiling 50).
+   *   The plugin validates `manager_at_level.level ∈ [1, maxManagerChainLevels]` against THIS value so it
+   *   never re-parses the env var into a second constant — one source, two surfaces, no drift.
+   * - `implementedKinds` is the set of dynamic kinds this host build can actually resolve at runtime.
+   *   S7-2/S7-3/S7-4 populate `direct_manager` + `dept_head` + `manager_at_level` (NOT
+   *   `continuous_managers` — OD-S7-2 OUT-of-v1). A kind absent from this list is unimplemented ⇒
+   *   the plugin fail-closes.
+   * - `resolve` is the org-scoped CREATE-TIME freeze seam (§3.3 / §3.4). For `direct_manager` /
+   *   `dept_head` it returns a single linked local assignee; for `manager_at_level` with no level it
+   *   returns the FULL dense chain as ordered assignees (plugin freezes `managerChainIds`); with an
+   *   integer level it returns the single positional pick. Step-advance must NOT call this again —
+   *   it reads only the frozen `requesterSnapshot.managerId` / `deptHeadId` / `managerChainIds`.
+   *   Self-exclusion is enforced here (resolving to the requester is treated as unresolved).
+   */
+  approvalAssigneeResolver?: {
+    readonly maxManagerChainLevels: number
+    readonly implementedKinds: readonly string[]
+    resolve(
+      orgId: string,
+      request: {
+        kind: string
+        level?: number
+        requesterUserId: string
+        requesterSnapshot?: Record<string, unknown>
+      },
+    ): Promise<
+      | { status: 'resolved'; assignees: Array<{ assignmentType: 'user'; assigneeId: string }> }
+      | { status: 'unresolved'; reason: string }
+      | { status: 'unimplemented' }
+    >
+  }
+  /**
+   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A + A2 —
+   * host→plugin port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
+   * and `POST …/cancel-round/actions` / `…/cancel-round/withdraw` (P-1 Q1′ = (i) attendance-side
+   * mounting; P-3 = (iii) round-summary carrier; P-4 summary read; A2 = owner 2026-09-29
+   * 「Attendance-side + OFF flag (Recommended)」). Same posture as `approvalAssigneeResolver` above:
+   * core-backend is the PROVIDER and ONLY plugin-attendance receives it; every other plugin gets
+   * `undefined`, and without it the consumer registers none of the routes (fail-closed). `launch` is
+   * the ONE plugin-reachable path to the dedicated cancel-round creation path (never the public
+   * `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance` applied to the
+   * ORIGINAL document instance; `decide` / `withdraw` hand approve / reject / revoke on the round's
+   * own instance to `ApprovalProductService.dispatchAction`, unchanged; `listSeatedPendingRounds`
+   * (C2, owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」, behind plugin-attendance's
+   * `GET /api/attendance/cancel-rounds/pending`) answers the pending rounds the viewer could decide
+   * now, by the decision door's own seat predicate. Implementation:
+   * `approvals/approval-cancel-round-entry-port.ts`.
+   */
+  approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort
+  /**
+   * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
+   * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
+   * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
+   * `isFieldWriteForbidden`). Same posture as `approvalAssigneeResolver` above: core-backend is the
+   * PROVIDER and ONLY plugin-integration-core receives it; every other plugin gets `undefined` and
+   * a consumer must check before use. Implementation:
+   * `services/stock-preparation-field-permissions.ts` (the concrete class is deliberately NOT
+   * exported into this type surface — only this structural shape is).
+   *
+   * Each entry means "this ROLE may NOT WRITE this column". THE LOAD-BEARING PROPERTY: the port
+   * scopes WRITE ONLY and is structurally incapable of restricting READ — `field_permissions.visible`
+   * is a hardcoded literal inside the implementation, not a parameter of this method, so no caller
+   * can hide a column through this port. That is required by the 备料 flow: 采购 and 仓库 must keep
+   * SEEING the production band (材料类型 / 毛胚类型 / 需求日期 / 提前周期 …) and each other's
+   * responses. Read scoping stays an operator action on
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions`. Fail-closed: unknown sheet /
+   * field-not-on-sheet / unknown role rejects the whole call with nothing written.
+   *
+   * WRITES ARE ADDITIVE UNLESS THE CALLER DECLARES A REGION. With no `reconcile` the call only ever
+   * upserts and `removed` is empty. With one, the SAME transaction also drops this port's OWN,
+   * still-denying rows inside that (columns × roles) region which the new declaration does not want
+   * — the fix for the one silent failure upsert-only cannot survive: a pack revision that MOVES a
+   * column's owner leaves the old denial standing next to the new one, and the write gate ORs
+   * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
+   * the install reports success. The delete is bounded FIVE ways — the target sheet only (the only
+   * project/tenant bound this table can carry); this PACK's `created_by` marker, plus the pack-less
+   * LEGACY marker only when the caller passes `legacyAdoptable` (a row an operator AUTHORED and a
+   * sibling pack's row are outside the predicate either way); `read_only = true` only; inside the
+   * declared region only (which the implementation REQUIRES to contain every entry being written);
+   * and never a row the same call just wrote — so it can neither reach another consumer's rows nor
+   * become "clear this sheet". Removals are returned, never silent.
+   *
+   * THE ONE THING IT CANNOT SEE: an operator edit made through the authoring route BEFORE that route
+   * started stamping `operator:<actorId>` left the PACK's marker on the row, so such a row is
+   * indistinguishable from installer output and a reconcile can retire it. Rows edited since are
+   * attributed and untouchable. There is no signal in the data to recover the difference.
+   *
+   * An entries-EMPTY call WITH a region is a legitimate "this rectangle should now hold no denial",
+   * not a no-op: that is exactly how a revision that hands every governed column to every declared
+   * role is expressed. Only entries-empty AND region-absent does nothing at all.
+   *
+   * The two READ methods are SELECT-only. `listRoleWriteScopes` is the in-process form of the
+   * provenance census (`WHERE created_by = <this port's marker>`); the reconcile heals orphans
+   * inside the caller's region, and this census is how a consumer finds and REPORTS the ones outside
+   * it. `findMissingRoleIds` lets a consumer ask "does this role exist" BEFORE it starts creating
+   * columns, instead of learning it from the write call after the schema is already half-applied.
+   * Neither can hide a column or drop a restriction. Both are OPTIONAL on this type: a consumer must
+   * degrade explicitly (say "not checked") rather than assume, so an older host stays usable.
+   */
+  stockPreparationFieldPermissions?: {
+    /**
+     * TRUE means this host HONOURS a `reconcile` region. A consumer must check it: an older host
+     * accepts the argument and ignores it, and the difference between "reconciled" and "silently
+     * did nothing" is not otherwise observable until the deployment is already wrong.
+     */
+    supportsWriteScopeReconcile?: boolean
+    applyRoleWriteScopes(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      /** Stamps `<marker>#<packId>` and is the reconcile's owner predicate. REQUIRED with `reconcile`. */
+      packId?: string
+      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
+      /**
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may this
+       * call adopt or retire the pack-LESS legacy rows it addresses. Default false.
+       *
+       * IT BINDS BOTH PATHS, and they FAIL DIFFERENTLY — the difference is the whole of what a
+       * caller must plan for:
+       *  · WITH `reconcile`: an unattributed pack-less row inside the rectangle REFUSES the call
+       *    (`LEGACY_UNATTRIBUTED`), before a single row is written.
+       *  · ENTRIES-ONLY (no `reconcile`): there is no refusal. The upsert's ownership guard simply
+       *    takes the ELSE branch on all three columns, so such a row keeps its `visible`,
+       *    `read_only` and `created_by` exactly as found — including an operator's earlier
+       *    decision. The declaration does NOT land for that pair; it is named in
+       *    `skippedUnattributed` and excluded from `applied` rather than silently counted.
+       */
+      legacyAdoptable?: boolean
+    }): Promise<{
+      applied: number
+      entries: Array<{ fieldId: string; roleId: string }>
+      removed?: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs an operator holds: the upsert was SKIPPED, the row is untouched. */
+      operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
+      governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /**
+       * Declared pairs whose EXISTING row this call was not entitled to rewrite (an operator's row,
+       * a NULL-provenance row, a sibling pack's row, or a pack-less legacy row without
+       * `legacyAdoptable`). The row is byte-identical to what it was, and — if it was RELAXED —
+       * THE DENIAL THIS CALL DECLARED IS NOT IN FORCE. Excluded from `applied`. OPTIONAL: an older
+       * host omits it, which a consumer must read as "not checked", never as "nothing was skipped".
+       */
+      skippedUnattributed?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+    }>
+    /**
+     * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row
+     * lock, read-only and outside a transaction. A consumer that has this can say exactly what an
+     * install will change, retire, refuse and defer BEFORE it changes anything.
+     */
+    classifyRoleWriteScopeRegion?(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      packId: string
+      reconcile: { fieldIds: readonly string[]; roleIds: readonly string[] }
+      legacyAdoptable?: boolean
+    }): Promise<{
+      sheetId: string
+      packId: string
+      legacyAdoptable: boolean
+      /** Rows the reconcile WILL delete: this pack's, in-region, still denying, no longer declared. */
+      willRetire: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs ANOTHER pack governs. Non-empty = the install refuses. */
+      packConflicts: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** In-region pack-less rows this pack cannot prove are its own. Non-empty = the install refuses. */
+      legacyUnattributed: Array<{ fieldId: string; roleId: string }>
+      /** In-region rows a HUMAN holds. Never changed; the upsert is skipped for the declared ones. */
+      operatorHeldInRegion: Array<{
+        fieldId: string
+        roleId: string
+        createdBy: string | null
+        declared: boolean
+        visible: boolean
+        readOnly: boolean
+      }>
+      /** Another pack's in-region rows on undeclared pairs. Not stale, not the operator's to clear. */
+      governedByOtherPacks: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** This pack's OWN denials OUTSIDE the region — the only genuine operator to-do list. */
+      operatorMustClear: Array<{ fieldId: string; roleId: string; packId: string | null }>
+    }>
+    listRoleWriteScopes?(input: {
+      sheetId: string
+    }): Promise<{
+      sheetId: string
+      /** What THIS PLUGIN wrote, attributed by pack (`packId: null` = a legacy, pack-less row). */
+      entries: Array<{ fieldId: string; roleId: string; createdBy?: string; packId?: string | null }>
+      /** Role-scoped denials this plugin did NOT write. Reportable, never claimable, never deletable. */
+      foreignEntries?: Array<{ fieldId: string; roleId: string; createdBy?: string | null }>
+    }>
+    findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
+    /** The column twin of `findMissingRoleIds`, asked about the columns an install will NOT create. */
+    findMissingFieldIds?(input: {
+      sheetId: string
+      fieldIds: readonly string[]
+    }): Promise<{ missing: string[] }>
+  }
+  /**
+   * E-learning L2 — host-provided reminder-intent producer. Only
+   * plugin-elearning receives this port. The plugin submits a persisted job
+   * envelope; core owns same-org eligibility, canonical occurrence-key
+   * derivation, and durable notification-ledger insertion.
+   */
+  elearningReminderProducer?: {
+    produce(
+      input: import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderInput,
+    ): Promise<
+      import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderResult
+    >
+  }
+  /**
+   * E-learning L3 timed-attempt settlement. Only plugin-elearning receives
+   * this port. The plugin supplies the persisted job org/ref; core owns the
+   * row lock, database-clock expiry check, immutable grading, and idempotency.
+   */
+  elearningExamExpirySettlement?: {
+    settle(
+      input: import('../services/elearning-exam').SettleExpiredElearningExamAttemptInput,
+    ): Promise<
+      import('../services/elearning-exam').SettleExpiredElearningExamAttemptResult
+    >
+  }
+  /**
+   * E-learning L5 daily analytics materialization. Only plugin-elearning
+   * receives this port. The plugin supplies the persisted job identity; core
+   * owns current directory membership, suppression, locking, and projection.
+   */
+  elearningStatsDailyProjection?: {
+    enqueueDue(): Promise<
+      import('../services/elearning-stats-daily-job-producer').EnqueueElearningStatsDailyJobsResult
+    >
+    project(
+      input: import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyInput,
+    ): Promise<
+      import('../services/elearning-stats-daily-projection').ProjectElearningDepartmentStatsDailyResult
+    >
+  }
+  /**
+   * E-learning L5 aggregate export materialization. Only plugin-elearning
+   * receives this port. Core owns export rows, suppression, byte storage,
+   * idempotency and cleanup; the plugin supplies only persisted job identity.
+   */
+  elearningAnalyticsExport?: {
+    materialize(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportResult
+    >
+    cleanup(
+      input: import('../services/elearning-analytics-export').MaterializeElearningAnalyticsExportInput,
+    ): Promise<
+      import('../services/elearning-analytics-export').CleanupElearningAnalyticsExportResult
+    >
+  }
+  /**
+   * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
+   * plugin-elearning; the notification worker must call it immediately before
+   * every effect-side dispatch.
+   */
+  elearningNotificationEligibility?: {
+    check(
+      input: import('../services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+        | { orgId: string; deliveryId: string; recipientUserId: string },
+    ): Promise<boolean>
+  }
+  elearningNotificationSource?: {
+    collect(): Promise<unknown>
+  }
+  /**
+   * Optional L2 platform-channel provider. The provider MUST deduplicate the
+   * external or durable platform effect by `(orgId, idempotencyKey)` and must
+   * return `outcome_unknown` when it cannot prove whether the effect happened.
+   * No unsafe adapter to the generic notification service is inferred.
+   */
+  elearningNotificationDispatch?: {
+    dispatch(input: {
+      assignmentMemberId: string | null
+      deliveryId: string
+      idempotencyKey: string
+      kind: 'assignment_reminder' | 'training_available' | 'result_published'
+      orgId: string
+      payload: Record<string, unknown>
+      recipientUserId: string
+    }): Promise<
+      | { outcome: 'sent' }
+      | { outcome: 'retryable'; code: string }
+      | { outcome: 'failed'; code: string }
+      | { outcome: 'outcome_unknown'; code?: string }
+    >
+  }
+  /** ACP-1B: attendance-only canonical anchor writer; never exposed to generic plugins. */
+  attendanceMultitableCleaningAuthority?: {
+    assertActor(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput): Promise<void>
+    cleanupProposal(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+      reason: string,
+    ): Promise<{ version: number }>
+    readCompletedInTransaction(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & { projectionRecordId: string; sourceRef: string },
+    ): Promise<unknown[]>
+    readCompleted(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & {
+      projectionRecordId: string; sourceRef: string;
+    }): Promise<unknown[]>
+    readSeed(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput):
+      ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>
+    lockSource(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+    ): ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').lockAttendanceCleaningSource>
+    refresh(input: {
+      projectionRecordId: string
+      canonicalRecordId: string
+      sourceFingerprint: string
+    }): Promise<void>
+    withhold(projectionRecordIds: readonly string[]): Promise<void>
+  }
+  /**
+   * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
+   * least-privilege W4 segment-calculation port. Same posture as
+   * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
+   * plugin-attendance receives it; every other plugin gets undefined and the
+   * consumer fail-closes. `validateIanaTimezone` is the single strict W4 IANA
+   * validator (`w4c1-strict-time.validateAttendanceIanaTimezoneV1`) — it
+   * throws on non-IANA input (offset forms, whitespace, unknown zones) and
+   * returns the zone unchanged otherwise. Default-rule and shift timezone
+   * WRITE routes must consult it so a persisted invalid zone can never become
+   * a future W4 calculation input; the plugin never copies the validator.
+   */
+  attendanceW4SegmentCalculation?: {
+    validateIanaTimezone(zone: unknown): string
+    /**
+     * W4C-2 — the ONE pure frozen in/out merge-policy decision (lock 4.4: "it
+     * removes only the second mutable post-upsert pass"). The canonical live
+     * adapter computes the decision BEFORE its single record write; the plugin
+     * never re-implements the branch logic.
+     */
+    applyMergePolicyPure(input: unknown): {
+      readonly changed: boolean
+      readonly nextFirstInAtMs: number | null
+      readonly nextLastOutAtMs: number | null
+    }
+    /**
+     * W4C-2 — canonical live/scheduled write boundary factory (lock 8.1). The
+     * plugin calls this ONCE at activate, injecting its legacy execution
+     * closures (event insert + record upsert + merge lift, absence
+     * INSERT..SELECT, in-transaction W2 resolvers, frozen-context loader).
+     * Routes then submit pure data envelopes; no per-request callback exists.
+     */
+    createLiveScheduledBoundary(config: {
+      legacyAdapters: import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledLegacyAdaptersV1
+    }): import('../attendance/w4c2-live-scheduled-boundary').AttendanceW4LiveScheduledBoundaryV1
+    /** W4C-3b P13: fixed request adapters captured once; routes submit closed data only. */
+    createRequestOperationBoundary(config: {
+      adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
+    }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * Approval-change-request lock §3 C-1 — bind the boundary built by `createRequestOperationBoundary`
+     * as the process-wide 完整业务取消 provider, so the approval side's cancel-round redemption can
+     * reach it through `attendance-cancellation-execution-port` without a compile-time dependency on
+     * this plugin. Registers the WHOLE boundary (lock §3 C-1 「复用同一套 W4 操作协议 … 仅移交连接与
+     * 事务生命周期的所有权」 — never a narrower cancel-only entry). Unbound ⇒ the approval side FAILS
+     * CLOSED (the round stays `pending`), unlike `workdayCalendar`, which fails open.
+     */
+    registerCancelRoundExecutionBoundary(
+      boundary: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1,
+    ): void
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+     * delivery. Separate from `registerCancelRoundExecutionBoundary` because it is NOT part of the
+     * W4 transaction protocol: it runs after the approval side's COMMIT, owns no connection and no
+     * transaction, and writes nothing. The bound function is the SAME one the plugin's HTTP cancel
+     * route calls, so the emit gate (`legacy` / `legacy_compat` only) and the payload shape exist
+     * once; the approval side hands over the W4 result verbatim and decides nothing.
+     *
+     * Unbound ⇒ the approval side logs a warning and proceeds (fail OPEN), the opposite of the
+     * execution boundary: by the time this is reached the business cancellation is already
+     * committed, so a throw could not undo it and would only turn a success into a 500.
+     */
+    registerCancelRoundCancelledEventDelivery(
+      deliver: import('../core/attendance-cancellation-execution-port').CancelRoundCancelledEventDeliveryV1,
+    ): void
+    /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
+    createRecordOperationBoundary(config: {
+      adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
+    }): import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationBoundaryV1
+    /** W4C-3c: transaction-bound operator retirement calculation (adapter-only). */
+    appendOperatorRetirementCalculation(
+      input: import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-ops-retirement').AppendOperatorRetirementCalculationResultV1>
+    /** W4C-3c: transaction-bound recompute calculation (adapter-only). */
+    appendRecomputeCalculation(
+      input: import('../attendance/w4c3c-recompute').AppendRecomputeCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-recompute').AppendRecomputeCalculationResultV1>
+    /** W4C-3c: transaction-bound manual override calculation (adapter-only). */
+    appendManualOverrideCalculation(
+      input: import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationInputV1,
+    ): Promise<import('../attendance/w4c3c-manual-edit-apply').AppendManualOverrideCalculationResultV1>
+    /**
+     * W4C-3c P20: singular canonical active-current helper namespace. Ordinary
+     * readers (anomaly, makeup facts, open-record, DecisionTrace) must call
+     * these — never re-implement the relation/predicate.
+     */
+    activeCurrent: {
+      relation: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_RELATION_V1
+      visibilityPredicate: typeof import('../attendance/w4c3c-active-current').ATTENDANCE_ACTIVE_CURRENT_VISIBILITY_PREDICATE_V1
+      loadForDecisionTrace: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForDecisionTraceV1
+      listForAnomalyListing: typeof import('../attendance/w4c3c-active-current').listActiveCurrentAttendanceRecordsForAnomalyListingV1
+      loadForMakeupAnomalyFacts: typeof import('../attendance/w4c3c-active-current').loadActiveCurrentAttendanceRecordForMakeupAnomalyFactsV1
+      listOpenForWorkDateResolver: typeof import('../attendance/w4c3c-active-current').listActiveCurrentOpenRecordsForWorkDateResolverV1
+    }
+    /** W4C-3b P14: transaction-bound frozen approved-leave cancellation calculation. */
+    appendApprovedLeaveCancellationCalculation(
+      input: import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationInputV1,
+    ): Promise<import('../attendance/w4c3b-approved-leave-cancellation').AppendApprovedLeaveCancellationCalculationResultV1>
+    /**
+     * W4C-3b P27: transaction-bound, values-free schedule-reference posture.
+     * The host acquires the canonical shared rollout lock and resolves the one
+     * posture seam on the caller's existing transaction/connection.
+     */
+    resolveOrgSegmentCalculationPosture(
+      trx: DatabaseTransaction,
+      orgId: string,
+    ): Promise<{
+      readonly effectiveState: string
+      readonly referenceSegments: boolean
+    }>
+    /**
+     * Lock-11 §10 W-4 — least-privilege access to the ONE org-derivation primitive
+     * (`services/approval-instance-org-derivation.ts`) for `approval_instances.org_id`
+     * writer-side stamping in `upsertAttendanceApprovalInstance`. Result-shaped (never throws
+     * a host error class across the plugin boundary — the plugin must not `instanceof` a host
+     * error, see feedback_attack_your_own_criterion): `ok: true` with the org to stamp, or
+     * `ok: false` with one of the three values-free refusal reasons. `trxQuery` MUST be bound
+     * to the plugin's own open transaction client (same TOCTOU discipline as W-1/W-2's
+     * in-transaction derivation call).
+     *
+     * `requestNamedOrgId === null` ⇒ arm (a) (subject's single active membership).
+     * `requestNamedOrgId !== null` ⇒ arm (f): the named org validated against the SUBJECT's
+     * (`subjectUserId`) active `user_orgs` memberships — falls through to the same refusal
+     * reason set on a miss.
+     */
+    deriveApprovalInstanceOrgIdForAttendanceSubjectV1(input: {
+      trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+      subjectUserId: string
+      requestNamedOrgId: string | null
+    }): Promise<
+      | { readonly ok: true; readonly orgId: string }
+      | {
+          readonly ok: false
+          readonly reason: 'zero_memberships' | 'multiple_memberships' | 'selector_not_permitted'
+        }
+    >
+    /**
+     * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
+     * §8.2 step 7 second clause ("source-definition fingerprint equality").
+     * Pure; no DB access. The route calls this with its OWN pre-transaction
+     * W2 resolution (same shape `resolveLiveCandidate`/`resolveScheduledCandidate`
+     * return) and frozen context (same shape `buildShadowFrozenContext`
+     * returns, built by the route over its own non-transactional
+     * connection) to obtain a fingerprint comparable to the freeze step's
+     * own in-transaction one. This is the ONLY way the plugin can reach the
+     * source-definition fingerprint domain — it cannot compute one for
+     * arbitrary data, only for a resolution+context shape it already
+     * produces via its own adapters.
+     */
+    computeOuterSourceDefinitionFingerprintV1(input: {
+      readonly orgId: string
+      readonly userId: string
+      readonly source: 'live_resolution' | 'scheduled_resolution'
+      readonly nowIso: string
+      readonly resolution: unknown
+      readonly context: unknown
+    }): string | null
+    /**
+     * W7-1b (#4556 comments 5293034619 + 5293478713) — THE single shared
+     * frozen-context issuance seam (ruling 3 / OD-W7-9 = REPLACE).
+     *
+     * Resolves the W7 context-source posture and returns the legacy arm's
+     * context (built by the caller's own injected legacy builder, bytes
+     * unchanged), a core-issued group-effective V2 context, or — W7-2, under
+     * the shadow-compare posture states — the dual-run variant carrying the
+     * served legacy context PLUS the unserved group comparison half. The
+     * arm-selection rule exists ONLY inside the seam; a caller that re-derives
+     * it is the drift the lock forbids, and
+     * `tests/unit/attendance-w7-1b-issuance-seam-closure.test.ts` pins that
+     * mechanically (S1 TS import graph, S2 adapter graph, S3 CJS require/port
+     * graph, S4 the OD-W7-10 no-seam-call rule, S0 non-vacuity — each ban leg
+     * with its own positive control), with the re-formed census in
+     * `tests/unit/attendance-w7-1a-inertness-sweep.test.ts` as the
+     * complementary exact-set importer closure over `w7-resolver/`. (W7-2
+     * correction of a correction: this block briefly asserted the closure
+     * suite never existed — false; it was added by 1b's own gate round and
+     * runs green. The W7-2 build carried a stale pre-gate-round anchor's
+     * negative forward without re-checking file existence at its base.)
+     *
+     * `deps` is injected by the plugin because three of the four dependencies
+     * are plugin-owned (the pure FSER derivation, the canonical producer-key
+     * builder, the org-rule loader) and because `buildLegacyFrozenContext` must
+     * be PRE-BOUND to the caller's own transaction client: the legacy builder
+     * reads a plugin-shaped client (`query()` -> row array) while the W7
+     * resolvers read a core-shaped one (`query()` -> `{ rows }`).
+     *
+     * `purpose` distinguishes a persisting producer from the fingerprint-only
+     * mirror for the CALLER-applied coherence precondition. It carries NO
+     * locking difference: W7-1a's facts resolver takes the composite advisory
+     * locks unconditionally as its step 1, so an "unlocked mirror path" does
+     * not exist and the mirror must supply its own transaction scope.
+     */
+    /**
+     * W7-1b (#4556) — the ARM-SELECTION rule, WITHOUT issuance.
+     *
+     * Ruling 7's mirror gate must read the real posture, never the allowlist
+     * env: re-deriving the two-part rule (persisted row AND allowlist AND
+     * implementation capability; any one alone => `off`) from the env alone
+     * reintroduces the exact allowlist-alone hole the ruling's inert negative
+     * controls exist to catch.
+     *
+     * Deliberately NOT short-circuited on the env: a short-circuit would skip
+     * W7-1a's three hard throws for every non-allowlisted org, making a corrupt
+     * or ambiguous posture row indistinguishable from an unconfigured one.
+     */
+    resolveAttendanceW7GroupArmSelectionV1(
+      trx: DatabaseTransaction,
+      orgId: string,
+    ): Promise<{ readonly effectiveState: string; readonly selectsGroupArm: boolean }>
+    issueAttendanceFrozenContextV1(
+      trx: DatabaseTransaction,
+      deps: {
+        readonly deriveFixedScheduleEffectiveness: (input: unknown) => unknown
+        readonly buildFixedScheduleProducerKey: (input: unknown) => string
+        readonly loadOrgRuleFacts: (
+          trx: DatabaseTransaction,
+          orgKey: string,
+        ) => Promise<{ severeLateThresholdMinutes: number; absenceLateThresholdMinutes: number }>
+        readonly buildLegacyFrozenContext: (args: {
+          readonly orgId: string
+          readonly userId: string
+          readonly workDate: string
+          readonly timezone: string
+          readonly isWorkday: boolean
+          readonly holidayKind: string | null
+          readonly shiftId: string
+        }) => Promise<unknown>
+        readonly now?: () => string
+      },
+      input: {
+        readonly orgId: string
+        readonly userId: string
+        readonly workDate: string
+        readonly timezone: string
+        readonly isWorkday: boolean
+        readonly holidayKind: string | null
+        readonly shiftId: string
+        readonly purpose: 'persist' | 'mirror'
+      },
+    ): Promise<{
+      readonly arm: 'legacy' | 'group'
+      readonly context: unknown
+      readonly reason: string | null
+    }>
+    /**
+     * W4C-2 — one drain pass over the durable result-event outbox (lock 7.1a).
+     * The plugin schedules this ONLY under the same env gate as the posture
+     * allowlist (`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` non-empty): no
+     * env => no worker => byte-identical runtime.
+     */
+    drainResultEventOutbox(options: {
+      emit: (delivery: { eventKind: string; payload: unknown; payloadSchemaVersion: number }) => void | Promise<void>
+      batchLimit?: number
+    }): Promise<{ claimed: number; delivered: number; failed: number }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.7's recovery sweep).
+     * ONE sweep tick over `state='running'` scheduled-run rows, cross-`workDate`, bounded by
+     * `limit`. `recoverCandidate` must rebuild plugin-owned scheduling context and resume the
+     * exact scanned run; the host never silently treats `not_ready` as completed work.
+     */
+    sweepScheduledRuns(options: {
+      limit?: number
+      recoverCandidate(candidate: {
+        orgId: string
+        initiator: 'cron' | 'admin_run'
+        workDate: string
+        runId: string
+      }): Promise<void>
+    }): Promise<{
+      scanned: number
+      finalized: number
+      notReady: number
+      skipped: number
+      errored: number
+      /** #4770: total `state='running'` rows at scan time — the starvation signal. */
+      backlogRemaining: number
+      /** #4770 follow-up: `state='running'` rows never yet claimed by a scan
+       *  (`last_attempt_at IS NULL`) — a stuck-vs-churn signal, see
+       *  `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full trend semantics. */
+      neverAttemptedRunning: number
+      /** Owner-review P2 on #4779: age (seconds) of the STALEST `last_attempt_at` among
+       *  `state='running'` rows — closes `neverAttemptedRunning`'s own blind spot for a row
+       *  scanned once then PERMANENTLY EXCLUDED from later scans (non-NULL, so invisible to
+       *  `MIN()`-ignores-NULL above). Read as BOUNDED-PLATEAU (healthy, even a congested backlog)
+       *  vs. UNBOUNDED-GROWTH — never merely "zero vs. nonzero": a congested-but-healthy backlog
+       *  legitimately reads nonzero on most ticks without anything being stuck.
+       *  UNBOUNDED-GROWTH does NOT mean "locked" specifically: a held row lock is one known
+       *  mechanism, sustained `NULLS FIRST` arrival starvation (a stream of brand-new `running`
+       *  rows preempting an already-stamped one for every scan slot, indefinitely — NO LOCK AT
+       *  ALL) is another, empirically reproduced at the production default `limit=25`; this field
+       *  cannot tell them apart, and the mechanism list is not claimed closed. (A prior version of
+       *  this comment attributed UNBOUNDED-GROWTH solely to "a row permanently locked after its
+       *  first scan" — RETRACTED, fresh-gate pass 2026-08-05: false, and it was the SAME
+       *  overclaim as the worker-doc mirror this field's own doc comment already corrects; see
+       *  below.) See `AttendanceScheduledRunSweepTickResultV1`'s doc comment in
+       *  `w4c2-scheduled-run-ops-worker.ts` for the full three-regime breakdown, the
+       *  arrival-starvation mechanism and its owner-deferred #4770 follow-up, and the two
+       *  counters' actual (narrower-than-"permanently stuck") coverage. */
+      oldestRunningAttemptAgeSeconds: number
+    }>
+    /**
+     * W4C-2 P1-1 fix (#4612 verdict second gate round; amendment section 1.1.2, the `abandoned`
+     * transition). `adminActorId` MUST be the route's own authenticated actor id — never a
+     * request-body-supplied value.
+     */
+    abandonScheduledRun(input: {
+      orgId: string
+      runId: string
+      adminActorId: string
+      reasonCode: string
+    }): Promise<
+      | { kind: 'deferred'; code: 'ATTENDANCE_SCHEDULED_RUN_ABANDON_DEFERRED' }
+      | { kind: 'not_running'; state: 'completed' | 'abandoned' }
+      | { kind: 'abandoned'; runId: string; completedUserCount: number }
+    >
+    /**
+     * W4C-3a — values-free V1 legacy-plan processor. Accepts only `{ jobId }`.
+     * Core assembles repository, SERIALIZABLE transaction, locks, preconditions,
+     * and fixed effects internally. Plugin must not pass payload/orgId/rules/
+     * settings/profile/source/effect callbacks. Fail closed when absent for a
+     * V1 job.
+     */
+    processLegacyImportPlan(input: { jobId: string }): Promise<
+      | { kind: 'not_found' }
+      | { kind: 'suspended' }
+      | { kind: 'failed'; reason: string }
+      | { kind: 'completed'; response: unknown }
+    >
+    /**
+     * W4C-3a P07 — core-owned V1 reservation. The plugin supplies one closed
+     * prepared plan; core owns posture, verified identities, authorization,
+     * SERIALIZABLE transaction, and class-00/10/11 locking.
+     */
+    reserveLegacyImportPlan(
+      input: ReserveAttendanceLegacyImportPlanFromHostInputV1,
+    ): Promise<ReserveAttendanceLegacyImportPlanJobResultV1>
+    /**
+     * W4C-3a P06 — core-owned modern synchronous import commit. The plugin
+     * supplies one closed prepareOnly plan; core opens one independent
+     * SERIALIZABLE source/effect transaction and owns class-00/10/11, claim,
+     * calculation, compatibility effects, and seals. Never creates V1
+     * job/plan/chunk/terminal rows and never calls processLegacyImportPlan.
+     */
+    commitSyncImportPlan(
+      input: CommitAttendanceSyncImportPlanFromHostInputV1,
+    ): Promise<AttendanceSyncImportResponseV1>
+    buildImportAttributionFreeze(
+      input: AttendanceImportFrozenAttributionBuildInputV1,
+    ): AttendanceImportAttributionFreezeBuildResultV1
+    buildImportPolicySourceProof(
+      input: AttendanceImportPolicySourceProjectionInputV1,
+    ): AttendanceImportPolicySourceProofV1
+    /**
+     * W4C-3a — canonical lock witnesses for the synchronous import compatibility
+     * bridge. Core owns key derivation; plugin-attendance only acquires these
+     * exact signed keys inside its existing source/effect transaction.
+     */
+    buildLegacyImportReservationLockWitness(input: {
+      orgId: string
+      idempotencyKey: string
+    }):
+      | {
+          rolloutKey: string
+          legacyIdempotencyKey: string
+          helperWaitMs: number
+          transactionLockTimeoutMs: number
+        }
+      | null
+  }
+  /**
+   * W4C-3a P11/P23 — core-owned import rollback boundary. The plugin may pass
+   * only authenticated request identity plus the durable batch id. Core owns
+   * posture resolution, target enumeration, server ids, authorization
+   * rechecks, transaction/locks, and append-only reversal DML. No target list,
+   * SQL, transaction, resolver, or callback crosses this port.
+   */
+  attendanceImportRollback?: {
+    rollbackImportBatchV1(input: {
+      orgId: string
+      batchId: string
+      actorId: string
+      tokenSubjectUserId: string
+    }): Promise<
+      | {
+          kind: 'legacy'
+          id: string
+          deleted: number
+          status: 'rolled_back'
+        }
+      | {
+          kind: 'w4'
+          id: string
+          affected: number
+          restored: number
+          retired: number
+          status: 'rolled_back'
+        }
+    >
+  }
+  /**
+   * 一线看得见自己工厂的项目 — the TENANT PRINCIPAL DIRECTORY port. Injected for
+   * `plugin-integration-core` only, and the narrowest port in this interface:
+   * the plugin submits two identity strings and receives one boolean.
+   *
+   * It exists because a plugin cannot establish tenancy from `req.user.tenantId`
+   * alone — `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto
+   * that field when the verified token carried no tenant claim — and the plugin's
+   * first tenant-scoped VALUE-BEARING read must not be founded on a
+   * caller-supplied string. Core owns the membership relation, the SQL, the pool
+   * and the liveness predicate; no table name, SQL, connection or callback
+   * crosses this port, and a refusal is indistinguishable from a non-membership.
+   *
+   * Grants NOTHING on its own: it is not a permission, not an ACL check, not a
+   * workspace check (no user-to-workspace relation exists in this schema), and it
+   * neither consults nor weakens multitable's ACL domain. Fail-closed — malformed
+   * input and query errors both yield `member: false`.
+   */
+  tenantPrincipalDirectory?: {
+    verifyTenantMembership(input: {
+      userId: string
+      tenantId: string
+    }): Promise<{ member: boolean }>
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

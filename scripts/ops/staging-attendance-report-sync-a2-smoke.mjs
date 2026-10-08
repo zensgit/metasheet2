@@ -72,6 +72,10 @@
 // Optional: SMOKE_TOKEN=<admin bearer> STAMP=reportsync-a2-smoke-... RUN_DATE=2026-07-05
 //           ALLOW_CROSS_ORG_REPORT_SYNC_FANOUT=1
 
+import {
+  cleanupStagingAttendanceScope,
+  createAuthenticatedOpsRetirementExecutor,
+} from './staging-attendance-tooling-teardown.mjs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -718,7 +722,26 @@ async function cleanup() {
   }).catch((error) => console.error(`  settings restore failed: ${error?.message || error}`))
 
   await q(`DELETE FROM ${REPORT_SYNC_JOB_TABLE} WHERE org_id = ANY($1::text[])`, [ALL_ORG_IDS]).catch((error) => console.error(`  delete job rows failed: ${error?.message || error}`))
-  await q('DELETE FROM attendance_records WHERE org_id = ANY($1::text[])', [ALL_ORG_IDS]).catch((error) => console.error(`  delete records failed: ${error?.message || error}`))
+  const retirementToken = process.env.TOKEN || process.env.ADMIN_TOKEN || adminToken || ''
+  if (!BASE_URL || !retirementToken) {
+    throw new Error('ATTENDANCE_STAGING_RETIREMENT_EXECUTOR_REQUIRED: BASE_URL and TOKEN required before W4-capable record cleanup')
+  }
+  for (const _orgId of (typeof ALL_ORG_IDS !== 'undefined' ? ALL_ORG_IDS : [ORG_ID])) {
+    const opsRetirementExecutor = createAuthenticatedOpsRetirementExecutor({
+      baseUrl: BASE_URL,
+      token: retirementToken,
+      commandSeed: '00000000-0000-5000-8000-0000000000a3',
+      ticket: 'STAGING-REPORT-SYNC',
+    })
+    await cleanupStagingAttendanceScope(
+      { query: async (sql, params) => {
+        const r = await (typeof q === 'function' ? q(sql, params) : pool.query(sql, params))
+        return { rows: r?.rows ?? (Array.isArray(r) ? r : []) }
+      } },
+      { orgId: _orgId, userIds: (typeof ALL_USERS !== 'undefined' ? ALL_USERS : undefined) },
+      { retireRecord: opsRetirementExecutor },
+    )
+  }
   await q('DELETE FROM attendance_rules WHERE org_id = ANY($1::text[])', [ALL_ORG_IDS]).catch((error) => console.error(`  delete rules failed: ${error?.message || error}`))
   await q('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [ALL_USER_IDS]).catch((error) => console.error(`  delete user_orgs failed: ${error?.message || error}`))
   await q('DELETE FROM users WHERE id = ANY($1::text[])', [ALL_USER_IDS]).catch((error) => console.error(`  delete users failed: ${error?.message || error}`))

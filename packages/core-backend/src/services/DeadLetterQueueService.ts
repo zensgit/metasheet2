@@ -165,6 +165,14 @@ export class DeadLetterQueueService {
     const totalResult = await countQuery.executeTakeFirst()
     const total = Number(totalResult?.count || 0)
 
+    // limit: 0 means "count only" — skip the row query entirely so callers
+    // that only need `.total` (e.g. GET /admin/queues) don't pay for a full
+    // 50-row/payload fetch just because `options.limit || 50` used to treat
+    // an explicit 0 as "not provided".
+    if (options.limit === 0) {
+      return { items: [], total }
+    }
+
     const items = await query
       .orderBy('created_at', 'desc')
       .limit(options.limit || 50)

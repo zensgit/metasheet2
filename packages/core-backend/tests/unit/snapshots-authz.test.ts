@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { isAdmin } from '../../src/rbac/service'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
@@ -95,6 +96,8 @@ function serviceCallCount(): number {
   return Object.values(s).reduce((n, fn) => n + (fn?.mock?.calls.length ?? 0), 0)
 }
 
+const pinned = usePinnedServer()
+
 describe('snapshots router — platform-admin gate on all mutations (GHSA-h8mf)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -104,8 +107,9 @@ describe('snapshots router — platform-admin gate on all mutations (GHSA-h8mf)'
   it('non-admin principal -> 403 on EVERY mutation route, and NO service method is called', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const app = buildApp({ id: 'u-nonadmin' })
+    pinned.setApp(app)
     for (const m of MUTATIONS) {
-      const req = request(app)[m.method](m.path)
+      const req = request(pinned.url())[m.method](m.path)
       await (m.body !== undefined ? req.send(m.body as object) : req).expect(403)
     }
     expect(serviceCallCount()).toBe(0)
@@ -113,35 +117,39 @@ describe('snapshots router — platform-admin gate on all mutations (GHSA-h8mf)'
 
   it('unauthenticated (no req.user) -> 403 on a mutation, no service call', async () => {
     const app = buildApp(undefined)
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(403)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(403)
     expect(serviceCallCount()).toBe(0)
   })
 
   it('RBAC check failure (isAdmin throws) -> 503 fail-closed on a mutation, NO service call', async () => {
     vi.mocked(isAdmin).mockRejectedValue(new Error('rbac db down'))
     const app = buildApp({ id: 'u-someone' })
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(503)
-    await request(app).delete('/api/snapshots/s1').expect(503)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(503)
+    await request(pinned.url()).delete('/api/snapshots/s1').expect(503)
     expect(serviceCallCount()).toBe(0)
   })
 
   it('platform-admin normal path: each mutation reaches its service method', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots').send({ view_id: 'v1', name: 'n' }).expect(201)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots').send({ view_id: 'v1', name: 'n' }).expect(201)
     expect(snapshotService.createSnapshot).toHaveBeenCalledTimes(1)
-    await request(app).delete('/api/snapshots/s1').expect(200)
+    await request(pinned.url()).delete('/api/snapshots/s1').expect(200)
     expect(snapshotService.deleteSnapshot).toHaveBeenCalledTimes(1)
-    await request(app).patch('/api/snapshots/s1/lock').send({ locked: false }).expect(200)
+    await request(pinned.url()).patch('/api/snapshots/s1/lock').send({ locked: false }).expect(200)
     expect(snapshotService.setSnapshotLock).toHaveBeenCalledTimes(1)
-    await request(app).patch('/api/snapshots/s1/protection').send({ level: 'critical' }).expect(200)
+    await request(pinned.url()).patch('/api/snapshots/s1/protection').send({ level: 'critical' }).expect(200)
     expect(snapshotService.setProtectionLevel).toHaveBeenCalledTimes(1)
   })
 
   it('reads are NOT elevated: a non-admin can still list/get/diff (permissions:read, scope unchanged)', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const app = buildApp({ id: 'u-reader' })
-    await request(app).get('/api/snapshots?view_id=v1').expect(200)
-    await request(app).get('/api/snapshots/s1').expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).get('/api/snapshots?view_id=v1').expect(200)
+    await request(pinned.url()).get('/api/snapshots/s1').expect(200)
   })
 })
 
@@ -153,26 +161,30 @@ describe('snapshots restore route — scope validation (GHSA-h8mf)', () => {
 
   it('missing restore_type -> 400, restoreSnapshot NOT called', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots/s1/restore').send({}).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({}).expect(400)
     expect(snapshotService.restoreSnapshot).toHaveBeenCalledTimes(0)
   })
 
   it('invalid restore_type -> 400, restoreSnapshot NOT called', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'everything' }).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'everything' }).expect(400)
     expect(snapshotService.restoreSnapshot).toHaveBeenCalledTimes(0)
   })
 
   it("full WITHOUT confirm_full -> 400 (must be explicitly confirmed), restoreSnapshot NOT called", async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'full' }).expect(400)
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: 'yes' }).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'full' }).expect(400)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: 'yes' }).expect(400)
     expect(snapshotService.restoreSnapshot).toHaveBeenCalledTimes(0)
   })
 
   it("full WITH item_types -> 400 (a full restore must not narrow), restoreSnapshot NOT called", async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/snapshots/s1/restore')
       .send({ restore_type: 'full', confirm_full: true, item_types: ['view'] })
       .expect(400)
@@ -181,7 +193,8 @@ describe('snapshots restore route — scope validation (GHSA-h8mf)', () => {
 
   it('full confirmed + no item_types -> 200, restoreSnapshot called with itemTypes undefined', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'full', confirm_full: true }).expect(200)
     expect(snapshotService.restoreSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({ snapshotId: 's1', restoreType: 'full', itemTypes: undefined }),
     )
@@ -189,14 +202,16 @@ describe('snapshots restore route — scope validation (GHSA-h8mf)', () => {
 
   it('partial WITHOUT item_types (and empty array) -> 400, restoreSnapshot NOT called', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'partial' }).expect(400)
-    await request(app).post('/api/snapshots/s1/restore').send({ restore_type: 'partial', item_types: [] }).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'partial' }).expect(400)
+    await request(pinned.url()).post('/api/snapshots/s1/restore').send({ restore_type: 'partial', item_types: [] }).expect(400)
     expect(snapshotService.restoreSnapshot).toHaveBeenCalledTimes(0)
   })
 
   it('partial with an out-of-allowlist item_type -> 400, restoreSnapshot NOT called', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/snapshots/s1/restore')
       .send({ restore_type: 'selective', item_types: ['view', 'secrets'] })
       .expect(400)
@@ -205,7 +220,8 @@ describe('snapshots restore route — scope validation (GHSA-h8mf)', () => {
 
   it('partial with allowlisted item_types -> 200, forwarded to the service', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/snapshots/s1/restore')
       .send({ restore_type: 'partial', item_types: ['view', 'table_row'] })
       .expect(200)
@@ -216,7 +232,8 @@ describe('snapshots restore route — scope validation (GHSA-h8mf)', () => {
 
   it('identity comes ONLY from req.user.id — a spoofed x-user-id header is ignored', async () => {
     const app = buildApp({ id: 'u-realadmin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/snapshots/s1/restore')
       .set('x-user-id', 'u-spoofed')
       .send({ restore_type: 'full', confirm_full: true })

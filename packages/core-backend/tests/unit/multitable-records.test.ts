@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createRecord,
@@ -11,6 +11,10 @@ import {
   patchRecord,
   type MultitableRecordsQueryFn,
 } from '../../src/multitable/records'
+import {
+  REQUEST_METADATA_SCOPE_MAX_AGE_MS,
+  runWithMultitableRequestMetadataCache,
+} from '../../src/multitable/request-metadata-cache'
 
 type FakeSheet = {
   id: string
@@ -275,9 +279,12 @@ function createQuery(): {
     }
 
     if (normalized.startsWith('UPDATE meta_records')) {
-      const [dataJson, recordId, sheetId] = params as [string, string, string]
+      const [dataJson, recordId, sheetId, expectedVersion] = params as [string, string, string, number?]
       const existing = records.find((record) => record.id === recordId && record.sheet_id === sheetId)
       if (!existing) return { rows: [], rowCount: 0 }
+      if (normalized.includes('AND version = $4') && existing.version !== expectedVersion) {
+        return { rows: [], rowCount: 0 }
+      }
       existing.data = JSON.parse(dataJson)
       existing.version += 1
       return {
@@ -595,6 +602,73 @@ describe('multitable records helper', () => {
     })
   })
 
+  it('patches when the optional expected version matches', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: { ticketNo: 'TK-1001', title: 'Before', priority: 'normal' },
+      version: 2,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      expectedVersion: 2,
+      changes: { title: 'After' },
+    })).resolves.toMatchObject({
+      version: 3,
+      data: { title: 'After' },
+    })
+  })
+
+  it('fails closed on a stale expected version without data, version, or revision mutation', async () => {
+    const { query, records, revisions } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: { ticketNo: 'TK-1001', title: 'Canonical', priority: 'normal' },
+      version: 3,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      expectedVersion: 2,
+      changes: { title: 'Stale writer' },
+    })).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+      message: 'Record version conflict',
+    })
+    expect(records[0]).toMatchObject({ version: 3, data: { title: 'Canonical' } })
+    expect(revisions).toEqual([])
+  })
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'rejects invalid expectedVersion %s before touching the record',
+    async (expectedVersion) => {
+      const { query, records, revisions } = createQuery()
+      records.push({
+        id: 'rec_existing',
+        sheet_id: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-1001', title: 'Canonical', priority: 'normal' },
+        version: 1,
+      })
+
+      await expect(patchRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        recordId: 'rec_existing',
+        expectedVersion,
+        changes: { title: 'Invalid writer' },
+      })).rejects.toBeInstanceOf(MultitableRecordValidationError)
+      expect(records[0]).toMatchObject({ version: 1, data: { title: 'Canonical' } })
+      expect(revisions).toEqual([])
+    },
+  )
+
   it('allows clearing a date field with null during patch', async () => {
     const { query, records } = createQuery()
     records.push({
@@ -854,5 +928,241 @@ describe('multitable records helper', () => {
       sheetId: 'sheet_service_ticket',
       recordId: 'rec_missing',
     })).rejects.toBeInstanceOf(MultitableRecordNotFoundError)
+  })
+})
+
+// W8-4 (L1): the measured cost driver on 222 was CONSTANT metadata re-read, once per written row
+// (2x `meta_fields`, 2x `plugin_multitable_object_registry`, 3x `meta_sheets` per created row at
+// 47.07ms of server wall-clock per row). These tests pin the SHAPE of the fix, not a timing: the
+// number of metadata statements must stop scaling with the number of rows inside one scope, and
+// must NOT be shared between two scopes.
+describe('multitable records request-scoped metadata memo', () => {
+  const FLAG = 'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE'
+
+  function countingQuery(inner: MultitableRecordsQueryFn) {
+    const calls = { sheets: 0, fields: 0 }
+    const query: MultitableRecordsQueryFn = async (sql, params) => {
+      const normalized = sql.replace(/\s+/g, ' ')
+      if (normalized.includes('FROM meta_sheets')) calls.sheets += 1
+      if (normalized.includes('FROM meta_fields')) calls.fields += 1
+      return inner(sql, params)
+    }
+    return { calls, query }
+  }
+
+  async function writeRows(query: MultitableRecordsQueryFn, count: number): Promise<void> {
+    for (let index = 0; index < count; index += 1) {
+      // The exact per-row pair the apply writer runs: an existence probe, then the insert. Each
+      // half runs its own `loadSheetAndFields` today, which is why the untouched baseline is 2N.
+      await queryRecords({
+        query,
+        sheetId: 'sheet_service_ticket',
+        filters: { ticketNo: `TK-${index}` },
+        limit: 2,
+      })
+      await createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: `TK-${index}`, title: `Ticket ${index}` },
+      })
+    }
+  }
+
+  // Save/restore rather than delete: a CI runner that sets this flag globally would otherwise have
+  // it wiped by the first test here, and every later case in this file would silently run under a
+  // different premise than the machine it was configured for.
+  const flagBefore = process.env[FLAG]
+  afterEach(() => {
+    if (flagBefore === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = flagBefore
+    vi.restoreAllMocks()
+  })
+
+  it('loads sheet and field metadata once per scope regardless of row count', async () => {
+    process.env[FLAG] = 'true'
+    const { query: inner, records } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(query, 8)
+    })
+
+    expect(records).toHaveLength(8)
+    // O(1), not O(N): one `meta_sheets` read and one `meta_fields` read for all 8 rows.
+    expect(calls).toEqual({ sheets: 1, fields: 1 })
+  })
+
+  it('keeps the untouched per-row statements when no scope is open', async () => {
+    process.env[FLAG] = 'true'
+    const { query: inner, records } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    await writeRows(query, 8)
+
+    expect(records).toHaveLength(8)
+    // 2 per row (query segment + write segment) x 8 rows, exactly as before this change.
+    expect(calls).toEqual({ sheets: 16, fields: 16 })
+  })
+
+  it('keeps the untouched per-row statements when the flag is off, even inside a scope', async () => {
+    delete process.env[FLAG]
+    const { query: inner, records } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(query, 8)
+    })
+
+    expect(records).toHaveLength(8)
+    expect(calls).toEqual({ sheets: 16, fields: 16 })
+  })
+
+  it('never reuses one scope’s metadata in another scope', async () => {
+    process.env[FLAG] = 'true'
+    const { query: inner } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(query, 3)
+    })
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(query, 3)
+    })
+
+    // Two scopes = two independent loads. A process-level cache would report 1/1 here; that is
+    // exactly the shape this test exists to forbid, because a later request must see a field
+    // added between the two.
+    expect(calls).toEqual({ sheets: 2, fields: 2 })
+  })
+
+  it('sees a mid-scope field addition on the NEXT scope, not inside the current one', async () => {
+    process.env[FLAG] = 'true'
+    const { query, fields, records } = createQuery()
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-A', title: 'first' },
+      })
+      fields.push({
+        id: 'addedMidScope',
+        sheet_id: 'sheet_service_ticket',
+        name: 'Added Mid Scope',
+        type: 'string',
+        property: {},
+        order: 99,
+      })
+      // Documented, accepted trade-off: within ONE scope the snapshot the first row read is what
+      // the rest of the rows see, so a field that appeared mid-scope is not yet writable here.
+      await expect(createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-B', addedMidScope: 'x' },
+      })).rejects.toBeInstanceOf(MultitableRecordValidationError)
+    })
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-C', addedMidScope: 'x' },
+      })
+    })
+
+    expect(records.map((record) => record.data.ticketNo)).toEqual(['TK-A', 'TK-C'])
+  })
+
+  // The whole tenant/cross-request safety argument for this module is "two concurrent requests get
+  // two different stores — AsyncLocalStorage guarantees it". Every test above runs one scope to
+  // completion before opening the next, and a SERIAL test cannot tell AsyncLocalStorage apart from
+  // a module-level `let store` with save/restore — which would leak one request's schema snapshot
+  // into a concurrent one. This test interleaves two scopes and resumes scope A while scope B is
+  // still open, which is exactly where that mutation diverges: A must still see ITS OWN snapshot.
+  it('keeps two INTERLEAVED scopes isolated: A never reads B’s snapshot', async () => {
+    process.env[FLAG] = 'true'
+    const { query: inner, fields, records } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    const gate = () => {
+      let open = (): void => {}
+      const passed = new Promise<void>((resolve) => { open = resolve })
+      return { passed, open }
+    }
+    const aLoaded = gate()
+    const bLoaded = gate()
+    const aChecked = gate()
+
+    const scopeA = runWithMultitableRequestMetadataCache(async () => {
+      // Snapshot taken here: the field list WITHOUT `addedByOtherScope`.
+      await createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-A', title: 'from scope A' },
+      })
+      aLoaded.open()
+      await bLoaded.passed
+      // Resumed while scope B is still inside its own scope. With a shared store this row would be
+      // validated against B's newer snapshot and SUCCEED; with per-call storage it is rejected.
+      await expect(createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-A2', addedByOtherScope: 'x' },
+      })).rejects.toBeInstanceOf(MultitableRecordValidationError)
+      aChecked.open()
+    })
+
+    const scopeB = runWithMultitableRequestMetadataCache(async () => {
+      await aLoaded.passed
+      fields.push({
+        id: 'addedByOtherScope',
+        sheet_id: 'sheet_service_ticket',
+        name: 'Added By Other Scope',
+        type: 'string',
+        property: {},
+        order: 98,
+      })
+      // B loads its OWN snapshot, which does contain the new field.
+      await createRecord({
+        query,
+        sheetId: 'sheet_service_ticket',
+        data: { ticketNo: 'TK-B', addedByOtherScope: 'x' },
+      })
+      bLoaded.open()
+      // Stay inside the scope until A has resumed and been checked, so that a shared store would
+      // still be pointing at B when A reads it.
+      await aChecked.passed
+    })
+
+    await Promise.all([scopeA, scopeB])
+
+    // Each scope loaded the metadata exactly once for itself: two scopes, two loads. Not one.
+    expect(calls).toEqual({ sheets: 2, fields: 2 })
+    expect(records.map((record) => record.data.ticketNo)).toEqual(['TK-A', 'TK-B'])
+  })
+
+  // The scope's LENGTH belongs to whoever opened it (`records.withMetadataCache` is on the generic
+  // plugin API), so "at most one chunk" is a convention. The deadline is the enforcement: past it
+  // the memo stops serving and the caller silently gets the pre-change statements back.
+  it('stops serving once the scope is older than the max age, and reloads instead', async () => {
+    process.env[FLAG] = 'true'
+    const { query: inner, records } = createQuery()
+    const { calls, query } = countingQuery(inner)
+
+    let clock = 1_757_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(query, 2)
+      expect(calls).toEqual({ sheets: 1, fields: 1 })
+
+      clock += REQUEST_METADATA_SCOPE_MAX_AGE_MS + 1
+      // Same scope, same caller, no error — just no memo any more.
+      await writeRows(query, 2)
+    })
+
+    expect(records).toHaveLength(4)
+    // 1 memoized load, then 2 rows x (query segment + write segment) unmemoized.
+    expect(calls).toEqual({ sheets: 5, fields: 5 })
   })
 })

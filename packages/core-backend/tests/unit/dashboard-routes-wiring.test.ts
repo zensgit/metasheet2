@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { dashboardRouter, getDashboardService } from '../../src/routes/dashboard'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: {
@@ -32,6 +33,7 @@ vi.mock('../../src/multitable/loaders', () => ({
 vi.mock('../../src/multitable/permission-service', () => ({
   resolveSheetReadableCapabilities: vi.fn(async () => ({
     access: { userId: 'unit-user' },
+    sheetLiveness: 'live',
     capabilities: {
       canRead: true,
       canCreateRecord: true,
@@ -47,6 +49,7 @@ vi.mock('../../src/multitable/permission-service', () => ({
   })),
   resolveSheetCapabilities: vi.fn(async () => ({
     access: { userId: 'unit-user' },
+    sheetLiveness: 'live',
     capabilities: {
       canRead: true,
       canCreateRecord: true,
@@ -75,11 +78,14 @@ function buildApp() {
   return app
 }
 
+const pinned = usePinnedServer()
+
 describe('dashboardRouter HTTP mounting', () => {
   const service = getDashboardService()
 
   beforeEach(() => {
     vi.restoreAllMocks()
+    pinned.setApp(buildApp())
   })
 
   it('GET /api/multitable/sheets/:sheetId/charts returns shape { charts: [...] }', async () => {
@@ -87,7 +93,7 @@ describe('dashboardRouter HTTP mounting', () => {
       { id: 'chart-1', sheetId: 'sheet-a', name: 'Test', type: 'number' } as any,
     ])
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/charts')
       .expect(200)
 
@@ -104,7 +110,7 @@ describe('dashboardRouter HTTP mounting', () => {
       { id: 'dash-1', sheetId: 'sheet-a', name: 'Main', panels: [] } as any,
     ])
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/dashboards')
       .expect(200)
 
@@ -122,7 +128,7 @@ describe('dashboardRouter HTTP mounting', () => {
       type: 'bar',
     } as any)
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/charts')
       .set('X-User-Id', 'user-1')
       .send({ name: 'New', type: 'bar' })
@@ -146,7 +152,7 @@ describe('dashboardRouter HTTP mounting', () => {
       dataPoints: [{ label: 'A', value: 1 }],
     } as any)
 
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/charts/chart-1/data')
       .expect(200)
 
@@ -162,7 +168,7 @@ describe('dashboardRouter HTTP mounting', () => {
       dataSource: { aggregation: { function: 'count' } },
     } as any)
 
-    await request(buildApp())
+    await request(pinned.url())
       .get('/api/multitable/sheets/sheet-a/charts/chart-x')
       .expect(404)
   })
@@ -173,7 +179,7 @@ describe('dashboardRouter HTTP mounting', () => {
     } as any)
     vi.spyOn(service, 'deleteDashboard').mockResolvedValue(undefined as any)
 
-    await request(buildApp())
+    await request(pinned.url())
       .delete('/api/multitable/sheets/sheet-a/dashboards/dash-1')
       .expect(204)
   })
@@ -181,7 +187,7 @@ describe('dashboardRouter HTTP mounting', () => {
   // Catches the legacy "/:sheetId/charts" path shape that was broken before
   // the 2026-04-20 fix — this URL no longer has a handler.
   it('legacy path without /sheets/ returns 404 (not accidentally matched)', async () => {
-    await request(buildApp())
+    await request(pinned.url())
       .get('/api/multitable/sheet-a/charts')
       .expect(404)
   })
@@ -192,7 +198,7 @@ describe('dashboardRouter HTTP mounting', () => {
   // to prove the type passed validation (an unknown type 400s before any field check).
   it('POST /charts/preview-data accepts the S3 chart types (area / funnel / gauge)', async () => {
     for (const type of ['area', 'funnel', 'gauge']) {
-      const res = await request(buildApp())
+      const res = await request(pinned.url())
         .post('/api/multitable/sheets/sheet-a/charts/preview-data')
         .send({ type, dataSource: { groupByFieldId: 'fld_x', aggregation: { function: 'count' } } })
       expect(res.status, `preview must accept chart type "${type}"`).toBe(200)
@@ -202,7 +208,7 @@ describe('dashboardRouter HTTP mounting', () => {
 
   it('POST /charts/preview-data still rejects unknown chart types (radar/nope — scatter is now a real type, see scatter tests below)', async () => {
     for (const type of ['radar', 'nope']) {
-      const res = await request(buildApp())
+      const res = await request(pinned.url())
         .post('/api/multitable/sheets/sheet-a/charts/preview-data')
         .send({ type, dataSource: { groupByFieldId: 'fld_x', aggregation: { function: 'count' } } })
       expect(res.status, `preview must reject chart type "${type}"`).toBe(400)
@@ -214,7 +220,7 @@ describe('dashboardRouter HTTP mounting', () => {
   // loaders mocked to zero fields the referenced x/y fields are "not allowed" → the route answers the
   // restricted ChartData shape (200), which is enough to prove the type passed validation.
   it('POST /charts/preview-data accepts scatter when xFieldId + yFieldId are present', async () => {
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/charts/preview-data')
       .send({ type: 'scatter', dataSource: { xFieldId: 'fld_x', yFieldId: 'fld_y', aggregation: { function: 'count' } } })
     expect(res.status).toBe(200)
@@ -226,7 +232,7 @@ describe('dashboardRouter HTTP mounting', () => {
       { yFieldId: 'fld_y', aggregation: { function: 'count' } }, // no x
       { xFieldId: 'fld_x', aggregation: { function: 'count' } }, // no y
     ]) {
-      const res = await request(buildApp())
+      const res = await request(pinned.url())
         .post('/api/multitable/sheets/sheet-a/charts/preview-data')
         .send({ type: 'scatter', dataSource })
       expect(res.status).toBe(400)
@@ -240,7 +246,7 @@ describe('dashboardRouter HTTP mounting', () => {
   it('POST /charts rejects an unknown chart type with 400 (never persists)', async () => {
     const createChart = vi.spyOn(service, 'createChart')
     for (const type of ['radar', 'nope']) {
-      const res = await request(buildApp())
+      const res = await request(pinned.url())
         .post('/api/multitable/sheets/sheet-a/charts')
         .send({ name: 'X', type, dataSource: { aggregation: { function: 'count' } } })
       expect(res.status, `create must reject chart type "${type}"`).toBe(400)
@@ -253,7 +259,7 @@ describe('dashboardRouter HTTP mounting', () => {
     vi.spyOn(service, 'createChart').mockResolvedValue({
       id: 'c', sheetId: 'sheet-a', name: 'X', type: 'gauge',
     } as any)
-    await request(buildApp())
+    await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/charts')
       .send({ name: 'X', type: 'gauge', dataSource: { aggregation: { function: 'count' } } })
       .expect(201)
@@ -261,7 +267,7 @@ describe('dashboardRouter HTTP mounting', () => {
 
   it('M3: POST /charts rejects a scatter chart missing x/y on the PERSISTED path (never persists)', async () => {
     const createChart = vi.spyOn(service, 'createChart')
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/charts')
       .send({ name: 'S', type: 'scatter', dataSource: { xFieldId: 'fld_x' } }) // y missing
     expect(res.status).toBe(400)
@@ -273,7 +279,7 @@ describe('dashboardRouter HTTP mounting', () => {
     vi.spyOn(service, 'createChart').mockResolvedValue({
       id: 'c', sheetId: 'sheet-a', name: 'S', type: 'scatter',
     } as any)
-    await request(buildApp())
+    await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/charts')
       .send({ name: 'S', type: 'scatter', dataSource: { xFieldId: 'fld_x', yFieldId: 'fld_y' } })
       .expect(201)
@@ -285,7 +291,7 @@ describe('dashboardRouter HTTP mounting', () => {
       dataSource: { aggregation: { function: 'count' } },
     } as any)
     const updateChart = vi.spyOn(service, 'updateChart')
-    const res = await request(buildApp())
+    const res = await request(pinned.url())
       .patch('/api/multitable/sheets/sheet-a/charts/chart-1')
       .send({ type: 'radar' })
     expect(res.status).toBe(400)
@@ -301,7 +307,7 @@ describe('dashboardRouter HTTP mounting', () => {
     const updateChart = vi.spyOn(service, 'updateChart').mockResolvedValue({
       id: 'chart-1', sheetId: 'sheet-a', name: 'c2', type: 'bar',
     } as any)
-    await request(buildApp())
+    await request(pinned.url())
       .patch('/api/multitable/sheets/sheet-a/charts/chart-1')
       .send({ name: 'c2' })
       .expect(200)

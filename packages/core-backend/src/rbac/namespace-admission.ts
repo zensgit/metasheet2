@@ -141,6 +141,41 @@ export function derivePermissionNamespace(permissionCode: string): string | null
   return isNamespaceAdmissionControlledResource(resource) ? resource : null
 }
 
+/**
+ * The admission-controlled namespaces implied by a grant, derived in-process.
+ *
+ * Deliberately the SAME two derivations `fetchUserNamespaceRoleContext` applies when it
+ * decides which namespaces a user's roles reach — the delegated-admin role-id suffix and
+ * the resource half of each permission code — so a provisioning path that grants a role id
+ * plus a set of permission codes can enable exactly the admissions those grants require,
+ * and no others.
+ *
+ * Pure and synchronous on purpose: the caller already holds the role id and the permission
+ * codes it is about to write, so no read is needed and the write can be made inside the
+ * caller's own transaction without acquiring a second connection.
+ *
+ * Non-admission-controlled resources (`multitable`, `workflow`, `approvals`, …) derive
+ * nothing, so a grant that touches only those produces an empty list and no admission row.
+ */
+export function deriveGrantNamespaces(grant: {
+  roleId?: string | null
+  permissionCodes?: readonly string[] | null
+}): string[] {
+  const namespaces = new Set<string>()
+
+  const delegatedAdminNamespace = deriveDelegatedAdminNamespace(normalizeString(grant.roleId))
+  if (delegatedAdminNamespace && isNamespaceAdmissionControlledResource(delegatedAdminNamespace)) {
+    namespaces.add(delegatedAdminNamespace)
+  }
+
+  for (const permissionCode of grant.permissionCodes ?? []) {
+    const permissionNamespace = derivePermissionNamespace(permissionCode ?? '')
+    if (permissionNamespace) namespaces.add(permissionNamespace)
+  }
+
+  return uniqueSorted(namespaces)
+}
+
 async function fetchUserNamespaceRoleContext(userId: string): Promise<UserNamespaceRoleContext> {
   try {
     const result = await query<UserRolePermissionRow>(
@@ -339,6 +374,49 @@ export async function filterPermissionCodesByNamespaceAdmission(userId: string, 
     if (!namespace) return true
     return roleContext.controlledNamespaces.includes(namespace) && admissions.get(namespace)?.enabled === true
   })
+}
+
+/**
+ * Enable namespace admissions for a user through a caller-supplied query surface.
+ *
+ * `setUserNamespaceAdmission` below is the platform-admin endpoint's writer and runs on the
+ * pool; provisioning needs the same write inside its own `transaction()`, so this variant
+ * takes the executor. Statement shape mirrors the projected-governance writer in
+ * `directory/directory-sync.ts`, which already performs this enable inside a transaction.
+ *
+ * A no-op when `namespaces` is empty, which is the derived result for every grant that does
+ * not touch an admission-controlled resource.
+ */
+export async function grantNamespaceAdmissions(
+  executor: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+  options: {
+    userId: string
+    namespaces: readonly string[]
+    actorId?: string | null
+    source?: string | null
+  },
+): Promise<string[]> {
+  const userId = normalizeString(options.userId)
+  const namespaces = uniqueSorted(options.namespaces.map((namespace) => normalizeNamespace(namespace)))
+  if (!userId || namespaces.length === 0) return []
+
+  await executor.query(
+    `INSERT INTO user_namespace_admissions (
+       user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at
+     )
+     SELECT $1, n.namespace, TRUE, $3, $4, $4, NOW(), NOW()
+     FROM unnest($2::text[]) AS n(namespace)
+     ON CONFLICT (user_id, namespace)
+     DO UPDATE SET
+       enabled = TRUE,
+       source = EXCLUDED.source,
+       granted_by = EXCLUDED.granted_by,
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()`,
+    [userId, namespaces, options.source ?? 'platform_admin', options.actorId ?? null],
+  )
+
+  return namespaces
 }
 
 export async function setUserNamespaceAdmission(options: {

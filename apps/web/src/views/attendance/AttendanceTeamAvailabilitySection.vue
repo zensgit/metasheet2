@@ -109,7 +109,9 @@
 import { computed, ref } from 'vue'
 import type { TranslateFn } from './useAttendanceAdminRail'
 import { useTeamAvailability } from './useTeamAvailability'
-import { teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
+import { fetchTeamAvailability, teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { apiFetch } from '../../utils/api'
 
 const props = defineProps<{ tr: TranslateFn }>()
 const tr = props.tr
@@ -118,7 +120,12 @@ const groupId = ref('')
 const from = ref('')
 const to = ref('')
 
-const { data, loading, errorStatus, errorMessage, load } = useTeamAvailability()
+const sessionGuard = useAttendanceSessionGuard()
+const guardedFetch = sessionGuard.wrapFetch(apiFetch)
+const { data, loading, errorStatus, errorMessage, load } = useTeamAvailability({
+  fetchAvailability: options => fetchTeamAvailability(options, guardedFetch),
+  isSessionCurrent: sessionGuard.isCurrent,
+})
 
 const canLoad = computed(() => Boolean(groupId.value && from.value && to.value))
 const pendingTooltip = computed(() => tr('Pending approval, not yet effective', '待审批，未生效'))

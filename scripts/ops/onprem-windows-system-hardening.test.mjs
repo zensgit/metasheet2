@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,6 +10,275 @@ const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 
 function readScript(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8')
+}
+
+function writeFixtureFile(filePath, contents, mode) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, contents)
+  if (mode) fs.chmodSync(filePath, mode)
+}
+
+function createTarArchive(stageRoot, packageName, archivePath) {
+  const result = spawnSync('tar', ['-czf', archivePath, '-C', stageRoot, packageName], {
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+}
+
+function createNoDepsApplyFixture(startMode) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-no-deps-apply-'))
+  const stageRoot = path.join(root, 'stage')
+  const packageName = 'metasheet-no-deps-fixture'
+  const packageRoot = path.join(stageRoot, packageName)
+  const liveRoot = path.join(root, 'live')
+  const archivePath = path.join(root, `${packageName}.tgz`)
+  const fakeBin = path.join(root, 'bin')
+  const nodeCallMarker = path.join(root, 'node-called.marker')
+  const pnpmCallMarker = path.join(root, 'pnpm-called.marker')
+  const newStartMarker = path.join(root, 'new-start.marker')
+  const oldStartMarker = path.join(root, 'old-start.marker')
+  const runtimeStage = path.join(root, 'runtime-stage')
+
+  writeFixtureFile(path.join(packageRoot, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n")
+  writeFixtureFile(path.join(packageRoot, 'PACKAGE-METADATA.json'), '{}')
+  writeFixtureFile(
+    path.join(packageRoot, 'scripts/ops/multitable-onprem-apply-package.ps1'),
+    '# package-root marker only',
+  )
+  writeFixtureFile(path.join(packageRoot, 'payload.txt'), 'new-payload')
+  writeFixtureFile(path.join(packageRoot, 'new-only.txt'), 'new-only-payload')
+  const newStartTail = startMode === 'throw' ? "throw 'NEW_START_FAILURE'" : '$global:LASTEXITCODE = 0'
+  writeFixtureFile(
+    path.join(packageRoot, 'scripts/ops/attendance-onprem-start-pm2.ps1'),
+    `Set-Content -LiteralPath $env:NEW_START_MARKER -Value 'called' -NoNewline\n${newStartTail}\n`,
+  )
+
+  writeFixtureFile(path.join(liveRoot, 'docker/app.env'), 'PORT=8900\n')
+  writeFixtureFile(path.join(liveRoot, 'payload.txt'), 'old-payload')
+  writeFixtureFile(path.join(liveRoot, 'node_modules/preserved.marker'), 'preserved')
+  writeFixtureFile(
+    path.join(liveRoot, 'scripts/ops/attendance-onprem-start-pm2.ps1'),
+    "Set-Content -LiteralPath $env:OLD_START_MARKER -Value 'called' -NoNewline\n$global:LASTEXITCODE = 0\n",
+  )
+  writeFixtureFile(
+    path.join(fakeBin, 'node'),
+    '#!/bin/sh\nprintf called > "$NODE_CALL_MARKER"\nexit 91\n',
+    0o755,
+  )
+  writeFixtureFile(
+    path.join(fakeBin, 'pnpm'),
+    '#!/bin/sh\nprintf called > "$PNPM_CALL_MARKER"\nexit 92\n',
+    0o755,
+  )
+  createTarArchive(stageRoot, packageName, archivePath)
+
+  return {
+    root,
+    liveRoot,
+    archivePath,
+    fakeBin,
+    nodeCallMarker,
+    pnpmCallMarker,
+    newStartMarker,
+    oldStartMarker,
+    runtimeStage,
+  }
+}
+
+function runNoDepsApply(
+  fixture,
+  {
+    runHealthcheck,
+    baseUrl = 'http://127.0.0.1:1',
+    apiBase = 'http://127.0.0.1:1/api',
+  },
+) {
+  const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
+  return spawnSync(
+    'pwsh',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-File',
+      applyHelper,
+      '-PackageArchive',
+      fixture.archivePath,
+      '-RootDir',
+      fixture.liveRoot,
+      '-StagingRoot',
+      fixture.runtimeStage,
+      '-InstallDeps',
+      '0',
+      '-RunMigrations',
+      '0',
+      '-RestartService',
+      '1',
+      '-RunHealthcheck',
+      runHealthcheck ? '1' : '0',
+      '-CheckNginx',
+      '0',
+      '-BaseUrl',
+      baseUrl,
+      '-ApiBase',
+      apiBase,
+      '-HealthcheckAttempts',
+      '1',
+      '-HealthcheckDelaySec',
+      '1',
+    ],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${fixture.fakeBin}${path.delimiter}${process.env.PATH}`,
+        NODE_CALL_MARKER: fixture.nodeCallMarker,
+        PNPM_CALL_MARKER: fixture.pnpmCallMarker,
+        NEW_START_MARKER: fixture.newStartMarker,
+        OLD_START_MARKER: fixture.oldStartMarker,
+      },
+      encoding: 'utf8',
+    },
+  )
+}
+
+function waitForFile(filePath, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs
+  const sleeper = new Int32Array(new SharedArrayBuffer(4))
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return
+    Atomics.wait(sleeper, 0, 0, 25)
+  }
+  throw new Error(`timed out waiting for ${filePath}`)
+}
+
+function startAsymmetricHealthServer(fixture, passingPath) {
+  const readyPath = path.join(fixture.root, `health-${passingPath.replaceAll('/', '_')}.port`)
+  const serverScript = String.raw`
+const fs = require('node:fs')
+const http = require('node:http')
+const readyPath = process.argv[1]
+const oldStartMarker = process.argv[2]
+const passingPath = process.argv[3]
+const server = http.createServer((request, response) => {
+  const restoredRuntime = fs.existsSync(oldStartMarker)
+  const ok = restoredRuntime || request.url === passingPath
+  response.statusCode = ok ? 200 : 503
+  response.end(ok ? 'ok' : 'unavailable')
+})
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(readyPath, String(server.address().port))
+})
+`
+  const child = spawn(process.execPath, ['-e', serverScript, readyPath, fixture.oldStartMarker, passingPath], {
+    stdio: 'ignore',
+  })
+  try {
+    waitForFile(readyPath)
+  } catch (error) {
+    child.kill()
+    throw error
+  }
+
+  const port = Number.parseInt(fs.readFileSync(readyPath, 'utf8'), 10)
+  assert.ok(Number.isInteger(port) && port > 0, 'health fixture must publish a valid port')
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    stop() {
+      child.kill()
+    },
+  }
+}
+
+function runNoDepsApplyWithCopyFailure(fixture, { failRestore = false } = {}) {
+  const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
+  const wrapperPath = path.join(fixture.root, 'inject-overlay-copy-failure.ps1')
+  writeFixtureFile(
+    wrapperPath,
+    String.raw`$ErrorActionPreference = 'Stop'
+$script:existingDestinationCopied = $false
+$script:newDestinationCopied = $false
+$script:overlayFailureInjected = $false
+$script:restoreFailureInjected = $false
+
+function global:Copy-Item {
+  param(
+    [string]$LiteralPath,
+    [string]$Destination,
+    [switch]$Force
+  )
+
+  $destinationFull = [System.IO.Path]::GetFullPath($Destination)
+  $existingDestination = [System.IO.Path]::GetFullPath($env:INJECT_EXISTING_DESTINATION)
+  $newDestination = [System.IO.Path]::GetFullPath($env:INJECT_NEW_DESTINATION)
+
+  if ($script:overlayFailureInjected -and
+      -not $script:restoreFailureInjected -and
+      $env:INJECT_RESTORE_FAILURE -eq '1' -and
+      [System.StringComparer]::OrdinalIgnoreCase.Equals($destinationFull, $existingDestination)) {
+    $script:restoreFailureInjected = $true
+    throw 'INJECTED_OVERLAY_RESTORE_FAILURE'
+  }
+
+  Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
+
+  if (-not $script:overlayFailureInjected) {
+    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($destinationFull, $existingDestination)) {
+      $script:existingDestinationCopied = $true
+    }
+    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($destinationFull, $newDestination)) {
+      $script:newDestinationCopied = $true
+    }
+    if ($script:existingDestinationCopied -and $script:newDestinationCopied) {
+      $script:overlayFailureInjected = $true
+      throw 'INJECTED_MID_OVERLAY_COPY_FAILURE'
+    }
+  }
+}
+
+& $env:APPLY_HELPER -PackageArchive $env:PACKAGE_ARCHIVE -RootDir $env:LIVE_ROOT -StagingRoot $env:RUNTIME_STAGE -InstallDeps 0 -RunMigrations 0 -RestartService 1 -RunHealthcheck 0 -CheckNginx 0
+`,
+  )
+
+  return spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', wrapperPath], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${fixture.fakeBin}${path.delimiter}${process.env.PATH}`,
+      APPLY_HELPER: applyHelper,
+      PACKAGE_ARCHIVE: fixture.archivePath,
+      LIVE_ROOT: fixture.liveRoot,
+      RUNTIME_STAGE: fixture.runtimeStage,
+      INJECT_EXISTING_DESTINATION: path.join(fixture.liveRoot, 'payload.txt'),
+      INJECT_NEW_DESTINATION: path.join(fixture.liveRoot, 'new-only.txt'),
+      INJECT_RESTORE_FAILURE: failRestore ? '1' : '0',
+      NODE_CALL_MARKER: fixture.nodeCallMarker,
+      PNPM_CALL_MARKER: fixture.pnpmCallMarker,
+      NEW_START_MARKER: fixture.newStartMarker,
+      OLD_START_MARKER: fixture.oldStartMarker,
+    },
+    encoding: 'utf8',
+  })
+}
+
+function runNoDepsWithMigrations(applyHelper, fixture) {
+  return spawnSync(
+    'pwsh',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-File',
+      applyHelper,
+      '-PackageArchive',
+      fixture.archivePath,
+      '-RootDir',
+      fixture.liveRoot,
+      '-InstallDeps',
+      '0',
+      '-RunMigrations',
+      '1',
+    ],
+    { cwd: repoRoot, encoding: 'utf8' },
+  )
 }
 
 test('Windows apply helper bootstraps SYSTEM-safe tool PATH and resolves pnpm from common locations', () => {
@@ -314,8 +583,10 @@ test('Windows apply helper retries post-PM2 healthcheck during warmup and remain
   assert.match(script, /function Invoke-HealthcheckOnce/)
   assert.match(script, /function Invoke-Healthcheck/)
   assert.match(script, /for \(\$attempt = 1; \$attempt -le \$Attempts; \$attempt\+\+\)/)
+  assert.match(script, /\$allUrlsHealthy = \$true/)
   assert.match(script, /foreach \(\$url in \$Urls\)/)
   assert.match(script, /Invoke-HealthcheckOnce -Url \$url/)
+  assert.match(script, /if \(\$allUrlsHealthy\) \{\s+return \$true\s+\}/)
   assert.match(script, /Start-Sleep -Seconds \$DelaySec/)
   assert.match(script, /return \$false/)
   assert.match(script, /Convert-PositiveInt -Value \$HealthcheckAttempts -Label 'HealthcheckAttempts'/)
@@ -389,6 +660,201 @@ test('Windows deploy launcher resolves staged package root by package markers, n
     /Get-ChildItem -LiteralPath \$Stage -Directory[^\n]*\n[^\n]*Select-Object -First 1/,
     'the staged root must not be chosen by first child directory',
   )
+})
+
+test('Windows deploy launcher forwards explicit no-dependency and no-migration controls to the staged helper', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-launcher-flags-'))
+  const packageName = 'metasheet-launcher-fixture'
+  const packageRoot = path.join(tempRoot, 'stage', packageName)
+  const archivePath = path.join(tempRoot, `${packageName}.tgz`)
+  const liveRoot = path.join(tempRoot, 'live')
+  const markerPath = path.join(tempRoot, 'forwarded.marker')
+
+  try {
+    writeFixtureFile(path.join(packageRoot, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n")
+    writeFixtureFile(path.join(packageRoot, 'PACKAGE-METADATA.json'), '{}')
+    writeFixtureFile(
+      path.join(packageRoot, 'scripts/ops/multitable-onprem-apply-package.ps1'),
+      String.raw`param(
+  [string]$PackageArchive,
+  [string]$RootDir,
+  [string]$StagingRoot,
+  [string]$InstallDeps = 'UNSET',
+  [string]$RunMigrations = 'UNSET'
+)
+Set-Content -LiteralPath $env:FORWARDED_MARKER -Value ("{0}|{1}" -f $InstallDeps, $RunMigrations) -NoNewline
+`,
+    )
+    fs.mkdirSync(liveRoot, { recursive: true })
+    createTarArchive(path.join(tempRoot, 'stage'), packageName, archivePath)
+
+    const launcher = path.join(repoRoot, 'scripts/ops/multitable-onprem-deploy-launcher.ps1')
+    const result = spawnSync(
+      'pwsh',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-File',
+        launcher,
+        '-PackageArchive',
+        archivePath,
+        '-RootDir',
+        liveRoot,
+        '-StagingRoot',
+        path.join(tempRoot, 'runtime-stage'),
+        '-InstallDeps',
+        '0',
+        '-RunMigrations',
+        '0',
+      ],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, FORWARDED_MARKER: markerPath },
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.equal(fs.readFileSync(markerPath, 'utf8'), '0|0')
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('no-dependency mode rejects migrations before either launcher or apply helper can stage a package', () => {
+  const fixture = createNoDepsApplyFixture('success')
+  const launcher = path.join(repoRoot, 'scripts/ops/multitable-onprem-deploy-launcher.ps1')
+  const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
+
+  try {
+    for (const script of [launcher, applyHelper]) {
+      const result = runNoDepsWithMigrations(script, fixture)
+      assert.notEqual(result.status, 0, `${path.basename(script)} must reject the unsafe flag combination`)
+      assert.match(
+        `${result.stdout}\n${result.stderr}`,
+        /PACKAGE_NO_DEPS_REQUIRES_NO_MIGRATIONS/,
+        `${path.basename(script)} must fail with the closed policy token`,
+      )
+    }
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'payload.txt'), 'utf8'), 'old-payload')
+    assert.equal(fs.existsSync(fixture.newStartMarker), false, 'the package must not reach its restart boundary')
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('InstallDeps=0 applies the package overlay while preserving existing node_modules', () => {
+  const fixture = createNoDepsApplyFixture('success')
+  try {
+    const result = runNoDepsApply(fixture, { runHealthcheck: false })
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'payload.txt'), 'utf8'), 'new-payload')
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'new-only.txt'), 'utf8'), 'new-only-payload')
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'node_modules/preserved.marker'), 'utf8'), 'preserved')
+    assert.equal(fs.existsSync(fixture.nodeCallMarker), false, 'RunMigrations=0 must never invoke node')
+    assert.equal(fs.existsSync(fixture.newStartMarker), true, 'the new runtime must be restarted')
+    assert.equal(fs.existsSync(fixture.oldStartMarker), false, 'the old runtime must not restart after a successful apply')
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+for (const [name, startMode, runHealthcheck] of [
+  ['service restart failure', 'throw', false],
+  ['post-restart health failure', 'success', true],
+]) {
+  test(`InstallDeps=0 restores the previous live tree after ${name}`, () => {
+    const fixture = createNoDepsApplyFixture(startMode)
+    try {
+      const result = runNoDepsApply(fixture, { runHealthcheck })
+
+      assert.notEqual(result.status, 0, 'the injected failure must remain fail-closed')
+      assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'payload.txt'), 'utf8'), 'old-payload')
+      assert.equal(fs.existsSync(path.join(fixture.liveRoot, 'new-only.txt')), false)
+      assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'node_modules/preserved.marker'), 'utf8'), 'preserved')
+      assert.equal(fs.existsSync(fixture.nodeCallMarker), false, 'RunMigrations=0 must never invoke node')
+      assert.equal(fs.existsSync(fixture.newStartMarker), true, 'the injected new-runtime boundary must execute')
+      assert.equal(fs.existsSync(fixture.oldStartMarker), true, 'rollback must restart the restored runtime')
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+}
+
+for (const [name, passingPath] of [
+  ['base health succeeds but plugin health fails', '/health'],
+  ['base health fails but plugin health succeeds', '/api/plugins'],
+]) {
+  test(`InstallDeps=0 rolls back when ${name}`, () => {
+    const fixture = createNoDepsApplyFixture('success')
+    const server = startAsymmetricHealthServer(fixture, passingPath)
+    try {
+      const result = runNoDepsApply(fixture, {
+        runHealthcheck: true,
+        baseUrl: server.baseUrl,
+        apiBase: `${server.baseUrl}/api`,
+      })
+
+      assert.notEqual(result.status, 0, 'a partial health result must remain fail-closed')
+      assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'payload.txt'), 'utf8'), 'old-payload')
+      assert.equal(fs.existsSync(path.join(fixture.liveRoot, 'new-only.txt')), false)
+      assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'node_modules/preserved.marker'), 'utf8'), 'preserved')
+      assert.equal(fs.existsSync(fixture.nodeCallMarker), false, 'RunMigrations=0 must never invoke node')
+      assert.equal(fs.existsSync(fixture.pnpmCallMarker), false, 'InstallDeps=0 must never invoke pnpm')
+      assert.equal(fs.existsSync(fixture.newStartMarker), true, 'the new runtime must reach the health boundary')
+      assert.equal(fs.existsSync(fixture.oldStartMarker), true, 'rollback must restart the restored runtime')
+    } finally {
+      server.stop()
+      fs.rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('InstallDeps=0 restores and restarts the previous runtime after a deterministic mid-overlay copy failure', () => {
+  const fixture = createNoDepsApplyFixture('success')
+  try {
+    const result = runNoDepsApplyWithCopyFailure(fixture)
+    const output = `${result.stdout}\n${result.stderr}`
+
+    assert.notEqual(result.status, 0, 'the injected copy failure must remain fail-closed')
+    assert.match(output, /INJECTED_MID_OVERLAY_COPY_FAILURE/)
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'payload.txt'), 'utf8'), 'old-payload')
+    assert.equal(fs.existsSync(path.join(fixture.liveRoot, 'new-only.txt')), false)
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'node_modules/preserved.marker'), 'utf8'), 'preserved')
+    assert.equal(fs.existsSync(fixture.nodeCallMarker), false, 'RunMigrations=0 must never invoke node')
+    assert.equal(fs.existsSync(fixture.pnpmCallMarker), false, 'InstallDeps=0 must never invoke pnpm')
+    assert.equal(fs.existsSync(fixture.newStartMarker), false, 'copy failure must precede new-runtime restart')
+    assert.equal(fs.existsSync(fixture.oldStartMarker), true, 'copy rollback must restart the restored runtime')
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('InstallDeps=0 preserves the rollback backup when overlay restoration fails', () => {
+  const fixture = createNoDepsApplyFixture('success')
+  try {
+    const result = runNoDepsApplyWithCopyFailure(fixture, { failRestore: true })
+    const output = `${result.stdout}\n${result.stderr}`
+
+    assert.notEqual(result.status, 0, 'the injected restore failure must remain fail-closed')
+    assert.match(output, /PACKAGE_NO_DEPS_ROLLBACK_FAILED/)
+    assert.match(output, /INJECTED_OVERLAY_RESTORE_FAILURE/)
+    assert.equal(fs.readFileSync(path.join(fixture.liveRoot, 'node_modules/preserved.marker'), 'utf8'), 'preserved')
+    assert.equal(fs.existsSync(fixture.nodeCallMarker), false, 'RunMigrations=0 must never invoke node')
+    assert.equal(fs.existsSync(fixture.pnpmCallMarker), false, 'InstallDeps=0 must never invoke pnpm')
+
+    const rollbackRoots = fs.readdirSync(fixture.runtimeStage)
+      .filter((entry) => entry.startsWith('mspb-'))
+    assert.equal(rollbackRoots.length, 1, 'failed restoration must preserve exactly one rollback root')
+    assert.equal(
+      fs.readFileSync(path.join(fixture.runtimeStage, rollbackRoots[0], 'files/payload.txt'), 'utf8'),
+      'old-payload',
+      'preserved rollback backup must retain the pre-change file',
+    )
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true })
+  }
 })
 
 test('PM2 startup helper initializes SYSTEM profile env before invoking PM2', () => {

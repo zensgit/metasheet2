@@ -158,6 +158,98 @@ function requiredString(value, field) {
   return normalized
 }
 
+// ── materialStatus canonicalization at the persist boundary ───────────────────────────────────────
+//
+// WHY THIS EXISTS. `materialStatus` is a SELECT column, and the multitable record validator refuses
+// any value outside the field's seeded option vocabulary. Two facts made that a guaranteed outage:
+//
+//   1. the intake normalizer defaults the column to 'imported'
+//      (stock-preparation-readonly-intake.cjs :252 — `firstValue(row, ['materialStatus','status']) ||
+//      'imported'`), a token no seeded vocabulary contains;
+//   2. when the source DOES carry a status, intake passes the RAW SOURCE STRING through untouched —
+//      an open set that no closed vocabulary can ever cover.
+//
+// So the first ERP material sync on a freshly-provisioned deployment would die on
+// `Invalid select option for materialStatus: imported`, on BOTH paths into this module (the
+// flag-gated auto-persist and the T2 commit route).
+//
+// WHY CANONICALIZATION RATHER THAN A WIDER VOCABULARY. Seeding 'imported' would have made this
+// particular row land and taught the system that the source's spelling is our spelling — the next
+// source that says `已启用` or `A` or `1` breaks it again, and the stored data would then carry three
+// different spellings of "this material is usable". Inflating the vocabulary chases an open set that
+// can never be closed. The PLM leg already settled this exact question the other way:
+// stock-preparation-plm-source-persist-bridge.cjs's `canonicalLineStatus` maps 'imported' → 'active'
+// against a CLOSED accepted set and 422s an unknown. This is that decision, applied to the ERP leg.
+//
+// WHERE. Here, at the single choke point every write into erp_material_master passes through, rather
+// than in the intake normalizer: intake is a pure READ projection shared by paths that never persist,
+// and canonicalizing there would silently rewrite what a read-only caller observed of their source.
+//
+// FAIL-CLOSED ON UNKNOWNS, VALUES-FREE IN THE REFUSAL. An unrecognised status is a mapping a human has
+// to decide, so the run is refused with a code and a COUNT. The offending string is a customer value
+// and never crosses into the error details — only our own committed platform constants do.
+const ERP_MATERIAL_STATUS_CANONICAL_BY_INPUT = Object.freeze({
+  // The intake default. Same mapping the PLM leg makes for the same token, for the same reason:
+  // "we imported it" is a statement about our sync, not about the material's state in ERP.
+  imported: 'active',
+  active: 'active',
+  inactive: 'inactive',
+  disabled: 'disabled',
+})
+const ACCEPTED_ERP_MATERIAL_STATUSES = Object.freeze(Object.keys(ERP_MATERIAL_STATUS_CANONICAL_BY_INPUT).sort())
+const CANONICAL_ERP_MATERIAL_STATUSES = Object.freeze(
+  [...new Set(Object.values(ERP_MATERIAL_STATUS_CANONICAL_BY_INPUT))].sort(),
+)
+const MATERIAL_STATUS_FIELD = 'materialStatus'
+
+/**
+ * `{ supported, status }`. An ABSENT status is supported and stays absent — the column is optional,
+ * and an empty select is legal where a wrong one is not. A PRESENT unrecognised status is unsupported.
+ */
+function canonicalErpMaterialStatus(value) {
+  const status = optionalString(value)
+  if (!status) return { supported: true, status: null }
+  const canonical = ERP_MATERIAL_STATUS_CANONICAL_BY_INPUT[status]
+  return canonical ? { supported: true, status: canonical } : { supported: false, status: null }
+}
+
+/**
+ * Canonicalize every row's materialStatus, or refuse the whole run. All-or-nothing on purpose: a
+ * partial ERP material cache is worse than an unrefreshed one, because the readers downstream
+ * (confirm-writes' mapping candidates, generation-runtime) cannot tell a missing material from an
+ * absent one.
+ */
+function canonicalizeErpMaterialRows(rows) {
+  const out = []
+  let unsupportedRowCount = 0
+  for (const row of rows) {
+    const { supported, status } = canonicalErpMaterialStatus(row[MATERIAL_STATUS_FIELD])
+    if (!supported) {
+      unsupportedRowCount += 1
+      continue
+    }
+    // Rebuilt rather than mutated: this module is handed the caller's own objects.
+    const next = { ...row }
+    if (status === null) delete next[MATERIAL_STATUS_FIELD]
+    else next[MATERIAL_STATUS_FIELD] = status
+    out.push(next)
+  }
+  if (unsupportedRowCount > 0) {
+    throw new StockPreparationErpMaterialSyncError(
+      422,
+      'ERP_MATERIAL_STATUS_UNSUPPORTED',
+      'ERP material status is not supported for internal persistence',
+      {
+        field: `erpMaterials[].${MATERIAL_STATUS_FIELD}`,
+        acceptedInput: ACCEPTED_ERP_MATERIAL_STATUSES.slice(),
+        canonicalOutput: CANONICAL_ERP_MATERIAL_STATUSES.slice(),
+        unsupportedRowCount,
+      },
+    )
+  }
+  return out
+}
+
 // Resolve ONE MVP objectId to a scoped, sheet-bound, logical-field-speaking records API (mirror of
 // sync-run-persist.cjs / confirm-writes.cjs / generation-runtime.cjs's resolveScopedTarget).
 async function resolveScopedTarget(recordsApi, provisioning, targetProjectId, objectId) {
@@ -382,8 +474,13 @@ async function persistStockPreparationErpMaterialSync(input = {}) {
   const materialTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, MATERIAL_OBJECT_ID)
   const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
 
+  // 3b. canonicalize materialStatus BEFORE any write — see canonicalizeErpMaterialRows. The intake
+  //     default ('imported') and every raw source spelling are mapped onto the seeded select
+  //     vocabulary here, and an unrecognised one refuses the run instead of reaching the validator.
+  const canonicalMaterials = canonicalizeErpMaterialRows(erpMaterials)
+
   // 4. upsert every material row (create-or-refresh by the template's OWN key field).
-  const { created, patched, skippedInvalid } = await upsertErpMaterials(materialTarget.scoped, erpMaterials)
+  const { created, patched, skippedInvalid } = await upsertErpMaterials(materialTarget.scoped, canonicalMaterials)
 
   // 5. the run record earns 'erp_material_sync' — 'partial' when any input row was unusable, else
   //    'succeeded' (mirrors sync-run-plan.cjs's status derivation: partial-if-flags-else-succeeded).
@@ -414,10 +511,18 @@ module.exports = {
   ERP_MATERIAL_SYNC_RUN_TYPE,
   RUN_STATUS_SUCCEEDED,
   RUN_STATUS_PARTIAL,
+  // The materialStatus boundary contract. Exported so the option-catalog sweep can prove that every
+  // status a writer can emit is either SEEDED in the select vocabulary or CANONICALIZED into it here —
+  // the two are the only legal fates for a select value, and the sweep checks both.
+  ACCEPTED_ERP_MATERIAL_STATUSES,
+  CANONICAL_ERP_MATERIAL_STATUSES,
+  ERP_MATERIAL_STATUS_CANONICAL_BY_INPUT,
+  canonicalErpMaterialStatus,
   StockPreparationErpMaterialSyncError,
   persistStockPreparationErpMaterialSync,
   __internals: {
     assertAdminPermission,
+    canonicalizeErpMaterialRows,
     ensureProvisioning,
     ensureRecordsApi,
     resolveScopedTarget,

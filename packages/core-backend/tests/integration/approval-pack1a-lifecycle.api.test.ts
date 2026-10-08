@@ -3,7 +3,20 @@ import net from 'net'
 import { randomUUID } from 'node:crypto'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+
+// Residual-hardening (2026-08-19): this suite was excluded from the no-DB job (vitest.config.ts
+// test.exclude) but wired into NO real-DB lane at all — a live FAIL-0 gap the approval CI-coverage
+// enumeration guard (tests/unit/approval-ci-coverage-enumeration.test.ts) found. Wired here as a
+// new job (approval-realdb-pack1a-lifecycle) in .github/workflows/approval-realdb-acceptance.yml,
+// mirroring the existing K1-K6 EXPECT_DB=1 lane discipline: an anti-skip-green sentinel armed ONLY
+// when EXPECT_DB='1' (set by that job), so a broken/missing DATABASE_URL in that lane reds instead
+// of silently reporting the whole suite as skipped. Ordinary no-DB collection (this file stays
+// excluded from vitest.config.ts's default job) never reaches this sentinel at all.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 type JsonRecord = Record<string, unknown>
 
@@ -23,6 +36,15 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  // FWB-0 Layer 2 P1-4 final write-boundary revalidation (ApprovalProductService.ts createApproval)
+  // is DB-only and does NOT accept JWT/actor.permissions as create-time authority — a dev-token's
+  // embedded roles=admin&perms=*:* alone is not enough to pass userHasApprovalsWriteOnQuery at the
+  // create boundary. Grant the DB-backed approvals:write permission code first, matching the
+  // established pattern every other real-DB approval-creation suite in this directory already uses
+  // (grantApprovalWriteForIntegrationActor, packages/core-backend/tests/helpers/
+  // approval-schema-bootstrap.ts) — this suite predated that helper and was never re-verified since
+  // (the exact rot the FAIL-0 CI-coverage guard wiring this suite in was built to surface).
+  await grantApprovalWriteForIntegrationActor(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )

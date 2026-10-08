@@ -104,6 +104,26 @@ host 如果没带 `requestId`，embed host 会生成 `mt_nav_*`。
 
 这样 parent 能稳定地把一次 host 导航请求和最终结果对应起来。
 
+#### 4.1 `mt:navigated` 去重（#5750 后续，2026-09-15）
+
+有 host 会在收到 `mt:navigated` 后再发一次 `mt:navigate`（“把外层 URL 对齐回来”），每次换一个新
+requestId，于是回声无限 ping-pong。因此 `mt:navigated` 现在按“上一条回声”去重：
+
+- `mt:navigate-result` 仍与请求 **1:1**：等回复的 parent 永远不会被饿死，权威的关联通道是它；
+- `mt:navigated` 只在 effective context 相对**上一条回声**真的变了时才发。重复落到同一个三元组的
+  请求（不管 requestId 是不是新的）只拿 `mt:navigate-result`，不再产生第二条 `mt:navigated`；
+- 因此**某个 requestId 可能没有对应的 `mt:navigated`**。只靠“等带我 requestId 的 `mt:navigated`”
+  来判完成的 parent 必须改成等 `mt:navigate-result`；
+- 同一个 requestId 不会出现在两条 `mt:navigated` 上：已经答复过的 requestId 若再次随结果回来且这次
+  真的挪动了画面，回声照发，但不带那个 requestId（它是一条普通的导航回声，不是回复）；
+- 画面被 iframe 内部操作（用户自己点了别的视图）挪走后，parent 通过 `mt:get-navigation-state`
+  看到漂移的那一刻，去重记忆即失效——随后的纠正性导航会重新拿到 `mt:navigated`。
+
+另外，`applied` 结果里的 context 是**真正生效**的三元组：请求里已删除/改名的 viewId 会落回
+views[0]，回显的是落点而不是请求。仅当这次 apply 的 await 窗口里被别的写者（轨道点击、另一次
+同步）抢走画面时，回显退回**请求本身**——这时画面不是这次请求的结果，由 workbench 的 props
+watcher 把画面带回请求的三元组。
+
 ### 5. Base-aware navigation must be complete
 
 这次 slice 把 host 级 navigation 从原来的 “sheet/view override” 补成完整的 `base/sheet/view` 级同步：

@@ -17,6 +17,58 @@ function assertContains(haystack, needle, label) {
   )
 }
 
+test('backend media dependencies use HTTPS bootstrap then system trust with bounded retries', () => {
+  const raw = readRepoFile('Dockerfile.backend')
+  const runner = raw.split('FROM node:20-slim AS runner')[1]
+  assert.ok(runner)
+  const ca = runner.indexOf('install -y --no-install-recommends ca-certificates')
+  const https = runner.indexOf("sed -i 's|http://deb.debian.org|https://deb.debian.org|g'")
+  const media = runner.indexOf('install -y --no-install-recommends ffmpeg')
+  const bootstrap = runner.indexOf('require("tls").rootCertificates')
+  const cleanup = runner.indexOf('rm /tmp/elearning-apt-bootstrap-ca.pem')
+  assert.ok(bootstrap >= 0 && https > bootstrap && ca > https && cleanup > ca && media > cleanup)
+  const aptCommands = runner.match(/apt-get[^\n]+/g)
+  assert.equal(aptCommands?.length, 4)
+  for (const [index, command] of aptCommands.entries()) {
+    assert.match(command, /-o Acquire::Retries=3/)
+    assert.match(command, /-o Acquire::https::Timeout=30/)
+    if (index < 2) {
+      assert.match(command, /-o Acquire::https::CaInfo=\/tmp\/elearning-apt-bootstrap-ca.pem/)
+    } else {
+      assert.doesNotMatch(command, /CaInfo/)
+    }
+    if (/\bupdate\b/.test(command)) assert.match(command, /-o APT::Update::Error-Mode=any/)
+  }
+  assert.match(runner, /test -s \/etc\/ssl\/certs\/ca-certificates.crt/)
+  assert.doesNotMatch(runner, /^(?:ENV|ARG).*NODE_(?:EXTRA_CA_CERTS|TLS_REJECT_UNAUTHORIZED)/m)
+  assert.ok(runner.indexOf('command -v ffprobe') > media)
+  assert.doesNotMatch(runner, /--allow-unauthenticated|trusted=yes|Verify-Peer=false|Verify-Host=false|\|\|\s*true/)
+})
+
+test('frontend build gets a bounded build-only heap budget', () => {
+  const raw = readRepoFile('Dockerfile.frontend')
+  const stages = raw.split(/^FROM nginx:[^\n]+$/m)
+  assert.equal(stages.length, 2)
+  assert.match(stages[0], /^RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @metasheet\/web build$/m)
+  assert.doesNotMatch(stages[0], /^(?:ENV|ARG) NODE_OPTIONS/m)
+  assert.doesNotMatch(stages[1], /NODE_OPTIONS|max-old-space-size/)
+})
+
+test('frontend heap fix retains typecheck before bundling', () => {
+  const pkg = JSON.parse(readRepoFile('apps', 'web', 'package.json'))
+  // Since 2026-10-07 the script itself pins a 4 GB heap for both tools: GitHub-hosted runners of a
+  // private repository are 2 vCPU / 8 GB, where Node's default heap (~2 GB) is too small for
+  // `vue-tsc -b` on apps/web. The contract is unchanged — type-check runs first, the bundler
+  // second, nothing is skipped — and stays byte-pinned so neither half can be dropped quietly.
+  assert.equal(
+    pkg.scripts.build,
+    'node --max-old-space-size=4096 node_modules/vue-tsc/bin/vue-tsc.js -b && node --max-old-space-size=4096 node_modules/vite/bin/vite.js build',
+  )
+  const raw = readRepoFile('Dockerfile.frontend')
+  assert.match(raw, /^RUN pnpm install --frozen-lockfile$/m)
+  assert.doesNotMatch(raw, /--noCheck|SKIP_TYPECHECK|\|\|\s*true/)
+})
+
 test('docker images carry commit trace metadata for backend and web', () => {
   const backendDockerfile = readRepoFile('Dockerfile.backend')
   const frontendDockerfile = readRepoFile('Dockerfile.frontend')
@@ -43,6 +95,8 @@ test('docker images carry commit trace metadata for backend and web', () => {
 test('docker-build workflow deploys exact commit images and verifies served backend/web commits', () => {
   const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
 
+  assertContains(raw, 'deploy_production:', 'docker-build workflow explicit production authorization input')
+  assertContains(raw, "github.event_name == 'workflow_dispatch' && inputs.deploy_production == true", 'docker-build workflow production deploy gate')
   assertContains(raw, '--build-arg VCS_REF="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_TAG="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"', 'docker-build workflow')

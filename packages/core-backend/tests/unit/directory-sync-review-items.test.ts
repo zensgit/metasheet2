@@ -10,7 +10,157 @@ vi.mock('../../src/db/pg', () => ({
   transaction: pgMocks.transaction,
 }))
 
-import { getDirectoryReviewItem, listDirectoryReviewItems } from '../../src/directory/directory-sync'
+import {
+  __directorySyncInternalsForTests,
+  getDirectoryReviewItem,
+  listDirectoryReviewItems,
+  resolveDirectoryIdentityMatch,
+} from '../../src/directory/directory-sync'
+
+const { doesExternalIdentityMatchAccount } = __directorySyncInternalsForTests
+
+describe('directory review identity corp scope', () => {
+  const account = {
+    corp_id: 'corp-b',
+    external_key: 'shared-union',
+    open_id: null,
+    union_id: 'shared-union',
+  }
+
+  it('rejects a legacy raw identity key from another corp', () => {
+    expect(doesExternalIdentityMatchAccount({
+      local_user_id: 'user-a',
+      external_key: 'shared-union',
+      provider_union_id: null,
+      provider_open_id: null,
+      corp_id: 'corp-a',
+    }, account)).toBe(false)
+  })
+
+  it('accepts the same legacy raw identity key within the same corp', () => {
+    expect(doesExternalIdentityMatchAccount({
+      local_user_id: 'user-b',
+      external_key: 'shared-union',
+      provider_union_id: null,
+      provider_open_id: null,
+      corp_id: 'corp-b',
+    }, account)).toBe(true)
+  })
+
+  it('preserves global legacy matching only when both sides have no corp', () => {
+    expect(doesExternalIdentityMatchAccount({
+      local_user_id: 'legacy-user',
+      external_key: 'legacy-key',
+      provider_union_id: null,
+      provider_open_id: null,
+      corp_id: null,
+    }, {
+      ...account,
+      corp_id: null,
+      external_key: 'legacy-key',
+      union_id: 'legacy-key',
+    })).toBe(true)
+  })
+
+  it('does not collide delimiter-containing corp and provider ids', () => {
+    expect(doesExternalIdentityMatchAccount({
+      local_user_id: 'user-a',
+      external_key: 'unrelated',
+      provider_union_id: null,
+      provider_open_id: 'c',
+      corp_id: 'a:b',
+    }, {
+      corp_id: 'a',
+      external_key: 'unrelated',
+      open_id: 'b:c',
+      union_id: null,
+    })).toBe(false)
+  })
+
+  it('returns ambiguous before matching a duplicate corp-scoped provider identity', () => {
+    const ambiguousUnionKey = JSON.stringify(['corp-a', 'duplicate-union'])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: 'duplicate-union',
+        unionId: 'duplicate-union',
+        openId: null,
+        email: null,
+        mobile: null,
+      },
+      null,
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(),
+        ambiguousScopedUnionIdentityKeys: new Set([ambiguousUnionKey]),
+        ambiguousScopedOpenIdentityKeys: new Set(),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
+  })
+
+  it.each([
+    ['external', 'duplicate-external', 'duplicate-external', null, null],
+    ['open', 'duplicate-open', null, 'duplicate-open', null],
+  ])('keeps the %s ambiguity branch load-bearing', (_kind, ambiguousId, externalKey, openId, unionId) => {
+    const scopedKey = JSON.stringify(['corp-a', ambiguousId])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: externalKey ?? 'unrelated',
+        unionId,
+        openId,
+        email: null,
+        mobile: null,
+      },
+      null,
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(externalKey ? [scopedKey] : []),
+        ambiguousScopedUnionIdentityKeys: new Set(),
+        ambiguousScopedOpenIdentityKeys: new Set(openId ? [scopedKey] : []),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
+  })
+
+  it('re-evaluates ambiguity before preserving an existing linked account', () => {
+    const scopedKey = JSON.stringify(['corp-a', 'duplicate-union'])
+    expect(resolveDirectoryIdentityMatch(
+      {
+        corpId: 'corp-a',
+        externalKey: 'duplicate-union',
+        unionId: 'duplicate-union',
+        openId: null,
+        email: null,
+        mobile: null,
+      },
+      { local_user_id: 'previous-user', link_status: 'linked' },
+      {
+        scopedExternalIdentityMap: new Map(),
+        scopedUnionIdentityMap: new Map(),
+        scopedOpenIdentityMap: new Map(),
+        ambiguousScopedExternalIdentityKeys: new Set(),
+        ambiguousScopedUnionIdentityKeys: new Set([scopedKey]),
+        ambiguousScopedOpenIdentityKeys: new Set(),
+        emailMap: new Map(),
+        mobileMap: new Map(),
+        ambiguousEmailKeys: new Set(),
+        ambiguousMobileKeys: new Set(),
+      },
+    )).toEqual({ matched: 'ambiguous' })
+  })
+})
 
 describe('listDirectoryReviewItems', () => {
   beforeEach(() => {

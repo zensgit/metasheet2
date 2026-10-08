@@ -50,12 +50,26 @@ const {
     LINE_FIELD_IDS,
     RUN_FIELD_IDS,
   },
+  parseStrictVersion,
 } = require('./stock-preparation-sync-run-plan.cjs')
-const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+const {
+  createTargetScopedRecordsApi,
+  resolveTargetFieldIds,
+} = require('./stock-preparation-table-actions.cjs')
 const {
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require('./stock-preparation-templates.cjs')
+const {
+  // THE ONE field-existence probe readiness and the #5719 plan layer run (db / computed /
+  // computed_scope_unavailable), and the verdict they derive from it. Reused here for the MVP
+  // snapshot tables this module writes, never re-implemented — see `assertMvpTargetFieldsExist`.
+  resolveFieldExistence,
+  __internals: {
+    templateFieldIds: templateLogicalFieldIds,
+    missingLogicalFields,
+  },
+} = require('./stock-preparation-target-provisioning.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
@@ -71,6 +85,15 @@ const LINE_KEY_FIELD = LINE_TEMPLATE.keyFields[0]
 const RUN_KEY_FIELD = RUN_TEMPLATE.keyFields[0]
 const READ_PAGE_LIMIT = 500
 const READ_MAX_PAGES = 50
+// H-3 (P4 lock round-1: prerequisite for the Option-A long transaction, and a replay-provability
+// precondition TODAY): a plan larger than the bounded replay read could be CREATED but never exactly
+// replayed — every retry would 409 PERSIST_EXISTING_BATCH_READ_UNPROVABLE forever. Reject loudly
+// before any provisioning / records access instead of persisting an unprovable batch.
+// The bound is READ_PAGE_LIMIT×READ_MAX_PAGES − 1, NOT the product itself: completeness is only
+// provable by a SHORT page, so 50 full 500-row pages (exactly 25,000 rows) fall out of the read loop
+// unprovable (adversarial round-2 finding — a 25,000-line batch persisted fine and then every replay
+// 409'd forever).
+const PERSIST_MAX_PLAN_LINES = READ_PAGE_LIMIT * READ_MAX_PAGES - 1
 
 // #4163 T1: the PROJECT table template — grounds the project-row upsert the SAME way BATCH/LINE/RUN are
 // grounded above (frozen template, never an invented field name).
@@ -81,6 +104,10 @@ const PROJECT_KEY_FIELD = PROJECT_TEMPLATE.keyFields[0] // 'projectId'
 // Design-grounded enum literal (docs/development/stock-preparation-mvp-design-20260707.md §"Project
 // Table": project_status includes 'active'). A project that just synced is, by definition, active.
 const PROJECT_STATUS_ACTIVE = 'active'
+
+// The FOUR MVP tables this module writes, in the order their sheets are resolved below. The field
+// existence probe walks exactly this list — a table this module never addresses is never judged.
+const MVP_PERSIST_TARGET_TEMPLATES = Object.freeze([BATCH_TEMPLATE, LINE_TEMPLATE, RUN_TEMPLATE, PROJECT_TEMPLATE])
 
 class StockPreparationSyncRunPersistError extends Error {
   constructor(status, code, message, details = {}) {
@@ -120,6 +147,18 @@ function ensureProvisioning(provisioning) {
   return provisioning
 }
 
+function ensurePersistUnitOfWork(recordsApi) {
+  if (!recordsApi || typeof recordsApi.runStockPreparationPersistUnitOfWork !== 'function') {
+    throw new StockPreparationSyncRunPersistError(
+      503,
+      'PERSIST_UNIT_OF_WORK_UNAVAILABLE',
+      'stock-preparation sync-run persist requires the atomic records unit-of-work',
+      { requiredMethod: 'runStockPreparationPersistUnitOfWork' },
+    )
+  }
+  return recordsApi
+}
+
 // Resolve ONE MVP objectId to a scoped, sheet-bound records API. objectId MUST be a frozen MVP member
 // (fail closed otherwise); the sheet MUST already exist (fail closed — NEVER create a sheet here). The
 // returned scoped API forces every call onto sheet.id, so a write can never leave the resolved sheet,
@@ -147,8 +186,103 @@ async function resolveScopedTarget(recordsApi, provisioning, projectId, objectId
       { objectId },
     )
   }
-  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, { provisioning, projectId })
-  return { objectId, sheetId, scoped }
+  const fieldIds = await resolveTargetFieldIds(provisioning, projectId, objectId)
+  const bindRecordsApi = (api) => createTargetScopedRecordsApi(
+    api,
+    { sheetId, objectId },
+    { resolvedFieldIds: fieldIds },
+  )
+  const scoped = await bindRecordsApi(recordsApi)
+  return { objectId, sheetId, scoped, bindRecordsApi }
+}
+
+/**
+ * MVP 快照表字段存在性探针 — THE WRITE-PATH HALF OF THE READINESS PROBE, FOR THE TABLES THIS MODULE
+ * WRITES.
+ *
+ * THE GAP (#5719 终审「所有视角都没看的路径」). #5719 gave dry-run/apply a DB-backed field
+ * existence probe, and the mvp-persist route threads it — into `computeDryRun`, which judges the
+ * CANONICAL 备料 target (`action.target.objectId`). The rows this module then persists go to FOUR
+ * OTHER tables — the snapshot batch / line / run / project MVP tables — whose field ids
+ * `resolveScopedTarget` resolves through `resolveTargetFieldIds`, i.e. through the COMPUTE-ONLY
+ * `provisioning.resolveFieldIds`. That map never omits a field, so its
+ * TABLE_ACTION_FIELD_IDS_UNRESOLVED gate is unreachable on a real host (目标表漂移检测是死代码), and a
+ * snapshot table provisioned by an older template surfaces the drift only when the records service
+ * rejects the first write as an opaque `VALIDATION_ERROR: Unknown fieldId` — the 222 incident where
+ * the snapshot line table was five columns short.
+ *
+ * WHAT THIS DOES. After every MVP sheet is proven provisioned, and BEFORE the host unit-of-work opens
+ * (so before any records read or write), ask the SAME probe readiness asks — `resolveFieldExistence`
+ * — for each of the four templates, and apply the SAME verdict (`missingLogicalFields` over the
+ * template's own ids). A `db` verdict that omits a field refuses with the code readiness/ensure and
+ * the #5719 plan layer already use.
+ *
+ * THE THREE MODES, AND THE ONE THAT REFUSES — identical to `assertTargetFieldsExist`
+ * (stock-preparation-table-actions.cjs):
+ *   db                         — the host read `meta_fields`; a missing field is a fact => 422.
+ *   computed                   — an older host without the DB read; nothing to act on => no refusal,
+ *                                no log, the pre-probe result byte for byte.
+ *   computed_scope_unavailable — the DB read refused the object scope and the shared probe degraded
+ *                                to the compute-only map => same as `computed`.
+ *
+ * CAPABILITY-DETECTED HERE, not in `ensureProvisioning`: that gate is the required-method contract
+ * (findObjectSheet / resolveFieldIds) and every provisioning fake in the suite satisfies exactly it. A
+ * host without the DB read is skipped outright — not one host call — so the legacy result and the
+ * legacy call trace are unchanged.
+ *
+ * NO SHEET-IDENTITY GATE, ON PURPOSE. #5719 runs its probe only when `getObjectSheetId(projectId,
+ * objectId)` equals the CONFIGURED `action.target.sheetId`, because the canonical binding may name a
+ * sheet the host would not derive from that pair. This module has no configured sheet id: the sheet
+ * it writes is `findObjectSheet({ projectId, objectId })`, which the host defines as
+ * `loadActiveSheet(getObjectSheetId(projectId, objectId))` — the very key the DB read judges. The two
+ * halves are one tuple by construction, so the gate would only add a way for the probe to fall silent.
+ *
+ * ORDER: 409 PERSIST_TARGET_NOT_PROVISIONED keeps precedence. The probe runs after the four
+ * `resolveScopedTarget` calls so an unprovisioned sheet still answers the coded "provision first",
+ * never a 422 that lists every column as missing.
+ *
+ * THE PROJECT IS SERVER-HELD: `targetProjectId` is the internal staging project every route derives
+ * from the AUTHENTICATED tenant (`resolveIntegrationStagingProjectId(tenantId, undefined)`) and this
+ * module already requires; no request field reaches it.
+ *
+ * VALUES-FREE: the refusal carries the public objectId and logical ids only — never a physical field
+ * id, never a sheet id. A host failure on the DB read (anything the shared probe does not degrade)
+ * is a values-free 503 TARGET_SCHEMA_UNAVAILABLE carrying the objectId and nothing else; the original
+ * stays on `cause` for the server log and never reaches the response as a driver string.
+ */
+async function assertMvpTargetFieldsExist(provisioning, projectId, template) {
+  if (
+    typeof provisioning.resolveExistingObjectFieldIds !== 'function'
+    || typeof provisioning.resolveFieldIds !== 'function'
+  ) return
+  const objectId = template.objectId
+  let verdict
+  try {
+    verdict = await resolveFieldExistence({
+      provisioning,
+      projectId,
+      objectId,
+      fieldIds: templateLogicalFieldIds(template),
+    })
+  } catch (error) {
+    const unavailable = new StockPreparationSyncRunPersistError(
+      503,
+      'TARGET_SCHEMA_UNAVAILABLE',
+      'stock-preparation MVP target table schema could not be read; retry once the metadata store answers',
+      { targetObjectId: objectId },
+    )
+    unavailable.cause = error
+    throw unavailable
+  }
+  if (verdict.fieldExistenceMode !== 'db') return
+  const missingFields = missingLogicalFields(template, verdict.resolved)
+  if (missingFields.length === 0) return
+  throw new StockPreparationSyncRunPersistError(
+    422,
+    'TARGET_SCHEMA_INCOMPLETE',
+    'stock-preparation MVP target table is missing template fields; the MVP readiness/ensure routes do not add columns to an existing table - repair the table (repairStockPreparationMvpTargets / host ensureMissingObjectFields) before persisting',
+    { targetObjectId: objectId, missingFields, fieldExistenceMode: verdict.fieldExistenceMode },
+  )
 }
 
 // Ground a mapped snapshot line to ONLY the frozen line-template field ids (dropping null / undefined
@@ -219,6 +353,73 @@ function existingBatchIncomplete(target, reason) {
     'existing stock-preparation snapshot commit is incomplete',
     { target, reason },
   )
+}
+
+// H-2 (P4 lock round-1: mandatory-first hardening). reason ∈ {stale_pointer, pointer_unresolvable}.
+function projectPointerStale(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_PROJECT_POINTER_STALE',
+    'existing project live pointer does not cover this batch',
+    { target: 'project', reason },
+  )
+}
+
+// H-2 precondition (rounds 2-4): the stale-pointer discriminator compares snapshotVersion, which is
+// caller-supplied and DEFAULTS to 1 — without enforcement, two default-version syncs make
+// CW4-existing invisible again. The CREATE path therefore enforces strictly-monotonic per-project
+// versions against the WHOLE batch history of the business project (not the pointer batch — orphan
+// complete batches are part of the history; and not gated on the project row existing — a first-sync
+// crash leaves history with no project row). Matches what the read side already assumes (predecessor
+// picking / latest-complete resolution order by version). reason ∈ {not_monotonic, history_unprovable}.
+function versionNotMonotonic(reason) {
+  throw new StockPreparationSyncRunPersistError(
+    422,
+    'PERSIST_VERSION_NOT_MONOTONIC',
+    'snapshot version must strictly increase per project',
+    { field: 'snapshotVersion', reason },
+  )
+}
+
+// Resolve the batch row named by the project live pointer (same business project; limit 2). Returns
+// its numeric snapshotVersion, or null when the pointer/batch/version cannot be resolved.
+async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
+  const pointerBatches = await batchScoped.queryRecords({
+    filters: { projectId: optionalString(plan.snapshotBatch.projectId), syncRunId: pointerRunId },
+    limit: 2,
+    offset: 0,
+  })
+  if (!Array.isArray(pointerBatches)) {
+    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (pointerBatches.length !== 1) return null
+  return parseStrictVersion(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
+}
+
+// Round-5: parseStrictVersion is SHARED from sync-run-plan.cjs — plan (preview) and persist
+// (commit + history scan) reject identically; see that module for the canonical-decimal contract.
+
+// Round-3: bounded, numeric MAX-version scan over ALL batch rows of a business project (orphan
+// complete batches included — the pointer alone is not the history). Returns the maximum numeric
+// snapshotVersion (0 when the project has no batch rows), or null when the history is unprovable
+// (page bound exceeded, malformed page, or any row with a non-numeric version) — callers fail closed.
+async function readProjectMaxBatchVersion(batchScoped, projectId) {
+  let maxVersion = 0
+  for (let page = 0; page < READ_MAX_PAGES; page += 1) {
+    const pageRows = await batchScoped.queryRecords({
+      filters: { projectId },
+      limit: READ_PAGE_LIMIT,
+      offset: page * READ_PAGE_LIMIT,
+    })
+    if (!Array.isArray(pageRows) || pageRows.length > READ_PAGE_LIMIT) return null
+    for (const row of pageRows) {
+      const version = parseStrictVersion(row && row.data && row.data.snapshotVersion)
+      if (version === null) return null
+      if (version > maxVersion) maxVersion = version
+    }
+    if (pageRows.length < READ_PAGE_LIMIT) return maxVersion
+  }
+  return null
 }
 
 function assertPlanIdentityKeys(plan, snapshotLines) {
@@ -295,6 +496,7 @@ async function assertExactReplay({
   snapshotLines,
   lineScoped,
   runScoped,
+  batchScoped,
   projectRows,
 }) {
   if (!projectionsEqual(BATCH_TEMPLATE, plan.snapshotBatch, existingBatch)) {
@@ -330,6 +532,29 @@ async function assertExactReplay({
   }
 
   if (projectRows.length === 0) existingBatchIncomplete('project', 'missing')
+
+  // H-2 (P4 lock round-1: mandatory-first): project-row EXISTENCE is not enough. A crash between the
+  // run create and the project upsert on a repeat sync (CW4-existing) used to replay as a silent 200
+  // with the live pointer still on an OLDER run — the only crash window with no observable at all.
+  // Discriminator (run rows carry no timestamps by design): batch rows carry `syncRunId`, so resolve
+  // the batch the pointer's run belongs to (same business project) and compare `snapshotVersion`:
+  //   pointer at this run                    -> covered, 200 path continues;
+  //   pointer batch at a HIGHER/EQUAL version -> a later sync legitimately advanced the pointer, 200;
+  //   pointer batch at a LOWER version        -> stale pointer (CW4-existing), 409;
+  //   pointer/pointer-batch not resolvable    -> not provable either way, fail closed 409.
+  const pointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
+  const currentRunId = optionalString(plan.syncRun[RUN_KEY_FIELD])
+  if (pointerRunId !== currentRunId) {
+    if (!pointerRunId) projectPointerStale('pointer_unresolvable')
+    const pointerVersion = await resolvePointerBatchVersion({ batchScoped, plan, pointerRunId })
+    const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+    if (pointerVersion === null || currentVersion === null) projectPointerStale('pointer_unresolvable')
+    if (pointerVersion < currentVersion) projectPointerStale('stale_pointer')
+    // EQUAL version on a DIFFERENT run cannot prove the pointer advanced (adversarial round-2: with
+    // versions enforced monotonic at create, this state is only reachable on legacy/degenerate data)
+    // — fail closed rather than silently blessing it.
+    if (pointerVersion === currentVersion) projectPointerStale('pointer_unresolvable')
+  }
 }
 
 // #4163 T1 — upsert the PROJECT row: query by the key field first (never trust "it must be new"), then
@@ -401,10 +626,40 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'input must be an object')
   }
-  const { context, permission, recordsApi, provisioning: provisioningInput, targetProjectId: targetProjectIdInput, ...planInputs } = input
+  const {
+    context,
+    permission,
+    recordsApi: recordsApiInput,
+    provisioning: provisioningInput,
+    targetProjectId: targetProjectIdInput,
+    lockTenantId: lockTenantIdInput,
+    allocateSnapshotVersion: allocateSnapshotVersionInput,
+    ...planInputs
+  } = input
 
-  // 1. admin gate FIRST — fail-closed before ANY provisioning / records access.
+  // 1. admin gate FIRST — fail-closed before config validation, provisioning, or records access.
+  // Keeping authorization ahead of the internal allocation-policy parser prevents an unauthorized
+  // caller from using validation differences as a capability oracle.
   assertAdminPermission(permission)
+
+  if (allocateSnapshotVersionInput !== undefined && typeof allocateSnapshotVersionInput !== 'boolean') {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'allocateSnapshotVersion must be a boolean when supplied',
+      { field: 'allocateSnapshotVersion' },
+    )
+  }
+  const allocateSnapshotVersion = allocateSnapshotVersionInput === true
+  if (allocateSnapshotVersion && planInputs.snapshotVersion !== undefined && planInputs.snapshotVersion !== null) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'snapshotVersion cannot be supplied when atomic version allocation is enabled',
+      { field: 'snapshotVersion' },
+    )
+  }
+
   const provisioning = ensureProvisioning(
     provisioningInput ||
       (context && context.api && context.api.multitable && context.api.multitable.provisioning),
@@ -412,7 +667,14 @@ async function persistStockPreparationSyncRun(input = {}) {
 
   // 2. recompute the deterministic plan (the SAME body the admin previewed). It re-asserts the admin
   //    gate and validates every plan input, and it PERSISTS nothing.
-  const plan = planBomSnapshotSyncRun({ permission, ...planInputs })
+  // Atomic callers request server-side version allocation. A provisional v1 plan performs the same
+  // shape/bounds validation before records/provisioning access; the authoritative plan is rebuilt
+  // under the project lock below from either the existing batch version (exact replay) or max+1.
+  let plan = planBomSnapshotSyncRun({
+    permission,
+    ...planInputs,
+    ...(allocateSnapshotVersion ? { snapshotVersion: 1 } : {}),
+  })
 
   const projectId = optionalString(planInputs.projectId)
   if (!projectId) {
@@ -430,8 +692,34 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!snapshotBatchId) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshotBatchId is required', { field: BATCH_KEY_FIELD })
   }
-  const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
+  let snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
   assertPlanIdentityKeys(plan, snapshotLines)
+
+  // H-3: explicit plan-size bound — fail before ANY provisioning / records access. See
+  // PERSIST_MAX_PLAN_LINES above; counts are values-free by doctrine, the details carry only the
+  // design-constant bound and the field name, never row content.
+  if (snapshotLines.length > PERSIST_MAX_PLAN_LINES) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_PLAN_TOO_LARGE',
+      'planned snapshot line count exceeds the provable persist bound',
+      { field: 'snapshotLines', maxLines: PERSIST_MAX_PLAN_LINES },
+    )
+  }
+
+  // P4 hard cut: there is no sequential per-record transaction fallback. Capability validation happens
+  // before provisioning or records I/O so a host that has not rolled out the atomic primitive cannot
+  // recreate the historical partial-commit window.
+  const recordsApi = ensurePersistUnitOfWork(recordsApiInput)
+  const lockTenantId = optionalString(lockTenantIdInput)
+  if (!lockTenantId) {
+    throw new StockPreparationSyncRunPersistError(
+      422,
+      'PERSIST_CONFIG_INVALID',
+      'lockTenantId is required for the atomic persist lock scope',
+      { field: 'lockTenantId' },
+    )
+  }
 
   // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
   // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
@@ -451,75 +739,145 @@ async function persistStockPreparationSyncRun(input = {}) {
   const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
   const projectTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, PROJECT_OBJECT_ID)
 
-  // 4. Idempotency + immutability. A batch-key hit is only a successful replay after every immutable
-  //    batch/line/run projection and the project-row existence check match exactly. Partial commits and
-  //    same-key/different-content requests fail closed; this module never repairs or patches snapshots.
-  const existingBatch = await batchTarget.scoped.queryRecords({
-    filters: { [BATCH_KEY_FIELD]: snapshotBatchId },
-    limit: 2,
-    offset: 0,
-  })
-  if (!Array.isArray(existingBatch)) {
-    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  // 3b. field existence on each of the four provisioned MVP sheets — the DB-backed verdict the
+  //     compute-only resolution above cannot give (see assertMvpTargetFieldsExist). Still before the
+  //     unit-of-work, so a refusal here has read and written nothing.
+  for (const template of MVP_PERSIST_TARGET_TEMPLATES) {
+    await assertMvpTargetFieldsExist(provisioning, targetProjectId, template)
   }
-  if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
 
-  // The project preflight occurs before the first write. It both rejects duplicate project keys and
-  // supplies the exact row (if any) that the final live-pointer upsert may patch.
-  const projectRows = await queryProjectRows(projectTarget.scoped, projectId)
+  // 4. The host takes all four canonical sheet fences, then the project key and batch key, and invokes
+  //    this callback on one transaction-scoped records API. Every idempotency decision, replay read,
+  //    create/patch, and revision write below therefore shares the same transaction and lock lifetime.
+  return recordsApi.runStockPreparationPersistUnitOfWork({
+    tenantId: lockTenantId,
+    sheetIds: [
+      batchTarget.sheetId,
+      lineTarget.sheetId,
+      runTarget.sheetId,
+      projectTarget.sheetId,
+    ],
+    project: { sheetId: projectTarget.sheetId, projectId },
+    batch: { sheetId: batchTarget.sheetId, snapshotBatchId },
+  }, async (transactionRecordsApi) => {
+    const batchScoped = await batchTarget.bindRecordsApi(transactionRecordsApi)
+    const lineScoped = await lineTarget.bindRecordsApi(transactionRecordsApi)
+    const runScoped = await runTarget.bindRecordsApi(transactionRecordsApi)
+    const projectScoped = await projectTarget.bindRecordsApi(transactionRecordsApi)
 
-  if (existingBatch.length === 1) {
-    await assertExactReplay({
-      existingBatch: existingBatch[0],
-      plan,
-      snapshotLines,
-      lineScoped: lineTarget.scoped,
-      runScoped: runTarget.scoped,
-      projectRows,
+    // Idempotency + immutability. A batch-key hit is only a successful replay after every immutable
+    // batch/line/run projection and the project-row existence check match exactly. Partial or conflicting
+    // replays fail closed; this module never repairs or patches snapshots.
+    const existingBatch = await batchScoped.queryRecords({
+      filters: { [BATCH_KEY_FIELD]: snapshotBatchId },
+      limit: 2,
+      offset: 0,
     })
-    const created = { batch: 0, lines: 0, run: 0 }
-    return {
-      persisted: false,
-      mode: 'skipped_existing',
-      created,
-      project: { mode: 'skipped' },
-      evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
+    if (!Array.isArray(existingBatch)) {
+      throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
-  }
+    if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
 
-  // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
-  //    existing row is ever mutated. Batch-first plants the idempotency key before lines/run; a crash
-  //    mid-commit is therefore visible on retry as an incomplete 409, never a duplicate or silent skip.
-  await batchTarget.scoped.createRecord({ data: plan.snapshotBatch })
-  let linesCreated = 0
-  for (const line of snapshotLines) {
-    await lineTarget.scoped.createRecord({ data: groundLineRow(line) })
-    linesCreated += 1
-  }
-  await runTarget.scoped.createRecord({ data: plan.syncRun })
+    if (allocateSnapshotVersion) {
+      let allocatedVersion
+      if (existingBatch.length === 1) {
+        allocatedVersion = parseStrictVersion(
+          existingBatch[0] && existingBatch[0].data && existingBatch[0].data.snapshotVersion,
+        )
+        if (allocatedVersion === null) versionNotMonotonic('history_unprovable')
+      } else {
+        const maxVersion = await readProjectMaxBatchVersion(batchScoped, projectId)
+        if (maxVersion === null || maxVersion >= Number.MAX_SAFE_INTEGER) {
+          versionNotMonotonic('history_unprovable')
+        }
+        allocatedVersion = maxVersion + 1
+      }
+      plan = planBomSnapshotSyncRun({ permission, ...planInputs, snapshotVersion: allocatedVersion })
+      snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
+      assertPlanIdentityKeys(plan, snapshotLines)
+      if (snapshotLines.length > PERSIST_MAX_PLAN_LINES) {
+        throw new StockPreparationSyncRunPersistError(
+          422,
+          'PERSIST_PLAN_TOO_LARGE',
+          'planned snapshot line count exceeds the provable persist bound',
+          { field: 'snapshotLines', maxLines: PERSIST_MAX_PLAN_LINES },
+        )
+      }
+    }
 
-  // #4163 T1: upsert the project row LAST — the run just genuinely completed, so `lastSyncRunId` /
-  // `lastSyncedAt` on the project row point at a run that actually finished (not one that merely
-  // started). Idempotent by projectId: a SECOND, genuinely-new batch for the same project patches this
-  // same row rather than creating a duplicate — the multi-sync-run case the populator exists for.
-  const projectSync = await upsertStockPreparationProject({
-    scoped: projectTarget.scoped,
-    existing: projectRows,
-    projectId,
-    sourceProjectNo,
-    projectName,
-    sourceSystem: projectSourceSystem,
-    syncRunId: plan.syncRun.runId,
+    // The project preflight occurs before the first write. It both rejects duplicate project keys and
+    // supplies the exact row (if any) that the final live-pointer upsert may patch.
+    const projectRows = await queryProjectRows(projectScoped, projectId)
+
+    if (existingBatch.length === 1) {
+      await assertExactReplay({
+        existingBatch: existingBatch[0],
+        plan,
+        snapshotLines,
+        lineScoped,
+        runScoped,
+        batchScoped,
+        projectRows,
+      })
+      const created = { batch: 0, lines: 0, run: 0 }
+      return {
+        persisted: false,
+        mode: 'skipped_existing',
+        created,
+        project: { mode: 'skipped' },
+        evidence: buildEvidence({ persisted: false, mode: 'skipped_existing', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: true, projectSync: null }),
+      }
+    }
+
+    // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write, for EVERY new
+    // batch): the new snapshotVersion must be strictly above EVERY existing batch of the business
+    // project. The scan runs UNCONDITIONALLY — round-4: a FIRST-sync crash at the project create
+    // (CW4-first) leaves orphan batch history with NO project row, so gating the scan on the project
+    // row's existence let the next lower-version sync through. Empty history scans to max 0 (any
+    // positive version passes); unprovable history (page bound exceeded / non-strict version values)
+    // fails closed. This is what makes the replay-side stale/advanced inference sound.
+    {
+      const currentVersion = parseStrictVersion(plan.snapshotBatch.snapshotVersion)
+      if (currentVersion === null) versionNotMonotonic('history_unprovable')
+      const maxVersion = await readProjectMaxBatchVersion(batchScoped, optionalString(planInputs.projectId))
+      if (maxVersion === null) versionNotMonotonic('history_unprovable')
+      if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')
+    }
+
+    // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
+    // existing row is ever mutated. The surrounding unit-of-work is the only commit point: a failure
+    // anywhere below rolls back every row and revision rather than exposing a partial batch.
+    await batchScoped.createRecord({ data: plan.snapshotBatch })
+    let linesCreated = 0
+    for (const line of snapshotLines) {
+      await lineScoped.createRecord({ data: groundLineRow(line) })
+      linesCreated += 1
+    }
+    await runScoped.createRecord({ data: plan.syncRun })
+
+    // #4163 T1: upsert the project row LAST — the run just genuinely completed, so `lastSyncRunId` /
+    // `lastSyncedAt` on the project row point at a run that actually finished (not one that merely
+    // started). Idempotent by projectId: a SECOND, genuinely-new batch for the same project patches this
+    // same row rather than creating a duplicate — the multi-sync-run case the populator exists for.
+    const projectSync = await upsertStockPreparationProject({
+      scoped: projectScoped,
+      existing: projectRows,
+      projectId,
+      sourceProjectNo,
+      projectName,
+      sourceSystem: projectSourceSystem,
+      syncRunId: plan.syncRun.runId,
+    })
+
+    const created = { batch: 1, lines: linesCreated, run: 1 }
+    return {
+      persisted: true,
+      mode: 'created',
+      created,
+      project: projectSync,
+      evidence: buildEvidence({ persisted: true, mode: 'created', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: false, projectSync }),
+    }
   })
-
-  const created = { batch: 1, lines: linesCreated, run: 1 }
-  return {
-    persisted: true,
-    mode: 'created',
-    created,
-    project: projectSync,
-    evidence: buildEvidence({ persisted: true, mode: 'created', created, plan, plannedLineCount: snapshotLines.length, existingBatchMatched: false, projectSync }),
-  }
 }
 
 module.exports = {
@@ -537,7 +895,10 @@ module.exports = {
   __internals: {
     assertAdminPermission,
     ensureProvisioning,
+    ensurePersistUnitOfWork,
     resolveScopedTarget,
+    assertMvpTargetFieldsExist,
+    MVP_PERSIST_TARGET_TEMPLATES,
     groundLineRow,
     upsertStockPreparationProject,
     buildEvidence,
@@ -551,5 +912,12 @@ module.exports = {
     PROJECT_FIELD_IDS,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
+    PERSIST_MAX_PLAN_LINES,
+    BATCH_TEMPLATE,
+    LINE_TEMPLATE,
+    RUN_TEMPLATE,
+    PROJECT_TEMPLATE,
+    LINE_KEY_FIELD,
+    RUN_KEY_FIELD,
   },
 }

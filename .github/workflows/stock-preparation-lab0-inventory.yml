@@ -1,0 +1,47 @@
+name: Stock Preparation LAB-0 Inventory
+
+# Hermetic contract test for the LAB-0 host-inventory tool (DRAFT, offline,
+# values-free). The tool replaces the six-field PostgreSQL readiness reply
+# (#4695) and the LAB-0 environment block (#4708) that an operator currently
+# hand-assembles; the contract test injects fake probes and asserts the tool
+# never installs, downloads, creates a database/principal, deploys, touches a
+# flag, reads a business row, or writes anything but stdout, and that every
+# emitted field stays inside its closed token set.
+#
+# Runs on ubuntu AND windows because the real host is Windows: the PowerShell
+# 5.1 / 7 probes and path handling must behave the same there. Same shape as
+# stock-preparation-s6a-operator-preflight.yml: checkout + setup-node only,
+# `node --test` directly. No DB, no network.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-lab0-inventory.yml'
+      - 'scripts/ops/stock-preparation-lab0-inventory.mjs'
+      - 'scripts/ops/stock-preparation-lab0-inventory.test.mjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/stock-preparation-lab0-inventory.yml'
+      - 'scripts/ops/stock-preparation-lab0-inventory.mjs'
+      - 'scripts/ops/stock-preparation-lab0-inventory.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: LAB-0 inventory contract (${{ matrix.os }}, values-free, no DB, no network)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic inventory tests (fake probes only, no DB, no network)
+        run: node --test scripts/ops/stock-preparation-lab0-inventory.test.mjs

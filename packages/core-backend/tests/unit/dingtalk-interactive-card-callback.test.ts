@@ -616,6 +616,7 @@ describe('B-4 hook: terminal card update at outcome production', () => {
     expect(sends[0].outTrackId).toBe(DELIVERY_ID)
     // Display name is the LOCAL users.name resolved fail-closed by the adapter (lock §B-4).
     expect(sends[0].statusText).toMatch(/^已由 Approver A 同意 · \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/)
+    expect(sends[0].actionsVisible).toBe(false)
     expect(sends[0].statusText).not.toContain('大黑客')
     expect(sends[0].statusText).not.toContain('Payload Hacker')
     expect(sends[0].statusText).not.toContain('EvilNick')
@@ -654,6 +655,8 @@ describe('B-4 hook: terminal card update at outcome production', () => {
     expect(b.sends).toHaveLength(1)
     expect(a.sends[0].statusText).toBe(b.sends[0].statusText)
     expect(a.sends[0].outTrackId).toBe(DELIVERY_ID)
+    expect(a.sends[0].actionsVisible).toBeUndefined()
+    expect(b.sends[0].actionsVisible).toBeUndefined()
   })
 
   it('stale duplicate → sender receives the TRUE terminal state from the summary', async () => {
@@ -663,7 +666,11 @@ describe('B-4 hook: terminal card update at outcome production', () => {
     const { sends, sender } = recordingSender()
     const result = await executeDingTalkApprovalCardCallback({ ...h.deps, cardUpdateSender: sender } as never, wirePayload())
     expect(result.outcome).toBe('stale')
-    expect(sends).toEqual([{ outTrackId: DELIVERY_ID, statusText: '已同意 · 2026/07/10 14:30' }])
+    expect(sends).toEqual([{
+      outTrackId: DELIVERY_ID,
+      statusText: '已同意 · 2026/07/10 14:30',
+      actionsVisible: false,
+    }])
   })
 
   it('parse-level rejection and unsupported actions never touch the card updater (no-op rows)', async () => {

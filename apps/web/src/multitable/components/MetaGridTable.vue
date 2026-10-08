@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
+  <div ref="gridRoot" class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
@@ -65,6 +65,14 @@
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <span>{{ startIndex + item.navIndex + 1 }}</span>
                 <button
+                  type="button"
+                  class="meta-grid__open-record-btn"
+                  data-test="grid-open-record"
+                  :aria-label="l('grid.openRecord')"
+                  :title="l('grid.openRecord')"
+                  @click.stop="emit('expand-record', item.row.id)"
+                >&#x2197;</button>
+                <button
                   v-if="resolveRowActions(item.row.id).canComment"
                   type="button"
                   class="meta-grid__comment-action"
@@ -101,8 +109,13 @@
                   :upload-context="{ recordId: item.row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :mention-search="props.mentionSearch"
+                  :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
-                  @confirm="confirmEdit(item.row)"
+                  @confirm="onEditorConfirm"
+                  @blur-commit="onEditorBlurCommit"
+                  @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(item.row.id, field)"
                   @open-person-picker="openPersonPickerFromCell(item.row.id, field)"
@@ -165,26 +178,41 @@
           </tr>
         </tbody>
         <tbody v-else>
+          <!-- #5863c: frozen rows (always mounted) + the A1 virtualization top spacer are both items in
+               flatRenderItems, IN ORDER, so the spacer's flow position always comes AFTER the frozen
+               prefix (never pushes it down) — see flatRenderItems' own comment. -->
+          <template v-for="item in flatRenderItems" :key="item.kind === 'spacer' ? `spacer:${item.position}` : item.row.id">
           <!-- A1 virtualization top spacer: reserves the height of rows scrolled above the window so the
-               scrollbar + row positions match a fully-rendered table. Height 0 → effectively absent. -->
-          <tr v-if="topSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-top-spacer">
-            <td :colspan="colSpan" :style="{ height: `${topSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+               scrollbar + row positions match a fully-rendered table. -->
+          <tr v-if="item.kind === 'spacer'" class="meta-grid__spacer" aria-hidden="true" :data-test="`grid-${item.position}-spacer`">
+            <td :colspan="colSpan" :style="{ height: `${item.height}px`, padding: '0', border: 'none' }"></td>
           </tr>
-          <template v-for="{ row, index: ri } in windowRows" :key="row.id">
+          <!-- Alias-destructure `item` back to `row`/`ri` (single-element v-for) so the row markup below
+               is untouched from before the flatRenderItems refactor. Two independent v-if (not v-if/
+               v-else) since v-else can't safely combine with a v-for on the same template element. -->
+          <template v-if="item.kind === 'row'" v-for="{ row, index: ri } in [item]" :key="row.id">
             <tr
               role="row"
               :aria-selected="row.id === selectedRecordId || undefined"
               class="meta-grid__row"
-              :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
+              :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri, 'meta-grid__row--frozen-top': isFrozenRow(ri) }"
               :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
-              @contextmenu="onRowContextMenu($event, row.id)"
+              @contextmenu="onRowContextMenu($event, row.id, ri)"
             >
-              <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
+              <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="isFrozenRow(ri) ? { position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : undefined" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
-              <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
+              <td class="meta-grid__row-num" :style="isFrozenRow(ri) ? { left: `${rowNumLeft}px`, position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : { left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
+                <button
+                  type="button"
+                  class="meta-grid__open-record-btn"
+                  data-test="grid-open-record"
+                  :aria-label="l('grid.openRecord')"
+                  :title="l('grid.openRecord')"
+                  @click.stop="emit('expand-record', row.id)"
+                >&#x2197;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
                 <span
                   v-if="isRowLocked(row.id)"
@@ -213,15 +241,29 @@
                 >
                   <MetaCommentAffordance :state="rowCommentAffordance(row.id)" />
                 </button>
+                <!-- #5863c: row-freeze pin, mirrors MetaFieldHeader's column-freeze pin. Toggling on row k
+                     sets frozenTopRowCount = k+1 (capped); toggling the current boundary row unfreezes. -->
+                <button
+                  type="button"
+                  class="meta-grid__row-pin"
+                  :class="{ 'meta-grid__row-pin--on': isFrozenRow(ri) }"
+                  data-test="grid-freeze-row"
+                  :aria-label="frozenTopRowsCountEffective === ri + 1 ? l('grid.unfreezeRows') : l('grid.freezeUpToRow')"
+                  :title="frozenTopRowsCountEffective === ri + 1 ? l('grid.unfreezeRows') : l('grid.freezeUpToRow')"
+                  @click.stop="onToggleFreezeRows(ri)"
+                  @mousedown.stop
+                >&#x1F4CC;</button>
               </td>
               <td
                 v-for="(field, ci) in visibleFields"
                 :key="field.id"
                 role="gridcell"
+                :data-ri="ri"
+                :data-ci="ci"
                 :aria-label="field.name"
                 class="meta-grid__cell"
                 :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
-                :style="cellStyle(row.id, field.id, ci)"
+                :style="cellStyle(row.id, field.id, ci, ri)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
               >
@@ -242,8 +284,13 @@
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   :ai-run-state="aiRunState"
                   :mention-suggestions="props.mentionSuggestions"
+                  :mention-search="props.mentionSearch"
+                  :host-commit-policy="'grid'"
                   @update:model-value="editCell!.value = $event"
-                  @confirm="confirmEdit(row)"
+                  @confirm="onEditorConfirm"
+                  @blur-commit="onEditorBlurCommit"
+                  @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
@@ -294,6 +341,7 @@
                 </div>
               </td>
             </tr>
+          </template>
           </template>
           <!-- A1 virtualization bottom spacer: reserves the height of rows scrolled below the window. -->
           <tr v-if="bottomSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-bottom-spacer">
@@ -372,6 +420,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MetaField,
   MetaRecordContext,
@@ -389,6 +438,8 @@ interface ConditionalFormattingByRecord {
 }
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
+import { dateTimeExportText } from '../utils/field-display'
+import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
@@ -399,8 +450,11 @@ import {
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
+import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-eligibility'
+import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
+import { MAX_FROZEN_TOP_ROWS } from '../utils/frozen-rows'
 import {
   metaCoreLabel,
   selectedCount,
@@ -410,7 +464,7 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
-const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
+const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment', 'person', 'multiSelect', 'dateTime'])
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
@@ -437,6 +491,9 @@ const props = defineProps<{
   canBulkRestore?: boolean
   canCreate?: boolean
   frozenLeftColumnIds?: string[]
+  // #5863c: first N rows (flat/ungrouped path only — see isFrozenRow) pinned under the sticky
+  // header, same opaque-config narrowing pattern as frozenLeftColumnIds (see utils/frozen-rows.ts).
+  frozenTopRowCount?: number
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -499,6 +556,8 @@ const props = defineProps<{
   // B5: people-mention candidates for rich-`longText` in-cell editing. Forwarded to
   // MetaCellEditor; the workbench feeds its already-loaded commentMentionSuggestions.
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   // Live cell-cursors: cellKey (`${recordId}:${fieldId}`) → remote collaborator userIds on that cell.
   // Presentational highlight only; absent/empty → no cursors rendered.
   remoteCursorsByCell?: Map<string, string[]>
@@ -529,6 +588,7 @@ const emit = defineEmits<{
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
+  (e: 'set-frozen-rows', frozenTopRowCount: number): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
   // Group-collapse toggle request (controlled-from-parent): parent flips the key in the persisted set.
   (e: 'toggle-group', key: string): void
@@ -538,12 +598,23 @@ const emit = defineEmits<{
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
   // Live cell-cursors: the local user focused a cell → parent broadcasts it as the active cursor.
   (e: 'cursor-focus', payload: { recordId: string; fieldId: string }): void
+  // Record inspector v3 (2026-09-05, PR-A §1.1 explicit-open): row-number expand icon / Shift+Space
+  // both route here — the workbench's `openRecord(id, opener)` is the single handler for all
+  // explicit-open triggers (see MultitableWorkbench.vue's own comment). Distinct from the
+  // pre-existing `toggle-group`/row-detail `expand`/`collapse` glyph (`meta-grid__expand-btn`,
+  // `toggleRowExpand`), which is unrelated to the inspector panel.
+  (e: 'expand-record', recordId: string): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const editCell = ref<EditingCell | null>(null)
+// D2/D3: the grid root DOM element, so a commit-and-close (Enter, Tab, or a
+// click-away that closed a dangling editor) can hand DOM focus back to it —
+// the editor's <input> just unmounted, and without an explicit refocus the
+// next keystroke would go nowhere (focus falls to document.body).
+const gridRoot = ref<HTMLElement | null>(null)
 const focusRow = ref(-1)
 const focusCol = ref(-1)
 const selectedIds = ref<Set<string>>(new Set())
@@ -659,18 +730,47 @@ const windowEnd = computed(() => {
 })
 // The rows actually mounted. Carries each row's ABSOLUTE index so row-number / focus / selection /
 // keyboard-nav all keep using the real index (window-local `ri` would desync them — the keystone bug).
+// #5863c: rows < frozenTopRowsCountEffective are ALWAYS mounted (never virtualized away — a frozen
+// row's own sticky positioning depends on it staying in the DOM) via a separate template loop
+// (see the template's own v-for over the first N rows), so this window is clamped to start no
+// earlier than the frozen-row count to avoid rendering those rows TWICE.
 const windowRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
   const rowsArr = filteredRows.value
-  if (!flatWindowEnabled.value) return rowsArr.map((row, index) => ({ row, index }))
+  const frozenN = frozenTopRowsCountEffective.value
+  if (!flatWindowEnabled.value) return rowsArr.map((row, index) => ({ row, index })).filter((x) => x.index >= frozenN)
   const out: Array<{ row: MetaRecord; index: number }> = []
-  for (let i = windowStart.value; i < windowEnd.value; i++) out.push({ row: rowsArr[i], index: i })
+  const start = Math.max(windowStart.value, frozenN)
+  for (let i = start; i < windowEnd.value; i++) out.push({ row: rowsArr[i], index: i })
+  return out
+})
+// The frozen prefix, ALWAYS rendered outside the virtualized window (see windowRows above).
+const frozenTopRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
+  const n = frozenTopRowsCountEffective.value
+  if (n <= 0) return []
+  return filteredRows.value.slice(0, n).map((row, index) => ({ row, index }))
+})
+// Render order: frozen prefix first (always mounted, in-flow at the top of tbody, pinned by each
+// cell's own `position: sticky; top: ...`) so their natural flow position is never pushed down by
+// the spacer, THEN the top spacer (as an item, not a template-level sibling — its natural flow
+// position must come AFTER the frozen prefix), THEN the (possibly virtualized) rest.
+type FlatRenderItem =
+  | { kind: 'row'; row: MetaRecord; index: number }
+  | { kind: 'spacer'; position: 'top' | 'bottom'; height: number }
+const flatRenderItems = computed<FlatRenderItem[]>(() => {
+  const out: FlatRenderItem[] = frozenTopRows.value.map((r) => ({ kind: 'row', ...r }))
+  if (topSpacerHeight.value > 0) out.push({ kind: 'spacer', position: 'top', height: topSpacerHeight.value })
+  for (const r of windowRows.value) out.push({ kind: 'row', ...r })
   return out
 })
 // Spacer heights reserve the off-screen rows' vertical space so the scrollbar + scroll position match a
 // fully-rendered table. zero when windowing is off (no spacer rows are emitted then).
+// #5863c: the frozen prefix is rendered separately (frozenTopRows, always mounted — see windowRows),
+// so the spacer only needs to cover the SKIPPED-but-not-frozen rows between the frozen prefix and
+// the virtualized window's start (never negative — windowStart is always >= 0, and >= frozenN once
+// scrolled past the frozen rows).
 const topSpacerHeight = computed(() =>
   flatWindowEnabled.value
-    ? windowStart.value * rowHeightPx.value
+    ? Math.max(0, windowStart.value - frozenTopRowsCountEffective.value) * rowHeightPx.value
     : groupedWindowEnabled.value
       ? groupedItemOffsets.value[groupWindowStart.value]
       : 0,
@@ -727,6 +827,11 @@ function measureViewport() {
   const firstGroupSubtotal = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__group-subtotal')
   const gs = firstGroupSubtotal?.offsetHeight ?? 0
   if (gs > 0) measuredGroupSubtotalHeight.value = gs
+  // #5863c: frozen-row `top` offsets stack under the real header height (its sticky-top position),
+  // not the density-based row height fallback used for body rows.
+  const headerRow = tableWrap.value.querySelector<HTMLElement>('thead tr')
+  const hh = headerRow?.offsetHeight ?? 0
+  if (hh > 0) measuredHeaderHeight.value = hh
   maybeKickWhenNotScrollable()
 }
 
@@ -815,8 +920,13 @@ const GROUP_UNGROUPED = '__ungrouped__'
 function levelKey(val: unknown): string {
   return val == null || val === '' ? GROUP_UNGROUPED : String(val)
 }
-function groupLabel(key: string): string {
-  return key === GROUP_UNGROUPED ? groupNoValue(isZh.value) : key
+// The KEY stays the raw String(val) (server-tree agreement, above); only the LABEL is humanised. 客户反馈
+// 2026-09-24 #4c (N5): a date-time group header shows the business wall clock the cells show, not the raw
+// stored `…T01:00:00.000Z`; an unparseable key keeps its raw text.
+function groupLabel(key: string, field?: MetaField): string {
+  if (key === GROUP_UNGROUPED) return groupNoValue(isZh.value)
+  if (field) return dateTimeExportText(field, key) ?? key
+  return key
 }
 
 // Nested group node over the current page rows. `path` is the composite key (ancestor keys + own key).
@@ -846,7 +956,7 @@ function buildGroupTree(rows: MetaRecord[], level: number, parentPath: string): 
     groups.push({
       key,
       path,
-      label: groupLabel(key),
+      label: groupLabel(key, field),
       level,
       rows: groupRows,
       count: groupRows.length,
@@ -1051,7 +1161,11 @@ function resolveRowActions(recordId: string): MetaRowActions {
 // context affordance — no floating menu component, just the native contextmenu suppressed when actionable.
 // Gated on `canCreate` (a duplicate is a create; the server re-enforces it). NOT active while a cell is being
 // edited, so the native menu (copy/paste) still works inside the cell editor.
-function onRowContextMenu(e: MouseEvent, recordId: string): void {
+// `ri` (row index, flat path only) is unused today — accepted so callers can pass it without a
+// signature mismatch; the row-freeze pin (#5863c) is its own dedicated button, not merged into this
+// gesture (this remains a single instant action, not an actual multi-item context menu).
+function onRowContextMenu(e: MouseEvent, recordId: string, ri?: number): void {
+  void ri
   if (!props.canCreate || editCell.value) return
   e.preventDefault()
   emit('duplicate-record', recordId)
@@ -1082,8 +1196,9 @@ const isEditable = (recordId: string, f: MetaField) =>
   !isFieldAlwaysReadOnly(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
-function cellStyle(rid: string, fid: string, ci?: number) {
+function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {
   const frozen = typeof ci === 'number' && isFrozen(ci)
+  const frozenRow = typeof ri === 'number' && isFrozenRow(ri)
   // frozen cells need a definite width so the sticky-offset math is exact
   const w = frozen ? colWidth(fid) : props.columnWidths?.[fid]
   const widthStyle: Record<string, string> | undefined = w
@@ -1114,12 +1229,22 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   const effectiveFormat: Record<string, string> | undefined = (barEntry || colorScaleFill)
     ? (formatStyle?.color ? { color: formatStyle.color } : undefined)
     : formatStyle
-  // frozen body cell: sticky-left + an OPAQUE bg (occludes scrolled-under content). Preserve any
-  // conditional-formatting backgroundColor — only fall back to #fff when formatting set none. (Row
-  // hover/selection tint is still not shown on frozen cells — accepted MVP limitation; conditional
-  // formatting is NOT lost.) With a data bar present, the opaque base is #fff so the gradient shows.
-  const frozenStyle: Record<string, string> | undefined = frozen
-    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: colorScaleFill ?? effectiveFormat?.backgroundColor ?? '#fff' }
+  // frozen body cell: sticky-left and/or sticky-top + an OPAQUE bg (occludes scrolled-under
+  // content). Preserve any conditional-formatting backgroundColor — only fall back to #fff when
+  // formatting set none. (Row hover/selection tint is still not shown on frozen cells — accepted
+  // MVP limitation; conditional formatting is NOT lost.) With a data bar present, the opaque base
+  // is #fff so the gradient shows.
+  // #5863c: a cell frozen on BOTH axes (frozen column ∩ frozen row) needs a HIGHER zIndex (3) than
+  // either single-axis frozen cell (2) so it paints over a frozen-row-only or frozen-column-only
+  // neighbor cell scrolling past it — see multitable-frozen-columns-grid.spec.ts.
+  const frozenStyle: Record<string, string> | undefined = (frozen || frozenRow)
+    ? {
+        position: 'sticky',
+        ...(frozen ? { left: `${frozenLeft(ci!)}px` } : {}),
+        ...(frozenRow ? { top: `${frozenRowTop(ri!)}px` } : {}),
+        zIndex: frozen && frozenRow ? '3' : '2',
+        backgroundColor: colorScaleFill ?? effectiveFormat?.backgroundColor ?? '#fff',
+      }
     : undefined
   // Over a scale fill, force a readable text color via a CSS var the cell-renderer
   // sign-colors inherit (see the `.meta-grid__cell--scale-fill` :deep rule). A
@@ -1189,6 +1314,28 @@ const rowNumLeft = computed(() => (props.enableMultiSelect ? CHECK_COL_W : 0))
 function onToggleFreeze(i: number) {
   if (i === frozenCount.value - 1) emit('set-frozen', [])
   else emit('set-frozen', props.visibleFields.slice(0, i + 1).map((f) => f.id))
+}
+
+// ── frozen top rows (#5863c) ────────────────────────────────────────────────
+// FLAT/UNGROUPED PATH ONLY — the grouped-rows render path (server-side nested groups, subtotals,
+// collapse) has no stable "first N rendered data rows" concept independent of collapse state, so
+// row-freezing is intentionally a no-op there (isFrozenRow always false when groupedRows is truthy).
+// The row-number context menu disables the freeze-rows action while grouping is active for the
+// same reason (see onRowContextMenu / the freeze-rows menu entry below).
+const frozenTopRowsCountEffective = computed(() => {
+  if (groupedRows.value) return 0
+  return Math.max(0, Math.min(props.frozenTopRowCount ?? 0, filteredRows.value.length))
+})
+function isFrozenRow(ri: number) { return ri < frozenTopRowsCountEffective.value }
+// Real layout override (measureViewport), falling back to the header's own padding/font math so the
+// very first paint (before layout is measured) still offsets frozen rows below the header.
+const HEADER_ROW_DEFAULT_HEIGHT = 37
+const measuredHeaderHeight = ref(0)
+const headerHeightPx = computed(() => (measuredHeaderHeight.value > 0 ? measuredHeaderHeight.value : HEADER_ROW_DEFAULT_HEIGHT))
+function frozenRowTop(ri: number) { return headerHeightPx.value + ri * rowHeightPx.value }
+function onToggleFreezeRows(ri: number) {
+  if (frozenTopRowsCountEffective.value === ri + 1) emit('set-frozen-rows', 0)
+  else emit('set-frozen-rows', Math.min(ri + 1, MAX_FROZEN_TOP_ROWS))
 }
 
 // ── aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY, no local fallback ──
@@ -1265,10 +1412,58 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
   handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
 }
 
+// D2 (grid-commit-reliability): a plain click on a DIFFERENT cell while an
+// editor is open must not leave the old editor mounted holding a draft (the
+// "dangling editor" bug — see confirmEdit/startEdit's matching guard below).
+// This click doesn't open a new editor itself (single click never has),
+// it only needs to close/commit whatever was open before moving focus.
 function onCellClick(ri: number, ci: number, rid: string) {
-  focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   const fieldId = props.visibleFields[ci]?.id
+  if (editCell.value && (editCell.value.recordId !== rid || editCell.value.fieldId !== fieldId)) {
+    // B2 (客户反馈 2026-09-24 #4c, PR #6083 review item 3): the open editor holds a dateTime draft the
+    // parser rejected. Closing it here would drop that text silently (confirmEdit commits the stale
+    // staged value). Keep the editor — and its inline error — where it is and hand focus back to it;
+    // the person fixes the text or presses Escape.
+    if (invalidDateTimeDraftIsOnScreen()) {
+      refocusEditorInput()
+      return
+    }
+    confirmEdit()
+    // The old editor's <input> just unmounted (its own DOM focus goes to
+    // `document.body` per spec); return focus to the grid root so keyboard
+    // nav (Enter/Arrows) keeps working without an extra click.
+    refocusGridRoot()
+  }
+  focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   if (fieldId) emit('cursor-focus', { recordId: rid, fieldId })
+}
+
+// B2: set by MetaCellEditor's `update:invalidDraft` while its dateTime draft is unparseable-and-flagged.
+// Cleared whenever the editor closes (confirm / cancel / a new edit starts) and by the editor itself on
+// unmount.
+const editorInvalidDraft = ref(false)
+/** The dateTime editor's input while the editor is rendered — null once its row/field left the rendered set. */
+function mountedDateTimeEditorInput(): HTMLInputElement | null {
+  return gridRoot.value?.querySelector<HTMLInputElement>('.meta-cell-editor input[data-meta-datetime-input]') ?? null
+}
+/**
+ * Re-judge of PR #6083 (must-fix): block a cell switch ONLY while the editor that flagged the draft is
+ * still on screen. A page change / filter / sort under virtualization / row delete / hide-field / view
+ * switch can unmount the editor after it flagged the draft; trusting the flag alone would then send every
+ * click to a `focus()` on nothing and lock the grid out of edit mode until a remount. When the editor is
+ * gone the flag is stale: clear it and fall through to the pre-existing `confirmEdit()` path (which also
+ * clears the stale `editCell`). The editor additionally reports `false` on unmount — two independent guards.
+ */
+function invalidDateTimeDraftIsOnScreen(): boolean {
+  if (!editorInvalidDraft.value) return false
+  if (mountedDateTimeEditorInput()) return true
+  editorInvalidDraft.value = false
+  return false
+}
+function refocusEditorInput() {
+  nextTick(() => {
+    mountedDateTimeEditorInput()?.focus()
+  })
 }
 
 // Live cell-cursors: remote collaborators currently occupying a given cell (presentational highlight).
@@ -1278,25 +1473,135 @@ function hasRemoteCursor(recordId: string, fieldId: string): boolean {
 
 function startEdit(row: MetaRecord, field: MetaField) {
   if (!isEditable(row.id, field)) return
+  // D2: switching the edit target (dblclick a DIFFERENT cell than the one
+  // currently open) must commit-or-close the previous editor first — never
+  // let two drafts exist at once. A no-op when the previous draft's value is
+  // unchanged (confirmEdit's own `value !== row.data[fieldId]` guard).
+  if (editCell.value && (editCell.value.recordId !== row.id || editCell.value.fieldId !== field.id)) {
+    // B2: never swap out an editor that is SHOWING an invalid dateTime draft (see onCellClick); a stale
+    // flag from an editor that was torn down is cleared inside the check and the old path runs.
+    if (invalidDateTimeDraftIsOnScreen()) {
+      refocusEditorInput()
+      return
+    }
+    confirmEdit()
+  }
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
-function confirmEdit(row: MetaRecord) {
+// Commits the CURRENTLY open edit (if any) and closes it — the single
+// canonical "close this editor" path reused by @confirm (Enter / native
+// change), @blur-commit (click-away on the text/number/date branches),
+// @tab-commit, and the cross-cell guards in startEdit/onCellClick above. Takes
+// no row argument (unlike the pre-D2 signature) so every caller — including
+// blur/Tab, which have no `row` in scope — can share it; the row is looked up
+// by id via `recordById` (already built from `props.rows` for lock-state).
+function confirmEdit() {
   if (!editCell.value) return
   const { recordId, fieldId, value } = editCell.value
-  // Skip the REST patch only when the editor signalled that Yjs carried
-  // the edit for this exact cell. If the Yjs path was not active (flag
-  // off, timeout, error) we stay on REST unchanged.
-  const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
-  if (!handledViaYjs && value !== row.data[fieldId]) {
-    emit('patch-cell', recordId, fieldId, value, row.version)
+  const row = recordById.value.get(recordId)
+  // Row can be missing if it was paged/filtered away mid-edit — close
+  // without emitting rather than dereferencing `row.data`.
+  if (row) {
+    // Skip the REST patch only when the editor signalled that Yjs carried
+    // the edit for this exact cell. If the Yjs path was not active (flag
+    // off, timeout, error) we stay on REST unchanged.
+    const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
+    // P3-2 (round 5): normalize ONLY the null/undefined distinction before
+    // comparing — not '' or any other falsy value. `startEdit` stages a
+    // never-before-set cell as `row.data[field.id] ?? null` (line above,
+    // `?? null`), so an untouched edit session on a field that is `undefined`
+    // in `row.data` (never written, vs. explicitly written `null`) staged
+    // `null` while `row.data[fieldId]` itself stays `undefined` — the strict
+    // `!==` below used to read that as a genuine change and emit
+    // `patch-cell(..., null, ...)` on a plain type-to-edit-then-close-with-
+    // no-typing, for a cell nothing about the user's session actually
+    // touched. `''` must stay distinct from both (an explicit empty string is
+    // a real, different value from "never set") — so this normalizes ONLY
+    // `undefined -> null` on each side, not a general nullish/falsy
+    // collapse.
+    const normalize = (v: unknown): unknown => (v === undefined ? null : v)
+    if (!handledViaYjs && normalize(value) !== normalize(row.data[fieldId])) {
+      emit('patch-cell', recordId, fieldId, value, row.version)
+    }
   }
   editCell.value = null
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
 }
 
-function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
+function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null; editorInvalidDraft.value = false }
+
+// D3: Enter commits via the same confirmEdit() as blur/Tab, then explicitly
+// returns DOM focus to the grid root — the editor's <input> just unmounted,
+// and without this "commit + close + keep focus on the same cell" (the
+// chosen Enter semantics — Airtable-style, no auto-move-down) would only be
+// a visual outline: the NEXT keystroke would go nowhere (focus fell to
+// `document.body`). Reused by every @confirm source (Enter, and native
+// change on select/boolean/rating/etc.), not just literal Enter presses —
+// none of those other sources hand focus to anything else, so reclaiming it
+// is safe/consistent for all of them.
+function onEditorConfirm() {
+  confirmEdit()
+  refocusGridRoot()
+}
+
+// D2: click-away commit for the editor's blur-commit signal (see
+// MetaCellEditor's `blur-commit` doc comment for which branches emit it).
+// Deliberately does NOT refocus the grid — a blur means focus already moved
+// somewhere else (another cell, the record panel, ...); stealing it back
+// would fight the user.
+function onEditorBlurCommit() {
+  confirmEdit()
+}
+
+// D2: Tab / Shift+Tab inside the open editor = commit + move focus to the
+// adjacent cell, opening nothing (matches the Enter semantics above — no
+// auto-open). "Adjacent cell" rather than "next *editable* cell" (the
+// literal task wording) to match the EXISTING arrow-key nav, which also does
+// not skip read-only columns — introducing a different traversal rule for
+// Tab-out-of-an-editor alone would be a bigger, less coherent behavior change
+// than reusing the nav the grid already has everywhere else.
+function onEditorTabCommit(shiftKey: boolean) {
+  confirmEdit()
+  moveFocusAfterEditorTab(!shiftKey)
+  refocusGridRoot()
+}
+
+// Mirrors the ArrowRight/ArrowLeft wrap-to-next/prev-row logic in onKeydown
+// below, but is intentionally a SEPARATE function rather than a shared
+// extraction: onKeydown's non-editing Tab case has its own (pre-existing,
+// out-of-scope) Shift+Tab quirk — see the comment on that switch-case — and
+// reusing one function for both would risk carrying this new, correct
+// direction handling into that unrelated path.
+function moveFocusAfterEditorTab(forward: boolean) {
+  const navRows = displayRows.value
+  const maxC = props.visibleFields.length - 1
+  const maxR = navRows.length - 1
+  if (forward) {
+    if (focusCol.value < maxC) focusCol.value++
+    else if (focusRow.value < maxR) { focusRow.value++; focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) }
+  } else {
+    if (focusCol.value > 0) focusCol.value--
+    else if (focusRow.value > 0) { focusRow.value--; focusCol.value = maxC; emit('select-record', navRows[focusRow.value].id) }
+  }
+  scrollFocusedRowIntoWindow()
+}
+
+// Guarded by `!editCell.value` at fire time (not just at schedule time): if a
+// NEW edit session opened in between (e.g. this callback was scheduled by an
+// Enter-commit, and something reopened an editor before the microtask ran),
+// stealing DOM focus back to the grid root would yank focus out of that
+// freshly-opened, freshly-self-focused editor. Without this guard a stale
+// refocus can even mask an unrelated bug: it blurs the reopened editor,
+// and — because blur on the text/number/date branches now commits (D2) —
+// that blur-triggered close can look indistinguishable from the reopen
+// never having happened at all.
+function refocusGridRoot() {
+  nextTick(() => { if (!editCell.value) gridRoot.value?.focus() })
+}
 
 function openLinkPickerFromCell(recordId: string, field: MetaField) {
   cancelEdit()
@@ -1342,23 +1647,240 @@ async function pasteFocusedCell() {
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
   if (!row || !field || !isEditable(row.id, field)) return
+  // person/multiSelect store array values server-side; pasting raw clipboard
+  // text would be rejected by record-write-service's field validation (400).
+  if (field.type === 'person' || field.type === 'multiSelect') return
   try {
     const text = await navigator.clipboard.readText()
-    const value = field.type === 'number' && text !== '' ? Number(text) : text
+    let value: unknown = field.type === 'number' && text !== '' ? Number(text) : text
+    // 客户反馈 2026-09-24 #4c (S1): pasted date-time text is a BUSINESS wall clock (zone rule: explicit
+    // non-UTC field zone, else the business zone), converted here to the UTC instant — never read in the
+    // browser's zone. Text the parser rejects is sent as-is: the server applies the same grammar and
+    // answers 400, which the grid surfaces as an error toast — not a silent drop.
+    if (field.type === 'dateTime' && typeof text === 'string' && text.trim() !== '') {
+      const ms = parseDateTimeTextToUtcMs(text, resolveDateTimeTimezone(field.property))
+      if (ms !== null) value = new Date(ms).toISOString()
+    }
     emit('patch-cell', row.id, field.id, value, row.version)
   } catch { /* clipboard access denied */ }
 }
 
+// D4: isComposing (Chrome/Firefox) / keyCode 229 (older Safari/IME shims) /
+// key === 'Process' (some IME shims report this literal key value during
+// composition) all mean this keydown is part of an IME composition, not a
+// real keystroke from the user. Guards the WHOLE grid-root handler (not just
+// Enter/Escape) — harmless for other keys (arrow/copy/paste are not
+// meaningful mid-composition either) and, combined with the length===1 check
+// on the D1 type-to-edit branch below, means a composition keystroke can
+// never seed a new edit nor reach the Enter/Escape switch cases.
+function isGridComposingEvent(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229 || e.key === 'Process'
+}
+
+// P1 (grid-commit-reliability, round 2): D1's type-to-edit branch below must
+// NOT seed/preventDefault a keydown whose real origin is a descendant
+// interactive control (row-select checkbox, header select-all, expand
+// button, bulk bar/pager buttons, footer aggregation <select>, ...) that
+// merely happens to sit inside `.meta-grid` and so has this handler bubble
+// to it. Without this check, pressing a printable key (Space included — the
+// keyboard-activation key for a checkbox/button) while one of those controls
+// has real DOM focus both suppresses its native activation (preventDefault)
+// AND opens the editor on whatever cell focusRow/focusCol last pointed at,
+// seeded with that character — silently overwriting that cell's value on
+// the next click-away now that blur-commit (D2) is wired.
+//
+// Cells (`<td role="gridcell">`) are never independently focusable (no
+// tabindex) — real DOM focus is either on `gridRoot` itself (the normal
+// case; tabindex="0" on `.meta-grid`) or on one of those descendant
+// controls once a click/Tab has focused it. So the allowlist is EXACT-
+// ELEMENT: the event target IS the grid root, OR the target ITSELF is the
+// specific gridcell `<td>` that currently matches focusRow/focusCol
+// (defensive — cells aren't focusable today, so this arm is normally
+// unreachable, but a future change that adds per-cell tabindex should not
+// silently regress this guard). Anything else — including a descendant
+// INSIDE that same focused `<td>` (an <input>/<button>/<select>/<textarea>/
+// [contenteditable]/[role=checkbox], e.g. the per-cell field-comment button
+// that renders precisely when its `<td>` is the focused one) — is rejected.
+//
+// P3-4 (round 3): this used to walk up via `target.closest('[role="gridcell"]')`
+// before comparing dataset.ri/ci, which finds the ANCESTOR gridcell of a
+// descendant too — so a focusable descendant of the CURRENTLY-focused `<td>`
+// (the field-comment-action button is the one that actually renders there)
+// passed this check even though the doc comment already claimed descendants
+// were rejected. Reading `target.getAttribute('role')` directly instead of
+// `closest()` means only an element that IS itself `role="gridcell"` can
+// match — a descendant button has no such attribute of its own.
+//
+// P3-5 (round 3): also the single target gate for the REST of onKeydown's
+// switch (Arrow/Tab/Enter/Escape) below — see that call site. Renamed from
+// `isValidTypeToEditTarget` since it now guards more than just D1 seeding.
+function isValidGridKeydownTarget(e: KeyboardEvent): boolean {
+  const target = e.target as HTMLElement | null
+  if (!target) return false
+  if (target === gridRoot.value) return true
+  if (target.getAttribute('role') !== 'gridcell') return false
+  return Number(target.dataset.ri) === focusRow.value && Number(target.dataset.ci) === focusCol.value
+}
+
 function onKeydown(e: KeyboardEvent) {
+  if (isGridComposingEvent(e)) return
+  // P3-3 (round 4): the SINGLE target gate for this ENTIRE handler — mod+c/v copy/paste, D1's
+  // type-to-edit seed, AND the Enter/Tab/Arrow/Escape switch below all now sit behind this one
+  // call, folded in from what used to be three separate call sites (D1 carried its own inline
+  // `&& isValidGridKeydownTarget(e)`, the switch had a second copy just above it, and mod+c/v had
+  // NONE at all). That third gap meant a descendant control's own Ctrl+C/Ctrl+V — e.g. copying text
+  // selected inside a focusable descendant with its own clipboard semantics — fired
+  // copyFocusedCell()/pasteFocusedCell() against whatever cell focusRow/focusCol last pointed at,
+  // instead of leaving the descendant's own default alone (same "hijacked by name, not by real
+  // target" defect the D1/P3-5 fixes already closed for typing and Enter/Tab/Arrow/Escape). Keeping
+  // ONE gate (rather than three copies that could drift) means removing it reds every one of those
+  // paths at once — see isValidGridKeydownTarget's doc comment above for the allowlist itself.
+  if (!isValidGridKeydownTarget(e)) return
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
   if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
   if (editCell.value) return
   const navRows = displayRows.value
   const maxR = navRows.length - 1, maxC = props.visibleFields.length - 1
+  // Record inspector v3 (2026-09-05, PR-A §1.1/§1.5): Shift+Space on a focused row opens the
+  // inspector. Dispatched HERE, strictly BEFORE the D1 type-to-edit printable-key branch below —
+  // `e.key === ' '` has `.length === 1`, so without this branch running first, Shift+Space on an
+  // editable string cell would fall into D1 and seed the editor with a literal space character
+  // (verified against this exact head: #5481's D1 branch is gated only on `!mod && !e.altKey`,
+  // which Shift does not set). Bare Space (no Shift) is UNCHANGED — it still reaches D1 below and
+  // types, per #5481 (the design's own grounding-facts note: Proposal 1's bare-Space open was stale
+  // against this head and is replaced by Shift+Space for exactly this reason). Gated on
+  // `focusRow`/`focusCol` (a real focused row), not `editCell` a second time (already returned above).
+  if (e.shiftKey && !mod && !e.altKey && e.key === ' ' && focusRow.value >= 0) {
+    const r = navRows[focusRow.value]
+    if (r) {
+      e.preventDefault()
+      emit('expand-record', r.id)
+    }
+    return
+  }
+  // D1: type-to-edit. A printable single character on a focused, editable
+  // string/number cell opens the editor with the draft SEEDED (replace, not
+  // appended) to that character, consuming the keystroke (preventDefault) so
+  // it isn't ALSO typed once the editor mounts — and, for a plain <div>
+  // holding focus, preventDefault also stops incidental browser defaults
+  // (e.g. Space triggering a page-scroll).
+  //   - string: any printable single character seeds the draft as-is.
+  //   - number: seeding is restricted to DIGITS 0-9 only (not '.'/'-') so the
+  //     seeded draft is always a clean, finite Number — never a string typed
+  //     into a numeric column, and never NaN from a lone '-' or '.'. This is
+  //     a deliberate narrowing versus the string case: decimals/negatives
+  //     remain fully editable via dblclick, or by continuing to type after
+  //     the digit seed (onNumberInput re-parses the whole field each
+  //     keystroke, same as always).
+  //   - boolean/date/select/link/attachment/person/multiSelect/dateTime (the rest of EDITABLE): NOT
+  //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
+  //     with one printable character" semantics.
+  //
+  //   P2 (round 5): a `string` field that renders as the date-like
+  //     `<input type="date">` branch (`isDateLikeStringField` — by field-name
+  //     convention, e.g. "Due Date", or because the current value already
+  //     looks like an ISO date; the SAME predicate MetaCellEditor's own
+  //     `isDateLike` uses to choose that branch) is excluded from the string
+  //     seed above and falls through to `undefined`/not-seeded — treated
+  //     exactly like the real `date` field type just above: a date picker has
+  //     no meaningful "replace with one printable character" semantics
+  //     either, seeded or not. Before this exclusion, seeding a bare
+  //     character (e.g. '5') into `modelValue` opened a `type="date"` input
+  //     whose `:value` binding can't parse a single digit — it rendered
+  //     EMPTY — while blur-commit (D2) would still commit that raw character
+  //     verbatim over the cell's real value on click-away: a picker showing
+  //     nothing, committing something. Checked against `r.data[f.id]`
+  //     (matching `isDateLike`'s own `props.modelValue` read at render time),
+  //     not the yet-to-be-typed seed character.
+  //
+  //   P1 (round 4, superseding P3-1/round 3): a Yjs-eligible `string` cell
+  //   (`isYjsTextEligible` — the SAME condition MetaCellEditor uses to decide
+  //   whether to CONSTRUCT a live binding at all) is a carve-out from the
+  //   seed-with-e.key rule above ONLY when `isYjsCollabEnabled()` — the SAME
+  //   build-flag helper `useYjsCellBinding` itself gates on — is also true.
+  //   Round 3's version of this carve-out checked eligibility alone, so with
+  //   the flag off (the default: `VITE_ENABLE_YJS_COLLAB` unset) it fired for
+  //   every populated, recordId-wired string cell even though no live binding
+  //   was ever going to be constructed to catch the keystroke — the editor
+  //   opened EMPTY on a printable key (the keystroke silently discarded) and
+  //   a plain click-away then blur-committed that empty draft, erasing the
+  //   cell. Consulting the flag here fixes that: flag OFF (default) falls
+  //   straight through to the normal string-seed branch below, byte-
+  //   identical to a non-eligible string cell.
+  //
+  //   Flag ON + eligible: still preventDefault AND stopPropagation (P3-1,
+  //   round 5 — preventDefault alone stops the browser's OWN default action
+  //   for the key, e.g. Space-scroll or Firefox quick-find on '/', but does
+  //   NOT stop the keydown from continuing to bubble; an ancestor listener
+  //   that never reads `defaultPrevented` — e.g. the workbench's own
+  //   shortcuts-overlay '?' handler — still observes it. A round-4 version of
+  //   this comment claimed preventDefault alone was sufficient; it was not:
+  //   without stopPropagation, seeding '?' both opened this editor AND
+  //   toggled the workbench's shortcuts overlay from the same keydown) and
+  //   still open the editor immediately — but stage the ROW'S CURRENT VALUE, never the
+  //   typed character and never ''. This is exactly `startEdit`'s own seed
+  //   (`row.data[field.id] ?? null`, see that function) minus the keystroke:
+  //   type-to-edit on a Yjs-eligible cell degrades to "open the editor as if
+  //   Enter had been pressed". The pressed character itself is not applied —
+  //   forwarding a pre-activation draft into Y.Text once the async binding
+  //   connects is the same unsafe "nobody synced yet" vs. "a collaborator
+  //   just synced empty" ambiguity documented in the removed P3-B watcher
+  //   (round 2, MetaCellEditor git history); flag-ON collaborative editing is
+  //   a follow-up owner decision, not attempted here.
+  //   `groupedRows.value ? null : r.id` mirrors exactly what the template
+  //   wires as `:record-id` on MetaCellEditor for each render path (the
+  //   grouped-rows branch passes no `record-id` at all) — grouped-mode
+  //   string cells are therefore never Yjs-eligible (regardless of the flag)
+  //   and keep seeding normally.
+  if (!mod && !e.altKey && e.key.length === 1 && focusRow.value >= 0 && focusCol.value >= 0) {
+    const r = navRows[focusRow.value]
+    const f = props.visibleFields[focusCol.value]
+    if (r && f && isEditable(r.id, f)) {
+      if (isYjsCollabEnabled() && isYjsTextEligible(f, groupedRows.value ? null : r.id, r.data[f.id])) {
+        e.preventDefault()
+        e.stopPropagation()
+        yjsHandledCellKey.value = null
+        editCell.value = { recordId: r.id, fieldId: f.id, value: r.data[f.id] ?? null }
+        return
+      }
+      const seedValue: unknown =
+        f.type === 'string' && !isDateLikeStringField(f, r.data[f.id]) ? e.key
+        : f.type === 'number' && /^[0-9]$/.test(e.key) ? Number(e.key)
+        : undefined
+      if (seedValue !== undefined) {
+        e.preventDefault()
+        e.stopPropagation()
+        yjsHandledCellKey.value = null
+        editCell.value = { recordId: r.id, fieldId: f.id, value: seedValue }
+        return
+      }
+    }
+  }
+  // P3-5 (round 3, same target-rejection rule as D1 above, pre-existing
+  // defect fixed under the same rule): without the single gate at the top of
+  // this handler, Enter/Tab/Arrows/Escape fired on a DESCENDANT interactive
+  // control (the row-expand button, the lock-toggle button, the row-select
+  // checkbox, a pager/bulk-bar button, ...) would be hijacked by this switch
+  // purely because the keydown bubbled up into `.meta-grid` — e.g. Enter on
+  // the expand button preventDefault'd AND opened the cell editor on
+  // whatever focusRow/focusCol last pointed at; Tab from the row checkbox
+  // preventDefault'd and moved the grid's OWN focus cursor instead of
+  // letting native Tab order continue past the checkbox. The top-of-handler
+  // `isValidGridKeydownTarget` gate (see its call site and doc comment
+  // above) covers this switch too — descendant controls keep their native
+  // keyboard behaviour untouched. (Round 4: this used to be a SECOND call to
+  // the same check, right here; collapsed into the single top-of-handler
+  // gate — see that call site's doc comment for why a second copy would
+  // have made some P3-4/P3-5 mutations non-discriminating.)
   switch (e.key) {
     case 'ArrowDown': e.preventDefault(); if (focusRow.value < maxR) { focusRow.value++; if (focusCol.value < 0) focusCol.value = 0; emit('select-record', navRows[focusRow.value].id) } break
     case 'ArrowUp': e.preventDefault(); if (focusRow.value > 0) { focusRow.value--; emit('select-record', navRows[focusRow.value].id) } break
+    // Pre-existing, out-of-scope quirk (left untouched): this case matches
+    // 'Tab' regardless of e.shiftKey, so a non-editing Shift+Tab moves focus
+    // FORWARD here (same as plain Tab) instead of backward — unrelated to
+    // the grid-commit-reliability work, which only touches Tab INSIDE an
+    // open editor (see onEditorTabCommit / moveFocusAfterEditorTab above).
     case 'ArrowRight': case 'Tab':
       if (e.key === 'Tab' && !e.shiftKey) e.preventDefault()
       if (e.key === 'ArrowRight') e.preventDefault()
@@ -1394,17 +1916,34 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 /* Header-only refinements: target thead specifically so the shared
    row-num/check-col classes (also used on body td) keep their existing
-   body-row appearance — only the header cells adopt the panel/token look. */
+   body-row appearance — only the header cells adopt the panel/token look.
+   #5863: these corner cells sit at the intersection of the left-sticky row-num/
+   check-col stack and the sticky-top header row, so they need BOTH `top: 0`
+   and a zIndex above a frozen body cell's (2) — 3, matching the plain
+   (non-frozen) `.meta-field-header` tier, so the corner paints over body
+   content scrolling underneath it in both directions. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
+/* #5863c: a frozen-top row is always rendered (never virtualized away, see windowRows/isFrozenRow)
+   and pinned by its own cells' `position: sticky; top: ...` (see cellStyle) — `content-visibility:
+   auto` would otherwise let the browser skip its layout/paint once scrolled "off" its ORIGINAL flow
+   position, which fights the sticky offset. */
+.meta-grid__row--frozen-top { content-visibility: visible; }
+.meta-grid__row-pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }
+.meta-grid__row-num:hover .meta-grid__row-pin { opacity: 0.4; }
+.meta-grid__row-pin:hover { opacity: 0.85; }
+.meta-grid__row-pin--on { opacity: 0.9; }
 .meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
 .meta-grid__cell { position: relative; padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
@@ -1485,6 +2024,22 @@ thead .meta-grid__check-col {
 .meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
 .meta-grid__expand-btn:hover { color: #666; }
 .meta-grid__expand-btn--open { transform: rotate(90deg); color: #409eff; }
+/* Record inspector v3 (2026-09-05, PR-A §1.1): the row-number "open record" icon. `opacity: 0`
+   (not `display: none`/`visibility: hidden`) so it stays keyboard-focusable and IN the a11y tree at
+   all times (design's own requirement) while only being visually revealed on row hover or when a
+   descendant of the row has focus (`:focus-within` covers Tabbing to the icon itself, so it never
+   disappears out from under the focus it just received). */
+.meta-grid__open-record-btn {
+  border: none; background: none; cursor: pointer; font-size: 11px; color: #999; padding: 0 2px;
+  opacity: 0; transition: opacity 0.1s;
+}
+.meta-grid__row:hover .meta-grid__open-record-btn,
+.meta-grid__row:focus-within .meta-grid__open-record-btn,
+.meta-grid__open-record-btn:focus-visible {
+  opacity: 1;
+}
+.meta-grid__open-record-btn:hover { color: var(--ms-color-primary, #409eff); }
+.meta-grid__open-record-btn:focus-visible { outline: 2px solid var(--ms-color-primary, #409eff); outline-offset: 1px; }
 .meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
 .meta-grid__expand-detail { padding: 8px 16px 12px !important; }
 .meta-grid__expand-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }

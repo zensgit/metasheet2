@@ -21,6 +21,10 @@ const path = require('node:path')
 const PLUGIN_DIR = path.join(__dirname, '..')
 const MANIFEST_PATH = path.join(PLUGIN_DIR, 'plugin.json')
 const ENTRY_PATH = path.join(PLUGIN_DIR, 'index.cjs')
+const {
+  ENV: STOCK_PREPARATION_ENV,
+  FEATURE_FLAG: STOCK_PREPARATION_FEATURE_FLAG,
+} = require('../lib/sealed-export/stock-preparation-runtime-config.cjs')
 
 function createMockContext() {
   const routes = []
@@ -114,6 +118,12 @@ async function runMockResponse(handler) {
 }
 
 async function main() {
+  const previousFeatureFlag =
+    process.env[STOCK_PREPARATION_FEATURE_FLAG]
+  const previousArtifactRoot =
+    process.env[STOCK_PREPARATION_ENV.artifactRoot]
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+
   // --- 1. Manifest structural checks -----------------------------------
   const manifest = require(MANIFEST_PATH)
   assert.equal(manifest.manifestVersion, '2.0.0', 'manifest.manifestVersion must be 2.0.0')
@@ -180,6 +190,11 @@ async function main() {
   assert.ok(statusResult.adapters.includes('metasheet:multitable'), 'status reports MetaSheet multitable target adapter')
   assert.equal(statusResult.deadLetters, true, 'status reports dead-letter store')
   assert.equal(statusResult.deadLetterReplay, true, 'status reports dead-letter replay')
+  assert.equal(
+    statusResult.stockPreparationSqlServerSealedSnapshot,
+    false,
+    'sealed-snapshot runtime remains disabled by default',
+  )
   assert.deepEqual(statusResult.capabilities, {
     externalSystems: statusResult.externalSystems,
     adapters: statusResult.adapters,
@@ -189,6 +204,8 @@ async function main() {
     deadLetters: statusResult.deadLetters,
     deadLetterReplay: statusResult.deadLetterReplay,
     staging: statusResult.staging,
+    stockPreparationSqlServerSealedSnapshot:
+      statusResult.stockPreparationSqlServerSealedSnapshot,
   }, 'status capabilities mirror flat readiness fields')
 
   // --- 5b. Comm API exposes registry methods ----------------------------
@@ -230,11 +247,107 @@ async function main() {
 
   // --- 7. Deactivate clears state --------------------------------------
   await entry.deactivate()
-  // After deactivate, a re-activation must work with clean slate
+  // A malformed enabled S6 configuration disables only that capability.
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'true'
+  delete process.env[STOCK_PREPARATION_ENV.artifactRoot]
   const { context: context2, inspect: inspect2 } = createMockContext()
   await entry.activate(context2)
   assert.ok(inspect2.routes.length >= 1, 'routes cleanly re-registered after deactivate')
+  const healthRoute2 = inspect2.routes.find(
+    (route) =>
+      route.method === 'GET'
+      && route.path === '/api/integration/health',
+  )
+  const healthBody2 = await runMockResponse(healthRoute2.handler)
+  assert.equal(
+    healthBody2.capabilities.stockPreparationSqlServerSealedSnapshot,
+    false,
+    'S6 initialization refusal leaves only the S6 capability disabled',
+  )
+  assert.equal(
+    inspect2.logs.some(
+      ([level, message]) =>
+        level === 'warn'
+        && message.includes('runtime initialization refused'),
+    ),
+    true,
+    'S6 initialization refusal emits a values-free warning',
+  )
   await entry.deactivate()
+
+  // --- 8. The connection resolver is handed the plugin logger ----------
+  // WHY a connection was refused is written by the connection resolver, through the logger that
+  // index.cjs passes to it. A resolver built without a logger refuses exactly the same way and
+  // writes nothing, so no other suite notices when that wiring is dropped. This section does: it
+  // activates the real entry module, refuses one canonical binding through the comm API, and
+  // requires the refusal line — once, with its three closed words and no value.
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+  {
+    const REFUSAL_REASON_KEY = Symbol.for('metasheet.dataSource.refusalReason')
+    const REFUSAL_LINE = '[plugin-integration-core] connection refused'
+    const marker = 'zq9mark'
+    const { context: wiredContext, inspect: wiredInspect } = createMockContext()
+    const lines = []
+    wiredContext.logger = {
+      info: (...args) => lines.push(['info', args]),
+      warn: (...args) => lines.push(['warn', args]),
+      error: (...args) => lines.push(['error', args]),
+    }
+    let facadeCalls = 0
+    wiredContext.api.dataSources = {
+      async resolveConnectionRegistration(id) {
+        facadeCalls += 1
+        const refusal = new Error(`Data source with id '${id}' not found`)
+        refusal.name = 'DataSourceUnavailableError'
+        refusal.code = 'DATA_SOURCE_NOT_FOUND'
+        Object.defineProperty(refusal, REFUSAL_REASON_KEY, { value: 'not_loaded_credentials_unreadable' })
+        throw refusal
+      },
+      async assertReferenceable() {},
+    }
+    await entry.activate(wiredContext)
+    const wiredApi = wiredInspect.namespaces.get('integration-core')
+    await assert.rejects(
+      () => wiredApi.upsertExternalSystem({
+        tenantId: 'tenant_1',
+        workspaceId: null,
+        name: `smoke ${marker}`,
+        kind: 'data-source:sql-readonly',
+        role: 'source',
+        connectionId: `ds_${marker}`,
+      }),
+      (error) => {
+        assert.equal(error.name, 'ExternalSystemValidationError', 'the refusal is the one the registry always raised')
+        assert.equal(error.message, 'canonical connection is unavailable')
+        assert.deepEqual(error.details, { field: 'connectionId', code: 'CONNECTION_CANONICAL_UNAVAILABLE' })
+        return true
+      },
+    )
+    assert.equal(facadeCalls, 1, 'the host facade was asked once')
+    const refusalLines = lines.filter(([, args]) => args[0] === REFUSAL_LINE)
+    assert.deepEqual(refusalLines, [[
+      'warn',
+      [REFUSAL_LINE, {
+        phase: 'canonical',
+        code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+        reason: 'not_loaded_credentials_unreadable',
+      }],
+    ]], 'index.cjs hands its logger to the connection resolver: one refusal, one line')
+    assert.ok(!JSON.stringify(refusalLines).includes(marker), 'the refusal line carries no id')
+    await entry.deactivate()
+  }
+
+  if (previousFeatureFlag === undefined) {
+    delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
+  } else {
+    process.env[STOCK_PREPARATION_FEATURE_FLAG] = previousFeatureFlag
+  }
+  if (previousArtifactRoot === undefined) {
+    delete process.env[STOCK_PREPARATION_ENV.artifactRoot]
+  } else {
+    process.env[STOCK_PREPARATION_ENV.artifactRoot] =
+      previousArtifactRoot
+  }
 
   console.log('✓ plugin-runtime-smoke: all assertions passed')
 }

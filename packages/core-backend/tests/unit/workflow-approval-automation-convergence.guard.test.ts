@@ -114,6 +114,16 @@ const BPMN_IMPORT_ALLOWLIST: Array<{ file: string; disposition: 'LEGACY-RUNTIME'
     disposition: 'TEST',
     reason: 'A3/A4 values-free egress destination-authorization evidence tests only — exercises the shipped egress guard through the real env path, not a product runtime consumer.',
   },
+  {
+    file: 'workflow/__tests__/BPMNWorkflowEngine.timerPoller.test.ts',
+    disposition: 'TEST',
+    reason: '#4770/#4779 owner ruling (2026-08-05, Plan B) env-gate regression tests for the minute timer poller (startTimerProcessor/shutdown) only — not a product runtime consumer.',
+  },
+  {
+    file: 'workflow/__tests__/BPMNWorkflowEngine.timerWriteGate.test.ts',
+    disposition: 'TEST',
+    reason: '#4783 owner review P1-1 write-gate regression tests for createTimerJob (rejects date/duration timer persistence while the poller is disabled) only — not a product runtime consumer.',
+  },
 ]
 
 /**

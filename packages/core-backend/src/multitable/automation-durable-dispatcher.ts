@@ -120,6 +120,16 @@ export interface ClaimOptions {
    * head-of-line block). Best-effort — a throwing callback never fails the claim.
    */
   onClaimTimePoison?: (info: { outboxId: string; consumerKey: string; attempts: number }) => void
+  /**
+   * (outbox_id, consumer_key) pairs THIS caller has already claimed in the current dispatch pass — they are
+   * excluded from the claim so a caller can never re-claim a row it is already handling (#4497 P1). Without
+   * it a row left `in_progress` by a non-resolving disposition (a heartbeat DB error / a mid-flight lease
+   * loss) becomes reclaimable the instant its lease expires — and the caller's OWN next slot re-claims it and
+   * runs the adapter a SECOND time inside the same pass (a duplicate external operation, not "at-least-once
+   * across workers"). The claim scans PAST an excluded row (it is not a head-of-line block): the next
+   * reclaimable row is claimed instead. Cross-worker concurrency is unaffected — this list is per-caller.
+   */
+  excludeRows?: ReadonlyArray<{ outboxId: string; consumerKey: string }>
   /** injectable clock for tests. */
   now?: () => Date
 }
@@ -142,6 +152,22 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Prom
   requireBoundedInt('batchSize', batchSize, 1, MAX_BATCH_SIZE)
   requireBoundedInt('leaseMs', leaseMs, 1, MAX_LEASE_MS)
   requireBoundedInt('maxAttempts', maxAttempts, 1, MAX_ATTEMPTS_CEILING)
+  // Exclusion list → two parallel text[] (unnest pairs them). A malformed entry THROWS rather than being
+  // skipped: silently dropping it would silently re-open the same-tick re-claim hole it exists to close.
+  const excludeOutboxIds: string[] = []
+  const excludeConsumerKeys: string[] = []
+  for (const pair of opts.excludeRows ?? []) {
+    if (
+      typeof pair?.outboxId !== 'string' ||
+      pair.outboxId === '' ||
+      typeof pair?.consumerKey !== 'string' ||
+      pair.consumerKey === ''
+    ) {
+      throw new RangeError('excludeRows entries must be { outboxId, consumerKey } with non-empty strings')
+    }
+    excludeOutboxIds.push(pair.outboxId)
+    excludeConsumerKeys.push(pair.consumerKey)
+  }
   const { rows } = await db.query(
     `WITH claim AS (
        SELECT c.outbox_id, c.consumer_key
@@ -151,6 +177,13 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Prom
              OR (c.status = 'in_progress' AND c.lease_expires_at <= $1::timestamptz)
               )
           AND c.consumer_key = ANY($4::text[])   -- worker's known keys only; unknown keys stay pending
+          -- rows this caller is already handling in the current pass are NEVER re-claimed (#4497 P1); the
+          -- scan simply moves past them to the next reclaimable row (no head-of-line block).
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM unnest($6::text[], $7::text[]) AS x(oid, ckey)
+                 WHERE x.oid = c.outbox_id AND x.ckey = c.consumer_key
+              )
         ORDER BY c.updated_at ASC
         LIMIT $2::int
         FOR UPDATE SKIP LOCKED
@@ -183,7 +216,7 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Prom
        JOIN meta_automation_outbox o ON o.id = r.outbox_id
       WHERE r.status IN ('in_progress', 'dead_letter')   -- dead_letter = poisoned at claim, reported not dispatched
       ORDER BY o.created_at ASC`,
-    [asOf, batchSize, leaseMs, keys, maxAttempts],
+    [asOf, batchSize, leaseMs, keys, maxAttempts, excludeOutboxIds, excludeConsumerKeys],
   )
   const claimed: ClaimedConsumer[] = []
   for (const r of rows) {
@@ -239,6 +272,14 @@ export async function findUnknownConsumerKeys(
 /**
  * Terminal success: → `done`, lease cleared. Returns false if the caller lost the lease (a zombie or a stale
  * token superseded by a reclaim/reschedule) — its write matched 0 rows and did nothing.
+ *
+ * The guard is fence-CAS **AND still-holding-the-lease** (`lease_expires_at > asOf`, the caller's own clock —
+ * the same clock that set the lease at claim, so no app/DB skew). A fence-CAS alone only catches a competitor
+ * that ALREADY reclaimed; it says nothing about the window where our lease has EXPIRED but nobody has
+ * re-claimed yet. Writing a terminal state in that window applies a handler result produced without
+ * ownership, and races the reclaimer that is entitled to the row (directory-sync's completion write guards
+ * the same way and aborts on a miss — `DirectorySyncLeaseLostError`). Here a miss is simply `false`: the row
+ * is left `in_progress` for a legitimate reclaim, and the loop counts it as a lost lease (#4497 P1).
  */
 export async function completeConsumer(
   db: Queryable,
@@ -250,7 +291,8 @@ export async function completeConsumer(
   const res = await db.query(
     `UPDATE meta_automation_outbox_consumer
         SET status = 'done', lease_expires_at = NULL, last_error = NULL, updated_at = $4::timestamptz
-      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
+      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'
+        AND lease_expires_at > $4::timestamptz`,
     [outboxId, consumerKey, fence, nowIso(opts)],
   )
   return Number(res.rowCount ?? 0) === 1
@@ -259,6 +301,12 @@ export async function completeConsumer(
 /**
  * Terminal poison for a DETERMINISTIC permanent failure: → `dead_letter`, lease cleared. (Attempt-exhaustion
  * poison is handled at claim, not here.) Returns false on a lost/stale token. `reason` is a values-free code.
+ *
+ * Lease-guarded like `completeConsumer` — and more load-bearing here: poison is the only DROP path, so
+ * dead-lettering an event on a verdict produced after our lease expired would discard work we no longer owned.
+ * (`rescheduleConsumer` is deliberately NOT lease-guarded: it is the non-terminal SAFE outcome — it keeps the
+ * row retryable rather than applying a result — and refusing it would only leave the row expired-in_progress
+ * to be reclaimed anyway, losing the backoff. Fence-CAS still protects it from a competitor.)
  */
 export async function poisonConsumer(
   db: Queryable,
@@ -272,7 +320,8 @@ export async function poisonConsumer(
   const res = await db.query(
     `UPDATE meta_automation_outbox_consumer
         SET status = 'dead_letter', lease_expires_at = NULL, last_error = $4, updated_at = $5::timestamptz
-      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
+      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'
+        AND lease_expires_at > $5::timestamptz`,
     [outboxId, consumerKey, fence, reason, nowIso(opts)],
   )
   return Number(res.rowCount ?? 0) === 1

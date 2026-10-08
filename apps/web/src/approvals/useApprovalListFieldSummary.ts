@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import type { FormSchema, UnifiedApprovalDTO } from '../types/approval'
 import { getTemplate } from './api'
 import { formatSummaryLine, summaryFields } from './detailField'
@@ -15,12 +16,13 @@ import { formatSummaryLine, summaryFields } from './detailField'
 export function resolveRowSummaryLine(
   schemas: Map<string, FormSchema> | undefined,
   row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>,
+  isZh: boolean,
   limit = 3,
 ): string {
   const templateId = row.templateId
   const schema = templateId ? schemas?.get(templateId) : undefined
   if (!schema) return ''
-  return formatSummaryLine(summaryFields(schema, row.formSnapshot, limit))
+  return formatSummaryLine(summaryFields(schema, row.formSnapshot, limit, isZh), isZh)
 }
 
 /**
@@ -52,6 +54,9 @@ export function resolveRowSummaryLine(
  */
 export function useApprovalListFieldSummary() {
   const schemas: Map<string, FormSchema> = reactive(new Map())
+  // O-8 / F8-1: the summary line follows the shell locale (read at render time, so a locale switch
+  // re-renders it through the same reactive dependency the template already tracks).
+  const { isZh } = useLocale()
   const attempted = new Set<string>()
   const inflight = new Map<string, Promise<void>>()
 
@@ -89,7 +94,7 @@ export function useApprovalListFieldSummary() {
   }
 
   function summaryLineFor(row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>): string {
-    return resolveRowSummaryLine(schemas, row)
+    return resolveRowSummaryLine(schemas, row, isZh.value)
   }
 
   return { schemas, ensureLoadedForRows, summaryLineFor }

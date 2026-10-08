@@ -48,6 +48,11 @@ export interface StockPreparationSnapshotDiffSummary {
     pathChanged: number
     missingChildBom: number
     fingerprintChanged: number
+    /** Q3a/Q3c: an in-place component-code swap at an unchanged path/parent/version — independent of
+     *  `fingerprintChanged` (a row can carry both at once; see the diff engine's compareMatchedRows). */
+    componentCodeChanged: number
+    /** Q3a/Q3c: an in-place material substitution — independent of `fingerprintChanged`, same reason. */
+    materialChanged: number
   }
   blockingExceptionCount: number
 }
@@ -103,8 +108,8 @@ export const STOCK_PREP_DIFF_TYPES = ['added', 'removed', 'changed', 'unchanged'
 export const STOCK_PREP_REVIEW_STATUSES = ['ready', 'held'] as const
 export const STOCK_PREP_CHANGE_TYPES = [
   'added', 'removed', 'quantity_changed', 'unit_changed', 'version_changed', 'path_changed',
-  'parent_changed', 'source_fingerprint_changed', 'invalid_qty', 'missing_child_bom',
-  'duplicate_path_key', 'missing_path_key',
+  'parent_changed', 'material_changed', 'component_code_changed', 'source_fingerprint_changed',
+  'invalid_qty', 'missing_child_bom', 'duplicate_path_key', 'missing_path_key',
 ] as const
 
 export type StockPreparationDiffType = (typeof STOCK_PREP_DIFF_TYPES)[number]

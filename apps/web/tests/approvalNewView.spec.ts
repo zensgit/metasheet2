@@ -1,6 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
+
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// FIX 3 (gate P2-3) — used ONLY by the real-drift-guard describe block at the end of this file
+// (which temporarily un-mocks '../src/approvals/serverFormDraft') to compute the SAME real
+// signature the view itself computes, rather than a hand-typed literal.
+import { formSchemaSignature } from '../src/approvals/formDraft'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -84,18 +91,120 @@ vi.mock('../src/composables/useAuth', () => ({
 // keeps every other export (dispatchAction, createApproval, ...) real; this suite's OTHER tests
 // never render a `user`-type field so this mock is inert for them.
 const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+// Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): the K2
+// requester_choice suite's `searchChoiceCandidates` unconditionally calls
+// `ensureUserNamesResolved`, which (through the shared `directoryResolve.ts` module singleton)
+// calls this REAL, unmocked `resolveApprovalDirectoryUsers` against a real `fetch` -- which always
+// fails under jsdom (no server). Left real, EVERY test in that describe block that fires a picker
+// search schedules a genuine `setTimeout(..., 300)` backoff retry through an unawaited
+// `flushUsers()` promise chain that is NOT tied to the test's own lifecycle -- a probe confirmed
+// the timer is not even created yet when the NEXT test's `beforeEach` runs (so
+// `__resetResolvedDirectoryNamesForTests()` alone cannot cancel it: it gets scheduled fresh,
+// mid-flight, during that next test). Mocked here to resolve immediately so the retry/backoff
+// path is never entered at all -- the fix is "never schedule the timer", not "cancel it after the
+// fact". Confirmed by reachability, checked at the granularity of what is actually mocked below
+// (`resolveApprovalDirectoryUsers`, not merely `ensureUserNamesResolved`): across all of
+// `apps/web/src`, `resolveApprovalDirectoryUsers` is called from exactly one place --
+// `directoryResolve.ts`'s own `flushUsers` -- which is reachable only through
+// `ensureUserNamesResolved`, whose only call site in `ApprovalNewView.vue` is
+// `searchChoiceCandidates` (`:1046`). No other describe block in this file mounts a component that
+// imports `ensureUserNamesResolved` (`ApprovalDetailView`/`ApprovalCenterDetailPane`/
+// `MyDelegationView`/`TemplateDetailView` are never referenced here); the `ApprovalUserPicker`
+// describe block below mounts a DIFFERENT component that only calls `searchApprovalDirectoryUsers`
+// (already mocked separately, above) and never imports `directoryResolve.ts` at all. So mocking
+// `resolveApprovalDirectoryUsers` file-wide cannot change behavior anywhere else in this file.
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 // B2-13 — the resubmit-prefill suite mocks the source-instance fetch; every other describe block
 // in this file never sets `?fromInstance=`, so `applyResubmitPrefill` short-circuits before ever
 // calling this, leaving it unused (and unconfigured) for them.
 const getApprovalSpy = vi.fn()
+// O-8 / F8-1 — the English render scan below sets this to return an ASCII route; null (every other
+// test) keeps the real client, so nothing else in this file changes.
+let previewRouteOverride: ((...args: unknown[]) => Promise<unknown>) | null = null
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
     getApproval: (...args: unknown[]) => getApprovalSpy(...args),
+    previewApprovalRoute: (...args: unknown[]) => (previewRouteOverride
+      ? previewRouteOverride(...args)
+      : (actual.previewApprovalRoute as (...a: unknown[]) => Promise<unknown>)(...args)),
   }
 })
+
+// B3-07 — mutable so the flag-ON attachment-uploader suite can enable the feature per-test; every
+// PRE-EXISTING test never touches it, so the default `false` keeps the B2-28 placeholder path
+// byte-identical for them (they double as the flag-OFF control).
+let approvalAttachmentsFlag = false
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    features: {
+      get value() {
+        return {
+          attendance: false,
+          workflow: false,
+          attendanceAdmin: false,
+          attendanceImport: false,
+          plm: false,
+          approvalMobile: false,
+          approvalAttachments: approvalAttachmentsFlag,
+          mode: 'platform',
+        }
+      },
+    },
+  }),
+}))
+
+// B3-07 — the upload client is spied (network-free); preValidateAttachments stays REAL so the
+// client-mirror reject path is the actual predicate, not a stub.
+const uploadApprovalAttachmentSpy = vi.fn()
+// §4.3: removal now goes through the SERVER delete, so the spec drives that transport too — a
+// client-only removal would leave the staged row + blob live, which is the whole point of the call.
+const deleteApprovalAttachmentSpy = vi.fn().mockResolvedValue(undefined)
+const fetchApprovalAttachmentRefsSpy = vi.fn().mockResolvedValue([])
+// Atomic multi-file helper: reimplemented against the spies so a later failure compensates
+// earlier successes (mirrors the real uploadApprovalAttachmentsAtomic contract).
+const uploadApprovalAttachmentsAtomicSpy = vi.fn(async (files: File[], templateId: string, fieldId: string) => {
+  const uploaded: Array<{ id: string; sizeBytes: number }> = []
+  try {
+    for (const file of files) {
+      uploaded.push(await uploadApprovalAttachmentSpy(file, templateId, fieldId))
+    }
+    return uploaded
+  } catch (error) {
+    for (const item of [...uploaded].reverse()) {
+      await deleteApprovalAttachmentSpy(item.id).catch(() => {})
+    }
+    throw error
+  }
+})
+vi.mock('../src/approvals/attachmentUpload', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/attachmentUpload')>('../src/approvals/attachmentUpload')
+  return {
+    ...actual,
+    uploadApprovalAttachment: (...args: unknown[]) => uploadApprovalAttachmentSpy(...args),
+    deleteApprovalAttachment: (...args: unknown[]) => deleteApprovalAttachmentSpy(...args),
+    fetchApprovalAttachmentRefs: (...args: unknown[]) => fetchApprovalAttachmentRefsSpy(...args),
+    uploadApprovalAttachmentsAtomic: (...args: unknown[]) => uploadApprovalAttachmentsAtomicSpy(...(args as [File[], string, string])),
+  }
+})
+
+// P3-3: draft storage moved server-side (apps/web/src/approvals/serverFormDraft.ts) — the view no
+// longer touches `window.localStorage` for drafts at all, so the G13 stale-attachment-ref tests
+// below (and any future draft-restore test) drive the RESTORE side through this mock instead of
+// seeding localStorage directly. Defaults to "no draft" (null) so every OTHER test in this file
+// (none of which care about drafts) mounts exactly as before.
+const loadFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => null as Record<string, unknown> | null)
+const saveFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+const clearFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+vi.mock('../src/approvals/serverFormDraft', () => ({
+  loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+  saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+  clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+  listFormDraftsServer: vi.fn(async () => []),
+}))
 
 const mockActiveTemplate = ref<any>(null)
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
@@ -197,14 +306,27 @@ const ElInputNumber = defineComponent({
 
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: { modelValue: [String, Array], placeholder: String, multiple: Boolean, filterable: Boolean },
+  props: {
+    modelValue: [String, Array],
+    placeholder: String,
+    multiple: Boolean,
+    multipleLimit: Number,
+    filterable: Boolean,
+  },
   emits: ['update:modelValue', 'change'],
-  render() { return h('select', { 'data-el-select': 'true' }, this.$slots.default?.()) },
+  render() {
+    return h('select', {
+      'data-el-select': 'true',
+      multiple: this.multiple || undefined,
+      'data-model-value': JSON.stringify(this.modelValue ?? null),
+      'data-multiple-limit': String(this.multipleLimit ?? 0),
+    }, this.$slots.default?.())
+  },
 })
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
-  render() { return h('option', { value: this.value }, this.label) },
+  props: { label: String, value: String, disabled: Boolean },
+  render() { return h('option', { value: this.value, disabled: this.disabled || undefined }, this.label) },
 })
 const ElDatePicker = defineComponent({
   name: 'ElDatePicker',
@@ -231,7 +353,10 @@ const ElIcon = defineComponent({
 const ElAlert = defineComponent({
   name: 'ElAlert',
   props: { title: String, type: String, showIcon: Boolean, closable: Boolean },
-  render() { return h('div', { 'data-el-alert': this.type }, [this.title, this.$slots.default?.()]) },
+  // NOTE: renders the `title` SLOT as well as the `title` prop — real ElAlert does, and the
+  // draft-restore alert puts its 恢复/丢弃 buttons in `<template #title>`. A stub that dropped the
+  // slot silently hid those affordances from every test that tried to click them.
+  render() { return h('div', { 'data-el-alert': this.type }, [this.$slots.title?.(), this.title, this.$slots.default?.()]) },
 })
 const ElEmpty = defineComponent({
   name: 'ElEmpty',
@@ -301,6 +426,12 @@ function formSchemaWithNumberPropsAndAttachment(): FormSchema {
     ],
   }
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment disable', () => {
   let app: VueApp<Element> | null = null
@@ -372,6 +503,142 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
   })
 
   // -------------------------------------------------------------------------
+  // G-B2-16 — pre-existing auto-sum 大写 caption, gap-closure (adversarial gate on #4959, P3-1):
+  // `amountWordsFor` was refactored from `(fieldId: string)` to `(field: FormField)` by the L8-C
+  // slice above, and the auto-sum branch's call shape was asserted "byte-identical" in that PR's
+  // own comment, but no test anywhere (base OR this PR) rendered the auto-summed-total 大写 caption
+  // in the view — mutation-proof below.
+  // -------------------------------------------------------------------------
+  it('G-B2-16: the auto-summed-total field (isAutoSummedTotal branch of amountWordsFor) renders the 大写 caption', async () => {
+    // `amount.defaultValue: 300` matches the declared detail rows' sum (100+200) so the asserted
+    // caption is correct under EITHER path this harness can exercise: the real `useAutoSumTotal`
+    // recompute (this describe block's `ElTable`/`ElTableColumn` stubs are dumb pass-throughs that
+    // don't render row content, so detail-row reactivity can't be independently observed here) or
+    // the defaultValue seed — both converge on the same total, so the assertion is not sensitive to
+    // which one wins. `useAutoSumTotal`'s OWN auto-sum computation is already covered exhaustively
+    // in `useAutoSumTotal.test.ts`; this test's job is narrower — proving `isAutoSummedTotal(id) ===
+    // true` alone (confirmed independently below via the pre-existing "由明细自动汇总" hint) drives
+    // `amountWordsFor` into its FIRST branch and the view renders the resulting caption.
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_autosum_words',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '总额', required: true, defaultValue: 300 } as FormField,
+          {
+            id: 'items', type: 'detail', label: '明细', required: false,
+            defaultValue: [{ amount: 100 }, { amount: 200 }],
+            columns: [{ id: 'amount', type: 'number', label: '金额', required: true }],
+          } as FormField,
+        ],
+        amountConsistencyCheck: { totalFieldId: 'amount', detailFieldId: 'items', amountColumnId: 'amount' },
+      } as any,
+    })
+    await mountView()
+    await flushUi()
+    // Confirms isAutoSummedTotal('amount') is true (the pre-existing, unrelated read-only hint
+    // shares that same predicate) — so the caption below is proven trigger-selected, not a
+    // coincidence of some other condition.
+    expect(container!.innerHTML).toContain('由明细自动汇总，无需手填')
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('叁佰圆整')
+  })
+
+  // -------------------------------------------------------------------------
+  // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display —
+  // currency/thousands caption + the per-field 大写 trigger, additive to the pre-existing
+  // auto-summed-total trigger (§0.4 — neither replaces the other).
+  // -------------------------------------------------------------------------
+  it('L8-C: uppercaseCny renders the 大写 caption on a PLAIN number field (no auto-sum total declared)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words',
+      formSchema: {
+        fields: [
+          { id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差申请' } as FormField,
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3,
+            props: { uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-words"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent).toContain('大写：')
+    expect(caption?.textContent).toContain('壹拾贰圆叁角')
+  })
+
+  it('L8-C: uppercaseCny is gated on scale <= 2 — a precision:4 field never shows the 大写 caption (amountToChineseWords is honest only up to 2 decimals, per its own header)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_words_high_precision',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3456,
+            props: { uppercaseCny: true, precision: 4 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+  })
+
+  it('L8-C: a plain number field with NO uppercaseCny and no auto-sum shows NEITHER caption (positive control for the trigger)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_none',
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 12.3 } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-amount-words"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-amount-display"]')).toBeNull()
+  })
+
+  it('L8-C: currencySymbol + thousandsSeparator render the formatted-number display caption', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_display',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, precision: 2 },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const caption = container!.querySelector('[data-testid="approval-amount-display"]')
+    expect(caption).toBeTruthy()
+    expect(caption?.textContent?.trim()).toBe('¥1,234.5')
+  })
+
+  it('L8-C: currencySymbol/thousandsSeparator/uppercaseCny do not change the submitted formData (display-only, M10)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_l8c_submit',
+      formSchema: {
+        fields: [
+          {
+            id: 'amount', type: 'number', label: '金额', required: true, defaultValue: 1234.5,
+            props: { currencySymbol: '¥', thousandsSeparator: true, uppercaseCny: true },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    expect(payload.formData).toEqual({ amount: 1234.5 })
+  })
+
+  // -------------------------------------------------------------------------
   // B2-28
   // -------------------------------------------------------------------------
   it('renders the disabled placeholder for an attachment field — no el-upload', async () => {
@@ -380,6 +647,33 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     const disabled = container!.querySelector('[data-testid="approval-attachment-disabled"]')
     expect(disabled).toBeTruthy()
     expect(disabled?.textContent).toContain('附件上传功能即将支持')
+    // Slice A (approval-attachment-roundtrip-guard, #4195 §7/§11 G1): pin the OFF-path placeholder
+    // BYTE-IDENTICALLY, not just via the loose textContent/data-testid checks above — a rung-4 change
+    // ("flip authorability + retire B2-28") is only allowed once the flag is ratified ON and rungs
+    // 1-3 have landed (design-lock §7); this exact string is the tripwire that a rung-4-shaped edit
+    // touched the OFF markup ahead of that ratify. `data-v-*` is Vue's scoped-style attribute:
+    // @vitejs/plugin-vue hashes `path.relative(root, filename)` alone in dev/test mode (source is
+    // folded in only when `isProduction`, per its `createDescriptor` — checked in this repo's
+    // installed dist, not assumed), so the id is ROOT-RELATIVE, not absolute-path- or
+    // content-dependent (verified stable against an unrelated same-file edit) — stable across any
+    // checkout location as long as `apps/web` stays vitest's root and this file's path is unchanged.
+    //
+    // IF THIS ASSERTION REDS ON A DEPENDENCY BUMP, THAT IS EXPECTED, NOT A REGRESSION. The hash is
+    // produced by @vitejs/plugin-vue, so it is a function of the INSTALLED PLUGIN VERSION as well as
+    // the file path: that package is free to change its id derivation (what it hashes, or the digest
+    // it truncates) across releases, and a legitimate bump can therefore change `data-v-7078a16d`
+    // while the markup under test is untouched. Recognising this case: the diff is the hash ALONE —
+    // class, data-testid, tag and text all still match, and `git log` shows a lockfile/plugin change
+    // rather than a change to ApprovalNewView.vue.
+    // WHAT A MAINTAINER SHOULD DO THEN: re-derive the id by running THIS spec and copying the hash
+    // out of the received `outerHTML`, then update the literal below — after confirming the rest of
+    // the string is byte-identical. Do NOT delete or loosen this assertion to make it pass: its
+    // discriminating power over the `data-testid` + `textContent` checks above was measured (a
+    // markup-only attribute added to the placeholder reds THIS assertion and nothing else in the
+    // file), and it is the tripwire for a rung-4-shaped edit landing ahead of the owner ratify.
+    expect(disabled?.outerHTML).toBe(
+      '<div data-v-7078a16d="" class="approval-new__attachment-disabled" data-testid="approval-attachment-disabled"> 附件上传功能即将支持，请先在其他字段中注明附件信息。 </div>',
+    )
 
     expect(container!.querySelector('[data-el-upload]')).toBeNull()
 
@@ -434,6 +728,715 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     await mountView()
 
     expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+  })
+
+  it('seeds and submits capped multi-contact designated defaults without exposing requester as selectable', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_userfield_multi',
+      formSchema: {
+        fields: [{
+          id: 'fld_assignees',
+          type: 'user',
+          label: '经办人',
+          required: true,
+          props: {
+            selection: 'multi',
+            maxSelections: 2,
+            defaultMode: 'designated',
+            defaultUserIds: ['u1', 'u2'],
+          },
+        } as FormField],
+      },
+    })
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'user_1', name: '申请人', email: '' },
+      { id: 'u1', name: 'Alice', email: '' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice' },
+      { id: 'u2', name: 'Bob' },
+    ])
+
+    await mountView()
+
+    const picker = container!.querySelector('[data-testid="approval-user-picker"]') as HTMLElement
+    expect(picker).toBeTruthy()
+    expect(picker.getAttribute('multiple')).not.toBeNull()
+    expect(picker.dataset.multipleLimit).toBe('2')
+    expect(picker.dataset.modelValue).toBe('["u1","u2"]')
+    const options = Array.from(picker.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.find((option) => option.value === 'user_1')?.disabled).toBe(true)
+
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    expect(submitApprovalSpy.mock.calls[0][0].formData).toEqual({
+      fld_assignees: ['u1', 'u2'],
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // B3-07 (#4195/#4342) — flag ON: the real uploader replaces the B2-28 placeholder; the submit
+  // payload carries the uploaded id ARRAY (the §4.4 bind contract). Flag OFF stays proven by every
+  // pre-existing test above (approvalAttachmentsFlag defaults false).
+  // -------------------------------------------------------------------------
+  describe('B3-07 flag-ON attachment uploader', () => {
+    beforeEach(() => {
+      approvalAttachmentsFlag = true
+      uploadApprovalAttachmentSpy.mockReset()
+      deleteApprovalAttachmentSpy.mockReset()
+      deleteApprovalAttachmentSpy.mockResolvedValue(undefined)
+      uploadApprovalAttachmentsAtomicSpy.mockClear()
+      fetchApprovalAttachmentRefsSpy.mockReset()
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([])
+      messageWarningSpy.mockReset()
+      messageErrorSpy.mockReset()
+      // P3-3: no draft residue between restore tests (server-backed mock, was localStorage.clear()).
+      loadFormDraftServerSpy.mockReset()
+      loadFormDraftServerSpy.mockResolvedValue(null)
+      saveFormDraftServerSpy.mockClear()
+      clearFormDraftServerSpy.mockClear()
+    })
+
+    afterEach(() => {
+      approvalAttachmentsFlag = false
+    })
+
+    function attachmentInput(): HTMLInputElement {
+      const input = container!.querySelector('[data-testid="approval-attachment-input-proof"]') as HTMLInputElement
+      expect(input).toBeTruthy()
+      return input
+    }
+
+    async function pickFile(file: File): Promise<void> {
+      const input = attachmentInput()
+      Object.defineProperty(input, 'files', { value: [file], configurable: true })
+      input.dispatchEvent(new Event('change'))
+      await flushUi()
+    }
+
+    it('replaces the disabled placeholder with the uploader control', async () => {
+      await mountView()
+      expect(container!.querySelector('[data-testid="approval-attachment-upload"]')).toBeTruthy()
+      expect(container!.querySelector('[data-testid="approval-attachment-disabled"]')).toBeNull()
+    })
+
+    it('a picked file uploads through the client and the submit payload carries the id array', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_1', sizeBytes: 8 })
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'evidence.pdf', { type: 'application/pdf' }))
+
+      expect(uploadApprovalAttachmentSpy).toHaveBeenCalledTimes(1)
+      const [file, templateId, fieldId] = uploadApprovalAttachmentSpy.mock.calls[0]
+      expect((file as File).name).toBe('evidence.pdf')
+      expect(templateId).toBe('tpl_numfields')
+      expect(fieldId).toBe('proof')
+      expect(container!.textContent).toContain('evidence.pdf') // rendered in the uploaded list
+
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_up_1']) // the id ARRAY — never a raw File
+    })
+
+    it('multi-file atomic refuse: later server failure compensates the selection — zero live/bindable refs from the failed pick', async () => {
+      uploadApprovalAttachmentSpy
+        .mockResolvedValueOnce({ id: 'att_ok_1', sizeBytes: 4 })
+        .mockRejectedValueOnce(new Error('attachment rejected: infected'))
+      deleteApprovalAttachmentSpy.mockResolvedValue(undefined)
+      await mountView()
+      const input = attachmentInput()
+      Object.defineProperty(input, 'files', {
+        value: [
+          new File(['%PDF-1.4'], 'ok.pdf', { type: 'application/pdf' }),
+          new File(['%PDF-1.4'], 'bad.pdf', { type: 'application/pdf' }),
+        ],
+        configurable: true,
+      })
+      input.dispatchEvent(new Event('change'))
+      await flushUi()
+      await flushUi()
+
+      expect(uploadApprovalAttachmentSpy).toHaveBeenCalledTimes(2)
+      // Compensated via DELETE (row soft-delete + durable purge intent; blob reclamation eventual).
+      expect(deleteApprovalAttachmentSpy).toHaveBeenCalledWith('att_ok_1')
+      expect(container!.textContent).not.toContain('ok.pdf')
+      expect(messageErrorSpy.mock.calls.length + messageWarningSpy.mock.calls.length).toBeGreaterThan(0)
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      // zero live/bindable refs from the failed pick — not a claim about physical blob deletion
+      expect(payload.formData.proof ?? []).toEqual([])
+    })
+
+    it('client mirror rejects a disallowed type BEFORE any upload — values-free code surfaced', async () => {
+      await mountView()
+      await pickFile(new File(['MZ'], 'x.exe', { type: 'application/x-msdownload' }))
+
+      expect(uploadApprovalAttachmentSpy).not.toHaveBeenCalled()
+      expect(messageErrorSpy).toHaveBeenCalledWith(expect.stringContaining('mime_not_allowed'))
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData).not.toHaveProperty('proof') // nothing staged, nothing submitted
+    })
+
+    it('removing an uploaded file drops its id from the submit payload', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_2', sizeBytes: 8 })
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'toremove.pdf', { type: 'application/pdf' }))
+      const removeBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('移除'))
+      expect(removeBtn).toBeTruthy()
+      removeBtn!.click()
+      await flushUi()
+
+      // the SERVER delete is what reclaims the staged row + blob; a client-only drop is not a removal
+      expect(deleteApprovalAttachmentSpy).toHaveBeenCalledWith('att_up_2')
+
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof ?? []).toEqual([]) // removed before submit
+    })
+
+    // -----------------------------------------------------------------------
+    // G13 / O2 — stale attachment-reference detection on DRAFT RESTORE. A draft can outlive the
+    // 7-day unbound-retention GC, so a restore must check its staged ids and drop the swept ones
+    // rather than carry a dangling id into a create the §4.4 bind would reject whole.
+    // -----------------------------------------------------------------------
+    function seedDraft(proofIds: string[]) {
+      // P3-3: the view now calls `loadFormDraftServer(templateId, expectedSignature)` — mocked to
+      // resolve with this draft's `data` directly (the mock bypasses the server's own signature
+      // comparison, which is exercised separately: the client-side comparison is unchanged pure
+      // logic covered by apps/web/tests/approval-form-draft.test.ts, and the server's OWN signature
+      // function is proven byte-identical to the client's in
+      // packages/core-backend/tests/unit/approval-form-draft-signature-web-parity.test.ts). These
+      // G13 tests are about the attachment-stale-ref restore behavior, not the signature guard.
+      loadFormDraftServerSpy.mockResolvedValueOnce({ proof: proofIds })
+    }
+
+    // ---------------------------------------------------------------------
+    // P3-3 arming-order hazard: draft restore used to be a SYNCHRONOUS localStorage read, so the
+    // 800ms autosave watcher could safely arm right after calling it. Now it is an async server
+    // fetch — arming the watcher before that fetch settles would let a user's mid-flight keystrokes
+    // schedule a save (and race the eventual `Object.assign(formData, draft)` from the restore
+    // itself). `ApprovalNewView.vue` awaits `offerDraftRestore()` before setting `draftArmed = true`
+    // — this proves it behaviorally: no save is scheduled while the GET is still pending, and a
+    // save DOES fire once it has settled.
+    // ---------------------------------------------------------------------
+    it('P3-3: the autosave watcher does not arm until the initial draft-restore fetch settles', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        let resolveLoad: (value: Record<string, unknown> | null) => void = () => {}
+        loadFormDraftServerSpy.mockReset()
+        loadFormDraftServerSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveLoad = resolve }))
+
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while draft GET is pending'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+
+        // The restore GET has not resolved yet ⇒ draftArmed is still false ⇒ no save scheduled.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        // Settle the restore (no draft found) and type again — the watcher must be armed NOW.
+        resolveLoad(null)
+        await flushUi()
+        reasonInput!.value = 'typed after settle'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX 8 (gate P3-3, PROBE-D) — the gate confirmed the call sequence `["CLEAR","SAVE"]`:
+    // the 800ms debounced autosave can already have a SAVE timer pending at the moment of submit,
+    // and clearing the draft on submit success does not itself cancel that timer, so it fires
+    // AFTERWARD and resurrects the just-submitted draft. Pre-existing shape (the same race existed
+    // against the old localStorage clear), but P3-3 gives it a bigger blast radius: the
+    // resurrection is now server-side (cross-device, appears in the drafts inbox) and CLEAR/SAVE
+    // are two independently-ordered HTTP requests rather than two synchronous same-tick calls.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX 8: a pending autosave SAVE never lands after a submit-triggered CLEAR (no CLEAR-then-SAVE resurrection)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // A SAVE is now scheduled (800ms debounce) but has NOT fired yet.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled() // the submit's own CLEAR fired
+
+        // Advance PAST the 800ms window that would otherwise have fired the pending SAVE.
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy, 'the pending debounced SAVE must have been cancelled by submit, not merely raced').not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the assertion above: WITHOUT a submit, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, never submitted'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a submit, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no submit happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D): FIX 8 above only closes the PENDING-timer half of the CLEAR/SAVE
+    // race — the debounce timer can already have FIRED (the SAVE issued, its HTTP promise still
+    // unsettled) at the exact moment submit runs. Constructed deterministically (no sleeps): the
+    // save's fetcher promise is held open under our control, so "SAVE issued but not yet settled"
+    // is a real, observable state, not a timing guess.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C: submit does not issue CLEAR while a debounced SAVE is still in flight (no resurrection via the in-flight-request window)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed well before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED (fetcher called) but its promise is
+        // held open by `resolveSave`, i.e. genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+
+        // The old behaviour clears immediately regardless of the in-flight save -- REDS here
+        // under that behaviour. The fix must wait for the in-flight save to settle first.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight -- it can otherwise commit first and the save resurrects the draft on INSERT',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D residual #1) -- `discardDraftRestore` used to fire `clearFormDraftServer`
+    // with NO regard for a pending/in-flight autosave at all: the identical race shape the two FIX C
+    // tests above cover for the submit path, gate2 found NOT covered here. Mirrors the submit-path
+    // test immediately above, but through `discardDraftRestore` (the shared
+    // `cancelPendingDraftSaveThenClear` helper is what makes the two paths behave identically here).
+    // NOTE: unlike submit, discard does NOT set `draftArmed = false` (see that helper's own comment
+    // for why) -- so this test must not type AGAIN after clicking discard, or a legitimate fresh
+    // save of the POST-discard content could arm and fire, which would be correct behavior, not a
+    // resurrection, but would confound this assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C (discard path): discard does not issue CLEAR while a debounced SAVE is still in flight, and no SAVE of the pre-discard content follows the CLEAR', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView() // the restore GET resolves during onMounted -> draftRestoreVisible=true, draftArmed=true
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while the restore banner is still up'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED but held open by `resolveSave`, i.e.
+        // genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        discardBtn!.click()
+        await flushUi()
+
+        // The old behaviour cleared immediately regardless of the in-flight save -- REDS here under
+        // that behaviour.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight at discard time either',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now. Nothing was typed after
+        // the discard click, so no further save is expected either.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // still just the one pre-discard save
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the discard-path assertion above: WITHOUT discard, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, discard never clicked'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a discard, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no discard happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Reviewer-found residual in the FIX C machinery above: `draftSaveInFlight` used to be a
+    // SINGLE slot that each debounced save's `.finally` overwrote/cleared based on `=== this
+    // call's own promise`. That is only correct while at most one save is ever outstanding at a
+    // time -- but two CAN be outstanding at once (typing again 800ms later while the first
+    // save's HTTP request is still on the wire). If the SECOND (later-issued) save's promise
+    // settled BEFORE the first, the old `.finally` nulled the slot while the first save was still
+    // unsettled, and a quiescing caller (submit/discard) reading the slot right then saw "nothing
+    // in flight" and issued its CLEAR immediately -- if the first save's transaction then
+    // committed AFTER that CLEAR had already committed, its INSERT resurrected the draft. Same
+    // resurrection shape FIX C closes for "one save in flight"; this is that window reached
+    // through a second, later-issued save completing first, not through a rejected/late network
+    // response. The earlier "closed for the dominant case" claim in this file's history was too
+    // broad -- it did not cover two in-flight saves settling out of order.
+    //
+    // Fix: `draftSaveInFlight` is now the TAIL of a per-slot promise chain (see
+    // `scheduleDraftSave` in ApprovalNewView.vue) -- a later save is not even ISSUED (its
+    // fetcher not called) until an earlier unsettled one from the same slot has settled, so the
+    // slot always names the chain's true tail and can never be nulled out from under a still-
+    // pending earlier save.
+    //
+    // Both tests below construct the SAME timeline (two debounced saves, the second one
+    // conditionally resolved "early" to mirror the reviewer's reverse-completion repro) and stay
+    // tolerant of EITHER implementation up to the discriminating CLEAR assertion, so a mutation
+    // that reverts the chain back to a plain overwrite reds on that CLEAR assertion specifically
+    // (see this PR's mutation-testing note), not on an incidental earlier assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (reverse-completion window): submit does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // first SAVE issued, held open (unsettled)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // second debounce elapses
+
+        // Mirrors "resolve B before A": under the reverted single-slot code a second save IS
+        // already issued here (independent of the first), and settling it "first" is exactly the
+        // reviewer's repro. Under the fix this is a same-tick no-op -- nothing is queued to
+        // resolve yet, because the second save is not issued until the first settles.
+        if (resolvers.length > 1) resolvers[1]()
+        await flushUi()
+
+        submitButton().click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while an earlier same-slot SAVE is still unsettled, regardless of what order any LATER save from that slot completes in',
+        ).not.toHaveBeenCalled()
+
+        // Drain the chain and confirm CLEAR follows once everything outstanding has settled.
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2) // neither save was dropped by the chain
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('P3-3 FIX (reverse-completion window, discard path): discard does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+
+        if (resolvers.length > 1) resolvers[1]() // no-op under the fix -- see the sibling submit-path test above
+        await flushUi()
+
+        discardBtn!.click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'discard must not issue CLEAR while an earlier same-slot SAVE is still unsettled either',
+        ).not.toHaveBeenCalled()
+
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Order guarantee behind the fix above: the chain does not just make `cancelPendingDraft-
+    // SaveThenClear` wait on the right promise, it also stops a later same-slot save from ever
+    // being ISSUED (its fetcher called) while an earlier one is still unsettled -- proven directly
+    // here via the fetcher's own call count, independent of any CLEAR/submit behaviour.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (order guarantee): a second debounced SAVE from the same slot is not issued until the earlier one has settled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        let resolveFirst: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveFirst = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // the first save IS issued
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // the second debounce elapses
+        expect(
+          saveFormDraftServerSpy,
+          'a second same-slot SAVE must not be issued while an earlier one is still unsettled',
+        ).toHaveBeenCalledTimes(1)
+
+        resolveFirst()
+        await flushUi()
+        expect(saveFormDraftServerSpy, 'once the earlier save settles, the queued one is issued').toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Discard must not permanently disarm autosave (contract note in `cancelPendingDraftSave-
+    // ThenClear`'s own comment: `discardDraftRestore` runs early in the component's lifecycle and
+    // the user is expected to keep filling out the SAME form afterward). This is the "keep typing
+    // after discard" half of that contract -- distinct from the tests above, which only check that
+    // a save PRE-DATING the discard is still respected.
+    //
+    // Types ONCE *before* discard (inside the debounce window, so that edit's own timer is what
+    // discard cancels -- proving the "not disarmed" claim below is about a NEW edit surviving a
+    // real disarm-of-the-old-timer, not merely about autosave that happened to never get armed in
+    // the first place). Without that pre-discard keystroke this test could not tell "discard leaves
+    // autosave armed" apart from "nothing here was ever armed to begin with" -- which is exactly
+    // the distinction that matters, since the one thing this test must catch is `draftArmed = false`
+    // being (re)introduced into `discardDraftRestore`.
+    // -----------------------------------------------------------------------
+    it('discard then keep typing: autosave is not permanently disarmed by a discard', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // still inside the 800ms debounce window -- a real pending timer exists
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+        discardBtn!.click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1) // no IN-FLIGHT save at discard time -- CLEAR fires right away
+        // The pre-discard timer was cancelled (FIX 8 behavior, unchanged) -- advancing past its
+        // window must NOT fire the pre-discard save.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        reasonInput!.value = 'typed after discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // Negative control: not yet -- still inside this NEW 800ms debounce window.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        await vi.advanceTimersByTimeAsync(900)
+        // Positive: a discard must not permanently disarm autosave for the rest of the session.
+        expect(
+          saveFormDraftServerSpy,
+          'discard must not permanently disarm autosave for the rest of the session',
+        ).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
+      seedDraft(['att_live', 'att_swept'])
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([
+        { id: 'att_live', stale: false, fileName: 'still-here.pdf' },
+        { id: 'att_swept', stale: true },
+      ])
+      await mountView()
+      const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+      expect(applyBtn).toBeTruthy() // the restore offer fired
+      applyBtn!.click()
+      await flushUi()
+
+      // the stale-check was uploader-scoped (NO instanceId — a draft has no instance yet)
+      expect(fetchApprovalAttachmentRefsSpy).toHaveBeenCalledWith(['att_live', 'att_swept'])
+      expect(messageWarningSpy).toHaveBeenCalledWith(expect.stringContaining('过期'))
+      // the live ref is restored (and rendered with the SERVER's filename, not the draft's memory)
+      expect(container!.textContent).toContain('still-here.pdf')
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_live']) // the swept id is GONE, never submitted
+    })
+
+    it('restore FAILS CLOSED: when the stale-check errors, no unverified ref is carried forward', async () => {
+      seedDraft(['att_unverifiable'])
+      fetchApprovalAttachmentRefsSpy.mockRejectedValue(new Error('network down'))
+      await mountView()
+      const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement
+      applyBtn.click()
+      await flushUi()
+
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof ?? []).toEqual([]) // unverified ⇒ dropped, not submitted
+    })
+
+    it('a draft whose refs are ALL live restores them untouched and raises no stale warning', async () => {
+      seedDraft(['att_a', 'att_b'])
+      fetchApprovalAttachmentRefsSpy.mockResolvedValue([
+        { id: 'att_a', stale: false, fileName: 'a.pdf' },
+        { id: 'att_b', stale: false, fileName: 'b.pdf' },
+      ])
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement).click()
+      await flushUi()
+
+      expect(messageWarningSpy).not.toHaveBeenCalled()
+      submitButton().click()
+      await flushUi()
+      expect(submitApprovalSpy.mock.calls[0][0].formData.proof).toEqual(['att_a', 'att_b'])
+    })
+
+    it('a FAILED server delete keeps the file staged (never a UI-only removal the server disagrees with)', async () => {
+      uploadApprovalAttachmentSpy.mockResolvedValue({ id: 'att_up_3', sizeBytes: 8 })
+      deleteApprovalAttachmentSpy.mockRejectedValue(new Error('attachment delete failed: 503'))
+      await mountView()
+      await pickFile(new File(['%PDF-1.4'], 'keepme.pdf', { type: 'application/pdf' }))
+      const removeBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('移除'))
+      removeBtn!.click()
+      await flushUi()
+
+      expect(messageErrorSpy).toHaveBeenCalledWith(expect.stringContaining('移除失败'))
+      expect(container!.textContent).toContain('keepme.pdf') // still listed — the user can retry
+      submitButton().click()
+      await flushUi()
+      const payload = submitApprovalSpy.mock.calls[0][0]
+      expect(payload.formData.proof).toEqual(['att_up_3']) // still staged, honestly
+    })
   })
 })
 
@@ -516,9 +1519,11 @@ describe('ApprovalNewView — B2-07 submit-time flow preview', () => {
     const steps = flowPreviewSteps()
     expect(steps).toHaveLength(3)
     expect(steps[0].textContent).toContain('部门主管审批')
-    expect(steps[0].textContent).toContain('指定角色：role_manager')
+    expect(steps[0].textContent).toContain('指定角色（1 个）')
+    expect(steps[0].textContent).not.toContain('role_manager')
     expect(steps[1].textContent).toContain('财务审批')
-    expect(steps[1].textContent).toContain('指定成员：user_finance')
+    expect(steps[1].textContent).toContain('指定成员（1 人）')
+    expect(steps[1].textContent).not.toContain('user_finance')
     expect(steps[2].textContent).toContain('结束')
     expect(steps[2].textContent).toContain('流程结束')
   })
@@ -859,6 +1864,62 @@ describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
     expect(payload.formData).toMatchObject({ reason: '出差报销（第一次）', amount: 3000 })
   })
 
+  // -------------------------------------------------------------------------------------------
+  // P3-3 (contract §4 G) — CONSTRUCTED RACE, not a stable-state check. With draft restore now an
+  // async server fetch (previously a synchronous localStorage read), the resubmit-prefill fetch
+  // (`getApproval`, also async) and the draft-restore fetch are two independently-timed network
+  // calls; a test that simply awaits both and then asserts is blind to a regression where they run
+  // CONCURRENTLY (a Promise.all-style refactor) instead of `applyResubmitPrefill` being fully
+  // awaited BEFORE `offerDraftRestore` is even attempted. This test makes `getApproval` resolve
+  // SLOWLY and a draft IMMEDIATELY available, and asserts that the draft fetch is not even ATTEMPTED
+  // until after the prefill fetch settles — proving the ordering by observing it mid-flight, not by
+  // inspecting only the final state (where a concurrent implementation could coincidentally look the
+  // same if the draft mock happened to resolve second).
+  // -------------------------------------------------------------------------------------------
+  it('CONSTRUCTED RACE: a slow-resolving resubmit-prefill fetch delays the draft-restore fetch entirely — prefill wins by construction, not by timing luck', async () => {
+    routeQuery = { fromInstance: 'apv_source_race' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_race',
+      formSchema: formSchemaRequiredReasonAndAmount(),
+    })
+    let resolveGetApproval: (value: unknown) => void = () => {}
+    getApprovalSpy.mockImplementation(
+      () => new Promise((resolve) => { resolveGetApproval = resolve }),
+    )
+    // A draft IS available — if the ordering regresses to "concurrent", this mock resolving first
+    // would let the restore banner win the race.
+    loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'STALE DRAFT — must never win', amount: 1 })
+
+    await mountView()
+
+    // Still mid-flight: getApproval has not resolved yet, so applyResubmitPrefill has not returned.
+    // The draft-restore fetch must not have even STARTED yet — proves strict sequencing, not two
+    // fetches racing where this one simply happened to be slower this run.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeNull() // notice not shown yet either — nothing has settled
+
+    resolveGetApproval(
+      mockPendingApproval({
+        id: 'apv_source_race',
+        status: 'rejected',
+        formSnapshot: { reason: '出差报销（race winner）', amount: 4200 },
+      }),
+    )
+    await flushUi()
+
+    // NOW the prefill has landed. Because prefillNoticeVisible is true, offerDraftRestore is
+    // skipped ENTIRELY — the draft fetch must still never have been called.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-draft-restore-apply"]')).toBeNull()
+
+    submitButton().click()
+    await flushUi()
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    // The prefilled value reached the form; the stale draft's value never did.
+    expect(payload.formData).toMatchObject({ reason: '出差报销（race winner）', amount: 4200 })
+  })
+
   it('does not prefill when there is no `fromInstance` query — unchanged behavior', async () => {
     routeQuery = {}
     mockActiveTemplate.value = mockPublishedTemplate({
@@ -922,5 +1983,880 @@ describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
     const payload = submitApprovalSpy.mock.calls[0][0]
     expect(payload.formData).toMatchObject({ reason: '出差报销' })
     expect(payload.formData).not.toHaveProperty('legacy_field_removed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FWB-0 Layer 2 — record-link display labels keyed by field id (not recordId alone).
+// Two fields can share a recordId across different pinned sheets with different labels.
+// ---------------------------------------------------------------------------
+const SHARED_RECORD_ID = 'rec_shared_001'
+const RECORD_LINK_LABEL_A = '客户甲（A表）'
+const RECORD_LINK_LABEL_B = '合同乙（B表）'
+
+// Module mock so the SFC import is replaced (global app.component cannot override local import).
+vi.mock('../src/approvals/components/ApprovalRecordLinkPicker.vue', () => ({
+  default: defineComponent({
+    name: 'ApprovalRecordLinkPicker',
+    props: {
+      visible: { type: Boolean, default: false },
+      baseId: { type: String, default: '' },
+      sheetId: { type: String, default: '' },
+      currentRecordId: { type: [String, null], default: null },
+    },
+    emits: ['confirm', 'close'],
+    setup(props, { emit }) {
+      return () => (props.visible
+        ? h('button', {
+            type: 'button',
+            'data-testid': 'stub-record-link-confirm',
+            onClick: () => {
+              const display = props.baseId === 'base_a' ? RECORD_LINK_LABEL_A : RECORD_LINK_LABEL_B
+              emit('confirm', { recordId: SHARED_RECORD_ID, display })
+            },
+          }, 'stub-confirm')
+        : null)
+    },
+  }),
+}))
+
+describe('ApprovalNewView — record-link labels are per-field (same recordId, distinct labels)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [
+          {
+            id: 'link_a',
+            type: 'record-link',
+            label: '关联客户',
+            required: false,
+            props: { baseId: 'base_a', sheetId: 'sheet_a' },
+          } as FormField,
+          {
+            id: 'link_b',
+            type: 'record-link',
+            label: '关联合同',
+            required: false,
+            props: { baseId: 'base_b', sheetId: 'sheet_b' },
+          } as FormField,
+        ],
+      },
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rl_1' }))
+    loadTemplateSpy.mockClear()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function flushUi() {
+    await nextTick()
+    await nextTick()
+  }
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  it('keeps distinct human labels for two fields that share the same recordId', async () => {
+    await mountView()
+
+    const fields = Array.from(container!.querySelectorAll('[data-testid="approval-record-link-field"]'))
+    expect(fields.length).toBe(2)
+    expect(container!.querySelector('input[placeholder="请输入关联客户"]')).toBeNull()
+    expect(container!.querySelector('input[placeholder="请输入关联合同"]')).toBeNull()
+
+    // Pick for field A (first pick button).
+    const pickButtons = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-pick"]'),
+    ) as HTMLButtonElement[]
+    expect(pickButtons.length).toBe(2)
+
+    pickButtons[0]!.click()
+    await flushUi()
+    const confirmA = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(confirmA).toBeTruthy()
+    confirmA.click()
+    await flushUi()
+
+    // Pick for field B with the SAME recordId but a different human label.
+    pickButtons[1]!.click()
+    await flushUi()
+    const confirmB = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(confirmB).toBeTruthy()
+    confirmB.click()
+    await flushUi()
+
+    const displays = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displays.length).toBe(2)
+
+    // Each field keeps its own label — second pick must NOT overwrite the first.
+    expect(displays[0]!.value).toBe(RECORD_LINK_LABEL_A)
+    expect(displays[1]!.value).toBe(RECORD_LINK_LABEL_B)
+
+    // No raw shared record id on either display (oracle surface).
+    expect(displays[0]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(displays[1]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(container!.textContent ?? '').not.toContain(SHARED_RECORD_ID)
+  })
+
+  it('clears the per-field label when the selection is cleared', async () => {
+    await mountView()
+    const pickButtons = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-pick"]'),
+    ) as HTMLButtonElement[]
+    pickButtons[0]!.click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const displaysBefore = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displaysBefore[0]!.value).toBe(RECORD_LINK_LABEL_A)
+
+    const clearBtn = container!.querySelector('[data-testid="approval-record-link-clear"]') as HTMLButtonElement
+    expect(clearBtn).toBeTruthy()
+    clearBtn.click()
+    await flushUi()
+
+    const displaysAfter = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-display"]'),
+    ) as HTMLInputElement[]
+    expect(displaysAfter[0]!.value).toBe('')
+    expect(displaysAfter[0]!.value).not.toContain(SHARED_RECORD_ID)
+    expect(displaysAfter[0]!.value).not.toContain(RECORD_LINK_LABEL_A)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lock-1 §K2 — submit-time requester-choice chooser (提交人自选)
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const RC_GRAPH: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'approval_1',
+        type: 'approval',
+        name: '自选审批人',
+        config: {
+          assigneeSources: [
+            { kind: 'requester_choice', mode: 'single', scope: { type: 'role', roleIds: ['role_fin'] } },
+          ],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  // Interactive el-select stub (this suite only): forwards modelValue, emits update:modelValue
+  // on change, and emits visible-change on focus so the view's scope-filtered remote search
+  // actually runs — the shared render-only ElSelect stub above cannot drive either path.
+  const InteractiveElSelect = defineComponent({
+    name: 'ElSelect',
+    props: {
+      modelValue: [String, Array],
+      multiple: Boolean,
+      loading: Boolean,
+      disabled: Boolean,
+      placeholder: String,
+      filterable: Boolean,
+      remote: Boolean,
+      clearable: Boolean,
+    },
+    emits: ['update:modelValue', 'change', 'visible-change'],
+    render() {
+      return h('select', {
+        'data-el-select': 'true',
+        value: Array.isArray(this.modelValue) ? undefined : this.modelValue ?? '',
+        onFocus: () => this.$emit('visible-change', true),
+        onChange: (event: Event) => {
+          const value = (event.target as HTMLSelectElement).value
+          this.$emit('update:modelValue', this.multiple ? [value] : value)
+          this.$emit('change', value)
+        },
+      }, this.$slots.default?.())
+    },
+  })
+
+  beforeEach(() => {
+    routeQuery = {}
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [{ id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差' } as FormField],
+      },
+      approvalGraph: RC_GRAPH,
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rc_1' }))
+    searchApprovalDirectoryUsersSpy.mockReset()
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'u_alpha', name: 'Alpha', email: 'a@x.test' }])
+    // Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): two separate
+    // mechanisms, two separate jobs -- neither one alone is sufficient.
+    //   1. `resolveApprovalDirectoryUsersSpy` (declared above) keeps `ensureUserNamesResolved`'s
+    //      indirect call off the real transient-retry/backoff path, so no `setTimeout(..., 300)`
+    //      is ever SCHEDULED by this suite in the first place. This is the one that actually
+    //      matters: a probe proved the timer usually does not exist yet when THIS beforeEach
+    //      runs (the unawaited `flushUsers()` chain from the previous test schedules it a couple
+    //      of milliseconds LATER, inside the next test) -- so step 2 below cannot reach it.
+    //   2. `__resetResolvedDirectoryNamesForTests()` clears the module-singleton name cache
+    //      (`resolvedUserNames`/`pendingUserIds`) and cancels any timer that IS already pending
+    //      at this exact moment -- cache-state hygiene, and the same call every other consuming
+    //      spec makes, but not what closes the leak on its own.
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    messageWarningSpy.mockClear()
+    pushSpy.mockClear()
+    __resetResolvedDirectoryNamesForTests()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', InteractiveElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  function submitButton(): HTMLButtonElement {
+    const btn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('提交审批'))
+    expect(btn).toBeTruthy()
+    return btn as HTMLButtonElement
+  }
+
+  function chooserPicker(): HTMLSelectElement {
+    const picker = container!.querySelector('[data-testid="approval-requester-choice-picker-approval_1"]')
+    expect(picker).not.toBeNull()
+    return picker as HTMLSelectElement
+  }
+
+  it('renders the chooser card for a requester_choice route; the static flow preview shows the pre-choice placeholder', async () => {
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-requester-choice"]')).not.toBeNull()
+    const item = container!.querySelector('[data-testid="approval-requester-choice-item"]')
+    expect(item?.textContent).toContain('自选审批人')
+    expect(item?.textContent).toContain('选一人')
+    expect(item?.textContent).toContain('限指定角色的成员')
+    // B2-07 static preview: honest placeholder — no fabricated approver, no raw config ids.
+    const flowPreview = container!.querySelector('[data-testid="approval-flow-preview"]')
+    expect(flowPreview?.textContent).toContain('提交人自选（提交时选择）')
+    expect(flowPreview?.textContent).not.toContain('role_fin')
+  })
+
+  it('does NOT render the chooser when the route has no requester_choice node (chooser is graph-selected, not blanket)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [{ id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差' } as FormField],
+      },
+    })
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-requester-choice"]')).toBeNull()
+  })
+
+  it('opening the picker runs a scope-filtered directory search (role scope → roleIds param)', async () => {
+    await mountView()
+    chooserPicker().dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(searchApprovalDirectoryUsersSpy).toHaveBeenCalledWith('', 20, { roleIds: ['role_fin'] })
+  })
+
+  it('blocks submit until a mode-satisfying choice is made, then sends requesterChoices keyed by node key', async () => {
+    await mountView()
+
+    // No choice yet → submit is blocked with an actionable message and NOTHING is sent.
+    submitButton().click()
+    await flushUi()
+    expect(messageWarningSpy).toHaveBeenCalledWith('请为「自选审批人」选择审批人')
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
+
+    // Choose via the scope-filtered picker (single mode → exactly one).
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    expect(submitApprovalSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: 'tpl_numfields',
+        requesterChoices: { approval_1: ['u_alpha'] },
+      }),
+    )
+    // POSITIVE CONTROL for the raw-id-render fix below: 'u_alpha' carries a real directory name
+    // ('Alpha'), so isChoiceOptionUnidentifiable never disables its option and this submit was
+    // never blocked by the new identity gate -- the happy path is unaffected by the fix.
+  })
+
+  // raw-id-render fix (2026-08-19; census 3rd missed site): a scope-matched candidate whose
+  // directory record has a blank name must render the SAME values-free ordinal ApprovalUserPicker
+  // uses ("成员 N"), never the raw directory id, and must be non-selectable -- discriminating
+  // negative (nameless) + positive (named) in ONE mount so both branches of the same computed
+  // function are proven against the SAME candidate list.
+  it('a nameless candidate renders "成员 N" (never the raw id) and is disabled; a named sibling renders its name and stays selectable', async () => {
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'user_secret_raw_id_9', name: '', email: '' },
+      { id: 'u_bob', name: 'Bob', email: 'b@x.test' },
+    ])
+    await mountView()
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    const options = Array.from(picker.querySelectorAll('option'))
+    const blankOption = options.find((o) => o.value === 'user_secret_raw_id_9')
+    const namedOption = options.find((o) => o.value === 'u_bob')
+    expect(blankOption, 'the nameless candidate must still render as a selectable-shaped option (disabled, not absent)').toBeTruthy()
+    expect(namedOption).toBeTruthy()
+
+    expect(blankOption!.textContent).toContain('成员 1')
+    expect(blankOption!.textContent).not.toContain('user_secret_raw_id_9')
+    expect(blankOption!.disabled, 'an unidentifiable candidate must be disabled, not merely relabelled').toBe(true)
+
+    expect(namedOption!.textContent).toContain('Bob')
+    expect(namedOption!.disabled, 'a directory-named candidate must stay selectable').toBe(false)
+  })
+
+  // Defense-in-depth proof for `firstUnidentifiableChoiceNode`: even if an unidentifiable id
+  // reaches `requesterChoices` (the disabled-option UI gate above is the FIRST line of defense;
+  // this jsdom native-<select> stub does not itself enforce HTML `disabled` the way a real
+  // browser/Element Plus would, so assigning `.value` directly is how this test simulates that
+  // bypass), the submit-time gate must still block it -- mirrors the 减签 submit-guard posture.
+  it('submit is blocked (and createApproval never called) when the selected choice has no confirmed name, even if the disabled option is bypassed', async () => {
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'user_secret_raw_id_9', name: '', email: '' }])
+    await mountView()
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    picker.value = 'user_secret_raw_id_9'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    submitButton().click()
+    await flushUi()
+
+    expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
+  })
+
+  // stale-cache identity fix (2026-08-21, Codex #4 P2-1): `choiceConfirmedNames` used to be
+  // append-only-non-blank -- a name confirmed by an EARLIER search stuck around forever, even
+  // after a LATER search for the SAME id explicitly returned a blank name (the directory record
+  // was renamed/anonymized/deactivated between the two searches). Combined with the old
+  // `isChoiceOptionUnidentifiable` exemption for the chooser's own current selection, this let an
+  // already-selected id stay both rendered as selectable AND submittable under its stale name.
+  // This is the discriminating construction: select 'u_alpha' while it is named ('Alpha'), then
+  // re-open the SAME picker once the directory search for the SAME id now returns a blank name --
+  // the freshest answer must retract the confirmation, disable the option, and BLOCK submit.
+  it('a stale confirmed name is retracted when a LATER search reconfirms the SAME id as blank -- option disables and submit is blocked, not silently allowed on the old name', async () => {
+    await mountView()
+    const picker = chooserPicker()
+
+    // Search #1: 'u_alpha' resolves named -> selected and confirmed.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Search #2 (same node, e.g. the requester re-opens the picker): the SAME id now comes back
+    // blank -- must RETRACT the earlier confirmation, not merely skip overwriting it.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_alpha', name: '', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    const staleOption = Array.from(picker.querySelectorAll('option')).find((o) => o.value === 'u_alpha')
+    expect(staleOption, 'the retracted candidate must still render as a selectable-shaped (disabled) option, not vanish').toBeTruthy()
+    expect(staleOption!.textContent, 'must render the values-free ordinal, never the stale name').not.toContain('Alpha')
+    expect(staleOption!.disabled, 'a retracted confirmation must disable the option even though it is the chooser\'s own current selection').toBe(true)
+
+    submitButton().click()
+    await flushUi()
+
+    expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
+    expect(submitApprovalSpy, 'the stale name must never let a now-unidentifiable selection through').not.toHaveBeenCalled()
+  })
+
+  // per-node request epoch (2026-08-21, Codex #4 P2-1 ordering half): `searchChoiceCandidates`
+  // used to write `choiceOptions`/`choiceConfirmedNames` unconditionally on resolution, with no
+  // generation guard -- an OLDER in-flight search resolving AFTER a NEWER one would silently
+  // clobber the newer, already-rendered page. Holds the first search open, lets a second
+  // (immediately-resolving) search land first, THEN resolves the first -- the stale response must
+  // never apply.
+  it('an out-of-order (older) search resolution never clobbers a newer one -- the per-node epoch discards it', async () => {
+    let resolveFirst: (users: Array<{ id: string; name: string; email: string }>) => void = () => {}
+    const firstSearch = new Promise<Array<{ id: string; name: string; email: string }>>((resolve) => {
+      resolveFirst = resolve
+    })
+    searchApprovalDirectoryUsersSpy.mockReturnValueOnce(firstSearch)
+    await mountView()
+    const picker = chooserPicker()
+
+    // Older search #1 fires and is held in flight.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // Newer search #2 fires (a later re-open) and resolves immediately.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_new', name: 'New', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // NOW the older, first search resolves -- late and out of order.
+    resolveFirst([{ id: 'u_old', name: 'Old', email: '' }])
+    await flushUi()
+
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
+    expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
+    expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalNewView. ASCII template
+// (name, field labels, options, node names) with one field of each member-facing type, a flow
+// preview whose walk passes approval nodes with several assignee-source kinds, a cc node and a
+// condition node with rule, formula and empty branches (assigneeSource.ts / conditionSummary.ts),
+// and a live route preview with a role assignee and an unresolved node (routePreviewSummary.ts).
+// The whole container (text + every attribute value) must carry no CJK outside the named
+// exceptions; then zh-CN shows Chinese and a flip back restores English. The file's shared stubs
+// stay unchanged; this describe registers local variants where a shared stub declares a copy prop
+// but never renders it (input / select / date-picker / input-number placeholder, divider slot,
+// table-column label, table empty slot).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalNewView English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const withPlaceholder = (name: string, tag: 'input' | 'select') => defineComponent({
+    name,
+    props: { modelValue: null as never, placeholder: String, startPlaceholder: String, endPlaceholder: String },
+    emits: ['update:modelValue', 'change'],
+    setup(props, { slots }) {
+      // A string/number model value is surfaced too: some inputs show view-computed text through
+      // it (e.g. the record-link field's read-only display).
+      const shown = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? String(v) : undefined)
+      return () => h(tag, {
+        placeholder: props.placeholder,
+        'data-start-placeholder': props.startPlaceholder,
+        'data-end-placeholder': props.endPlaceholder,
+        'data-model-value': shown(props.modelValue),
+      }, tag === 'select' ? slots.default?.() : undefined)
+    },
+  })
+  const ScanElDivider = defineComponent({
+    name: 'ElDivider',
+    setup(_props, { slots }) {
+      return () => h('div', { 'data-el-divider': 'true' }, slots.default?.())
+    },
+  })
+  const ScanElTable = defineComponent({
+    name: 'ElTable',
+    props: { data: Array },
+    setup(props, { slots }) {
+      return () => h('div', { 'data-el-table': 'true' }, [
+        slots.default?.(),
+        ((props.data as unknown[] | undefined) ?? []).length === 0 ? slots.empty?.() : null,
+      ])
+    },
+  })
+  const ScanElTableColumn = defineComponent({
+    name: 'ElTableColumn',
+    props: { prop: String, label: String, width: [String, Number], align: String },
+    setup(props) {
+      return () => h('span', { 'data-column': props.prop ?? '' }, props.label ?? '')
+    },
+  })
+
+  const asciiSchema: FormSchema = {
+    fields: [
+      { id: 'reason', type: 'text', label: 'Reason', required: true } as FormField,
+      { id: 'notes', type: 'textarea', label: 'Notes' } as FormField,
+      { id: 'amount', type: 'number', label: 'Amount', defaultValue: 1234, props: { currencySymbol: '$', thousandsSeparator: true } } as FormField,
+      { id: 'day', type: 'date', label: 'Day' } as FormField,
+      { id: 'at', type: 'datetime', label: 'Time' } as FormField,
+      { id: 'trip', type: 'date_range', label: 'Trip', defaultValue: { start: '2026-09-01', end: '2026-09-04' }, props: { dateType: 'date', durationLabel: 'Days' } } as FormField,
+      { id: 'slot', type: 'date_range', label: 'Slot', defaultValue: { start: '2026-09-01T09:00:00', end: '2026-09-01T10:30:00' }, props: { dateType: 'date_minute' } } as FormField,
+      { id: 'kind', type: 'select', label: 'Kind', options: [{ label: 'Travel', value: 'travel' }, { label: 'Other', value: 'other' }] } as FormField,
+      { id: 'tags', type: 'multi-select', label: 'Tags', options: [{ label: 'Urgent', value: 'urgent' }] } as FormField,
+      { id: 'owner', type: 'user', label: 'Owner' } as FormField,
+      { id: 'dept', type: 'department', label: 'Department' } as FormField,
+      {
+        id: 'lines',
+        type: 'detail',
+        label: 'Lines',
+        columns: [
+          { id: 'item', type: 'text', label: 'Item' } as FormField,
+          { id: 'cost', type: 'number', label: 'Cost' } as FormField,
+        ],
+      } as FormField,
+      { id: 'linked', type: 'record-link', label: 'Linked record', defaultValue: { recordId: 'rec_1' }, props: { baseId: 'base_1', sheetId: 'sheet_1' } } as FormField,
+      { id: 'proof', type: 'attachment', label: 'Proof' } as FormField,
+    ],
+  }
+
+  const asciiGraph: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'n1', type: 'approval', name: 'Manager review', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['role_a'] }, { kind: 'direct_manager' }] } },
+      { key: 'n2', type: 'approval', name: 'Finance review', config: { assigneeSources: [{ kind: 'static_user', userIds: ['user_a', 'user_b'] }, { kind: 'dept_head_at_level', level: 2 }] } },
+      { key: 'n3', type: 'approval', name: 'Legacy review', config: { assigneeType: 'user', assigneeIds: ['user_c'] } },
+      { key: 'n4', type: 'cc', name: 'Notify', config: { targetType: 'role', targetIds: ['role_b'] } },
+      {
+        key: 'n5',
+        type: 'condition',
+        name: 'Route by amount',
+        config: {
+          branches: [
+            { edgeKey: 'e-big', rules: [{ fieldId: 'amount', operator: 'gt', value: 5000 }, { fieldId: 'kind', operator: 'in', value: ['travel', 'other'] }], conjunction: 'or' },
+            { edgeKey: 'e-empty', rules: [{ fieldId: 'notes', operator: 'isEmpty' }] },
+            { edgeKey: 'e-formula', rules: [], formula: { expression: 'amount > 1' } },
+          ],
+          defaultEdgeKey: 'e-small',
+        },
+      },
+      { key: 'n6', type: 'approval', name: 'After branch', config: { assigneeSources: [{ kind: 'requester' }] } },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'n1' },
+      { key: 'e2', source: 'n1', target: 'n2' },
+      { key: 'e3', source: 'n2', target: 'n3' },
+      { key: 'e4', source: 'n3', target: 'n4' },
+      { key: 'e5', source: 'n4', target: 'n5' },
+      { key: 'e-big', source: 'n5', target: 'n6' },
+      { key: 'e-empty', source: 'n5', target: 'n6' },
+      { key: 'e-small', source: 'n5', target: 'n6' },
+    ],
+  } as unknown as ApprovalGraph
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    routeQuery = {}
+    submitApprovalSpy.mockReset()
+    loadTemplateSpy.mockClear()
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([])
+    previewRouteOverride = async () => ({
+      route: [
+        { nodeKey: 'n1', nodeLabel: 'Manager review', assignees: [{ id: 'role_a', name: 'Leads', assignmentType: 'role' }, { id: 'user_a', name: 'Ada', assignmentType: 'user' }] },
+        { nodeKey: 'n2', nodeLabel: 'Finance review', assignees: [], resolveError: 'EMPTY_ASSIGNEES' },
+      ],
+      truncated: false,
+    })
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_scan',
+      name: 'Expense claim',
+      description: 'Claim travel costs',
+      formSchema: asciiSchema,
+      approvalGraph: asciiGraph,
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    previewRouteOverride = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountForScan() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    app = createApp(defineComponent({ setup: () => () => h(ApprovalNewView as any) }))
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', withPlaceholder('ElDatePicker', 'input'))
+    app.component('ElDivider', ScanElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', withPlaceholder('ElInput', 'input'))
+    app.component('ElInputNumber', withPlaceholder('ElInputNumber', 'input'))
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', withPlaceholder('ElSelect', 'select'))
+    app.component('ElTable', ScanElTable)
+    app.component('ElTableColumn', ScanElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Rendered CJK this slice does not convert (source file:line). The flag-OFF attachment
+  // placeholder is pinned byte-identical by the B2-28 tests above (outerHTML snapshot) until the
+  // attachment rung retires it; it is the gate-1 named exception for this view as well.
+  const EXCEPTIONS: Array<{ text: string; count: number; source: string }> = [
+    { text: '附件上传功能即将支持，请先在其他字段中注明附件信息。', count: 1, source: 'apps/web/src/views/approval/ApprovalNewView.vue:560 (B2-28 flag-OFF placeholder)' },
+  ]
+
+  const q = (testid: string) => container!.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null
+
+  it('form, flow preview and live route preview render English chrome only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const { RECORD_LINK_SELECTED_GENERIC_EN } = await import('../src/approvals/recordLinkField')
+    await mountForScan()
+
+    const steps = Array.from(container!.querySelectorAll('[data-testid="approval-flow-preview-step"]')).map((el) => el.textContent ?? '')
+    expect(steps.length, 'flow preview walks to the condition node').toBe(5)
+    expect(steps.join(' | ')).toContain('Continues by condition')
+    ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
+    await flushUi()
+    const route = Array.from(container!.querySelectorAll('[data-testid="approval-route-preview-node"]')).map((el) => el.textContent ?? '')
+    expect(route.length, 'route preview rendered').toBe(2)
+    expect(route[0]).toContain('Role: Leads')
+    expect(route[1]).toContain('(approver to be determined)')
+    // Field-level helpers reached the DOM: date-range durations (dateRangeField.ts), the
+    // record-link display (recordLinkField.ts) and the formatted-number caption.
+    const scanned = renderedTextAndAttributes(container!)
+    expect(scanned).toContain('3 days')
+    expect(scanned).toContain('1 h 30 min')
+    expect(scanned).toContain(RECORD_LINK_SELECTED_GENERIC_EN)
+    expect(scanned).toContain('$1,234')
+    expectNoCjkOutside(scanned, EXCEPTIONS, 'new (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new (en again)')
+  })
+
+  it('a route preview that fails without a message shows the English fallback (routePreviewController.ts)', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    previewRouteOverride = () => Promise.reject('offline')
+    await mountForScan()
+    ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-route-preview-error')?.textContent?.trim()).toBe('Route preview failed')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new route-preview error (en)')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 3 (gate P2-3) — restores the view-level drift-guard coverage the P3-3 diff deleted.
+//
+// Before P3-3, `seedDraft()` (the G13 describe block above) wrote a REAL signature — computed by
+// the REAL `formSchemaSignature` — into REAL `window.localStorage`, and the view's then-current
+// `formDraft.ts`-backed `offerDraftRestore` ran the REAL signature comparison against it. So a
+// regression in the comparison itself (not just in the VIEW's handling of whatever the module
+// returns) would have shown up in that test. P3-3's diff replaced the real localStorage write with
+// `vi.mock('../src/approvals/serverFormDraft', ...)` (declared near the top of this file) — the
+// right call for isolating the VIEW's own logic in every OTHER test here, but it means the
+// comparison inside the NEW module (`serverFormDraft.ts:70`) is never exercised by anything that
+// mounts the view; a mocked `loadFormDraftServerSpy` returns whatever a test tells it to,
+// unconditionally, regardless of whether the signatures would really have matched.
+//
+// The two tests below temporarily UN-mock `serverFormDraft.ts` (`vi.doUnmock` +
+// `vi.resetModules()`) and stub only the underlying `fetch` the view's default (uninjected)
+// `apiFetch` call bottoms out in — driving the REAL `loadFormDraftServer`, including its REAL
+// signature comparison, through a REAL mount of `ApprovalNewView.vue`. The mock is restored in
+// `afterEach` (`vi.doMock` + `vi.resetModules()`) so no other test in this file is affected — this
+// block is placed LAST in the file specifically so its `resetModules()` calls (which force a fresh
+// module graph on the NEXT dynamic import, including of unrelated singleton modules like
+// `directoryResolve.ts`) cannot bleed forward into any test that runs after it, because none does.
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — P3-3 (gate P2-3): real drift-guard comparison, driven end-to-end through a real mount (not the module mock)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: formSchemaWithNumberPropsAndAttachment(),
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_numfields_1' }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.unstubAllGlobals()
+    // Restore the file-wide mock for every OTHER describe block (none run after this one, but this
+    // keeps the invariant explicit rather than relying on "nothing else happens to run later").
+    vi.doMock('../src/approvals/serverFormDraft', () => ({
+      loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+      saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+      clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+      listFormDraftsServer: vi.fn(async () => []),
+    }))
+    vi.resetModules()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  /** Stubs `fetch` for the draft GET and returns a promise that resolves once that GET has been
+   *  answered — a REAL `fetch`/`Response.json()` round trip takes more real event-loop turns to
+   *  settle than the synchronous-mock-resolving tests elsewhere in this file (their
+   *  `loadFormDraftServerSpy.mockResolvedValueOnce(...)` settles in one microtask), so tests await
+   *  this signal (plus a couple of `flushUi()` cycles for the resulting DOM update to commit)
+   *  instead of guessing a fixed number of cycles or sleeping a fixed duration. */
+  function stubDraftFetch(draftBody: { signature: string; data: Record<string, unknown> } | null): Promise<void> {
+    let resolveGetAnswered: () => void = () => {}
+    const getAnswered = new Promise<void>((resolve) => {
+      resolveGetAnswered = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.includes('/api/approvals/form-drafts/tpl_numfields') && method === 'GET') {
+          const body = draftBody
+            ? { data: { draft: { templateId: 'tpl_numfields', signature: draftBody.signature, data: draftBody.data, savedAt: '2026-01-01T00:00:00.000Z' } } }
+            : { data: { draft: null } }
+          const response = new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+          resolveGetAnswered()
+          return response
+        }
+        // Any other call this mount makes while un-mocked (e.g. the best-effort GC DELETE on a
+        // mismatch) — a generic 204/empty-ok response is fine, nothing here asserts on it.
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }),
+    )
+    return getAnswered
+  }
+
+  it('a MATCHING signature (computed by the REAL formSchemaSignature against the CURRENT schema) offers the restore banner with the real draft data', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const matchingSignature = formSchemaSignature(mockActiveTemplate.value.formSchema)
+    const getAnswered = stubDraftFetch({ signature: matchingSignature, data: { proof: ['att_real_match'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MATCH — restore must be offered').toBeTruthy()
+  })
+
+  it('a MISMATCHED signature (real comparison against a schema that has since drifted) does NOT offer the restore banner', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const getAnswered = stubDraftFetch({ signature: 'stale-signature-from-a-since-changed-schema', data: { proof: ['att_stale'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MISMATCH — restore must NOT be offered').toBeNull()
   })
 })

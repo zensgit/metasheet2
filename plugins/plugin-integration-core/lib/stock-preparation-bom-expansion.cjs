@@ -7,6 +7,10 @@
 // write, external DB write, raw SQL, stored procedure, or K3 path.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
+const {
+  applyExtFieldMapping,
+  isNormalizedExtFieldMapping,
+} = require('./stock-preparation-ext-field-mapping.cjs')
 
 const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
@@ -18,10 +22,234 @@ const LARGE_BOM_BOUNDED_ERROR_TYPES = Object.freeze([
   'read_count_exceeded',
   'read_time_limit_exceeded',
 ])
+// A BROKEN CURSOR (HG v1.2 §9.1(3), "cursor 断裂"), which is NOT a scale bound.
+//
+// `readAll`'s page loop stops when the adapter reports `done` or offers no `nextCursor`. A page that
+// says `done: false` and then supplies NOWHERE TO CONTINUE FROM is neither: the source stated the
+// batch was unfinished and then declined to say how to finish it. Before this constant the loop
+// simply broke out of the loop and returned what it had — a SILENTLY TRUNCATED batch that reached
+// the planner as a complete one, with `canApply: true`.
+//
+// It is deliberately NOT in `LARGE_BOM_BOUNDED_ERROR_TYPES`: those four mean "this BOM is too big
+// for the interactive path, take the background job", and routing a broken cursor there would tell
+// an operator to retry a read that will truncate again. It is a failed read, and it says so.
+const READ_CURSOR_BROKEN_ERROR_TYPE = 'read_cursor_broken'
+const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
+  ...LARGE_BOM_BOUNDED_ERROR_TYPES,
+  READ_CURSOR_BROKEN_ERROR_TYPE,
+])
+
+// ---------------------------------------------------------------------------
+// PROJECT-SUBTREE ROOT DISCOVERY — the OPTIONAL second root segment.
+//
+// The shipped plan reaches a project's top-level components through the ORDER MODULE
+// (pathExAttr -> pathInfo -> orderHead -> orderDetail). A deployment whose projects carry their
+// assemblies on the FOLDER TREE instead — BOM heads hanging off a project's directory nodes — has no
+// order line to enter through, and the expansion returns zero rows and calls it a success.
+//
+// `readPlan.projectSubtree` is that second entry, and it is OPTIONAL AND ABSENT BY DEFAULT: the
+// shipped `PLM_STOCK_PREPARATION_BOM_READ_PLAN` does not carry the block, so "off" is STRUCTURAL —
+// the normalizer emits no key, the expander's second segment is one `if` that never runs, and the
+// summary grows no counter. Nothing about the order path changes, in either state.
+//
+// THE THREE THINGS THAT MAKE IT SAFE (each has a test that fails if it is removed):
+//
+//   1. THE THREE READS THAT DECIDE WHICH PROJECT'S DATA THIS IS are re-filtered CLIENT-SIDE with
+//      `matchesByField`: the pathExAttr ENTRY read (whose rows seed both root segments), the
+//      pathInfo CHILD-NODE read, and the bomHead FIND-ROOTS read. `readAll` RECORDS `filtersApplied`
+//      and never ENFORCES it, and `bridge:legacy-sql-readonly` may legally answer
+//      `filtersApplied: false` (i.e. the whole table). Without the second filter one BFS step would
+//      take every folder node in the catalog for a child of this project — and then read other
+//      projects' BOM heads under this project's authorization. `visited` and `maxSubtreeDepth` do
+//      not help there: the breach happens on the first read, at depth 1, on nodes seen once each.
+//
+//      NOT re-filtered, and stated plainly rather than glossed: the two reads `expandChildren`
+//      issues per row (bomHead by part+version, bomDetail by bom id). Those are the ORDER path's
+//      own reads — both root segments call the same function — so their exposure to a lying source
+//      is pre-existing and shared, not something root discovery introduces. Closing it is a change
+//      to the order path with its own regressions, deferred to W4; the test file's "WHAT IS NOT
+//      PINNED" note says the same thing at the same altitude.
+//   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
+//      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
+//      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
+//      cannot group them and the whole sub-assembly lands twice with two different totals. So the
+//      registry holds every componentSourceId this run has expanded, roots and children alike, and a
+//      subtree root that is already in it is skipped and counted. Two BOM heads on one `part_id` (a
+//      measured customer shape) collapse to ONE root for the same reason.
+//   3. THE READ BUDGET REALLY EXISTS. `maxReadCount`/`maxElapsedMs` are OPTIONAL on the expansion
+//      and unset on the measured deployment, and `maxPages` counts pages WITHIN one `readAll`, not
+//      reads overall — so "the subtree reuses the existing budget" would have been a budget of
+//      nothing. Enabling the block therefore REQUIRES the plan to carry `maxReadCount`, and the
+//      three structural bounds below are hard CEILINGS the normalizer refuses to exceed rather than
+//      advisory defaults.
+//
+// The three overrun/loop conditions are GLOBAL errors, never rowErrors: the conflict planner's
+// `missingFromPlmPolicy` is pinned to `mark_inactive`, so a HALF-DISCOVERED root set that "succeeds"
+// would mark the missing half of last pull's rows invalid. A global error means status `failed` and
+// `canApply: false`, which is the only safe posture for a truncated traversal.
+// ---------------------------------------------------------------------------
+const SUBTREE_CYCLE_DETECTED_ERROR_TYPE = 'subtree_cycle_detected'
+const SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE = 'subtree_node_limit_exceeded'
+const SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE = 'subtree_root_limit_exceeded'
+// Deliberately NOT part of `LARGE_BOM_BOUNDED_ERROR_TYPES`, for the same reason
+// `READ_CURSOR_BROKEN_ERROR_TYPE` is not: those four mean "this BOM is too big for the interactive
+// path, take the background job". A folder traversal that hit its own structural ceiling will hit
+// the identical ceiling on the retry, so routing it there tells an operator to re-run a read that
+// cannot end differently.
+const PROJECT_SUBTREE_ERROR_TYPES = Object.freeze([
+  SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
+  SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
+  SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,
+])
+
+// Structural bounds on the folder traversal. `DEFAULT_*` is what an enabling plan gets when it says
+// nothing; `MAX_*` is a CEILING the normalizer refuses to exceed, so a deployment cannot configure
+// `maxSubtreeNodes: 100000` and call it a bound. `maxSubtreeDepth` counts FOLDER levels and has
+// nothing to do with `maxDepth`, which counts BOM levels.
+const DEFAULT_MAX_SUBTREE_DEPTH = 1
+const MAX_SUBTREE_DEPTH_CEILING = 4
+const DEFAULT_MAX_SUBTREE_NODES = 200
+const MAX_SUBTREE_NODES_CEILING = 2000
+const DEFAULT_MAX_SUBTREE_ROOTS = 200
+const MAX_SUBTREE_ROOTS_CEILING = 500
+const PROJECT_SUBTREE_LIMITS = Object.freeze({
+  DEFAULT_MAX_SUBTREE_DEPTH,
+  MAX_SUBTREE_DEPTH_CEILING,
+  DEFAULT_MAX_SUBTREE_NODES,
+  MAX_SUBTREE_NODES_CEILING,
+  DEFAULT_MAX_SUBTREE_ROOTS,
+  MAX_SUBTREE_ROOTS_CEILING,
+})
+// The quantity a subtree root carries. A folder-discovered root has NO order line, so there is no
+// measured quantity to read — and `parseQuantity`'s hold-not-zero rule refuses an absent one rather
+// than letting it become a real 0 that multiplies down. 1 is the declared neutral multiplier, and
+// the summary counts how many roots took it (`rootQuantitySource.subtreeDefault`) against how many
+// came from an order line, so "these rows carry a defaulted quantity" is visible in evidence instead
+// of being indistinguishable from a measured 1.
+const SUBTREE_ROOT_DEFAULT_QUANTITY = 1
 const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
   'data-source:sql-readonly',
   'bridge:legacy-sql-readonly',
 ])
+
+// W3a — THE ONE VALUE-BEARING SIDE CHANNEL THIS MODULE PRODUCES, and the cap on it.
+//
+// A `missing_component` rowError says "a part the BOM points at is not in the part library". That
+// blocks the WHOLE project (one such rowError makes the plan invalid, and apply refuses without an
+// explicit manual-confirm hold), so an operator cannot act on it without knowing WHICH part numbers
+// to create. The part number is a real customer value, and the rowError payload is emphatically NOT
+// where it may travel: `expansion.rowErrors` is hashed whole into the dry-run revision
+// (stock-preparation-table-actions.cjs buildRevision) and feeds the anonymous-hold identity and the
+// confirmation ledger. Adding a key there would move every stored revision, supersede every pending
+// hold on a project that has a missing component, and put a part number in the ledger.
+//
+// So the detail travels BESIDE the rowErrors, in its own top-level array, and `rowErrors` keeps the
+// exact `{type, field, depth}` shape it has always had. `expansion.missingComponents` is projected
+// by NOTHING that hashes, stores or evidences — it is read only by `summarizeMissingComponents`
+// below, for the dry-run response's opt-in `missingComponents` key (gated operate ∧ proven tenant).
+//
+// THE CAP IS ON DISTINCT PART NUMBERS, NOT ON PROBES, and that distinction is the whole guard.
+//
+// A 10k-row BOM against an empty part library must not accumulate 10k detail objects on a read whose
+// contract is that it is bounded — hence a cap. But an earlier cut capped the number of PROBES, and
+// that was a correctness bug, not merely a smaller list: a BOM with 199 positions wanting part A and
+// then 300 positions wanting part B produced `[A:199, B:1]`, and one more A position made B vanish
+// from the list entirely. The operator would then create every part the list named, re-run, and find
+// the project still held — by a part the list had silently dropped. Worse, the ordering ("create the
+// most-blocking part first") inverted in exactly the case it exists for.
+//
+// So the collector is KEYED BY PART NUMBER: at most 200 distinct part numbers carry detail, and a
+// part number already retained keeps accumulating its occurrence and parent counts however many
+// times it is probed. `missingComponentDistinctCount` counts EVERY distinct part number — including
+// the ones past the cap that carry no detail — so the summary's `distinctCount` is a true total and
+// `truncated` can say honestly that the list is not the whole set.
+const MISSING_COMPONENT_DETAIL_LIMIT = 200
+
+// D-C — THE CAP ON `rowErrors`, and why the overflow is a HASHED FACT rather than a silent drop.
+//
+// `rowErrors` had no bound at all. One bad project — an empty part library, a BOM whose quantity
+// column is prose, a mapping whose coercion refuses every cell — produces one entry per BOM
+// POSITION, so a 40k-position project produced 40k entries. That array is not a local: it is
+// returned in the dry-run response, hashed WHOLE into the dry-run revision
+// (stock-preparation-table-actions.cjs `buildRevision`), and handed to the conflict planner, which
+// emits one `manualConfirm` decision — with its own anonymous-hold identity — per entry. So the
+// unbounded array became an unbounded response, an unbounded plan and an unbounded ledger.
+//
+// THE CAP IS ON RETAINED ENTRIES, NOT ON THE COUNTS. Past the limit the sample stops GROWING while
+// `addRowError` keeps counting (X5 below decides WHICH N entries the sample then holds — the cap
+// itself is unchanged), so `rowErrorsTotal` and the per-type totals in `rowErrorTypeCounts` are TRUE
+// TOTALS and `summary.errorTypes` still names a type whose every occurrence was dropped. An
+// operator reading a truncated expansion learns the real size of the problem; what they lose is the
+// per-position enumeration of a project that was never actionable position-by-position anyway.
+//
+// BYTE-IDENTITY BELOW THE CAP IS THE OTHER HALF OF THE CONTRACT. The three summary keys and the
+// revision's projection of them are mounted CONDITIONALLY, exactly like `subtree`: a project with
+// 4999 rowErrors gets the same array, the same summary key set, the same evidence and the same
+// revision hash it got before this change. Only a project that actually overflowed moves — and it
+// must move, because otherwise two different overflowing projects sharing their first 5000 entries
+// would hash the same and one's dry-run token would apply the other's plan.
+//
+// The ceiling exists so `rowErrorLimit` in a deploy config cannot un-bound the array by writing a
+// big number: configuration may lower the cap or raise it within reach of the ceiling, never past.
+const ROW_ERROR_LIMIT = 5000
+const ROW_ERROR_LIMIT_CEILING = 20000
+
+// X5 — WHICH entries survive the cap. "The first N that arrived" was not an answer.
+//
+// D-C bounded the array; X4 (#5674) took the truncated SAMPLE out of the dry-run revision hash and
+// left only the overflow facts, so two reads retaining the same N entries in a different ORDER stop
+// being two revisions. Measured afterwards (rowErrorLimit=1, one batch read in two source orders),
+// a 409 survived both: the retained subset was still "whichever positions the source handed back
+// first", so the two dry-runs kept entries of DIFFERENT TYPES. The conflict planner emits one
+// manual_confirm decision per RETAINED entry, so `plan.summary.conflictTypes` came out as
+// [add_missing, invalid_quantity] one way and [add_missing, missing_component] the other. Those are
+// genuinely different plans; no hash recipe may paper over them, and none should. The selection
+// itself had to stop depending on arrival order.
+//
+// SO THE RETAINED SET IS THE N SMALLEST BY ROW IDENTITY, not the first N seen — a classic bounded
+// top-N (`createRowErrorCollector`): fill to N, then compare each later entry against the LARGEST
+// retained one and swap when the newcomer sorts below it. The surviving set is therefore a property
+// of the SET of rowErrors the batch produced, not of the order it produced them in, and the memory
+// bound D-C exists for is untouched: at most N entries are ever held (see the collector's header).
+//
+// THE KEY IS ROW IDENTITY, THEN THE ENTRY'S OWN CONTENT: `type`, then `path`, then
+// `idempotencyKey`, then `componentCode`, with `stableRowErrorContent` breaking ties. No timestamp,
+// no counter, no arrival index — any of those would re-introduce the production order under a
+// different name and this whole guard would be decoration.
+//
+// SCOPE OF THAT SENTENCE, BECAUSE THREE QUARTERS OF THE TUPLE IS EMPTY TODAY. Of the four identity
+// fields only `type` is ever populated: every `addRowError` call site in this module emits
+// `{type, field, depth}` (some with `relation`), and the ext-mapping branch adds
+// `{type, target, sourceColumn, expectedType, depth}` — not one payload carries `path`,
+// `idempotencyKey` or `componentCode`. So on production data the identity half degenerates to the
+// type token and THE CONTENT TIEBREAKER IS THE HALF THAT DOES THE WORK: it is what separates two
+// `invalid_quantity` entries differing only in `depth`, and dropping it would hand the cap back to
+// arrival order for every same-type collision. The other three fields stay declared because a
+// rowError carrying a row identity is a planned shape (the expanded ROW already has both
+// `idempotencyKey` and `path`) and because X4's `rowHashIdentityToken` reads the same token types.
+// `testTheSampleIsOrderBlindWhenTwoDefectsShareAType` pins the working half on a real expansion and
+// pins the key set of the `invalid_quantity` payload ONLY; `missing_component` is pinned by its own
+// `{type, field, depth} and nothing else` case; `ambiguous_component` and the ext-mapping payloads
+// carry no key-set pin today, so a `path` added THERE would not turn any test red — re-read this
+// paragraph before adding one. (The resemblance to X4 is in the TOKEN helper, not in
+// the key: `canonicalHashOrder` orders rowErrors with an identity of `() => ''`, content alone.)
+//
+// ASYMMETRY, DELIBERATE AND NARROW: an expansion that did NOT overflow still reports its rowErrors
+// in TRAVERSAL order — but NOT, as an earlier draft of this comment claimed, because sorting them
+// would move every under-cap deployment's revision. It would not. `stock-preparation-table-actions`
+// hashes the untruncated array through `canonicalHashOrder(expansion.rowErrors, () => '')`, which
+// re-sorts it by content first, so the array's order is ALREADY invisible to the revision (measured
+// on an 11-entry under-cap expansion: sorting changes the array's bytes and leaves the revision
+// hash identical). The two reasons that do hold: (1) `expansion.rowErrors` is what an operator
+// READS out of the dry-run response, and under the cap its order is the order the expander MET the
+// defects — a real diagnostic sequence, and the only place it survives; (2) under the cap the
+// retained set IS the whole set, so no selection is happening and no two reads can differ — sorting
+// would buy no determinism at all, while renumbering the positional `index` that
+// `stock-preparation-expansion-snapshot-mapper.cjs` hands `stampMissingChildLine`. Past the cap the
+// sorted sample DOES renumber that index (deterministically), and the stamped lines' pathKeys move
+// with it — that is the accepted price of determinism, not a contradiction of (2). The determinism
+// this constant is about is only in question once something was dropped.
+const ROW_ERROR_IDENTITY_FIELDS = Object.freeze(['type', 'path', 'idempotencyKey', 'componentCode'])
 
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
   'sql',
@@ -132,6 +360,50 @@ function optionalPositiveInteger(input, field) {
   return positiveInteger(input, field, undefined)
 }
 
+// A positive integer with a CEILING the configuration cannot argue with. `positiveInteger` alone
+// accepts any integer, which is how "recommended maximum 4" ends up as a comment while a plan
+// carries 100000. Over the ceiling is a refusal at normalization time, before a single read.
+//
+// It is also stricter about the TYPE than `positiveInteger`, which coerces with `Number()` and so
+// accepts `true` (-> 1) and `[3]` (-> 3). These three values are read budgets: the difference
+// between "the operator wrote 3" and "the operator wrote something that happens to coerce to 3" is
+// exactly the difference this module refuses to paper over elsewhere. The plan arrives as JSON, so
+// a real number is always expressible and nothing legitimate is lost.
+function ceilingBoundedPositiveInteger(input, field, defaultValue, ceiling) {
+  if (input !== undefined && input !== null && input !== '' && !Number.isInteger(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
+  }
+  const value = positiveInteger(input, field, defaultValue)
+  if (value > ceiling) {
+    throw new StockPreparationBomExpansionError(`${field} must not exceed ${ceiling}`, {
+      field,
+      value,
+      ceiling,
+    })
+  }
+  return value
+}
+
+// Same no-coercion rule as `ceilingBoundedPositiveInteger`, for a value that has no ceiling but is
+// just as load-bearing: `readPlan.maxReadCount` is the budget `projectSubtree` is REFUSED without.
+// A key the normalizer insists on should not then accept `true` (-> 1) or `['200']` (-> 200) as if
+// someone had chosen it. Absent stays absent — this is only about what a PRESENT value may be.
+function strictOptionalPositiveInteger(input, field) {
+  if (input === undefined || input === null || input === '') return undefined
+  if (!Number.isInteger(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be a positive integer`, { field, value: input })
+  }
+  return positiveInteger(input, field, undefined)
+}
+
+function optionalBoolean(input, field, defaultValue) {
+  if (input === undefined || input === null || input === '') return defaultValue
+  if (typeof input !== 'boolean') {
+    throw new StockPreparationBomExpansionError(`${field} must be a boolean`, { field, value: input })
+  }
+  return input
+}
+
 function nonNegativeInteger(input, field, defaultValue) {
   if (input === undefined || input === null || input === '') return defaultValue
   const value = Number(input)
@@ -186,6 +458,19 @@ const PLM_STOCK_PREPARATION_BOM_READ_PLAN = Object.freeze({
     nameField: 'IdentityName',
     materialField: 'Material',
     versionField: 'SysVer',
+    // specField / createTimeField are DECLARED-BUT-UNDEFAULTED on purpose.
+    //
+    // 规格 and the material creation time are NOT part of this family's core part roles
+    // (source-vendor-presets/dn-pdm-family.preset.json coreTables.part.roles declares exactly
+    // rowId/id/code/name/material/version). Where they live is a PER-DEPLOYMENT reading: on the
+    // measured customer catalog they surface as native view columns (`Specification`, `Createtime`
+    // on DN_PartLibrary_View — docs/development/takeover-beiliao-20260821/onsite-connection-test-
+    // runbook-20260901.md §0/§4), while on a stock DN_PDM catalog 规格 is a dictionary-assigned
+    // `partExAttr` slot (preset semanticExpectations `part-spec`). Pinning either here would encode
+    // ONE customer's dictionary row — the same refusal the preset applies to bomDetail quantity.
+    //
+    // So the plan DECLARES the two roles and defaults them to ABSENT. Undeclared => the expansion
+    // row simply carries no `spec` / `createTime` key (graceful absence), never a guessed column.
   },
   bomHead: {
     object: 'DN_PDM_BomHeadInfo',
@@ -222,9 +507,65 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
     pathInfo: normalizeObjectFields(plan.pathInfo, 'readPlan.pathInfo', ['object', 'idField']),
     orderHead: normalizeObjectFields(plan.orderHead, 'readPlan.orderHead', ['object', 'idField', 'pathIdField']),
     orderDetail: normalizeObjectFields(plan.orderDetail, 'readPlan.orderDetail', ['object', 'orderIdField', 'componentIdField', 'quantityField'], ['sortField']),
-    part: normalizeObjectFields(plan.part, 'readPlan.part', ['object', 'idField'], ['codeField', 'nameField', 'materialField', 'versionField']),
+    part: normalizeObjectFields(plan.part, 'readPlan.part', ['object', 'idField'], ['codeField', 'nameField', 'materialField', 'versionField', 'specField', 'createTimeField']),
     bomHead: normalizeObjectFields(plan.bomHead, 'readPlan.bomHead', ['object', 'parentPartField', 'bomIdField'], ['versionField', 'activeField']),
     bomDetail: normalizeObjectFields(plan.bomDetail, 'readPlan.bomDetail', ['object', 'bomParentField', 'componentIdField', 'quantityField'], ['sortField']),
+  }
+  // The DECLARED 备料 batch rule. The expansion itself never reads this — batch identity is minted
+  // upstream of it (stock-preparation-batch-identity.cjs) — but the read plan is the deployment's
+  // one configuration surface, so the declaration must SURVIVE normalization instead of being
+  // silently dropped here. Absent stays absent; a present value is carried through verbatim and
+  // validated by the minting module, which refuses an unknown mode rather than defaulting on a typo.
+  if (isPlainObject(plan.batchIdentity)) {
+    const mode = optionalString(plan.batchIdentity.mode, 'readPlan.batchIdentity.mode', { identifier: false })
+    if (mode !== undefined) out.batchIdentity = { mode }
+  }
+  // The plan-level READ BUDGET. Optional, and ABSENT STAYS ABSENT — an existing plan normalizes to
+  // the same object it always did. It exists because `maxReadCount` was reachable only as a
+  // per-invocation input that the measured deployment never set, which made "the subtree reuses the
+  // existing budget" a statement about a budget of nothing (see the projectSubtree banner).
+  const planMaxReadCount = strictOptionalPositiveInteger(plan.maxReadCount, 'readPlan.maxReadCount')
+  if (planMaxReadCount !== undefined) out.maxReadCount = planMaxReadCount
+
+  // THE OPTIONAL PROJECT-SUBTREE BLOCK. Absent (the shipped default) => NO KEY AT ALL, so every
+  // consumer of a normalized plan sees byte-for-byte what it saw before this feature existed.
+  // `assertNoForbiddenPlanKeys` above already walked the raw block, so sql/where/join inside it are
+  // refused exactly as they are anywhere else in the plan.
+  if (plan.projectSubtree !== undefined && plan.projectSubtree !== null) {
+    const block = requiredObject(plan.projectSubtree, 'readPlan.projectSubtree')
+    out.projectSubtree = {
+      // The folder tree's self-reference: PathInfo rows point at their parent node. Read with
+      // `{ [parentIdField]: nodeId }` and then RE-FILTERED client-side, because a source may answer
+      // a filtered read with the whole table.
+      pathInfo: normalizeObjectFields(block.pathInfo, 'readPlan.projectSubtree.pathInfo', ['parentIdField']),
+      // The BOM head's folder-node column: which directory node a head hangs off. Same re-filter.
+      bomHead: normalizeObjectFields(block.bomHead, 'readPlan.projectSubtree.bomHead', ['pathIdField']),
+      maxSubtreeDepth: ceilingBoundedPositiveInteger(
+        block.maxSubtreeDepth, 'readPlan.projectSubtree.maxSubtreeDepth',
+        DEFAULT_MAX_SUBTREE_DEPTH, MAX_SUBTREE_DEPTH_CEILING,
+      ),
+      maxSubtreeNodes: ceilingBoundedPositiveInteger(
+        block.maxSubtreeNodes, 'readPlan.projectSubtree.maxSubtreeNodes',
+        DEFAULT_MAX_SUBTREE_NODES, MAX_SUBTREE_NODES_CEILING,
+      ),
+      maxSubtreeRoots: ceilingBoundedPositiveInteger(
+        block.maxSubtreeRoots, 'readPlan.projectSubtree.maxSubtreeRoots',
+        DEFAULT_MAX_SUBTREE_ROOTS, MAX_SUBTREE_ROOTS_CEILING,
+      ),
+      // The project node itself is queried for heads too. One extra read, and on the measured
+      // catalog the difference between "the project's own heads" and "no roots at all".
+      includeSelf: optionalBoolean(block.includeSelf, 'readPlan.projectSubtree.includeSelf', true),
+    }
+    // MANDATORY READ BUDGET (see (3) in the projectSubtree banner). Refused HERE rather than
+    // defaulted, because a default read ceiling picked by this module would be a number nobody
+    // measured, and the deployments that need the subtree are exactly the ones whose read
+    // amplification has to be a deliberate, reviewed figure.
+    if (out.maxReadCount === undefined) {
+      throw new StockPreparationBomExpansionError(
+        'readPlan.maxReadCount is required when readPlan.projectSubtree is enabled',
+        { field: 'readPlan.maxReadCount', reason: 'PROJECT_SUBTREE_REQUIRES_READ_BUDGET' },
+      )
+    }
   }
   if (out.matchField !== out.pathExAttr.matchField) {
     throw new StockPreparationBomExpansionError('readPlan.matchField must match readPlan.pathExAttr.matchField', {
@@ -265,12 +606,16 @@ function isLargeBomBoundedErrorType(type) {
   return LARGE_BOM_BOUNDED_ERROR_TYPES.includes(type)
 }
 
+// Recognizes every INCOMPLETE-READ type, not only the four scale bounds, so a broken cursor keeps
+// its structural code instead of collapsing into `read_failed` with a driver message. What counts as
+// "large BOM, use the background job" is still decided by `isLargeBomBoundedExpansion`, which asks
+// the narrower `isLargeBomBoundedErrorType` — so this widening does not reroute a single expansion.
 function isReadLimitError(error) {
   return Boolean(
     error &&
     error.name === 'StockPreparationBomExpansionError' &&
     error.details &&
-    isLargeBomBoundedErrorType(error.details.code),
+    INCOMPLETE_READ_ERROR_TYPES.includes(error.details.code),
   )
 }
 
@@ -344,6 +689,19 @@ async function readAll(adapter, object, filters, options, readStats) {
     for (const record of records) {
       if (isPlainObject(record)) rows.push(record)
     }
+    // COMPLETE-BATCH CHECK, opt-in. `done === false` with no `nextCursor` is the source saying the
+    // batch is unfinished and refusing to say where to resume — §9.1's 断游标. Gated on
+    // `requireCompleteBatch` so an unarmed deployment keeps the exact loop it had: the common fixture
+    // shape `{ records: [...] }` leaves `done` UNDEFINED and must keep terminating normally, which is
+    // why the test is `=== false` and not falsy.
+    if (options.requireCompleteBatch === true
+      && isPlainObject(result) && result.done === false && !result.nextCursor) {
+      throw new StockPreparationBomExpansionError('PLM read stopped on a broken cursor', {
+        code: READ_CURSOR_BROKEN_ERROR_TYPE,
+        object,
+        page,
+      })
+    }
     if (!isPlainObject(result) || result.done === true || !result.nextCursor) break
     cursor = result.nextCursor
   }
@@ -367,7 +725,14 @@ function matchesByField(rows, field, value) {
 }
 
 function parseQuantity(value, context) {
-  const numeric = Number(value)
+  // Hold-not-zero: a SQL NULL or blank/whitespace-only string is an ABSENT
+  // quantity, not a measured one — Number(null) === 0 and Number('') === 0
+  // are both finite, so without this guard an absent source quantity would
+  // silently become a real 0 and multiply down as 0 through every descendant
+  // (see totalQuantity below). Force it through the same invalid_quantity
+  // path a garbled ('not-a-number') value already takes instead. A STATED
+  // numeric 0 (isBlank(0) is false) is a real measured zero and stays valid.
+  const numeric = isBlank(value) ? NaN : Number(value)
   if (!Number.isFinite(numeric)) {
     return {
       ok: false,
@@ -392,6 +757,324 @@ function isActiveBomHead(row, activeField) {
     if (['0', 'false', 'n', 'no', 'disabled', 'inactive'].includes(normalized)) return false
   }
   return true
+}
+
+// ---------------------------------------------------------------------------
+// F1c — 老系统(StockInfoController.java)的三条 BOM 语义,照抄到这条管线上。
+//
+// 老系统是客户今天在用的备料系统,owner 裁决「阅读 StockInfoController.java,采用该逻辑」。
+// 三条语义各自的老系统出处(行号为客户交付的只读源码副本):
+//
+//   1. 根选择 `doGetAllBomInfo` 1046-1095 —— 订单 BOM 行里若有 `J…-00` 总图,就只拿
+//      sysVer 最高的那一张总图 + 所有 `J…-A`/`J…-B` 钣金件当根;一张总图都没有时全部订单行
+//      当根,但把「按图号 dash 分段判定为别人子级」的行剔除(`checkHierarchyRelationship`
+//      413-450)。
+//   2. 同父去重 `iterHandle` 669-700 —— 同一父件之下,key =
+//      父组件图号 + 当前组件图号 + 名称及规格 + 材质,首条胜出。老系统的注释写明了为什么要带
+//      名称和材质:标准件图号一样,只按图号去重会把不同的标准件合并掉。
+//   3. 名称/规格切分 `fillBasicStockInfo` 762-770 —— identityName 按**第一个空格**切两段,
+//      前段是名称、后段是规格;切不开则名称=全串、规格空。
+//
+// 全部是 PURE 函数,没有 IO,便于单独测。规则常量默认按老系统,但由 `rootSelection` 配置块可
+// 覆盖(见 normalizeRootSelection):图号前后缀是一家工厂的编码约定,写死在代码里就成了一家客户
+// 的字典。
+// ---------------------------------------------------------------------------
+const DEFAULT_ROOT_SELECTION = Object.freeze({
+  enabled: true,
+  mainDrawingPrefix: 'J',
+  mainDrawingSuffix: '-00',
+  sheetMetalSuffixes: Object.freeze(['-A', '-B']),
+  // #5862 — how `sheetMetalSuffixes` is matched against a drawing number. `endsWith` is the老系统
+  // reading (the list really is a suffix list); `contains` is the customer's stated rule (「图号含
+  // -A/-B/-C/-D」), under which the list is a TOKEN list and a token hits anywhere AFTER the first
+  // character (a code that merely STARTS with the token is not a hit). Total order of the two
+  // shape checks is fixed by `hasSheetMetalShape`: 总图 first, so a 总图 is never also 钣金.
+  sheetMetalMatch: 'endsWith',
+  // #5862 — whether a 钣金 code must also start with `mainDrawingPrefix`. `true` is the老系统
+  // reading (钣金 = `J…-A`); `false` lets a deployment whose 钣金 numbers do not share the 总图
+  // prefix still name them by token.
+  sheetMetalRequiresMainPrefix: true,
+  dropDashDescendants: true,
+})
+
+const ROOT_SELECTION_SHEET_METAL_MATCH_MODES = Object.freeze(['endsWith', 'contains'])
+
+// THE CLOSED KEY SET of a `rootSelection` block. A key outside it is refused rather than ignored: the
+// block is deploy config that is snapshotted and hashed, and an ignored misspelling
+// (`sheetMetalMatchMode`, `sheetMetalSuffix`) would store a rule the expander never runs — the same
+// "the stored config must not lie about what runs" argument the action normalizer makes.
+const ROOT_SELECTION_KEYS = Object.freeze([
+  'enabled',
+  'mainDrawingPrefix',
+  'mainDrawingSuffix',
+  'sheetMetalSuffixes',
+  'sheetMetalMatch',
+  'sheetMetalRequiresMainPrefix',
+  'dropDashDescendants',
+])
+
+function optionalStringList(input, field) {
+  if (input === undefined || input === null) return undefined
+  if (!Array.isArray(input)) {
+    throw new StockPreparationBomExpansionError(`${field} must be an array of strings`, { field })
+  }
+  return input.map((entry, index) => {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      throw new StockPreparationBomExpansionError(`${field}[${index}] must be a non-empty string`, { field: `${field}[${index}]` })
+    }
+    return entry.trim()
+  })
+}
+
+// A PREFIX may legitimately be '' ("no prefix rule on this deployment"); a SUFFIX may not, because
+// an empty suffix makes `endsWith` true for every code and silently turns every order line into a
+// 总图. Absent (`undefined`) keeps the老系统 default; an explicit '' for the suffix is a refusal.
+function optionalRuleToken(input, field, { allowEmpty = false } = {}) {
+  if (input === undefined || input === null) return undefined
+  if (typeof input !== 'string') {
+    throw new StockPreparationBomExpansionError(`${field} must be a string`, { field })
+  }
+  const trimmed = input.trim()
+  if (trimmed === '' && !allowEmpty) {
+    throw new StockPreparationBomExpansionError(`${field} must not be empty`, { field })
+  }
+  return trimmed
+}
+
+function normalizeRootSelection(input) {
+  if (input === undefined || input === null) return DEFAULT_ROOT_SELECTION
+  if (!isPlainObject(input)) {
+    throw new StockPreparationBomExpansionError('rootSelection must be an object', { field: 'rootSelection' })
+  }
+  for (const key of Object.keys(input)) {
+    if (!ROOT_SELECTION_KEYS.includes(key)) {
+      throw new StockPreparationBomExpansionError(`rootSelection.${key} is not a recognized key`, { field: `rootSelection.${key}` })
+    }
+  }
+  const prefix = optionalRuleToken(input.mainDrawingPrefix, 'rootSelection.mainDrawingPrefix', { allowEmpty: true })
+  const suffix = optionalRuleToken(input.mainDrawingSuffix, 'rootSelection.mainDrawingSuffix')
+  const sheetMetal = optionalStringList(input.sheetMetalSuffixes, 'rootSelection.sheetMetalSuffixes')
+  const sheetMetalMatch = optionalRuleToken(input.sheetMetalMatch, 'rootSelection.sheetMetalMatch')
+  if (sheetMetalMatch !== undefined && !ROOT_SELECTION_SHEET_METAL_MATCH_MODES.includes(sheetMetalMatch)) {
+    throw new StockPreparationBomExpansionError(
+      `rootSelection.sheetMetalMatch must be one of ${ROOT_SELECTION_SHEET_METAL_MATCH_MODES.join(', ')}`,
+      { field: 'rootSelection.sheetMetalMatch' },
+    )
+  }
+  return Object.freeze({
+    enabled: optionalBoolean(input.enabled, 'rootSelection.enabled', DEFAULT_ROOT_SELECTION.enabled),
+    mainDrawingPrefix: prefix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingPrefix : prefix,
+    mainDrawingSuffix: suffix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingSuffix : suffix,
+    sheetMetalSuffixes: Object.freeze(sheetMetal === undefined ? [...DEFAULT_ROOT_SELECTION.sheetMetalSuffixes] : sheetMetal),
+    sheetMetalMatch: sheetMetalMatch === undefined ? DEFAULT_ROOT_SELECTION.sheetMetalMatch : sheetMetalMatch,
+    sheetMetalRequiresMainPrefix: optionalBoolean(input.sheetMetalRequiresMainPrefix, 'rootSelection.sheetMetalRequiresMainPrefix', DEFAULT_ROOT_SELECTION.sheetMetalRequiresMainPrefix),
+    dropDashDescendants: optionalBoolean(input.dropDashDescendants, 'rootSelection.dropDashDescendants', DEFAULT_ROOT_SELECTION.dropDashDescendants),
+  })
+}
+
+function hasMainDrawingShape(code, rules) {
+  const text = toKey(code)
+  if (text === null) return false
+  return text.startsWith(rules.mainDrawingPrefix) && text.endsWith(rules.mainDrawingSuffix)
+}
+
+// ORDER IS THE CONTRACT: the 总图 shape is checked FIRST and wins. Under `endsWith` the two shapes
+// could not overlap (a code cannot end with both `-00` and `-A`), so the old body never had to say
+// so; under `contains` they can (`J1-A-00` contains `-A`), and a 总图 that also counted as 钣金 would
+// survive root selection as a 钣金 root even when a newer version of the same 总图 superseded it.
+function hasSheetMetalShape(code, rules) {
+  const text = toKey(code)
+  if (text === null) return false
+  if (hasMainDrawingShape(text, rules)) return false
+  if (rules.sheetMetalRequiresMainPrefix !== false && !text.startsWith(rules.mainDrawingPrefix)) return false
+  if (rules.sheetMetalMatch === 'contains') {
+    // A hit must sit AFTER the first character: `-A` at index 0 is a code that starts with the token,
+    // which the customer's rule (「图号含 -A」 — a segment separator followed by the letter) does not mean.
+    return rules.sheetMetalSuffixes.some((token) => text.indexOf(token, 1) > 0)
+  }
+  return rules.sheetMetalSuffixes.some((suffix) => text.endsWith(suffix))
+}
+
+// 老系统 `Comparator.comparingInt(BomInfo::getSysVer)` 比的是 int。这条管线上的版本是读计划声明
+// 的一列,到手是字符串('V1'/'2'/...),所以:两边都能取出数字就按数字比(老系统口径),否则退回
+// 码点序 —— 绝不用 localeCompare(宿主 locale 会让同一批数据在 CI 和客户服务器上排出两种结果)。
+function versionRank(value) {
+  const text = toKey(value)
+  if (text === null) return null
+  const digits = text.replace(/[^0-9]/g, '')
+  if (digits === '') return null
+  const numeric = Number(digits)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function compareSourceVersion(left, right) {
+  const leftRank = versionRank(left)
+  const rightRank = versionRank(right)
+  if (leftRank !== null && rightRank !== null) {
+    if (leftRank === rightRank) return 0
+    return leftRank < rightRank ? -1 : 1
+  }
+  const leftText = toKey(left) || ''
+  const rightText = toKey(right) || ''
+  if (leftText === rightText) return 0
+  return leftText < rightText ? -1 : 1
+}
+
+// 老系统 `checkHierarchyRelationship` 413-450 的逐行等价物:
+//   1  -> code1 是 code2 的父级;2 -> code2 是 code1 的父级;0 -> 无直接层级关系;-1 -> 图号不可判定。
+// 老系统先用 `Utils.regx` 判图号格式合法(那条正则在客户的 Utils 里,没有随源码交付),这里退到
+// 「非空才判定」:判不了就答 -1,而 -1 从不导致剔除 —— 判不出层级时保留行,而不是猜一个关系把行删掉。
+function dashHierarchyRelationship(code1, code2) {
+  const left = toKey(code1)
+  const right = toKey(code2)
+  if (left === null || right === null) return -1
+  const leftParts = left.split('-')
+  const rightParts = right.split('-')
+  if (leftParts[0] !== rightParts[0]) return 0
+  if (leftParts.length === rightParts.length) return 0
+  const leftIsShorter = leftParts.length < rightParts.length
+  const parent = leftIsShorter ? leftParts : rightParts
+  const child = leftIsShorter ? rightParts : leftParts
+  for (let index = 0; index < parent.length; index += 1) {
+    if (parent[index] !== child[index]) return 0
+  }
+  return leftIsShorter ? 1 : 2
+}
+
+/**
+ * 老系统 `doGetAllBomInfo` 1046-1095 的根选择,作用在**订单行候选**上。
+ *
+ * 入参是 `{ componentSourceId, componentCode, sourceVersion }` 形状的候选数组(候选顺序=读到的
+ * 顺序),回 `{ selected, droppedCount }`。selected 保持候选的相对顺序:展示顺序由树序比较器决定
+ * (orderRowsAsBomTree),这里只决定「谁是根」。
+ *
+ * 只会 **缩小** 根集合,永远不会造出一个新根 —— 被剔除的行不是被丢掉,它还会作为它父件的子级
+ * 展开出来(那正是老系统剔除它的理由:它已经是别人的子级)。
+ */
+function selectOrderRootCandidates(candidates, rules) {
+  if (!rules || rules.enabled !== true) {
+    return { selected: candidates.slice(), droppedCount: 0, report: makeRootSelectionReport({ mode: 'disabled' }) }
+  }
+  const mains = candidates.filter((candidate) => hasMainDrawingShape(candidate.componentCode, rules))
+  if (mains.length === 0) {
+    // 无总图:全部订单行当根,但互为 dash 层级关系的,把作为子级的那条剔除。
+    if (rules.dropDashDescendants !== true) {
+      return {
+        selected: candidates.slice(),
+        droppedCount: 0,
+        report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: candidates.length }),
+      }
+    }
+    const dropped = new Set()
+    for (let i = 0; i < candidates.length; i += 1) {
+      for (let j = 0; j < candidates.length; j += 1) {
+        if (i === j) continue
+        // 老系统按 pliObjId 跳过同一行(`Objects.equals(bomInfo.getPliObjId(), info.getPliObjId())`);
+        // 这里的等价物是部件源 id。同一个部件出现两次的订单行不会互删。
+        if (candidates[i].componentSourceId === candidates[j].componentSourceId) continue
+        if (dashHierarchyRelationship(candidates[i].componentCode, candidates[j].componentCode) === 1) {
+          dropped.add(j)
+        }
+      }
+    }
+    const selected = candidates.filter((_, index) => !dropped.has(index))
+    const droppedCount = candidates.length - selected.length
+    return {
+      selected,
+      droppedCount,
+      report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: selected.length, dashDescendantsDropped: droppedCount }),
+    }
+  }
+  // 有总图:钣金件全要 + 总图只要版本最高的那一张(老系统 `Stream.max`,并列时取先到的那条)。
+  let best = mains[0]
+  for (const candidate of mains.slice(1)) {
+    if (compareSourceVersion(candidate.sourceVersion, best.sourceVersion) > 0) best = candidate
+  }
+  const keep = new Set([best])
+  let sheetMetalRoots = 0
+  for (const candidate of candidates) {
+    // `hasSheetMetalShape` is false for every 总图 (see its header), so a superseded 总图 version
+    // can never sneak back in here as a 钣金 root, whatever the match mode.
+    if (hasSheetMetalShape(candidate.componentCode, rules)) {
+      keep.add(candidate)
+      sheetMetalRoots += 1
+    }
+  }
+  const selected = candidates.filter((candidate) => keep.has(candidate))
+  const droppedCount = candidates.length - selected.length
+  return {
+    selected,
+    droppedCount,
+    report: makeRootSelectionReport({
+      mode: 'main_drawing',
+      mainDrawingCandidates: mains.length,
+      sheetMetalRoots,
+      // Superseded 总图 versions are dropped too but are NOT "other": they are `mainDrawingCandidates - 1`.
+      otherCandidatesDropped: droppedCount - (mains.length - 1),
+    }),
+  }
+}
+
+/**
+ * #5862 — VALUES-FREE 根选择报告:一个模式 token、四个整数、若干 flag token。没有图号、没有名称。
+ *
+ * 它回答的是操作员在 dry-run 里最常问的那一句「为什么根是这几条」:有没有认出总图、认出了几张
+ * 钣金、剔了几条、有没有可疑形状(一张总图配两张以上钣金 / 有总图却一张钣金都没有 / 没总图却
+ * 多根)。flag 只是提示,不阻断 —— 「可疑」在一家工厂是常态,在另一家是错配,那是配置的事。
+ */
+function makeRootSelectionReport({ mode, mainDrawingCandidates = 0, sheetMetalRoots = 0, otherCandidatesDropped = 0, dashDescendantsDropped = 0, selectedCount = 0 }) {
+  const flags = []
+  if (mode === 'main_drawing') {
+    if (sheetMetalRoots > 1) flags.push('multipleSheetMetalRoots')
+    if (sheetMetalRoots === 0) flags.push('sheetMetalRootMissing')
+  } else if (mode === 'no_main_drawing' && selectedCount > 1) {
+    flags.push('noMainDrawingMultipleRoots')
+  }
+  return {
+    mode,
+    mainDrawingCandidates,
+    sheetMetalRoots,
+    otherCandidatesDropped,
+    dashDescendantsDropped,
+    flags,
+  }
+}
+
+/**
+ * 老系统 `fillBasicStockInfo` 762-770:名称及规格按**第一个**空格切两段。
+ * 切不开(无空格 / 非字符串)=> 名称是全串、规格 undefined。多个空格只切首个,后半段原样保留
+ * (老系统 `split(" ", 2)` 就是这样,第二段带着它自己的前导空格)。
+ */
+function splitNameAndSpec(value) {
+  if (typeof value !== 'string') return { componentName: value, spec: undefined }
+  const index = value.indexOf(' ')
+  if (index < 0) return { componentName: value, spec: undefined }
+  return { componentName: value.slice(0, index), spec: value.slice(index + 1) }
+}
+
+/**
+ * 老系统 `iterHandle` 686-693 的同父去重键:父组件图号 + 当前组件图号 + 名称及规格 + 材质,
+ * **外加一项老系统没有的:本层用量**。
+ *
+ * 用 JSON 数组而不是老系统的字符串拼接:拼接会让 ('AB','C') 和 ('A','BC') 撞成同一个键。
+ * 这个键 **只在展开层用**,不进幂等键 —— 幂等键 {projectNo, componentSourceId, parentSourceId,
+ * pathTokens} 一个字符都没动(dry-run revision / hold / 确认账本全挂在它上面)。
+ *
+ * 为什么多一项用量(这是对老系统的一处**有意偏离**,写进 PR 正文):
+ * 老系统那四样一致就合并,首条胜出 —— 同一父件下两条明细指着同一个零件、用量却一个 1 一个 2 时,
+ * 它静悄悄取了第一条的用量。这条管线上,那种形状今天会走到 `duplicate_expanded_key` 的
+ * manual_confirm(冲突规划器的 fail-closed 挂起,人来裁),而「按老系统合并」会把这个挂起
+ * **消掉** —— 那是把一道已有的守卫放松。所以:四样一致 **且用量也一致** 才合并(真正的重复,
+ * 例如两条 active bomHead 指着同一条明细);用量不一致的仍然两行入库,仍然被挂起给人看。
+ */
+function siblingDedupeKey({ parentComponentCode, componentCode, nameAndSpec, material, rawQuantity }) {
+  return JSON.stringify([
+    toKey(parentComponentCode),
+    toKey(componentCode),
+    toKey(nameAndSpec),
+    toKey(material),
+    rawQuantity === undefined ? null : String(rawQuantity),
+  ])
 }
 
 function makePath(pathTokens) {
@@ -467,7 +1150,181 @@ function boundedPreviewSummary(summary = {}, errorTypes = []) {
   return out
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors }) {
+/**
+ * A COUNTS-ONLY projection of the subtree segment. Every member is an integer; not one business
+ * value crosses into it, and the keys exist only when the block is enabled — the same
+ * conditional-key discipline `createRow` applies to `spec`/`sortLine`, so a plan without the block
+ * produces a summary whose key set is byte-identical to the pre-feature one.
+ *
+ * `rootQuantitySource` is the honest half: it says how many depth-0 rows carried a MEASURED order
+ * quantity and how many carried the defaulted `SUBTREE_ROOT_DEFAULT_QUANTITY`. The row itself cannot
+ * say which it is, so the evidence does.
+ */
+function subtreeSummaryOf(counters) {
+  if (!isPlainObject(counters)) return undefined
+  return {
+    nodesVisited: Number(counters.nodesVisited || 0),
+    // Redundant arrivals at a folder node already queued by another branch — a DAG-shaped
+    // directory, a duplicate parent row, or a project naming both an ancestor and its descendant.
+    // Ordinary, counted, never an error (see the LOOP/RE-VISIT note on `discoverSubtreeRoots`).
+    nodesSkippedAlreadyVisited: Number(counters.nodesSkippedAlreadyVisited || 0),
+    rootsDiscovered: Number(counters.rootsDiscovered || 0),
+    rootsExpanded: Number(counters.rootsExpanded || 0),
+    rootsSkippedAlreadyExpanded: Number(counters.rootsSkippedAlreadyExpanded || 0),
+    rootsWithoutChildren: Number(counters.rootsWithoutChildren || 0),
+    rootQuantitySource: {
+      orderDetail: Number((counters.rootQuantitySource || {}).orderDetail || 0),
+      subtreeDefault: Number((counters.rootQuantitySource || {}).subtreeDefault || 0),
+    },
+  }
+}
+
+// X5 — the sort key, and nothing but the entry's own identity in it.
+//
+// Scalars only, like X4's `rowHashIdentityToken`: a non-scalar contributes the empty token and the
+// content tiebreaker below is what tells such entries apart. The four fields are joined on U+0000,
+// the smallest code unit there is, so comparing the JOINED strings is the same total order as
+// comparing the tuples (no token can straddle the separator).
+function rowErrorIdentityToken(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function rowErrorSortIdentity(entry) {
+  if (!isPlainObject(entry)) return ''
+  return ROW_ERROR_IDENTITY_FIELDS.map((field) => rowErrorIdentityToken(entry[field])).join('\u0000')
+}
+
+// Key-sorted JSON, so the tiebreaker is the entry's VALUE rather than its key insertion order —
+// `{type, field, depth}` and `{depth, field, type}` are the same rowError and must not compete.
+function stableRowErrorContent(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableRowErrorContent(item)).join(',')}]`
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableRowErrorContent(value[key])}`).join(',')}}`
+  }
+  const encoded = JSON.stringify(value)
+  return encoded === undefined ? 'undefined' : encoded
+}
+
+// Identity first, content second. For the scalar-only payloads this module emits, entries that tie on
+// BOTH are equal VALUES (the content projection serialises Date/Map/Set as '{}', so a non-scalar
+// payload — none exists today — could tie without being equal), so which of them the collector
+// happens to keep cannot change a single byte of what leaves this module.
+function compareRetainedRowErrors(left, right) {
+  if (left.identity !== right.identity) return left.identity < right.identity ? -1 : 1
+  if (left.content !== right.content) return left.content < right.content ? -1 : 1
+  return 0
+}
+
+/**
+ * X5 — THE BOUNDED, ORDER-BLIND rowError sample. See ROW_ERROR_IDENTITY_FIELDS' header for why the
+ * selection could not stay "the first N that arrived".
+ *
+ * THE MEMORY BOUND IS THE POINT AND IT IS STRUCTURAL: `entries` is pushed to only while it is
+ * SHORTER than `capacity`, and every later entry either replaces an existing slot or is dropped on
+ * the spot. There is no second buffer, no "collect then sort", no per-entry bookkeeping outside the
+ * retained set — a 40k-position project past a cap of 5000 holds 5000 decorated entries at its peak
+ * and the other 35k are unreferenced the moment `add` returns. That is the same O(N) ceiling D-C
+ * bought, and a regression to O(M) would be a return of the unbounded response D-C removed.
+ *
+ * The heap is built ONCE, on the first entry that does not fit — i.e. exactly when the expansion
+ * becomes truncated. Until then `entries` is untouched TRAVERSAL order, which is what lets
+ * `finalize` hand an under-cap expansion byte-identically the array it had before X5. Past that
+ * point `entries` is a MAX-heap on the sort key: the root is the worst entry retained, a newcomer
+ * that sorts below it takes its place, and anything else is refused. O(M log N).
+ */
+function createRowErrorCollector(capacity) {
+  const limit = Number.isInteger(capacity) && capacity > 0 ? capacity : ROW_ERROR_LIMIT
+  const entries = []
+  // `true` exactly when something was refused a slot or evicted an incumbent — which is exactly when the expansion is
+  // truncated, i.e. the same condition `rowErrorTruncationOf` reports as `total > retained`. ONE
+  // fact, read here to choose between traversal order and sorted order, so the array's shape and
+  // the summary's `rowErrorsTruncated` can never disagree.
+  let overflowed = false
+  const decorate = (entry) => ({
+    entry,
+    identity: rowErrorSortIdentity(entry),
+    content: stableRowErrorContent(entry),
+  })
+  const siftDown = (from) => {
+    let parent = from
+    for (;;) {
+      const left = parent * 2 + 1
+      if (left >= entries.length) return
+      const right = left + 1
+      const largest = right < entries.length && compareRetainedRowErrors(entries[right], entries[left]) > 0
+        ? right
+        : left
+      if (compareRetainedRowErrors(entries[largest], entries[parent]) <= 0) return
+      const held = entries[parent]
+      entries[parent] = entries[largest]
+      entries[largest] = held
+      parent = largest
+    }
+  }
+  return {
+    add(entry) {
+      if (entries.length < limit) {
+        entries.push(decorate(entry))
+        return
+      }
+      if (!overflowed) {
+        for (let index = Math.floor(entries.length / 2) - 1; index >= 0; index -= 1) siftDown(index)
+        overflowed = true
+      }
+      const candidate = decorate(entry)
+      // `>= 0` keeps the incumbent on a tie: a tie is value-equality (see compareRetainedRowErrors),
+      // so keeping either is the same output, and keeping the incumbent costs no sift.
+      if (compareRetainedRowErrors(candidate, entries[0]) >= 0) return
+      entries[0] = candidate
+      siftDown(0)
+    },
+    size() {
+      return entries.length
+    },
+    // TRAVERSAL order while nothing was dropped (byte-identity with the pre-X5 array), the sorted
+    // top-N once something was. A COPY is sorted, so calling this twice — the failure return
+    // threads the array into both the result and its summary — cannot disturb the heap.
+    finalize() {
+      const retained = overflowed ? entries.slice().sort(compareRetainedRowErrors) : entries
+      return retained.map((decorated) => decorated.entry)
+    },
+  }
+}
+
+/**
+ * The D-C overflow stanza, or `undefined` when nothing overflowed.
+ *
+ * `undefined` is the whole point: an expansion under the cap mounts NO key, which is what keeps its
+ * summary — and therefore its evidence and its revision hash — byte-identical to the pre-cap one.
+ *
+ * VALUES-FREE by construction. The keys of `rowErrorTypeCounts` are rowError `type` tokens, the
+ * same closed vocabulary `summary.errorTypes` has always published; the values are integers.
+ */
+function rowErrorTruncationOf({ total, retained, typeTotals }) {
+  if (!(Number.isFinite(total) && Number.isFinite(retained) && total > retained)) return undefined
+  const rowErrorTypeCounts = {}
+  for (const type of Array.from(typeTotals.keys()).sort()) rowErrorTypeCounts[type] = typeTotals.get(type)
+  return {
+    rowErrorsTotal: total,
+    rowErrorsRetained: retained,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts,
+  }
+}
+
+// EVERY type the expansion produced — retained and dropped alike — for an expansion that overflowed.
+// A SUPERSET of the dropped types, deliberately: `errorTypes` unions this in, so a superset of the
+// truth is exactly as correct as the truth and costs one Map instead of a second one tracking which
+// types happened to lose their last array slot. Empty (and therefore invisible to the `Set` below)
+// when nothing overflowed, so `errorTypes` is unchanged for every expansion under the cap.
+function truncatedRowErrorTypes(rowErrorTruncation) {
+  if (!isPlainObject(rowErrorTruncation)) return []
+  return Object.keys(rowErrorTruncation.rowErrorTypeCounts || {})
+}
+
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation, duplicateSiblingsCollapsed, rootsFilteredOut, rootSelectionReport }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -482,7 +1339,10 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
     readObjects: Array.from(new Set(readStats.map((entry) => entry.object))).sort(),
     readCount: readStats.length,
     readDiagnostics: readStats.map(readDiagnostic),
-    errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).filter(Boolean))).sort(),
+    // `.concat` of the TRUNCATED expansion's types keeps this honest: a type whose every occurrence
+    // was refused an array slot still has to be named here, or the summary would say the project has
+    // no such defect. Empty concat under the cap => the identical set => the identical hash.
+    errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).concat(truncatedRowErrorTypes(rowErrorTruncation)).filter(Boolean))).sort(),
     actions: makeActions(status === 'expanded' ? rowsExpanded : 0),
   }
   if (status === 'not_found') {
@@ -494,10 +1354,58 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
       manualConfirm: 0,
     }
   }
+  // CONDITIONAL KEY — present only when the deployment enabled the block. Appended last so the
+  // preceding key order is untouched.
+  const subtreeCounts = subtreeSummaryOf(subtree)
+  if (subtreeCounts) summary.subtree = subtreeCounts
+  // CONDITIONAL KEYS — see ROW_ERROR_LIMIT's header. Mounted only by an expansion that actually
+  // overflowed, and appended after `subtree` so neither conditional block can move the other.
+  if (isPlainObject(rowErrorTruncation)) Object.assign(summary, rowErrorTruncation)
+  // F1c — 老系统语义的两个计数,VALUES-FREE(两个整数,没有图号、没有名称)。
+  //
+  // CONDITIONAL by the same discipline as every block above it, and appended LAST so neither
+  // existing conditional block can be moved by them: an expansion that collapsed nothing and
+  // filtered no root produces a summary byte-identical to the pre-F1c one, which is what keeps
+  // the dry-run revision of an untouched project stable.
+  //
+  // WHY THEY MUST BE VISIBLE AT ALL: both are行数变化的原因。去重掉的兄弟行和被剔除的根都会
+  // 让「重拉后行数变少」,没有这两个数,操作员分不清「PLM 少了件」和「我们按老系统合并了」。
+  if (Number.isFinite(duplicateSiblingsCollapsed) && duplicateSiblingsCollapsed > 0) {
+    summary.duplicateSiblingsCollapsed = duplicateSiblingsCollapsed
+  }
+  if (Number.isFinite(rootsFilteredOut) && rootsFilteredOut > 0) {
+    summary.rootsFilteredOut = rootsFilteredOut
+  }
+  // #5862 — the根选择 report, VALUES-FREE (mode / flag tokens and four integers). Mounted whenever
+  // the expander ran root selection (mode `disabled` included: "the rule is off" is itself the
+  // answer to 「为什么根是这几条」). Appended last so no conditional block above moves.
+  if (isPlainObject(rootSelectionReport)) summary.rootSelectionReport = cloneRootSelectionReport(rootSelectionReport)
   return summary
 }
 
-function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
+function cloneRootSelectionReport(report) {
+  return {
+    mode: report.mode,
+    mainDrawingCandidates: Number(report.mainDrawingCandidates || 0),
+    sheetMetalRoots: Number(report.sheetMetalRoots || 0),
+    otherCandidatesDropped: Number(report.otherCandidatesDropped || 0),
+    dashDescendantsDropped: Number(report.dashDescendantsDropped || 0),
+    flags: Array.isArray(report.flags) ? report.flags.filter((flag) => typeof flag === 'string') : [],
+  }
+}
+
+// THE ROW-PRODUCTION BOUNDARY.
+//
+// `createRow` emits the fixed canonical shape and, when — and only when — an
+// `extFieldMapping` is configured, the tenant `ext_` values that mapping
+// produced. `extValues` is merged AFTER the canonical keys and is guaranteed by
+// the mapping normalizer to contain nothing but `ext_`-prefixed ids that the
+// customer pack declared `plm_system`, so it can neither shadow a canonical
+// column nor smuggle a human-owned one past the refresh wall.
+//
+// Omit the mapping and this function is byte-identical to the pre-change one:
+// no key is added, not even an empty one.
+function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine, extValues }) {
   const componentSourceId = toKey(readField(partRow, 'OBJ_ID'))
   const path = makePath(pathTokens)
   const row = {
@@ -508,18 +1416,50 @@ function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQ
     path,
     depth,
     componentCode: readField(partRow, 'IdentityNo'),
-    componentName: readField(partRow, 'IdentityName'),
+    // F1c — 名称 is the FIRST SEGMENT of 名称及规格, never the whole cell any more. See
+    // splitNameAndSpec (老系统 fillBasicStockInfo 762-770). The UNSPLIT string stays reachable
+    // as `nameAndSpec` below, because 名称及规格 is a column of the customer's own workbook.
+    componentName: splitNameAndSpec(readField(partRow, 'IdentityName')).componentName,
     material: readField(partRow, 'Material'),
     sourceVersion: readField(partRow, 'SysVer'),
     rawQuantity,
     totalQuantity,
     active,
   }
+  // DECLARED-OR-ABSENT (see PLM_STOCK_PREPARATION_BOM_READ_PLAN.part): 规格 and the material
+  // creation time are emitted ONLY when the deployment's read plan declared the slot AND the
+  // source row actually carried a value. Same conditional-key discipline as `sortLine`, so a plan
+  // that declares neither produces a byte-identical row to the pre-change one — no empty key.
+  const spec = readField(partRow, 'Spec')
+  // F1c — 名称及规格, the customer's own column (老系统 StockInfo.nameAndStandard). Carried
+  // VERBATIM and only when the source row had one, so a part library with no name still produces
+  // no key. The planner maps it onto the customer pack's `ext_nameAndSpec` where that pack
+  // declares the column; on a pack-less deployment it simply travels no further.
+  const nameAndSpec = readField(partRow, 'IdentityName')
+  if (!isBlank(nameAndSpec)) row.nameAndSpec = nameAndSpec
+  if (!isBlank(spec)) {
+    // A DECLARED 规格 column always wins: it is the deployment's own column, measured, while the
+    // split below is derived from the name cell.
+    row.spec = spec
+  } else {
+    // 老系统口径: 规格 is the tail of 名称及规格 after the first space. This is NOT a guessed
+    // COLUMN (the "declared or absent" rule for `readPlan.part.specField` is untouched) — it is a
+    // derivation from the DECLARED name column, and a name with no space still yields no key.
+    const derivedSpec = splitNameAndSpec(nameAndSpec).spec
+    if (!isBlank(derivedSpec)) row.spec = derivedSpec
+  }
+  const createTime = readField(partRow, 'Createtime')
+  if (!isBlank(createTime)) row.createTime = createTime
   if (!isBlank(sortLine)) row.sortLine = sortLine
+  if (isPlainObject(extValues)) {
+    for (const [fieldId, value] of Object.entries(extValues)) {
+      row[fieldId] = value
+    }
+  }
   return row
 }
 
-function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
+function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine, extFieldMapping }) {
   const componentSourceId = toKey(readField(partRow, plan.part.idField))
   if (componentSourceId === null) {
     return {
@@ -532,7 +1472,19 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
     IdentityName: plan.part.nameField ? readField(partRow, plan.part.nameField) : undefined,
     Material: plan.part.materialField ? readField(partRow, plan.part.materialField) : undefined,
     SysVer: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
+    Spec: plan.part.specField ? readField(partRow, plan.part.specField) : undefined,
+    Createtime: plan.part.createTimeField ? readField(partRow, plan.part.createTimeField) : undefined,
   }
+  // The mapping reads the RAW source row, not `normalizedPart`: the canonical
+  // declared keys are the only ones the read plan knows about, and the whole
+  // point of a tenant mapping is to reach the columns it does not.
+  //
+  // `readField` is handed over rather than reimplemented, so a mapped source
+  // column resolves through EXACTLY the same lookup (own key first, then a
+  // single case-insensitive match, ambiguity refused) as a canonical one.
+  const mapped = extFieldMapping
+    ? applyExtFieldMapping(extFieldMapping, partRow, { readField })
+    : null
   return {
     row: createRow({
       projectNo,
@@ -544,19 +1496,28 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
       totalQuantity,
       active,
       sortLine,
+      extValues: mapped ? mapped.values : undefined,
     }),
     componentSourceId,
     sourceVersion: normalizedPart.SysVer,
+    // A refused cell is reported, never guessed at. It does NOT drop the row:
+    // one unparseable legacy cell must not cost a BOM component its PLM data.
+    extErrors: mapped && mapped.errors.length ? mapped.errors.map((entry) => ({ ...entry, depth })) : undefined,
   }
 }
 
-function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs }) {
+function failureResult({ projectNoPresent, matchField, status = 'failed', rows, errors, rowErrors, missingComponents = [], missingComponentDistinctCount = 0, readStats, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, subtree, rowErrorTruncation }) {
   return {
     valid: false,
     status,
     rows,
     errors,
     rowErrors,
+    // Present on EVERY return path (see the constant's header), so a consumer never has to ask
+    // whether this particular expansion has the keys. Deliberately NOT passed to makeSummary:
+    // `summary` is the values-free projection and stays that way.
+    missingComponents,
+    missingComponentDistinctCount,
     summary: makeSummary({
       projectNoPresent,
       matchField,
@@ -571,8 +1532,26 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
       readStats,
       errors,
       rowErrors,
+      subtree,
+      rowErrorTruncation,
     }),
   }
+}
+
+// Fail-closed on the mapping itself: an `extFieldMapping` that has not been
+// through `normalizeExtFieldMapping` has not been checked against a customer
+// pack, so its targets could be human-owned, canonical, or simply not installed.
+// This module refuses to be the place where that check is skipped. Absent is
+// fine (every existing caller); present-but-unvalidated is not.
+function requireNormalizedExtFieldMapping(extFieldMapping) {
+  if (extFieldMapping === undefined || extFieldMapping === null) return null
+  if (!isNormalizedExtFieldMapping(extFieldMapping)) {
+    throw new StockPreparationBomExpansionError(
+      'extFieldMapping must be produced by normalizeExtFieldMapping (stock-preparation-ext-field-mapping.cjs)',
+      { field: 'extFieldMapping', reason: 'EXT_FIELD_MAPPING_NOT_NORMALIZED' },
+    )
+  }
+  return extFieldMapping
 }
 
 async function expandPlmProjectBom(input = {}) {
@@ -581,21 +1560,90 @@ async function expandPlmProjectBom(input = {}) {
   if (!projectNo) {
     throw new StockPreparationBomExpansionError('projectNo is required', { field: 'projectNo' })
   }
+  const extFieldMapping = requireNormalizedExtFieldMapping(input.extFieldMapping)
   const plan = normalizeStockPreparationBomReadPlan(input.readPlan || PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  // F1c — 老系统根选择的规则常量。默认就是老系统那套(J…-00 总图 / J…-A、J…-B 钣金 / dash 层级
+  // 剔除),但图号编码是一家工厂的约定,所以整块可由调用方(动作配置)覆盖,包括整条规则关掉
+  // (`enabled: false` => 订单行全部当根,即 F1c 之前的行为)。
+  const rootSelection = normalizeRootSelection(input.rootSelection)
   const options = {
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', DEFAULT_PAGE_LIMIT),
     maxPages: positiveInteger(input.maxPages, 'maxPages', DEFAULT_MAX_PAGES),
     maxDepth: nonNegativeInteger(input.maxDepth, 'maxDepth', DEFAULT_MAX_DEPTH),
     maxRows: positiveInteger(input.maxRows, 'maxRows', DEFAULT_MAX_ROWS),
-    maxReadCount: optionalPositiveInteger(input.maxReadCount, 'maxReadCount'),
+    // The per-invocation budget still wins where it is given; the PLAN's budget is the floor under
+    // it. Both absent stays both absent, so nothing about an existing caller changes — but a plan
+    // that enabled `projectSubtree` cannot be budget-less, because the normalizer refused it.
+    maxReadCount: optionalPositiveInteger(input.maxReadCount, 'maxReadCount') !== undefined
+      ? optionalPositiveInteger(input.maxReadCount, 'maxReadCount')
+      : plan.maxReadCount,
     maxElapsedMs: optionalPositiveInteger(input.maxElapsedMs, 'maxElapsedMs'),
     startedAtMs: Number.isFinite(input.startedAtMs) ? Number(input.startedAtMs) : Date.now(),
     now: typeof input.now === 'function' ? input.now : Date.now,
+    // Opt-in, and only the B2a seam opts in. Default `false` keeps every existing caller — every
+    // fixture, every demo, every dormant deployment — on the loop it already had.
+    requireCompleteBatch: input.requireCompleteBatch === true,
+    // D-C. Configuration may move this within reach of the ceiling and no further — see
+    // ROW_ERROR_LIMIT's header. The enforcement lives HERE, in the only place that reads the cap, so
+    // a caller that forgot to validate cannot un-bound the array by threading a big number through.
+    //
+    // `ceilingBoundedPositiveInteger`, not a silent `Math.min`: over the ceiling is a REFUSAL, and
+    // the type is not coerced. A clamp would have let `rowErrorLimit: 100000` read as "hard cap
+    // 20000" with no feedback anywhere, which is the exact "recommended maximum 4 as a comment while
+    // the plan carries 100000" failure that helper exists to prevent; and `positiveInteger` alone
+    // would have accepted `true` (-> 1), silently cutting the retained sample — and the operator's
+    // defect list — to a single entry over a config typo.
+    rowErrorLimit: ceilingBoundedPositiveInteger(
+      input.rowErrorLimit,
+      'rowErrorLimit',
+      ROW_ERROR_LIMIT,
+      ROW_ERROR_LIMIT_CEILING,
+    ),
   }
   const readStats = []
   const errors = []
-  const rowErrors = []
+  // X5. The retained SAMPLE lives here now, not in a bare array: bounded by `rowErrorLimit` exactly
+  // as D-C left it, but the N it keeps are the N smallest by row identity rather than the N that
+  // arrived first. `finalize()` — called once per return path — is what produces the array that
+  // leaves the module (traversal order under the cap, sorted top-N past it).
+  const rowErrorCollector = createRowErrorCollector(options.rowErrorLimit)
+  // D-C counters. `rowErrorsTotal` counts EVERY call to `addRowError`, including the ones the cap
+  // refused an array slot; `rowErrorTypeTotals` does the same per type. Both are read only through
+  // `rowErrorTruncationOf`, which returns `undefined` — and therefore mounts nothing — when the
+  // expansion stayed under the cap.
+  let rowErrorsTotal = 0
+  const rowErrorTypeTotals = new Map()
+  // F1c counters — values-free, reported through `makeSummary`'s two conditional keys.
+  let duplicateSiblingsCollapsed = 0
+  let rootsFilteredOut = 0
+  let rootSelectionReport
   const rows = []
+  // Zeroed the moment the block is enabled — so "enabled" and "the summary carries subtree counts"
+  // are the same fact on every exit path, including `not_found` and an entry-read failure. Stays
+  // `undefined` when the block is absent, which is what keeps the disabled summary byte-identical.
+  const subtreeCounters = plan.projectSubtree
+    ? {
+      nodesVisited: 0,
+      nodesSkippedAlreadyVisited: 0,
+      rootsDiscovered: 0,
+      rootsExpanded: 0,
+      rootsSkippedAlreadyExpanded: 0,
+      rootsWithoutChildren: 0,
+      rootQuantitySource: { orderDetail: 0, subtreeDefault: 0 },
+    }
+    : undefined
+  // The side channel, keyed by part number — see MISSING_COMPONENT_DETAIL_LIMIT's header. Three
+  // structures, because three different questions have to stay answerable:
+  //   * `missingComponents`        the DETAIL that leaves this module, at most one entry per distinct
+  //                               part number and at most MISSING_COMPONENT_DETAIL_LIMIT of them;
+  //   * `missingComponentParents`  the distinct parents per retained part (a Set, so `parentCount`
+  //                               counts places-it-is-wanted rather than probes);
+  //   * `missingComponentIds`      EVERY distinct part number probed, capped by nothing, so the
+  //                               reported `distinctCount` is the truth and not the page size.
+  const missingComponents = []
+  const missingComponentIndex = new Map()
+  const missingComponentParents = new Map()
+  const missingComponentIds = new Set()
 
   const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
   const addGlobalError = (type, details = {}) => {
@@ -607,10 +1655,57 @@ async function expandPlmProjectBom(input = {}) {
       addGlobalError(bounded.type, bounded)
       return
     }
-    addGlobalError('read_failed', { object, message: err && err.message })
+    // The read-only ORIGINAL CAUSE CLASS, kept alongside the message. `message` is dynamic and is
+    // never allowed into evidence; `causeClass` is `error.code || error.name` — a symbolic token —
+    // and it is the only thing a downstream seam can classify a driver failure by. Without it an
+    // mssql request timeout is indistinguishable from any other failed read, and the B2a seam has to
+    // call it "incomplete" when it is specifically "timed out".
+    addGlobalError('read_failed', { object, causeClass: safeErrorCode(err), message: err && err.message })
   }
+  // COUNT FIRST, OFFER SECOND (D-C). Every caller keeps being counted; only the SAMPLE is bounded.
+  // The type key mirrors `makeSummary`'s `entry.type || entry.code` exactly, so the per-type totals
+  // and `errorTypes` can never disagree about what a rowError's type is.
   const addRowError = (error) => {
-    rowErrors.push(error)
+    rowErrorsTotal += 1
+    const type = isPlainObject(error) ? (error.type || error.code) : undefined
+    if (type) rowErrorTypeTotals.set(type, (rowErrorTypeTotals.get(type) || 0) + 1)
+    // X5. The collector decides what the cap keeps — the N smallest by row identity, so the same
+    // SET of rowErrors retains the same N whatever order the source produced them in. The counters
+    // above are updated BEFORE it and unconditionally, so `rowErrorsTotal` / `rowErrorTypeCounts`
+    // stay true totals whether an entry took a slot, replaced one, or was refused.
+    rowErrorCollector.add(error)
+  }
+  const rowErrorTruncation = () => rowErrorTruncationOf({
+    total: rowErrorsTotal,
+    retained: rowErrorCollector.size(),
+    typeTotals: rowErrorTypeTotals,
+  })
+  // Deliberately separate from `addRowError`: the two payloads have different audiences and
+  // different rules, and merging them is exactly the mistake this design exists to prevent.
+  //
+  // AGGREGATES AT THE POINT OF COLLECTION. Creating a part in PLM is a per-part job, so the unit of
+  // this list is the part number, not the BOM position. A part number already retained keeps
+  // counting no matter how many positions want it — the cap can cost the list a WHOLE PART, never a
+  // wrong count for a part that is on it.
+  const addMissingComponent = ({ componentSourceId, parentSourceId, bomId, path, depth }) => {
+    missingComponentIds.add(componentSourceId)
+    let entry = missingComponentIndex.get(componentSourceId)
+    if (!entry) {
+      // Only a NEW part number can be refused by the cap, and `missingComponentIds` has already
+      // recorded it so `distinctCount` still counts it.
+      if (missingComponents.length >= MISSING_COMPONENT_DETAIL_LIMIT) return
+      // parent / bom / path / depth are the FIRST place this part was wanted, and stay so.
+      entry = { componentSourceId, parentSourceId, bomId, path, depth, occurrenceCount: 0, parentCount: 0 }
+      missingComponents.push(entry)
+      missingComponentIndex.set(componentSourceId, entry)
+      missingComponentParents.set(componentSourceId, new Set())
+    }
+    entry.occurrenceCount += 1
+    const parents = missingComponentParents.get(componentSourceId)
+    // `null` for the BOM root ("wanted directly by the order"), which is a distinct place a part is
+    // wanted and is counted as one. It can never collide with a String() parent id.
+    parents.add(parentSourceId === null || parentSourceId === undefined ? null : String(parentSourceId))
+    entry.parentCount = parents.size
   }
   const pushRow = (row) => {
     if (rows.length + 1 > options.maxRows) {
@@ -623,15 +1718,38 @@ async function expandPlmProjectBom(input = {}) {
 
   let pathMatches = []
   try {
-    pathMatches = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    // THE ENTRY READ, RE-FILTERED CLIENT-SIDE — the one read in this module that was not.
+    //
+    // Every other filtered read whose result decides WHICH PROJECT'S DATA we are looking at already
+    // goes through `matchesByField`, because `readAll` RECORDS `filtersApplied` and never ENFORCES
+    // it, and `bridge:legacy-sql-readonly` may legally answer with the whole table. This read was
+    // the exception, and it is the most load-bearing one of all: its rows ARE the project — they
+    // seed the order loop's folder-node lookups AND the subtree segment's BFS.
+    //
+    // Unfiltered, a single say-anything source turns every other project's directory node into a
+    // depth-0 node of THIS project, and the resulting rows land as this project's stock-preparation
+    // lines with `status: expanded`, `valid: true`, `errors: []` — a clean bill of health on
+    // cross-project data, with `dataScopeRef` still naming the one project the request asked for.
+    //
+    // Filtering HERE rather than in the subtree segment is deliberate: one clean `pathMatches`
+    // serves both root segments, and the order path — which had the identical exposure before this
+    // change — is closed by the same line. Against a source that applies its filters, this is a
+    // no-op; the behaviour only differs against a source that lied.
+    const pathExAttrRows = await read(plan.pathExAttr.object, { [plan.pathExAttr.matchField]: projectNo })
+    pathMatches = matchesByField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
   } catch (err) {
     addReadError(err, plan.pathExAttr.object)
+    // X5: materialised ONCE and threaded on, so the result and the summary built from it are the
+    // same array rather than two independently-sorted copies.
+    const rowErrors = rowErrorCollector.finalize()
     return failureResult({
       projectNoPresent: true,
       matchField: plan.matchField,
       rows,
       errors,
       rowErrors,
+      missingComponents,
+      missingComponentDistinctCount: missingComponentIds.size,
       readStats,
       rootMatches: 0,
       maxDepth: options.maxDepth,
@@ -639,6 +1757,8 @@ async function expandPlmProjectBom(input = {}) {
       maxPages: options.maxPages,
       maxReadCount: options.maxReadCount,
       maxElapsedMs: options.maxElapsedMs,
+      subtree: subtreeCounters,
+      rowErrorTruncation: rowErrorTruncation(),
     })
   }
 
@@ -649,6 +1769,8 @@ async function expandPlmProjectBom(input = {}) {
       rows: [],
       errors: [],
       rowErrors: [],
+      missingComponents: [],
+      missingComponentDistinctCount: 0,
       summary: makeSummary({
         projectNoPresent: true,
         matchField: plan.matchField,
@@ -663,11 +1785,25 @@ async function expandPlmProjectBom(input = {}) {
         readStats,
         errors: [],
         rowErrors: [],
+        subtree: subtreeCounters,
+        // NO `rowErrorTruncation` here, and that is not an omission: this is the ONE `makeSummary`
+        // call site reached before `addRowError` can have run even once (the project-number lookup
+        // came back empty, so nothing was expanded), which is why `rowErrors` is a hardcoded `[]`
+        // two lines up. Threading the counters would mount nothing. The other two call sites are
+        // both downstream of expansion and MUST thread it — do not copy this exception into one.
       }),
     }
   }
 
-  async function readPart(componentSourceId, depth) {
+  // `locus` is the W3a context for the missing-component side channel ONLY: the parent, the BOM head
+  // and the path this probe happened under. It never reaches `addRowError` — the rowError payload is
+  // frozen at `{type, field, depth}` and a test pins its `Object.keys()`.
+  //
+  // `ambiguous_component` gets NO such channel, deliberately. Two candidate rows for one part id is a
+  // SOURCE DATA defect nobody on the floor can fix by creating a part, so naming the part would put a
+  // customer value on the wire for no operator action — and every value-bearing key is a leak surface
+  // that has to earn its keep.
+  async function readPart(componentSourceId, depth, locus = {}) {
     const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId })
     const candidates = matchesByField(matches, plan.part.idField, componentSourceId)
     if (candidates.length > 1) {
@@ -677,6 +1813,13 @@ async function expandPlmProjectBom(input = {}) {
     const row = candidates[0]
     if (!row) {
       addRowError({ type: 'missing_component', field: plan.part.idField, depth })
+      addMissingComponent({
+        componentSourceId,
+        parentSourceId: locus.parentSourceId === undefined ? null : locus.parentSourceId,
+        bomId: locus.bomId === undefined ? null : locus.bomId,
+        path: locus.path === undefined ? null : locus.path,
+        depth,
+      })
       return undefined
     }
     return row
@@ -686,6 +1829,16 @@ async function expandPlmProjectBom(input = {}) {
     if (errors.length > 0) return
     const parentSourceId = parentRow.componentSourceId
     const nextDepth = parentRow.depth + 1
+    // F1c 同父去重 (老系统 iterHandle 686-693). ONE set PER PARENT, declared here rather than per
+    // BOM head on purpose: 老系统 dedupes the parent's WHOLE child list, which it gets by
+    // `parentId` — i.e. across every BOM head that named this parent. That is also exactly the
+    // shape of 差异A (两条 active bomHead 让同一个子件以相同 pathTokens 重复入行,banner :72-78
+    // 自承): the second head's identical child now collapses into the first head's row instead of
+    // producing a second row the conflict planner cannot even see as related.
+    //
+    // 去重掉的子件连同它的子树一起不展开 —— 老系统也是这样(重复节点整个不进 `iterHandle`),
+    // 而且它的子树会在胜出的那条兄弟下面原样展开一遍。
+    const siblingKeys = new Set()
     const headFilters = { [plan.bomHead.parentPartField]: parentSourceId }
     if (plan.bomHead.versionField && !isBlank(parentRow.sourceVersion)) {
       headFilters[plan.bomHead.versionField] = parentRow.sourceVersion
@@ -743,9 +1896,31 @@ async function expandPlmProjectBom(input = {}) {
           addRowError(qty.error)
           continue
         }
-        const partRow = await readPart(childSourceId, nextDepth)
-        if (!partRow) continue
         const childTokens = pathTokens.concat(childSourceId)
+        const partRow = await readPart(childSourceId, nextDepth, {
+          parentSourceId,
+          bomId,
+          path: makePath(childTokens),
+        })
+        if (!partRow) continue
+        // 键取的是老系统那四样,读的是 PART 行(图号/名称及规格/材质)+ 父件图号 —— 和老系统
+        // `info.getParentComponentCode()+info.getComponentCode()+info.getNameAndStandard()+
+        // info.getMaterialId()` 同一组值。名称及规格用的是 **未切分** 的原串,所以两个同图号、
+        // 不同名称的标准件不会被合并(老系统那行注释说的就是这件事)。
+        const dedupeKey = siblingDedupeKey({
+          parentComponentCode: parentRow.componentCode,
+          componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+          nameAndSpec: plan.part.nameField ? readField(partRow, plan.part.nameField) : undefined,
+          material: plan.part.materialField ? readField(partRow, plan.part.materialField) : undefined,
+          // 本层用量,已经过 parseQuantity(hold-not-zero),所以这里比的是解析后的数,而不是
+          // 驱动给的 '1' / 1 两种形状。
+          rawQuantity: qty.value,
+        })
+        if (siblingKeys.has(dedupeKey)) {
+          duplicateSiblingsCollapsed += 1
+          continue
+        }
+        siblingKeys.add(dedupeKey)
         const rowResult = rowFromPart(plan, {
           projectNo,
           parentSourceId,
@@ -756,17 +1931,146 @@ async function expandPlmProjectBom(input = {}) {
           totalQuantity: parentRow.totalQuantity * qty.value,
           active: true,
           sortLine: plan.bomDetail.sortField ? readField(detail, plan.bomDetail.sortField) : undefined,
+          extFieldMapping,
         })
         if (rowResult.error) {
           addRowError(rowResult.error)
           continue
         }
+        if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
         if (!pushRow(rowResult.row)) return
         await expandChildren(rowResult.row, childTokens)
       }
     }
   }
 
+  /**
+   * BREADTH-FIRST over the project's FOLDER subtree, returning the `part_id`s of the BOM heads that
+   * hang off it — in discovery order, de-duplicated.
+   *
+   * Returns `null` when the traversal refused (cycle / node ceiling / root ceiling). A refusal is a
+   * GLOBAL error by then, so the caller must not treat `null` as "no roots".
+   *
+   * Two properties do the safety work, and both are testable by making the source misbehave:
+   *
+   *   RE-FILTERING. Both reads THIS function issues — child nodes by parent, heads by folder node —
+   *   go through `matchesByField` before anything is believed, and the SEEDS are covered by the
+   *   same discipline one level up (`pathMatches` is re-filtered at the entry read). A source
+   *   answering `filtersApplied: false` hands back the WHOLE table; without those filters the first
+   *   hop would adopt every folder node in the catalog as this project's child and then read other
+   *   projects' BOM heads under this project's authorization, with `dataScopeRef` still naming the
+   *   one project the request asked for. The reads `expandChildren` makes for each discovered root
+   *   are NOT re-filtered — see the banner: they are the order path's reads, shared verbatim.
+   *
+   *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
+   *   and they get two different answers:
+   *
+   *     A LOOP is a node that is its own ancestor — the parent chain that led here comes back to
+   *     this node. That is a mis-shaped directory whose traversal cannot terminate on its own, and
+   *     it is refused: `subtree_cycle_detected`, global, fail-closed. Each queue item therefore
+   *     carries its ANCESTOR CHAIN (bounded by `maxSubtreeDepth` <= 4, so it is a 4-element array,
+   *     not a data structure worth optimizing).
+   *
+   *     A RE-VISIT is a node reached a second time by a DIFFERENT branch: a DAG-shaped directory
+   *     where two folders share a child, or — the case that matters most — a project whose
+   *     pathExAttr rows name BOTH an ancestor and one of its descendants, which is an ordinary
+   *     directory shape and not a fault at all. It is SKIPPED (its heads were already collected the
+   *     first time) and COUNTED as `nodesSkippedAlreadyVisited`. Refusing it would kill the entire
+   *     pull — the ALREADY-COMPLETED order path included — over a perfectly well-formed directory.
+   */
+  async function discoverSubtreeRoots(seedPathIds, subtree, counters) {
+    // Membership is decided AT ENQUEUE, not at dequeue. Deciding it at dequeue is functionally
+    // identical but lets one node enter the queue once per PARENT EDGE pointing at it, so a
+    // pathInfo table with many rows naming the same child (duplicates, a wide DAG) inflates the
+    // queue to `pageLimit * maxPages` entries per visited node while doing exactly the same work.
+    // The structural ceilings bound the WORK, not that array. Enqueueing each node at most once
+    // bounds both. BFS is FIFO, so the first enqueue of a node is always its minimum depth and
+    // dropping the later ones cannot cost a child.
+    const queued = new Set(seedPathIds)
+    const roots = []
+    const rootsSeen = new Set()
+    const queue = seedPathIds.map((nodeId) => ({ nodeId, depth: 0, ancestors: [] }))
+
+    while (queue.length > 0) {
+      if (errors.length > 0) return null
+      const { nodeId, depth, ancestors } = queue.shift()
+      if (counters.nodesVisited >= subtree.maxSubtreeNodes) {
+        addGlobalError(SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE, {
+          object: plan.pathInfo.object,
+          maxSubtreeNodes: subtree.maxSubtreeNodes,
+        })
+        return null
+      }
+      counters.nodesVisited += 1
+
+      // The heads hanging off THIS node. `includeSelf` decides whether the project node itself is
+      // asked; every deeper node always is.
+      if (depth > 0 || subtree.includeSelf) {
+        const headRows = await read(plan.bomHead.object, { [subtree.bomHead.pathIdField]: nodeId })
+        const heads = matchesByField(headRows, subtree.bomHead.pathIdField, nodeId)
+          .filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+        for (const head of heads) {
+          const rootSourceId = toKey(readField(head, plan.bomHead.parentPartField))
+          if (rootSourceId === null) continue
+          // ONE ROOT PER PART, not one per head. A part with two heads (a measured customer shape)
+          // would otherwise become two roots whose idempotencyKeys are byte-identical, which the
+          // conflict planner groups and HOLDS — turning the whole plan into manual_confirm.
+          if (rootsSeen.has(rootSourceId)) continue
+          rootsSeen.add(rootSourceId)
+          if (roots.length >= subtree.maxSubtreeRoots) {
+            addGlobalError(SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE, {
+              object: plan.bomHead.object,
+              maxSubtreeRoots: subtree.maxSubtreeRoots,
+            })
+            return null
+          }
+          roots.push(rootSourceId)
+        }
+      }
+
+      if (depth >= subtree.maxSubtreeDepth) continue
+      const childRows = await read(plan.pathInfo.object, { [subtree.pathInfo.parentIdField]: nodeId })
+      const children = matchesByField(childRows, subtree.pathInfo.parentIdField, nodeId)
+      const childAncestors = ancestors.concat(nodeId)
+      for (const child of children) {
+        const childId = toKey(readField(child, plan.pathInfo.idField))
+        if (childId === null) continue
+        // ORDER MATTERS: the ancestor test comes FIRST. A node on this branch's own chain is a
+        // LOOP — descending would walk that chain forever — and it is refused whether or not some
+        // other branch has already queued it. `childAncestors` includes `nodeId`, so a
+        // self-referencing node (the simplest and commonest form) is caught by the same test.
+        if (childAncestors.includes(childId)) {
+          addGlobalError(SUBTREE_CYCLE_DETECTED_ERROR_TYPE, {
+            object: plan.pathInfo.object,
+            depth: depth + 1,
+          })
+          return null
+        }
+        // Not a loop, but already spoken for: a DAG merge, a duplicate parent row, or a seed that
+        // is this node's ancestor. Counted and dropped — never re-queued, so redundant parent edges
+        // cost a counter increment rather than a queue slot.
+        if (queued.has(childId)) {
+          counters.nodesSkippedAlreadyVisited += 1
+          continue
+        }
+        queued.add(childId)
+        queue.push({ nodeId: childId, depth: depth + 1, ancestors: childAncestors })
+      }
+    }
+    return roots
+  }
+
+  // ---- FIRST ROOT SEGMENT: the order module, in TWO PHASES since F1c -------------------------
+  //
+  // 老系统 `doGetAllBomInfo` 1046-1095 决定哪些订单行当根,决定的依据是**整个项目的订单 BOM 行
+  // 集合**(`selectBomFromBomOrderByProductCode` 一次取全量,再挑总图/钣金)。一条行是不是根,
+  // 取决于同一批里有没有别的行 —— 所以在这条管线上,「读一行展开一行」的老形状表达不了这条规则。
+  //
+  // 于是订单段拆成两段:先把候选根**读齐**(路径 -> 订单头 -> 订单明细 -> 部件行),再按老系统规则
+  // 选根,最后才展开。读的对象、过滤器、每行的错误分类一个没变,变的只有顺序:所有根的 part 读
+  // 现在都发生在第一次 bomHead 读之前。预算(maxReadCount/maxElapsedMs)仍由同一个 `read` 记账,
+  // 超了仍是全局错误 -> status failed -> canApply false。
+  const rootCandidates = []
   try {
     for (const pathRow of pathMatches) {
       if (errors.length > 0) break
@@ -810,42 +2114,184 @@ async function expandPlmProjectBom(input = {}) {
             addRowError(qty.error)
             continue
           }
-          const partRow = await readPart(componentSourceId, 0)
-          if (!partRow) continue
           const pathTokens = [componentSourceId]
-          const rowResult = rowFromPart(plan, {
-            projectNo,
+          // The BOM root: the order detail names the part directly, so there is no parent and no BOM
+          // head above it. Both are null rather than absent — the shape is uniform for the UI.
+          const partRow = await readPart(componentSourceId, 0, {
             parentSourceId: null,
-            pathTokens,
-            depth: 0,
+            bomId: null,
+            path: makePath(pathTokens),
+          })
+          if (!partRow) continue
+          // PHASE 1 ends here: a candidate, not yet a row. 图号/版本 are read through the read
+          // plan's declared part slots — the same two values 老系统 selects roots by.
+          rootCandidates.push({
+            componentSourceId,
+            componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+            sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
             partRow,
             rawQuantity: qty.value,
-            totalQuantity: qty.value,
-            active: true,
             sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
+            pathTokens,
           })
-          if (rowResult.error) {
-            addRowError(rowResult.error)
-            continue
-          }
-          if (!pushRow(rowResult.row)) break
-          await expandChildren(rowResult.row, pathTokens)
         }
       }
     }
   } catch (err) {
     const bounded = readLimitErrorDetails(err)
     if (bounded) addGlobalError(bounded.type, bounded)
-    else addGlobalError('read_failed', { message: err && err.message })
+    else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
   }
 
-  const status = errors.length > 0 || rowErrors.length > 0 ? 'failed' : 'expanded'
+  // PHASE 2 — 老系统根选择。PURE: no read, no row, just which candidates survive.
+  const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
+  rootsFilteredOut = rootSelectionResult.droppedCount
+  rootSelectionReport = rootSelectionResult.report
+
+  // PHASE 3 — expansion, in candidate (read) order. Byte-identical to the pre-F1c loop body.
+  try {
+    for (const candidate of rootSelectionResult.selected) {
+      if (errors.length > 0) break
+      const rowResult = rowFromPart(plan, {
+        projectNo,
+        parentSourceId: null,
+        pathTokens: candidate.pathTokens,
+        depth: 0,
+        partRow: candidate.partRow,
+        rawQuantity: candidate.rawQuantity,
+        totalQuantity: candidate.rawQuantity,
+        active: true,
+        sortLine: candidate.sortLine,
+        extFieldMapping,
+      })
+      if (rowResult.error) {
+        addRowError(rowResult.error)
+        continue
+      }
+      if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
+      if (!pushRow(rowResult.row)) break
+      // The ONLY line the order loop gained, and it is a no-op unless the optional block is
+      // configured. Counted HERE, where an order root is actually produced, rather than
+      // re-derived later from `rows`: the subtree segment does not run on every exit path (an
+      // early failure, a `not_found`), and a count derived there would report 0 order-sourced
+      // roots for a run that produced several — the one number `rootQuantitySource` exists to
+      // get right.
+      if (subtreeCounters) subtreeCounters.rootQuantitySource.orderDetail += 1
+      await expandChildren(rowResult.row, candidate.pathTokens)
+    }
+  } catch (err) {
+    const bounded = readLimitErrorDetails(err)
+    if (bounded) addGlobalError(bounded.type, bounded)
+    else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
+  }
+
+  // ---- SECOND ROOT SEGMENT: the project's folder subtree (optional, off by default) ------------
+  //
+  // Everything above this line is the order path, unchanged to the character. Everything below runs
+  // only when `plan.projectSubtree` exists, and only when the order path finished clean: after a
+  // `max_rows_exceeded` or a `cycle_detected` the run is already failed, and continuing to read
+  // would burn budget and re-push the same global error once per remaining root.
+  //
+  // Its own try/catch, INSIDE the function, for the reason the order loop has one: a read that
+  // blows `maxReadCount`/`maxElapsedMs` throws, and an uncaught throw here would reject the whole
+  // expansion into a 500 instead of the global error -> `status: failed` -> `canApply: false` this
+  // design depends on.
+  if (plan.projectSubtree && errors.length === 0) {
+    const subtree = plan.projectSubtree
+    // EVERY component this run has already expanded — roots AND children. See (2) in the banner:
+    // de-duplicating only against order ROOTS leaves the common case (a part that is an order root's
+    // child and a subtree root) producing two rows the planner cannot even see as related.
+    const expandedComponentIds = new Set()
+    for (const row of rows) {
+      if (row.componentSourceId !== null && row.componentSourceId !== undefined) {
+        expandedComponentIds.add(row.componentSourceId)
+      }
+    }
+    try {
+      // The project's folder nodes, taken from the pathExAttr rows the entry read ALREADY returned.
+      // No extra read, and the order loop above is not touched to produce them.
+      const seedPathIds = []
+      for (const pathRow of pathMatches) {
+        const pathId = toKey(readField(pathRow, plan.pathExAttr.pathIdField))
+        if (pathId !== null && !seedPathIds.includes(pathId)) seedPathIds.push(pathId)
+      }
+
+      const discovered = await discoverSubtreeRoots(seedPathIds, subtree, subtreeCounters)
+      if (discovered) {
+        subtreeCounters.rootsDiscovered = discovered.length
+        for (const rootSourceId of discovered) {
+          if (errors.length > 0) break
+          if (expandedComponentIds.has(rootSourceId)) {
+            subtreeCounters.rootsSkippedAlreadyExpanded += 1
+            continue
+          }
+          const pathTokens = [rootSourceId]
+          // W3a: the SUBTREE root, and it is a root in exactly the sense the order path's root is —
+          // no parent above it, no BOM head that named it (the folder walk found it, not a BOM). Same
+          // locus shape as the order root, so a missing subtree root reads identically in the
+          // operator's list to a missing order root. Without this argument the sidecar would carry
+          // the part number with a silently `null` parent/bom/path anyway, but by accident rather
+          // than by statement — and `path` would be missing, which the UI's column expects.
+          const partRow = await readPart(rootSourceId, 0, {
+            parentSourceId: null,
+            bomId: null,
+            path: makePath(pathTokens),
+          })
+          if (!partRow) continue
+          const rowResult = rowFromPart(plan, {
+            projectNo,
+            parentSourceId: null,
+            pathTokens,
+            depth: 0,
+            partRow,
+            rawQuantity: SUBTREE_ROOT_DEFAULT_QUANTITY,
+            totalQuantity: SUBTREE_ROOT_DEFAULT_QUANTITY,
+            active: true,
+            extFieldMapping,
+          })
+          if (rowResult.error) {
+            addRowError(rowResult.error)
+            continue
+          }
+          if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
+          if (!pushRow(rowResult.row)) break
+          expandedComponentIds.add(rowResult.componentSourceId)
+          subtreeCounters.rootsExpanded += 1
+          subtreeCounters.rootQuantitySource.subtreeDefault += 1
+          const rowsBefore = rows.length
+          await expandChildren(rowResult.row, pathTokens)
+          // A root whose head SysVer does not match its part's SysVer gets NO children, because
+          // `expandChildren` re-reads bomHead filtered by the part's version. Counted rather than
+          // silent, so "we pulled six bare roots" is a number in evidence and not a surprise.
+          if (rows.length === rowsBefore) subtreeCounters.rootsWithoutChildren += 1
+          for (let index = rowsBefore; index < rows.length; index += 1) {
+            expandedComponentIds.add(rows[index].componentSourceId)
+          }
+        }
+      }
+    } catch (err) {
+      const bounded = readLimitErrorDetails(err)
+      if (bounded) addGlobalError(bounded.type, bounded)
+      else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
+    }
+  }
+
+  // `rowErrorsTotal`, not `rowErrors.length`: a project whose rowErrors were ALL past the cap is
+  // still a failed project. (Unreachable today — the cap is 5000 and the array fills before it
+  // overflows — but the status must follow the truth, not the retained sample.)
+  const status = errors.length > 0 || rowErrorsTotal > 0 ? 'failed' : 'expanded'
+  // X5: the retained sample, materialised once for both the result and its summary.
+  const rowErrors = rowErrorCollector.finalize()
   return {
     valid: status === 'expanded',
     status,
     rows,
     errors,
     rowErrors,
+    // Same on the bounded (large-BOM) path, which reaches this return with its scale error in
+    // `errors`: the keys are always present, empty/zero when nothing was missing.
+    missingComponents,
+    missingComponentDistinctCount: missingComponentIds.size,
     summary: makeSummary({
       projectNoPresent: true,
       matchField: plan.matchField,
@@ -860,13 +2306,127 @@ async function expandPlmProjectBom(input = {}) {
       readStats,
       errors,
       rowErrors,
+      subtree: subtreeCounters,
+      rowErrorTruncation: rowErrorTruncation(),
+      duplicateSiblingsCollapsed,
+      rootsFilteredOut,
+      rootSelectionReport,
     }),
+  }
+}
+
+/**
+ * W3a — THE OPERATOR-FACING MISSING-COMPONENT LIST. Values-BEARING, and the only function in this
+ * module that is.
+ *
+ * Deliberately NOT built on `summarizeBomExpansionForEvidence`, and deliberately not called by it:
+ * that one is the values-free projection every evidence stanza, audit row and ledger entry rides on,
+ * and the single most valuable property it has is that no part number can reach it. Sharing code
+ * between the two is how that property gets lost in a later refactor, so they share none.
+ *
+ * ONE ROW PER PART NUMBER, not per probe — and the deduplication has ALREADY HAPPENED, in the
+ * expander's keyed collector. Creating a part in PLM is a per-part job, so a list that repeated a
+ * part once per BOM position would be a worklist with the same work written out fifty times. The
+ * parent / BOM / path / depth reported are the FIRST place the part was wanted; `parentCount` says
+ * how many distinct parents wanted it, which is the "this one is holding up several assemblies"
+ * signal. This function ranks, bounds and reports; it does not re-derive counts the collector is the
+ * only thing in a position to get right (it sees the probes the cap dropped detail for).
+ *
+ * ORDER: `occurrenceCount` descending (do the most-blocking part first), ties broken by
+ * `componentSourceId` ascending — total, so the same expansion always summarizes identically.
+ *
+ * TOTALS ARE TRUE TOTALS.
+ *   `distinctCount` — every distinct missing part number, from the expander's uncapped id set, so a
+ *                     BOM whose missing parts overran the detail cap still reports how many there
+ *                     really are rather than the page size.
+ *   `probeCount`    — every missing-component probe (one per probe). Counted off the rowErrors, but
+ *                     `rowErrors` is a bounded sample once D-C truncated, so the expander's true
+ *                     per-type total is preferred whenever it says the array is short — and
+ *                     `distinctCount` is a hard floor, because a part cannot be missing without
+ *                     having been probed.
+ *   `truncated`     — true whenever the items are not the whole set: distinct parts beyond the
+ *                     collector's cap, or `limit` cutting the list here. A truncated list is a
+ *                     "fix these first, export for the rest" signal, never a total.
+ */
+function summarizeMissingComponents(expansion = {}, { limit = MISSING_COMPONENT_DETAIL_LIMIT } = {}) {
+  const entries = Array.isArray(expansion.missingComponents) ? expansion.missingComponents : []
+  const rowErrors = Array.isArray(expansion.rowErrors) ? expansion.rowErrors : []
+  const boundedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : MISSING_COMPONENT_DETAIL_LIMIT
+
+  const positiveInt = (value, fallback) => (Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback)
+
+  const byComponent = new Map()
+  let retainedProbes = 0
+  for (const entry of entries) {
+    if (!isPlainObject(entry)) continue
+    const componentSourceId = toKey(entry.componentSourceId)
+    if (componentSourceId === null) continue
+    // Defensive against a second entry for the same part (the collector never emits one, but this
+    // function is also handed hand-built objects): fold rather than shadow.
+    const existing = byComponent.get(componentSourceId)
+    const occurrenceCount = positiveInt(entry.occurrenceCount, 1)
+    retainedProbes += occurrenceCount
+    if (existing) {
+      existing.occurrenceCount += occurrenceCount
+      existing.parentCount = Math.max(existing.parentCount, positiveInt(entry.parentCount, 1))
+      continue
+    }
+    byComponent.set(componentSourceId, {
+      componentSourceId,
+      parentSourceId: entry.parentSourceId === undefined ? null : entry.parentSourceId,
+      bomId: entry.bomId === undefined ? null : entry.bomId,
+      path: entry.path === undefined ? null : entry.path,
+      depth: Number.isFinite(entry.depth) ? Number(entry.depth) : null,
+      occurrenceCount,
+      parentCount: positiveInt(entry.parentCount, 1),
+    })
+  }
+
+  const ranked = [...byComponent.values()].sort((a, b) => {
+    if (b.occurrenceCount !== a.occurrenceCount) return b.occurrenceCount - a.occurrenceCount
+    return a.componentSourceId < b.componentSourceId ? -1 : a.componentSourceId > b.componentSourceId ? 1 : 0
+  })
+
+  let probeCount = 0
+  for (const rowError of rowErrors) {
+    if (isPlainObject(rowError) && rowError.type === 'missing_component') probeCount += 1
+  }
+  // A caller may hand this function a bare `{ missingComponents }` with no rowErrors and no id count
+  // at all (the frontend clamp tests do). Never report fewer than what the details themselves show.
+  if (retainedProbes > probeCount) probeCount = retainedProbes
+  // D-C. `rowErrors` became a BOUNDED SAMPLE, so counting the array stopped being the same claim as
+  // counting the probes — and the undercount is not merely low, it is SELF-CONTRADICTORY: the
+  // `distinctCount` below comes off the uncapped id set, so a truncated expansion rendered
+  // "5100 parts missing across 5000 references", which is arithmetically impossible (a probe per
+  // part, at least). The expander publishes the true per-type total the moment it truncates, and it
+  // is the authority here — exactly the discipline `hasHardApplyBlockingRowErrors` follows.
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated === true && isPlainObject(summary.rowErrorTypeCounts)) {
+    const trueProbes = Number(summary.rowErrorTypeCounts.missing_component || 0)
+    if (Number.isFinite(trueProbes) && trueProbes > probeCount) probeCount = trueProbes
+  }
+  const distinctCount = Math.max(
+    Number.isFinite(expansion.missingComponentDistinctCount) ? Math.floor(expansion.missingComponentDistinctCount) : 0,
+    ranked.length,
+  )
+  // Structural floor, and the last line of defence for the invariant above: every distinct missing
+  // part was probed at least once, so `probeCount >= distinctCount` can never be false for real
+  // data. Holding it here means no future truncation anywhere upstream can make this pair
+  // self-contradictory again, whatever it does to the array.
+  if (distinctCount > probeCount) probeCount = distinctCount
+  const items = ranked.slice(0, boundedLimit)
+
+  return {
+    distinctCount,
+    probeCount,
+    truncated: distinctCount > items.length,
+    items,
   }
 }
 
 function summarizeBomExpansionForEvidence(result = {}) {
   const summary = isPlainObject(result.summary) ? result.summary : {}
-  return {
+  const evidence = {
     valid: result.valid === true,
     status: typeof result.status === 'string' ? result.status : summary.status,
     projectNoPresent: summary.projectNoPresent === true,
@@ -886,6 +2446,44 @@ function summarizeBomExpansionForEvidence(result = {}) {
     boundedPreview: isLargeBomBoundedExpansion(result) ? boundedPreviewSummary(summary, scaleErrorTypes(result.errors)) : undefined,
     actions: isPlainObject(summary.actions) ? { ...summary.actions } : undefined,
   }
+  // Same conditional key as the summary's: absent block => absent key => an evidence object whose
+  // key set is byte-identical to the pre-feature one.
+  const subtree = subtreeSummaryOf(summary.subtree)
+  if (subtree) evidence.subtree = subtree
+  // D-C. Same conditional discipline, and values-free by the same argument the summary makes: four
+  // integers, a boolean, and type tokens `errorTypes` already publishes. An expansion under the cap
+  // mounts nothing, so its evidence stanza is byte-identical to the pre-cap one.
+  if (summary.rowErrorsTruncated === true) {
+    evidence.rowErrorsTotal = Number(summary.rowErrorsTotal || 0)
+    evidence.rowErrorsRetained = Number(summary.rowErrorsRetained || 0)
+    evidence.rowErrorsTruncated = true
+    evidence.rowErrorTypeCounts = isPlainObject(summary.rowErrorTypeCounts)
+      ? { ...summary.rowErrorTypeCounts }
+      : {}
+  }
+  // F1c — 老系统语义的两个计数,PROJECTED HERE ON PURPOSE.
+  //
+  // 这个函数是白名单投影:summary 上新长出来的键,不写在这里就**永远到不了 dry-run 证据**
+  // (`evidenceForDryRun` 只拿这个投影,路由不另外回原始 summary)。而这两个数正是「重拉之后行数
+  // 变少」的唯一解释 —— 少了这一步,操作员在 dry-run 里看到的只有一个变小的 rowsExpanded,分不清
+  // 「PLM 少了件」和「我们按老系统合并/剔根了」。
+  //
+  // 同 `subtree` 的 conditional discipline:0 不长键,所以一次什么都没合并、什么根都没剔的展开,
+  // 证据对象与本改动之前**逐字节相同**(dry-run revision 不动)。追加在最后,不移动既有条件块。
+  // VALUES-FREE:两个整数,没有图号、没有名称、没有材质。
+  if (Number.isFinite(summary.duplicateSiblingsCollapsed) && summary.duplicateSiblingsCollapsed > 0) {
+    evidence.duplicateSiblingsCollapsed = Number(summary.duplicateSiblingsCollapsed)
+  }
+  if (Number.isFinite(summary.rootsFilteredOut) && summary.rootsFilteredOut > 0) {
+    evidence.rootsFilteredOut = Number(summary.rootsFilteredOut)
+  }
+  // #5862 — the根选择 report rides the same allow-list projection (this is the ONLY way onto
+  // dry-run evidence, see above). Re-projected field by field, never spread: a future key on the
+  // summary object must be named here to reach evidence. VALUES-FREE by construction.
+  if (isPlainObject(summary.rootSelectionReport)) {
+    evidence.rootSelectionReport = cloneRootSelectionReport(summary.rootSelectionReport)
+  }
+  return evidence
 }
 
 module.exports = {
@@ -894,14 +2492,35 @@ module.exports = {
   DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_ROWS,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
+  INCOMPLETE_READ_ERROR_TYPES,
+  MISSING_COMPONENT_DETAIL_LIMIT,
+  ROW_ERROR_LIMIT,
+  ROW_ERROR_LIMIT_CEILING,
+  READ_CURSOR_BROKEN_ERROR_TYPE,
+  SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
+  SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
+  SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,
+  PROJECT_SUBTREE_ERROR_TYPES,
+  PROJECT_SUBTREE_LIMITS,
+  SUBTREE_ROOT_DEFAULT_QUANTITY,
   FORBIDDEN_PLAN_KEYS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
+  DEFAULT_ROOT_SELECTION,
+  ROOT_SELECTION_KEYS,
+  ROOT_SELECTION_SHEET_METAL_MATCH_MODES,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
+  // PUBLIC because the根选择 rules are DEPLOY CONFIG, not an internal: the action-config normalizer
+  // validates `action.rootSelection` through THIS function at config time, so a config can only say
+  // what the expander can mean (and a typo is refused where an operator sees it, not at read time).
+  normalizeRootSelection,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // Values-BEARING — see its header. Exported separately from the evidence summary so a reader of
+  // this list can see at a glance which of the two carries customer values.
+  summarizeMissingComponents,
   __internals: {
     isBlank,
     isActiveBomHead,
@@ -910,7 +2529,28 @@ module.exports = {
     makePath,
     parseQuantity,
     readAll,
+    readField,
     toKey,
     nonNegativeInteger,
+    // X5 — the bounded top-N sample collector, exposed so the memory bound can be asserted DIRECTLY
+    // (feed it M entries, ask its size) instead of only through an expansion's output length, which
+    // a "collect everything then slice" regression would satisfy just as well.
+    createRowErrorCollector,
+    // The row-production boundary, exposed so a test can pin what a row CARRIES
+    // without standing up an adapter and a whole expansion.
+    createRow,
+    rowFromPart,
+    requireNormalizedExtFieldMapping,
+    // F1c — 老系统语义的纯函数,单独暴露给测试:根选择、dash 层级判定、版本比较、名称规格切分、
+    // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
+    // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
+    selectOrderRootCandidates,
+    hasMainDrawingShape,
+    hasSheetMetalShape,
+    makeRootSelectionReport,
+    dashHierarchyRelationship,
+    compareSourceVersion,
+    splitNameAndSpec,
+    siblingDedupeKey,
   },
 }

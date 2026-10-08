@@ -1,0 +1,53 @@
+name: Stock Preparation S6-A Operator Preflight
+
+# Hermetic contract test for the S6-A operator preflight tool (offline,
+# values-free). The runbook (docs/operations/stock-preparation-s6a-sqlserver
+# -onprem-runbook-20260731.md §4) tells the operator to create five private
+# artifacts and gives zero commands; at least seven distinct mistakes all
+# collapse into the same opaque SEALED_EXPORT_INTERNAL_ERROR token, previously
+# discoverable only inside the one non-repeatable flag-on window. This tool
+# calls the product's own exported, pure (env + files, no DB, no network)
+# validators and bisects the inputs for specificity — it never re-implements
+# a validation rule. No database, no network: the test writes only synthetic,
+# self-generated key material and specs under os.tmpdir().
+#
+# Follows the same shape as the `contract` job in
+# gip-authority-substrate-inventory.yml / data-source-exposure-inventory.yml:
+# checkout + setup-node only, `node --test` directly.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-s6a-operator-preflight.yml'
+      - 'scripts/ops/stock-preparation-s6a-operator-preflight.mjs'
+      - 'scripts/ops/stock-preparation-s6a-operator-preflight.test.mjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-store.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/failure-vocabulary.cjs'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/stock-preparation-s6a-operator-preflight.yml'
+      - 'scripts/ops/stock-preparation-s6a-operator-preflight.mjs'
+      - 'scripts/ops/stock-preparation-s6a-operator-preflight.test.mjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-store.cjs'
+      - 'plugins/plugin-integration-core/lib/sealed-export/failure-vocabulary.cjs'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: S6-A operator preflight contract (values-free, no DB, no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic preflight tests (synthetic material only, no DB, no network)
+        run: node --test scripts/ops/stock-preparation-s6a-operator-preflight.test.mjs

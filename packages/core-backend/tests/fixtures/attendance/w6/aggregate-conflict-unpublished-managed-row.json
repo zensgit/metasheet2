@@ -1,0 +1,93 @@
+{
+  "ok": true,
+  "data": {
+    "groupId": "a4556006-0008-4000-8000-000000000001",
+    "groupType": "fixed_shift",
+    "timezone": "Asia/Shanghai",
+    "activeMemberCount": 12,
+    "managerPosture": { "ownerCount": 1, "subOwnerCount": 0 },
+    "calculationPosture": "legacy",
+    "domains": {
+      "membership": {
+        "label": "effective",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "people" }
+      },
+      "schedule": {
+        "label": "conflict_action_required",
+        "strategy": "fixed_shift",
+        "reasonCodes": ["UNPUBLISHED_MANAGED_ROW"],
+        "sourceRefs": [
+          { "kind": "shift", "id": "a4556006-0008-4000-8000-000000000101" },
+          { "kind": "fixed_schedule_config", "id": "a4556006-0008-4000-8000-000000000102" }
+        ],
+        "fixedSchedule": {
+          "state": "effective",
+          "reasonCodes": ["UNPUBLISHED_MANAGED_ROW", "EFFECTIVE"],
+          "desired": {
+            "shiftId": "a4556006-0008-4000-8000-000000000101",
+            "startDate": "2026-08-01",
+            "endDate": null,
+            "revision": 1
+          },
+          "coverage": {
+            "targetMembers": 12,
+            "matchingMembers": 12,
+            "missingMembers": 0,
+            "nonMemberTargets": 0,
+            "differentKeyRows": 0
+          },
+          "drift": {
+            "unconfiguredManagedRows": 0,
+            "unpublishedManagedRows": 3,
+            "managedSets": []
+          },
+          "evaluatedAt": "2026-08-05T00:00:00.000Z"
+        },
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "assignments" }
+      },
+      "segments": {
+        "label": "effective",
+        "reasonCodes": [],
+        "sourceRefs": [{ "kind": "shift", "id": "a4556006-0008-4000-8000-000000000101" }],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "flex": {
+        "label": "effective",
+        "mode": "strict",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "shifts" }
+      },
+      "rules": {
+        "label": "org_inherited",
+        "source": "org_default",
+        "sourceRefs": [],
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_context_route", "step": "rules", "surface": "rule-sets" }
+      },
+      "punchMethod": {
+        "label": "org_inherited",
+        "source": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      },
+      "requestPosture": {
+        "label": "org_inherited",
+        "overtime": "org_inherited",
+        "makeupPunch": "org_inherited",
+        "outdoor": "org_inherited",
+        "reasonCodes": [],
+        "editorRef": { "kind": "group_stage", "stage": "policies" }
+      }
+    },
+    "conflicts": [
+      {
+        "code": "FIXED_SCHEDULE_UNPUBLISHED_MANAGED_ROW",
+        "domain": "schedule",
+        "label": "conflict_action_required",
+        "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "assignments" }
+      }
+    ],
+    "evaluatedAt": "2026-08-05T00:00:00.000Z"
+  }
+}

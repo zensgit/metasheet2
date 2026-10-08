@@ -5,8 +5,9 @@
  * §6 G-BATCH-ENDPOINT. Under test: migration
  * `zzzz20260715210000_create_meta_record_history_operations.ts` (ledger table, DEFERRABLE-INITIALLY-DEFERRED
  * FKs, append-after-seal + endpoint-validation triggers), `operation-ledger.ts` (mint/seal), and the wiring
- * into the L4/L4cov-fenced record writers (`record-service.ts`, `record-write-service.ts`). Everything is
- * behind `MULTITABLE_ENABLE_WRITER_FENCE` (default OFF); this file toggles env vars only inside its OWN
+ * into the L4/L4cov-fenced record writers (`record-service.ts`, `record-write-service.ts`,
+ * `automation-executor.ts`). Everything is behind `MULTITABLE_ENABLE_WRITER_FENCE` (default OFF); this file
+ * toggles env vars only inside its OWN
  * process, exactly like the sibling `…-l4-canonical-fence-realdb.test.ts`. Nothing here arms the fence,
  * Revert, or Reset in any real environment.
  *
@@ -14,7 +15,8 @@
  * count/max validated in-DB), and the DB enforces it independently of service comments — a wrong count, a
  * non-max endpoint_seq, a skipped seal (deferred FK), an append after seal, and an endpoint-before-events all
  * fail closed. The §W writer goldens prove the real mint wiring produces those endpoints (G-BATCH-ENDPOINT:
- * the multi-row bulk operation anchors AFTER all rows, never at an intermediate seq).
+ * the multi-row bulk operation anchors AFTER all rows, never at an intermediate seq); W4-W6 additionally
+ * drive production `AutomationService.executeRule` wiring for lock/unlock sealing, rollback, and flag-off parity.
  *
  * P2-C hygiene (v3.7): every seq comparison uses EXACT bigint (BigInt(), never Number()/parseInt/+/-); this
  * file NEVER calls `setval` on the shared `meta_record_chain_seq`; §E fixtures insert explicit SYNTHETIC seq
@@ -32,10 +34,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { EventBus } from '../../src/integration/events/event-bus'
+import { EventBus as AutomationEventBus } from '../../src/integration/events/event-bus'
+import type { AutomationRule } from '../../src/multitable/automation-executor'
+import { AutomationService } from '../../src/multitable/automation-service'
+import { db } from '../../src/db/db'
 import { RecordService } from '../../src/multitable/record-service'
 import { RecordWriteService, type RecordPatchInput as WriteRecordPatchInput } from '../../src/multitable/record-write-service'
 import { createRecordWriteHelpers } from '../../src/routes/univer-meta'
 import { deriveCapabilities, type AccessInfo } from '../../src/multitable/sheet-capabilities'
+import { resolveExactAnchor } from '../../src/multitable/exact-anchor-recovery'
+import { activateCheckpoint, type QueryFn as CheckpointQuery } from '../../src/multitable/history-trust-checkpoint'
 import {
   mintOperation,
   sealOperation,
@@ -83,6 +91,27 @@ const mkWriteService = () => {
     helpers,
   )
 }
+const mkAutomationService = () => {
+  const pool = poolManager.get()
+  // Production entry-point wiring: AutomationService constructs AutomationExecutor with the real
+  // poolManager transaction seam. W5 is therefore a transaction-boundary proof, not a hand-wired fake.
+  return new AutomationService(new AutomationEventBus(), db as never, pool.query.bind(pool))
+}
+const automationLockRule = (locked: boolean): AutomationRule => ({
+  id: `rule_l6a_lock_${locked ? 'on' : 'off'}_${TS}_${seqCounter++}`,
+  name: `L6a automation ${locked ? 'lock' : 'unlock'}`,
+  sheetId: SHEET,
+  enabled: true,
+  trigger: { type: 'record.updated', config: {} },
+  actions: [{ type: 'lock_record', config: { locked } } as never],
+  createdBy: ACTOR,
+  createdAt: new Date().toISOString(),
+} as unknown as AutomationRule)
+const executeAutomationLock = (recordId: string, locked: boolean) =>
+  mkAutomationService().executeRule(
+    automationLockRule(locked),
+    { recordId, actorId: ACTOR, data: {} },
+  )
 
 const seedRecord = async (id: string, data: Record<string, unknown> = { [F_STR]: 'orig' }): Promise<void> => {
   await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [id, SHEET, JSON.stringify(data), ACTOR])
@@ -391,6 +420,154 @@ describeIfDatabase('W0-1 L6-a — sealed operation-endpoint ledger (real DB)', (
     // minted AFTER the fence ⇒ the endpoint seq equals the op's own event seq (commit-order reflection)
     expect(ep!.endpoint_seq).toBe(rev.seq)
     expect(ep!.event_count).toBe(1)
+  })
+
+  // ── §W-AUTOMATION — the REAL lock_record action mints marker endpoints ──────────────────────────────
+  test('W4 [automation lock/unlock] each marker is operation-tagged and sealed; the terminal unlock endpoint resolves as an exact anchor', async () => {
+    const R = mkRecord('w4')
+    await seedRecord(R)
+    let checkpointId: string | null = null
+    const operationIds: string[] = []
+    try {
+      // The checkpoint predates both operations, so each marker endpoint is inside its trusted seq range.
+      const checkpoint = await poolManager.get().transaction(async ({ query }) =>
+        activateCheckpoint(query as unknown as CheckpointQuery, { sheetId: SHEET }))
+      checkpointId = checkpoint.checkpointId
+      process.env[FLAG] = 'true'
+
+      const lock = await executeAutomationLock(R, true)
+      expect(lock.steps[0]?.status).toBe('success')
+      const unlock = await executeAutomationLock(R, false)
+      expect(unlock.steps[0]?.status).toBe('success')
+
+      const markers = (await q(
+        `SELECT kind, version, seq::text AS seq, operation_id::text AS operation_id
+         FROM meta_record_version_markers
+         WHERE sheet_id=$1 AND record_id=$2
+         ORDER BY version`,
+        [SHEET, R],
+      )).rows as Array<{ kind: 'lock' | 'unlock'; version: number; seq: string; operation_id: string | null }>
+      expect(markers).toHaveLength(2)
+      expect(markers.map((m) => [m.kind, m.version])).toEqual([['lock', 2], ['unlock', 3]])
+
+      for (const marker of markers) {
+        expect(marker.operation_id).toMatch(/^[0-9a-f-]{36}$/)
+        operationIds.push(marker.operation_id!)
+        const endpoint = await endpointOf(marker.operation_id!)
+        expect(endpoint).toEqual({ endpoint_seq: marker.seq, event_count: 1 })
+      }
+      expect(operationIds[0]).not.toBe(operationIds[1])
+
+      // The terminal automation marker is not merely tagged: its sealed endpoint is accepted by the real
+      // exact-anchor resolver, and the exact marker seq is frozen into the preview identity.
+      const terminal = markers[1]!
+      const resolved = await resolveExactAnchor(q, {
+        sheetId: SHEET,
+        request: { kind: 'exact-anchor', anchorOperationId: terminal.operation_id! },
+        actorId: ACTOR,
+        mode: 'revert',
+        evaluateFullReadAccess: async () => true,
+      })
+      expect(resolved.ok).toBe(true)
+      if (resolved.ok) {
+        expect(resolved.anchorOperationId).toBe(terminal.operation_id)
+        expect(resolved.anchorSeq).toBe(terminal.seq)
+      }
+
+      expect((await q('SELECT locked, version FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET])).rows[0])
+        .toMatchObject({ locked: false, version: 3 })
+    } finally {
+      for (const operationId of operationIds) {
+        await pruneSealedOperation(q, SHEET, operationId).catch(() => {})
+      }
+      if (checkpointId) {
+        await q('DELETE FROM meta_history_baselines WHERE checkpoint_id=$1', [checkpointId]).catch(() => {})
+        await q('DELETE FROM meta_history_trust_checkpoints WHERE id=$1', [checkpointId]).catch(() => {})
+      }
+      await q('DELETE FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET]).catch(() => {})
+    }
+  })
+
+  test('W5 [automation rollback] an endpoint-seal failure rolls back the lock bump, marker, and endpoint together', async () => {
+    const R = mkRecord('w5')
+    await seedRecord(R)
+    process.env[FLAG] = 'true'
+    const suffix = `${TS}_${seqCounter++}`
+    const functionName = `l6a_automation_seal_fail_${suffix}`
+    const triggerName = `trg_l6a_automation_seal_fail_${suffix}`
+    const endpointsBefore = Number(((await q(
+      'SELECT count(*)::int AS n FROM meta_record_history_operations WHERE sheet_id=$1',
+      [SHEET],
+    )).rows[0] as { n: number }).n)
+    try {
+      await q(`
+        CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.sheet_id = '${SHEET}' THEN
+            RAISE EXCEPTION 'l6a automation endpoint seal fault' USING ERRCODE = 'raise_exception';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await q(`
+        CREATE TRIGGER ${triggerName}
+        BEFORE INSERT ON meta_record_history_operations
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}()
+      `)
+
+      const result = await executeAutomationLock(R, true)
+      expect(result.steps[0]?.status).toBe('failed')
+      expect(result.steps[0]?.error).toMatch(/endpoint seal fault/)
+      expect((await q('SELECT locked, version FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET])).rows[0])
+        .toMatchObject({ locked: false, version: 1 })
+      expect((await q(
+        'SELECT count(*)::int AS n FROM meta_record_version_markers WHERE sheet_id=$1 AND record_id=$2',
+        [SHEET, R],
+      )).rows[0]).toMatchObject({ n: 0 })
+      expect(Number(((await q(
+        'SELECT count(*)::int AS n FROM meta_record_history_operations WHERE sheet_id=$1',
+        [SHEET],
+      )).rows[0] as { n: number }).n)).toBe(endpointsBefore)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${triggerName} ON meta_record_history_operations`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${functionName}()`).catch(() => {})
+      await q('DELETE FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET]).catch(() => {})
+    }
+  })
+
+  test('W6 [automation flag OFF] lock/unlock keep the legacy marker shape and mint no endpoint', async () => {
+    const R = mkRecord('w6')
+    await seedRecord(R)
+    delete process.env[FLAG]
+    const endpointsBefore = Number(((await q(
+      'SELECT count(*)::int AS n FROM meta_record_history_operations WHERE sheet_id=$1',
+      [SHEET],
+    )).rows[0] as { n: number }).n)
+    try {
+      expect((await executeAutomationLock(R, true)).steps[0]?.status).toBe('success')
+      expect((await executeAutomationLock(R, false)).steps[0]?.status).toBe('success')
+      const markers = (await q(
+        `SELECT kind, version, operation_id
+         FROM meta_record_version_markers
+         WHERE sheet_id=$1 AND record_id=$2
+         ORDER BY version`,
+        [SHEET, R],
+      )).rows as Array<{ kind: 'lock' | 'unlock'; version: number; operation_id: string | null }>
+      expect(markers).toEqual([
+        { kind: 'lock', version: 2, operation_id: null },
+        { kind: 'unlock', version: 3, operation_id: null },
+      ])
+      expect(Number(((await q(
+        'SELECT count(*)::int AS n FROM meta_record_history_operations WHERE sheet_id=$1',
+        [SHEET],
+      )).rows[0] as { n: number }).n)).toBe(endpointsBefore)
+      expect((await q('SELECT locked, version FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET])).rows[0])
+        .toMatchObject({ locked: false, version: 3 })
+    } finally {
+      await q('DELETE FROM meta_record_version_markers WHERE sheet_id=$1 AND record_id=$2', [SHEET, R]).catch(() => {})
+      await q('DELETE FROM meta_records WHERE id=$1 AND sheet_id=$2', [R, SHEET]).catch(() => {})
+    }
   })
 
   // ── §G-MULTIOP-BATCH (owner-mandated, ruling 2026-07-16 — pins the original finding-#1 defect) ──────

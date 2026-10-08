@@ -15,6 +15,9 @@ import express from 'express'
 import client from 'prom-client'
 import request from 'supertest'
 import { describe, expect, it } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 describe('/metrics endpoint — Prometheus text exposition smoke test', () => {
   it('returns 200 with text/plain body containing the registered metric name', async () => {
@@ -35,7 +38,8 @@ describe('/metrics endpoint — Prometheus text exposition smoke test', () => {
       res.end(await registry.metrics())
     })
 
-    const res = await request(app).get('/metrics')
+    pinned.setApp(app)
+    const res = await request(pinned.url()).get('/metrics')
     expect(res.status).toBe(200)
     // prom-client's contentType looks like:
     //   'text/plain; version=0.0.4; charset=utf-8'
@@ -70,8 +74,9 @@ describe('/metrics endpoint — Prometheus text exposition smoke test', () => {
       res.end(await registryB.metrics())
     })
 
-    const a = await request(app).get('/metrics/a')
-    const b = await request(app).get('/metrics/b')
+    pinned.setApp(app)
+    const a = await request(pinned.url()).get('/metrics/a')
+    const b = await request(pinned.url()).get('/metrics/b')
     expect(a.status).toBe(200)
     expect(b.status).toBe(200)
     expect(a.text).toContain('alpha_only_total 1')

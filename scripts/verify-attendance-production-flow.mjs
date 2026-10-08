@@ -2,6 +2,8 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
+import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 import { randomUUID } from 'node:crypto'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
@@ -130,6 +132,7 @@ async function fetchWithRetry(url, init = {}, options = {}) {
       }
       return res
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       if (attempt >= apiRetryAttempts) throw error
       const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
       logWarn(`${label} network error: ${(error && error.message) || String(error)}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
@@ -161,12 +164,14 @@ async function refreshAuthToken(apiBase) {
     }
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
+      await verifyAcceptanceTokenTenant(apiBase, nextToken)
       token = nextToken
       return true
     }
     logWarn('token refresh response missing token')
     return false
   } catch (error) {
+    if (error instanceof AcceptanceTenantError) throw error
     logWarn(`token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
@@ -264,10 +269,7 @@ async function switchToOverview(page) {
 }
 
 async function selectAdminSection(page, sectionId, headingName, waitMs = timeoutMs) {
-  const quickJump = page.locator('[data-admin-quick-jump="true"]').first()
-  if (await quickJump.count()) {
-    await quickJump.selectOption(sectionId)
-  }
+  await selectAttendanceAdminWorkspaceSection(page, sectionId, waitMs)
 
   const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
   await section.waitFor({ state: 'visible', timeout: waitMs })
@@ -424,6 +426,7 @@ async function run() {
   logInfo(`API_BASE=${apiBase}`)
 
   await refreshAuthToken(apiBase)
+  await verifyAcceptanceTokenTenant(apiBase, token)
 
   const me = await apiGetJson(`${apiBase}/auth/me`, token)
   if (!me.ok) {

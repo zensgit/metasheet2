@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 
@@ -70,6 +71,8 @@ describe('Attendance admin anchor navigation', () => {
     vi.clearAllMocks()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
+    window.localStorage.setItem('tenantId', 'default')
+    window.localStorage.setItem('workspaceId', 'default')
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
@@ -124,9 +127,16 @@ describe('Attendance admin anchor navigation', () => {
     )
 
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Annual leave', 'Data & Payroll'])
-    expect(labels).toHaveLength(33)
+    // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
+    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
+    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" waystation
+    // section and its rail entry outright (redirecting UserManagementView.vue's deep link
+    // straight at Attendance groups instead).
+    expect(labels).toHaveLength(34)
     expect(labels).toEqual(
       expect.arrayContaining([
+        'Setup readiness',
+        'Decision trace',
         'Annual leave balance',
         'Annual leave policy',
         'Annual leave operations',
@@ -148,35 +158,163 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
+    expect(labels).not.toContain('Group members')
     expect(container!.querySelector('.attendance__admin-nav-current')).toBeNull()
     expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
     expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
     expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
-  it('renders a task-oriented admin home and routes task actions to existing sections', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+  it('renders the four task groups as the first admin context and opens one workspace at a time', async () => {
+    const clearSection = vi.fn()
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      onClearSection: clearSection,
+    })
     app.mount(container!)
     await flushUi()
 
+    const homeContext = container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')
+    const sectionWorkspace = container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')
     const taskHome = container!.querySelector<HTMLElement>('[data-admin-task-home="true"]')
+    expect(homeContext?.style.display).not.toBe('none')
+    expect(sectionWorkspace?.style.display).toBe('none')
     expect(taskHome).toBeTruthy()
-    expect(taskHome?.textContent).toContain('Admin workflow')
-    expect(taskHome?.textContent).toContain('Today queue')
-    expect(taskHome?.textContent).toContain('Monthly processing')
-    expect(taskHome?.textContent).toContain('Base configuration')
-    expect(taskHome?.textContent).toContain('Audit and rollback')
+    expect(taskHome?.textContent).toContain('Attendance management')
+    expect(Array.from(taskHome!.querySelectorAll('[data-admin-task-group]')).map(group => group.getAttribute('data-admin-task-group'))).toEqual([
+      'daily-operations',
+      'people-groups',
+      'work-time-policies',
+      'reporting-payroll',
+    ])
+    expect(taskHome?.textContent).toContain('Daily operations')
+    expect(taskHome?.textContent).toContain('People and attendance groups')
+    expect(taskHome?.textContent).toContain('Work time and policies')
+    expect(taskHome?.textContent).toContain('Reporting and payroll')
 
     const pendingApprovalsLink = taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
-    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?section=attendance-overview-requests')
+    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?tab=overview&section=attendance-overview-requests')
+    // Relabeled per GATE-5086 (P2-1/P3-5): this link's destination is scoped to the viewer's own
+    // requests by default, never an org-wide review queue — "Pending approvals" over-promised.
+    expect(pendingApprovalsLink?.textContent?.trim()).toBe('My requests')
+    expect(taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')?.getAttribute('href'))
+      .toBe('/attendance?tab=overview&section=attendance-overview-anomalies')
+    for (const action of ['attendance-groups', 'shifts', 'holidays', 'rule-sets', 'daily-import']) {
+      expect(taskHome!.querySelector(`[data-admin-task-action="${action}"]`)).toBeTruthy()
+    }
+    // Navigability audit fix 5(b): the standalone "Members" task-home shortcut is gone — it
+    // duplicated the "Attendance groups" entry right next to it and landed on a section whose
+    // only content was "open Attendance groups instead". A-class batch 2 (A4) removed the
+    // waystation section and its sidebar nav entry outright, and repointed
+    // UserManagementView.vue's post-create-user deep link straight at `attendance-admin-groups`.
+    expect(taskHome!.querySelector('[data-admin-task-action="group-members"]')).toBeNull()
 
-    const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="monthly-import"]')
+    const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
     expect(importButton).toBeTruthy()
     importButton!.click()
     await flushUi(2)
 
+    expect(homeContext?.style.display).toBe('none')
+    expect(sectionWorkspace?.style.display).not.toBe('none')
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar?.textContent).toContain('Import')
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-task-home-return="true"]')!.click()
+    await flushUi(2)
+
+    expect(homeContext?.style.display).not.toBe('none')
+    expect(sectionWorkspace?.style.display).toBe('none')
+    expect(window.location.hash).toBe('')
+    expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
+    expect(clearSection).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins the parent navigate wiring for task-home link actions (fix 4, GATE-5086 P2-2)', async () => {
+    // GATE-5086's mutation M8 deleted `@navigate="onAdminTaskHomeNavigate"` at
+    // AttendanceView.vue's <AttendanceAdminTaskHome> usage and found 272/272 green across 5
+    // suites — the three AttendanceAdminTaskHome.spec.ts cases only prove the CHILD emits;
+    // nothing proved the PARENT was listening. With that binding gone the click still calls
+    // preventDefault() (AttendanceAdminTaskHome.vue's onLinkActionClick) and the emit goes
+    // nowhere — a fully inert click, strictly worse than the full-page reload this fix set out
+    // to remove. This suite mounts AttendanceView with no router installed (see the
+    // `injection "Symbol(router)" not found` warnings throughout this file), so
+    // onAdminTaskHomeNavigate's fallback branch (`window.location.assign`) is what's
+    // observable here; a real app with a router would take the `router.push` branch instead —
+    // both branches are gated on the SAME `@navigate` binding this test pins.
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    // jsdom's `window.location.assign` is non-configurable, so it cannot be `vi.spyOn`'d
+    // directly — replace the whole `location` object for this test only, matching the pattern
+    // already established in App.spec.ts's "clears local auth state and redirects after sign
+    // out" test.
+    const originalLocation = window.location
+    const assign = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: { ...originalLocation, assign },
+      writable: true,
+      configurable: true,
+    })
+    try {
+      const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+      expect(link).toBeTruthy()
+      link!.click()
+      await flushUi(2)
+
+      expect(assign).toHaveBeenCalledWith('/attendance?tab=overview&section=attendance-overview-requests')
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      })
+    }
+  })
+
+  it('routes task-home link actions through router.push when a real router is installed (fix 4 production path, GATE-5086 P2-2)', async () => {
+    // Companion to the previous test, which mounts AttendanceView with NO router installed at
+    // all (same as every other test in this file) and can therefore only observe
+    // onAdminTaskHomeNavigate's `window.location.assign` FALLBACK branch. `useRouter()` resolves
+    // to a real router anywhere in the app once `app.use(router)` is called — AttendanceView
+    // does not need to sit under a `<router-view>` for this — so mounting it as the app root
+    // under a real router exercises the branch that actually runs in production:
+    // `void router.push(href)`. Mutating ONLY that line (e.g. to `void 0`, leaving the
+    // `@navigate` binding itself intact) reds this test while leaving the previous
+    // fallback-branch test green; the two are deliberately non-overlapping.
+    const router: Router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/attendance', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/attendance?tab=admin')
+    await router.isReady()
+
+    const routedApp = createApp(AttendanceView, { mode: 'admin' })
+    routedApp.use(router)
+    routedApp.mount(container!)
+    await flushUi()
+
+    // This app instance is local to this test (the outer `app`/`afterEach` unmount the shared
+    // one, which stays null here) — unmount it ourselves, and in a `finally` so a failed
+    // assertion below can't leak a mounted app into the rest of this file's 30+ other tests
+    // (the exact "flake attributed to the last active suite" shape documented elsewhere in this
+    // repo's institutional memory).
+    try {
+      const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+      expect(link).toBeTruthy()
+      link!.click()
+
+      // vue-router's navigation resolves over more microtask ticks than a fixed flushUi() loop
+      // reliably covers (documented pitfall from this PR's own earlier router-link investigation)
+      // — poll until settled rather than assuming a fixed tick count catches it.
+      await vi.waitFor(() => {
+        expect(router.currentRoute.value.fullPath).toBe('/attendance?tab=overview&section=attendance-overview-requests')
+      })
+    } finally {
+      routedApp.unmount()
+    }
   })
 
   it('creates an attendance group from the detail pane and selects it for people management', async () => {
@@ -275,7 +413,9 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url.startsWith('/api/admin/users')) {
+      // The picker sites on this page are wired to the attendance-scoped user search; the
+      // platform route is kept here so this mock stays honest for either caller.
+      if (url.startsWith('/api/admin/users') || url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -346,7 +486,7 @@ describe('Attendance admin anchor navigation', () => {
     const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
     expect(people).toBeTruthy()
     expect(people!.querySelector('[data-attendance-group-member-count]')?.textContent).toContain('Showing 1 of 25 members')
-    expect(resolveBodies.at(-1)).toEqual({ userIds: [existingMemberUserId] })
+    expect(resolveBodies.at(-1)).toEqual({ userIds: [existingMemberUserId], orgId: 'default' })
     expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent).toContain('Alice Member')
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain(existingMemberUserId)
     expect(people!.querySelector('[data-attendance-group-member-secondary]')?.textContent).toContain('alice.member@example.com')
@@ -614,7 +754,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(people).toBeTruthy()
     // No uuid handoffs (496e3a082): non-UUID / legacy member IDs are now sent to the label
     // resolver too (the resolver no longer pre-filters to UUIDs).
-    expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'] }])
+    expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'], orgId: 'default' }])
     // The resolver rejects the legacy ID (400), so the UI falls back to showing the raw ID.
     expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain('legacy-user-1')
@@ -789,7 +929,10 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('renders a sticky current-section bar in the right pane', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      initialSectionId: 'attendance-admin-settings',
+    })
     app.mount(container!)
     await flushUi()
 
@@ -797,7 +940,8 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar).toBeTruthy()
     expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
-    expect(currentSectionBar?.textContent).toContain('Quick switch: Alt+↑ previous')
+    expect(currentSectionBar?.textContent).toContain('Management home')
+    expect(currentSectionBar?.textContent).not.toContain('Quick switch')
     expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
     expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
@@ -833,7 +977,10 @@ describe('Attendance admin anchor navigation', () => {
 
     const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
     expect(jumpSelect).toBeTruthy()
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(33)
+    // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
+    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
+    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" section.
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(34)
 
     jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -960,11 +1107,10 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
     expect(container!.textContent).toContain('Append selected user')
 
-    const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
-    expect(groupMembersAnchor).toBeTruthy()
-    groupMembersAnchor!.click()
-    await flushUi(2)
-    expect(container!.querySelector('[data-attendance-group-members-redirect]')?.textContent).toContain('Group members now live inside')
+    // A4 (A-class batch 2, 2026-08-22): the "Group members" waystation section and its rail
+    // entry are deleted outright — confirm no dangling anchor or section remains.
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-group-members"]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-group-members-redirect]')).toBeNull()
 
     await ensureGroupVisible('Policies')
     const ruleSetsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
@@ -1180,21 +1326,17 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.textContent).toContain('Recent admin shortcuts cleared.')
   })
 
-  it('restores the last active admin section when no hash is present', async () => {
+  it('keeps the task home as the first context when only a remembered section exists', async () => {
     window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY), 'attendance-admin-approval-flows')
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
-    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
-    expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(true)
-
-    const button = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
-    expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
-    expect(button?.getAttribute('aria-current')).toBe('true')
-    expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    expect(container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')?.style.display).not.toBe('none')
+    expect(container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')?.style.display).toBe('none')
+    expect(window.location.hash).toBe('')
   })
 
   it('isolates admin rail persistence by org id', async () => {
@@ -1224,9 +1366,9 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Data & Payroll · Payroll Cycles', 'Data & Payroll · Import batches'])
-    expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
-    expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(false)
+    expect(container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')?.style.display).not.toBe('none')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

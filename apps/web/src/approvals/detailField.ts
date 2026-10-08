@@ -1,6 +1,7 @@
 import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/approval'
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
+import { formatRecordLinkDisplay } from './recordLinkField'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -17,8 +18,9 @@ import { isRowDerivationActive } from './lineDerivation'
 
 /**
  * Leaf sub-field types allowed inside a `detail` group's `columns` — the 8 authorable scalar
- * types (everything except `attachment`, which is not authorable, and `detail`, which would
- * nest). Mirrors backend `DETAIL_LEAF_FIELD_TYPES`.
+ * types (everything except `attachment`, which is not authorable; `detail`, which would nest;
+ * and `record-link`, which is FWB-0 Layer 2 top-level-only). Mirrors backend
+ * `DETAIL_LEAF_FIELD_TYPES` (which derives from FORM_FIELD_TYPES and excludes detail + record-link).
  */
 export const DETAIL_LEAF_FIELD_TYPES: readonly FormFieldType[] = [
   'text',
@@ -141,12 +143,22 @@ export function buildDetailColumns(drafts: DetailColumnDraft[]): FormField[] {
  *
  * `minRowsText`/`maxRowsText` are the raw input strings (`''` = unset); they are validated as
  * the authoring UI binds text inputs.
+ *
+ * B0 `options?.minimal` gates ONLY the "select/multi-select sub-column needs >=1 option" check —
+ * verified directly against the backend (`ApprovalProductService.normalizeFormField`,
+ * `packages/core-backend/src/services/ApprovalProductService.ts:1289-1301`): `options` is only
+ * shape-checked when the key is present, and the authoring UI always sends `options: []` (never
+ * `undefined`) for an empty select — an empty array passes the backend's array-of-valid-options
+ * check vacuously. Every OTHER check here (non-empty `columns`, id required/unique, label
+ * required, leaf-type-only, malformed non-empty options, minRows/maxRows shape) mirrors a real
+ * `normalizeDetailFieldParts`/`normalizeFormField` 400 and stays blocking in both modes.
  */
 export function validateDetailColumnsDraft(
   fieldLabel: string,
   columns: DetailColumnDraft[],
   minRowsText: string,
   maxRowsText: string,
+  options?: { minimal?: boolean },
 ): string[] {
   const errors: string[] = []
   const label = fieldLabel || '(未命名明细)'
@@ -174,10 +186,10 @@ export function validateDetailColumnsDraft(
       errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 类型不支持`)
     }
     if (column.type === 'select' || column.type === 'multi-select') {
-      const options = parseOptionsText(column.optionsText)
-      if (options.length === 0) {
+      const columnOptions = parseOptionsText(column.optionsText)
+      if (!options?.minimal && columnOptions.length === 0) {
         errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 需要至少一个选项`)
-      } else if (options.some((option) => !option.label.trim() || !option.value.trim())) {
+      } else if (columnOptions.some((option) => !option.label.trim() || !option.value.trim())) {
         errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 的选项 label/value 不能为空`)
       }
     }
@@ -322,6 +334,7 @@ export function pruneHiddenFormDataWithDetail(
 export function validateDetailRows(
   formSchema: FormSchema,
   formData: Record<string, unknown>,
+  isZh: boolean,
 ): string[] {
   const violations: string[] = []
   for (const field of formSchema.fields) {
@@ -340,6 +353,10 @@ export function validateDetailRows(
         if (!visibleIds.has(column.id)) continue // hidden this row — can never be "missing"
         if (isRowDerivationActive(columns, column, row)) continue // read-only derived target
         if (isEmptyValue(row[column.id])) {
+          if (!isZh) {
+            violations.push(`"${fieldLabel}" row ${index + 1} is missing "${column.label || column.id}"`)
+            continue
+          }
           violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)
         }
       }
@@ -425,10 +442,43 @@ function matchOptionLabel(options: FormOption[] | undefined, value: unknown): st
  * but — unlike that helper — passes the raw value through unchanged when it doesn't parse as a
  * date, instead of surfacing the JS-internal "Invalid Date" string to the reader.
  */
-function formatDisplayDate(value: unknown): string {
+function formatDisplayDate(value: unknown, isZh = true): string {
   const raw = String(value)
   const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString('zh-CN')
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString(isZh ? 'zh-CN' : 'en-US')
+}
+
+/** O-8 / F8-1: the list separator used when several display values share one cell. */
+function displayListSeparator(isZh: boolean): string {
+  return isZh ? '、' : ', '
+}
+
+/**
+ * Flag-OFF / legacy attachment display: when the new attachment pipeline is OFF, frozen snapshot
+ * values may still be plain strings (B2-28 era notes) or objects `{ name | fileName | filename }`.
+ * Render those without calling the attachment refs endpoint. Opaque id arrays from the new pipeline
+ * are NOT formatted here — they resolve through `attachmentRefs.ts` when the flag is ON.
+ */
+export function formatLegacyAttachmentValue(value: unknown, isZh = true): string {
+  if (value === null || value === undefined || value === '') return '-'
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((entry) => formatLegacyAttachmentValue(entry, isZh))
+      .filter((part) => part && part !== '-')
+    return parts.length > 0 ? parts.join(displayListSeparator(isZh)) : '-'
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    for (const key of ['fileName', 'filename', 'name', 'label', 'title'] as const) {
+      const candidate = obj[key]
+      if (typeof candidate === 'string' && candidate.trim()) return candidate
+    }
+    // Avoid dumping "[object Object]" — a nameless legacy object still surfaces as a stable placeholder.
+    return isZh ? '附件' : 'Attachment'
+  }
+  return String(value)
 }
 
 /**
@@ -437,24 +487,61 @@ function formatDisplayDate(value: unknown): string {
  * its option label, falling back to the raw value when no option matches (e.g. an option
  * renamed/removed after the instance was created); `multi-select` maps each stored value the
  * same way and joins with '、'; `date` uses `formatDisplayDate` (pass-through on unparsable);
- * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user/
- * attachment) stringifies as-is.
+ * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user)
+ * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
+ * string/object snapshots remain readable without the new refs endpoint.
  */
-function formatDisplayValue(field: FormField, value: unknown): string {
+function formatDisplayValue(field: FormField, value: unknown, isZh: boolean): string {
   if (value === null || value === undefined || value === '') return '-'
   switch (field.type) {
     case 'select':
       return matchOptionLabel(field.options, value)
     case 'multi-select': {
       const values = Array.isArray(value) ? value : [value]
-      return values.map((entry) => matchOptionLabel(field.options, entry)).join('、')
+      return values.map((entry) => matchOptionLabel(field.options, entry)).join(displayListSeparator(isZh))
     }
     case 'date':
     case 'datetime':
-      return formatDisplayDate(value)
+      return formatDisplayDate(value, isZh)
     case 'number': {
       const num = Number(value)
-      return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value)
+      return Number.isFinite(num) ? num.toLocaleString(isZh ? 'zh-CN' : 'en-US') : String(value)
+    }
+    case 'attachment':
+      return formatLegacyAttachmentValue(value, isZh)
+    case 'department': {
+      if (!Array.isArray(value)) return '-'
+      const showFullPath = field.props?.display === 'full_path'
+      const labels = value.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+        const record = entry as Record<string, unknown>
+        const candidate = showFullPath ? record.fullPath : record.name
+        return typeof candidate === 'string' && candidate.trim() ? [candidate.trim()] : []
+      })
+      return labels.length > 0 ? labels.join(displayListSeparator(isZh)) : '-'
+    }
+    case 'record-link': {
+      // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
+      // human summary channel here — generic selected-record label when present.
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const recordId = (value as { recordId?: unknown }).recordId
+        if (typeof recordId === 'string' && recordId.trim()) {
+          return formatRecordLinkDisplay(null, isZh)
+        }
+      }
+      return '-'
+    }
+    case 'date_range': {
+      // Lock-8 L8-B MS-12: `date_range` is excluded from detail columns (OD-L8-4), but a TOP-LEVEL
+      // date_range still flows through `buildDisplayFields` below — without this arm it would fall
+      // through to the `default: String(value)` case and print "[object Object]" (M8 honesty).
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const { start, end } = value as { start?: unknown; end?: unknown }
+        if (start !== undefined && end !== undefined) {
+          return `${formatDisplayDate(start, isZh)} ~ ${formatDisplayDate(end, isZh)}`
+        }
+      }
+      return '-'
     }
     default:
       return String(value)
@@ -473,22 +560,60 @@ function formatDisplayValue(field: FormField, value: unknown): string {
  * schema-ordered entries, using the raw key as label — so unexpected data is surfaced, not
  * silently dropped.
  */
+export interface BuildDisplayFieldsOptions {
+  /**
+   * When true (flag ON), attachment fields are excluded here and render via the refs-resolved
+   * attachment block instead. When false/undefined (flag OFF default), legacy attachment
+   * string/object snapshot values still render inline without calling the new endpoint.
+   */
+  attachmentPipelineEnabled?: boolean
+  /**
+   * O-8 / F8-1: shell locale for value formatting (list separators, dates, numbers, the legacy
+   * attachment placeholder). Defaults to zh-CN so the not-yet-converted authoring callers (F8-3)
+   * keep today's output; the member surfaces pass `useLocale().isZh`.
+   */
+  isZh?: boolean
+}
+
 export function buildDisplayFields(
   formSchema: FormSchema | null | undefined,
   formSnapshot: Record<string, unknown> | null | undefined,
+  options: BuildDisplayFieldsOptions = {},
 ): DisplayField[] {
   const snapshot = formSnapshot ?? {}
   const fields = formSchema?.fields ?? []
   const knownFieldIds = new Set(fields.map((field) => field.id))
   const result: DisplayField[] = []
+  const pipelineOn = options.attachmentPipelineEnabled === true
+  const isZh = options.isZh ?? true
+  // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3): explanation carries no formSnapshot value at all (A-1),
+  // so "is this field's id a snapshot key" — the test every OTHER arm below uses — is never true
+  // for it and can't gate its render. Its visibility must instead be evaluated directly against
+  // the FROZEN schema + snapshot, mirroring the fill view's own live evaluation: a hidden
+  // explanation must render nothing here either, exactly like a hidden field whose value the
+  // requester never got to see is never in the snapshot for any OTHER type.
+  const visibleFieldIds = formSchema
+    ? new Set(getVisibleFormFields(formSchema, snapshot).map((field) => field.id))
+    : null
 
   for (const field of fields) {
     if (field.type === 'detail') continue
+    // B3-07 §8 (flag ON): an attachment field's snapshot value is an array of opaque
+    // `approval_attachments.id` REFERENCES. Stringifying them here would print raw ids as if they
+    // were the reader's data. They resolve through `attachmentRefs.ts` in their own block.
+    // Flag OFF (default): keep rendering legacy string/object values inline — no new endpoint.
+    if (field.type === 'attachment' && pipelineOn) continue
+    if (field.type === 'explanation') {
+      if (!visibleFieldIds?.has(field.id)) continue
+      const text = typeof field.props?.text === 'string' ? field.props.text : ''
+      result.push({ key: field.id, label: field.label || field.id, value: text })
+      continue
+    }
     if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
     result.push({
       key: field.id,
       label: field.label || field.id,
-      value: formatDisplayValue(field, snapshot[field.id]),
+      value: formatDisplayValue(field, snapshot[field.id], isZh),
     })
   }
 
@@ -516,18 +641,21 @@ export function summaryFields(
   formSchema: FormSchema | null | undefined,
   formSnapshot: Record<string, unknown> | null | undefined,
   limit = 3,
+  isZh = true,
 ): DisplayField[] {
   const fields = formSchema?.fields
   if (!Array.isArray(fields) || fields.length === 0) return []
 
+  // Lock-8 L8-A: explanation is authoring copy, not "data the requester filled in" — excluded from
+  // the compact glance line the same way attachment/detail are (each for its own reason).
   const eligibleFieldIds = new Set(
     fields
-      .filter((field) => field.type !== 'attachment' && field.type !== 'detail')
+      .filter((field) => field.type !== 'attachment' && field.type !== 'detail' && field.type !== 'explanation')
       .map((field) => field.id),
   )
   if (eligibleFieldIds.size === 0) return []
 
-  return buildDisplayFields(formSchema, formSnapshot)
+  return buildDisplayFields(formSchema, formSnapshot, { isZh })
     .filter((field) => eligibleFieldIds.has(field.key))
     .slice(0, limit)
 }
@@ -538,6 +666,6 @@ export function summaryFields(
  * single-line container with CSS `text-overflow: ellipsis`, so truncation stays purely visual
  * (never a substring cut here that could clip mid-character).
  */
-export function formatSummaryLine(fields: DisplayField[]): string {
-  return fields.map((field) => `${field.label}：${field.value}`).join(' · ')
+export function formatSummaryLine(fields: DisplayField[], isZh = true): string {
+  return fields.map((field) => (isZh ? `${field.label}：${field.value}` : `${field.label}: ${field.value}`)).join(' · ')
 }

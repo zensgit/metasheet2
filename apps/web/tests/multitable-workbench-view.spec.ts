@@ -1,5 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp, type Component, type PropType } from 'vue'
+// P3-2 (2026-09-05): pure-function coverage for the mentionDisplayFieldId unification lives here,
+// beside the WB `mentionDisplayFieldId` computed it replaces — see that describe block below.
+import { resolveMentionDisplayField, resolvePrimaryField } from '../src/multitable/utils/recordDisplay'
+import { recordLabel } from '../src/multitable/utils/meta-record-labels'
+import type { MetaField } from '../src/multitable/types'
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
@@ -8,6 +15,54 @@ const showSuccessSpy = vi.fn()
 // vi.hoisted: the mocked module is imported synchronously by MultitableWorkbench.vue, so a plain
 // top-level const would still be in its TDZ when the factory runs.
 const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn(() => new Uint8Array([1, 2, 3])) }))
+// Round 3 (2026-09-05, record inspector v3 refuter finding): identity capture of the `openerEl` prop
+// the workbench binds via `:opener-el="inspectorOpenerEl"` on `<MetaRecordInspector>`. An
+// HTMLElement cannot round-trip through a DOM attribute (a fallthrough attr would stringify it to
+// "[object HTMLButtonElement]"), so the MetaRecordInspector stub below declares the prop and writes
+// the LATEST value it was rendered with — plus a render counter, so an "unchanged after close"
+// assertion can prove the stub really re-rendered rather than the holder simply being stale — into
+// this hoisted holder. `vi.hoisted` for the same reason as `buildXlsxBufferMock` above. Reset per
+// test in `beforeEach`.
+// Record inspector v3 PR-B1 round 2 (2026-09-05, refuter P2 "WB producer + WB→INS wiring untested"):
+// the same holder also records the LATEST `inspectorFieldLayout` and `fetchRecord` props the stub was
+// rendered with, and `gridStubSeen.fetchRecord` records what the MetaGridTable stub received on its
+// own `:fetch-record` binding — so the HI-1 "same function the grid already receives" claim is
+// asserted by IDENTITY between the two stubs, not by a stringified attr or a source-text regex.
+const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
+  inspectorStubSeen: {
+    openerEl: null as HTMLElement | null,
+    renders: 0,
+    fieldLayout: undefined as { ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null | undefined,
+    fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    // #5795: the server-side mention search the workbench hands the inspector.
+    mentionSearch: undefined as ((query: string) => Promise<{ items: unknown[]; requiresQuery: boolean; hasMore: boolean }>) | undefined,
+  },
+  gridStubSeen: {
+    fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    mentionSearch: undefined as ((query: string) => Promise<unknown>) | undefined,
+  },
+}))
+// PR-B2 round 2 (2026-09-05, record inspector v3 §1.3): the stub's answer to the workbench's
+// `canAnchorFieldError(recordId, fieldId)` query (the real MetaRecordInspector exposes it via
+// `defineExpose`; the workbench calls it through `recordInspectorRef` before writing an inline entry).
+// Default `true` = "details tab active, field row rendered"; a test flips it to `false` to play "the
+// alert could not render" (attachments tab / hidden field / closed inspector) and asserts the toast
+// fallback. Re-armed to `true` in the PR-B2 describe's own beforeEach (clearAllMocks keeps
+// implementations, so a per-test `false` would otherwise leak). Its call args are asserted too: the
+// workbench must ask about the record the FAILURE belongs to, not whatever is selected by then.
+const { inspectorStubAnchor } = vi.hoisted(() => ({
+  inspectorStubAnchor: vi.fn((_recordId: string, _fieldId: string) => true),
+}))
+// #5808: when `enabled`, the MetaRecordInspector stub renders the REAL shared MetaCommentsPanel (and so
+// the real MetaCommentComposer) with the same comment props/emits the real inspector forwards, so the
+// workbench's comment-edit path can be driven end to end. Off by default: every other test keeps the
+// plain stand-in buttons. Reset in the top-level beforeEach.
+// #5813: `realInspector` goes one step further — the stub renders the REAL MetaRecordInspector (and so its
+// real tab bar, which unmounts the comments tabpanel on every switch) instead of the bare panel, inside
+// the same `data-real-comments-panel` wrapper so the #5808 helpers keep working.
+const { inspectorStubRealComments } = vi.hoisted(() => ({
+  inspectorStubRealComments: { enabled: false, realInspector: false },
+}))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
   return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
@@ -107,6 +162,8 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getAccessSnapshot: () => authAccessSnapshot,
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+    // #5813: read only by the real inspector's provenance section (opt-in `realInspector` harness).
+    hasPermission: () => false,
   }),
 }))
 
@@ -304,9 +361,19 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       columnWidths: { type: Object, default: () => ({}) },
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
+      // PR-B1 round 2: the grid's own `:fetch-record="fetchLinkedRecordFn"` binding, recorded into
+      // `gridStubSeen` so the inspector's binding can be asserted IDENTICAL to it (HI-1).
+      fetchRecord: { type: Function, default: undefined },
+      mentionSearch: { type: Function, default: undefined },
     },
-    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` added to this stub's emits —
+    // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
+    // the inspector; tests that need the panel OPEN click the new `data-expand-record` button
+    // (mirrors the real grid's row-number icon → `expand-record`).
+    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change', 'set-frozen-rows'],
     render() {
+      gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
+      gridStubSeen.mentionSearch = this.$props.mentionSearch as typeof gridStubSeen.mentionSearch
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
         'data-grid-collapsed-keys': JSON.stringify(this.$props.collapsedGroupKeys ?? []),
@@ -331,10 +398,37 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
         h(
           'button',
           {
+            'data-expand-record': 'rec_1',
+            onClick: () => this.$emit('expand-record', 'rec_1'),
+          },
+          'expand-record-1',
+        ),
+        h(
+          'button',
+          {
+            'data-expand-record': 'rec_2',
+            onClick: () => this.$emit('expand-record', 'rec_2'),
+          },
+          'expand-record-2',
+        ),
+        h(
+          'button',
+          {
             'data-open-comments': 'rec_1',
             onClick: () => this.$emit('open-comments', 'rec_1'),
           },
           'open-comments',
+        ),
+        // Round 4 (2026-09-05, stale-opener P2): a second row's comment click-through, so the
+        // "expand-open row 1 → close → comment-open row 2" sequence can be driven end to end
+        // (mirrors the real grid's per-row `.meta-grid__comment-action` button → `open-comments`).
+        h(
+          'button',
+          {
+            'data-open-comments': 'rec_2',
+            onClick: () => this.$emit('open-comments', 'rec_2'),
+          },
+          'open-comments-2',
         ),
         h(
           'button',
@@ -343,6 +437,15 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('open-field-comments', { recordId: 'rec_1', fieldId: 'fld_title' }),
           },
           'open-field-comments',
+        ),
+        // #5863c: row-freeze pin round-trip — mirrors the real grid's per-row pin → set-frozen-rows.
+        h(
+          'button',
+          {
+            'data-set-frozen-rows': '2',
+            onClick: () => this.$emit('set-frozen-rows', 2),
+          },
+          'set-frozen-rows',
         ),
         h(
           'button',
@@ -419,21 +522,97 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
 // comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
 // tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
 // pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
-vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
+  const { default: RealMetaCommentsPanel } = await import('../src/shared/comments/components/MetaCommentsPanel.vue')
+  const { default: RealMetaRecordInspector } = await vi.importActual<{ default: Component }>('../src/multitable/components/MetaRecordInspector.vue')
+  return {
   default: defineComponent({
     name: 'MetaRecordInspector',
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
+      // Round 3 (2026-09-05): declared so the workbench's `:opener-el` binding arrives as a typed
+      // prop (recorded into `inspectorStubSeen` in `render` below) instead of a stringified
+      // fallthrough attr — see the holder's own comment near the top of this file.
+      openerEl: { type: Object as PropType<HTMLElement | null>, default: null },
+      // PR-B1 round 2 (refuter P2): the two headline B1 bindings on `<MetaRecordInspector>` —
+      // `:inspector-field-layout="inspectorFieldLayout"` (the WB producer's `{ ordered, hiddenInView }`)
+      // and `:fetch-record="fetchLinkedRecordFn"` — declared so they arrive typed and are recorded
+      // into `inspectorStubSeen` on every render (see the holder's comment near the top of this file).
+      inspectorFieldLayout: { type: Object as PropType<{ ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null>, default: undefined },
+      fetchRecord: { type: Function, default: undefined },
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
+      mentionSearch: { type: Function, default: undefined },
+      // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
+      // binding arrives as a typed prop and is rendered below as the same `[data-test=
+      // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
+      fieldErrors: { type: Object as PropType<Record<string, string> | null>, default: null },
+      // #5808: the comment-tab props the real inspector forwards to MetaCommentsPanel, declared so the
+      // opt-in real panel below receives them typed (see `inspectorStubRealComments`).
+      comments: { type: Array, default: () => [] },
+      commentDraft: { type: String, default: '' },
+      commentEditingId: { type: String, default: null },
+      commentComposerInitialMentions: { type: Array, default: () => [] },
+      currentUserId: { type: String, default: null },
+      canComment: { type: Boolean, default: false },
+      // #5813: forwarded to the opt-in real inspector (its default tab / later switch to comments).
+      openComments: { type: Boolean, default: false },
     },
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+      'comment-edit', 'comment-cancel-edit',
+      // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
+      // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
+      // `data-copy-link` button below is this stub's stand-in for that icon.
+      'copy-link',
     ],
+    methods: {
+      // PR-B2 round 2: same name/signature as the real component's `defineExpose`d query; reachable
+      // through the workbench's `ref="recordInspectorRef"` because Options-API methods sit on the
+      // public instance. Delegates to the hoisted spy so tests can both steer and inspect it.
+      canAnchorFieldError(recordId: string, fieldId: string): boolean {
+        return inspectorStubAnchor(recordId, fieldId)
+      },
+    },
     render() {
+      // Round 3 (2026-09-05): record what THIS render was given, visible or not — the real component
+      // instance stays mounted across every open/close (no `v-if` at the workbench call site), so the
+      // prop keeps flowing to it after `visible` drops back to false too.
+      inspectorStubSeen.openerEl = (this.$props.openerEl as HTMLElement | null) ?? null
+      inspectorStubSeen.renders += 1
+      inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
+      inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
+      inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
+      if (inspectorStubRealComments.realInspector) {
+        // #5813: stays mounted while hidden, like the real shell at the workbench call site.
+        const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
+        return h('div', { 'data-real-comments-panel': 'true', 'data-record-drawer': shownRecordId || undefined }, [
+          h(RealMetaRecordInspector, {
+            visible: this.$props.visible,
+            record: this.$props.record,
+            fields: [],
+            canEdit: false,
+            canComment: this.$props.canComment,
+            canDelete: false,
+            comments: this.$props.comments,
+            commentDraft: this.$props.commentDraft,
+            commentEditingId: this.$props.commentEditingId,
+            currentUserId: this.$props.currentUserId,
+            mentionSuggestions: this.$props.mentionSuggestions,
+            mentionSearch: this.$props.mentionSearch,
+            commentComposerInitialMentions: this.$props.commentComposerInitialMentions,
+            openComments: this.$props.openComments,
+            onCommentSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+            onCommentEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+            onCommentCancelEdit: () => this.$emit('comment-cancel-edit'),
+            onToggleComments: () => this.$emit('toggle-comments'),
+            'onUpdate:commentDraft': (value: string) => this.$emit('update:comment-draft', value),
+          }),
+        ])
+      }
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -442,6 +621,12 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
         'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
         'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
       }, [
+        // PR-B2 (2026-09-05): one node per `fieldErrors` entry, mirroring the real panel's markup, so the
+        // `onDrawerPatch` routing tests can assert "inline under THAT field" through this stub. The real
+        // panel's alert/aria/draft behaviour is pinned in multitable-record-inspector-field-errors.spec.ts.
+        ...Object.entries((this.$props.fieldErrors as Record<string, string> | null) ?? {}).map(([fieldId, message]) =>
+          h('div', { 'data-test': 'drawer-field-error', 'data-field-id': fieldId, role: 'alert' }, message),
+        ),
         h(
           'button',
           {
@@ -457,6 +642,14 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
             onClick: () => this.$emit('toggle-comments'),
           },
           'toggle-comments',
+        ),
+        h(
+          'button',
+          {
+            'data-copy-link': 'true',
+            onClick: () => this.$emit('copy-link'),
+          },
+          'copy-link',
         ),
         h(
           'button',
@@ -490,6 +683,15 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'patch-record',
         ),
+        // PR-B2 round 2: a second patchable field so two drawer patches can be in flight at once.
+        h(
+          'button',
+          {
+            'data-patch-record': 'fld_status',
+            onClick: () => this.$emit('patch', 'fld_status', 'Patched status'),
+          },
+          'patch-record-status',
+        ),
         h(
           'button',
           {
@@ -522,10 +724,31 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'cancel-reply',
         ),
+        // #5808: same bindings as MetaRecordInspector.vue's own <MetaCommentsPanel> (comments tab).
+        inspectorStubRealComments.enabled
+          ? h('div', { 'data-real-comments-panel': 'true' }, [
+            h(RealMetaCommentsPanel, {
+              comments: this.$props.comments as never,
+              loading: false,
+              canComment: this.$props.canComment,
+              canResolve: false,
+              draft: this.$props.commentDraft,
+              editingCommentId: this.$props.commentEditingId,
+              currentUserId: this.$props.currentUserId,
+              mentionSuggestions: this.$props.mentionSuggestions as never,
+              mentionSearch: this.$props.mentionSearch as never,
+              composerInitialMentions: this.$props.commentComposerInitialMentions as never,
+              onSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+              onEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+              'onUpdate:draft': (value: string) => this.$emit('update:comment-draft', value),
+            }),
+          ])
+          : null,
       ])
     },
   }),
-}))
+  }
+})
 vi.mock('../src/multitable/components/MetaMentionPopover.vue', () => ({
   default: defineComponent({
     name: 'MetaMentionPopover',
@@ -957,6 +1180,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -1098,6 +1322,14 @@ function createGridMock() {
     rowActions: ref(null),
     rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
+    // PR-B2 round 2 (2026-09-05): the workbench routes on what `patchCell` RETURNS for its own call (a
+    // `GridPatchFailure`, or null) — there is no shared "last failure" ref any more; each test's
+    // `patchCell.mockImplementation` returns the failure it plays.
+    // PR-B2 (2026-09-05): `lastBatchId` is what the real composable exposes for the success toast's
+    // "view in history" action (`historyLinkAction(grid.lastBatchId.value)` in onDrawerPatch). It was
+    // missing from this mock because, until PR-B2, no test in this file ever drove `onDrawerPatch` to its
+    // SUCCESS branch — the stub's `data-patch-record` button existed but was never clicked.
+    lastBatchId: ref<string | null>(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
     toggleFieldVisibility: vi.fn(),
@@ -1167,6 +1399,13 @@ describe('MultitableWorkbench view wiring', () => {
     authAccessSnapshot.isAdmin = false
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
+    inspectorStubSeen.openerEl = null
+    inspectorStubSeen.renders = 0
+    inspectorStubSeen.fieldLayout = undefined
+    inspectorStubSeen.fetchRecord = undefined
+    inspectorStubRealComments.enabled = false
+    inspectorStubRealComments.realInspector = false
+    gridStubSeen.fetchRecord = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -1222,6 +1461,297 @@ describe('MultitableWorkbench view wiring', () => {
     app.mount(container!)
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
+
+  // #5750: an embedding host re-sends the same mt:navigate context on a timer (once a second in the
+  // report). The host/URL base id is a slug, while workbench.activeBaseId is whatever the LOADED
+  // context said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+  // ctx.sheet.baseId) -- so a verbatim comparison of the two can miss forever and every tick
+  // re-enters applyExternalContext (and, when the user is busy or has drafts open, the defer toast).
+  async function replayExternalContextSync(
+    hostState: any,
+    context: { baseId: string; sheetId: string; viewId: string },
+    times: number,
+  ) {
+    const results: Array<{ status: string; context: { baseId: string; sheetId: string; viewId: string } }> = []
+    for (let i = 0; i < times; i += 1) {
+      results.push(await hostState.workbenchRef.requestExternalContextSync(context, { requestId: `req_${i}` }))
+      await flushUi()
+    }
+    return results
+  }
+
+  it('#5750 short-circuits repeated external context syncs whose base id is spelled differently from the loaded base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    // What the first load already wrote into the state: the CONTEXT's base id, not the URL slug.
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    const results = await replayExternalContextSync(
+      hostState,
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      5,
+    )
+
+    expect(workbenchMock.syncExternalContext).not.toHaveBeenCalled()
+    expect(results.map((result) => result.status)).toEqual(['applied', 'applied', 'applied', 'applied', 'applied'])
+    // The echo carries the base the workbench is really on, so the embed host can pin it in the URL.
+    expect(results[0].context).toEqual({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+  })
+
+  it('#5750 keeps syncing when the base id is not the only difference, or when the active sheet is not known to live in the active base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // A different sheet is never ignored, whatever the base id says.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_deals', viewId: 'view_grid' },
+      { requestId: 'req_other_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // Neither is a different view.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_other_view' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(2)
+
+    // And the base id is only ignored when the loaded sheet list PROVES the active sheet lives in
+    // the active base: an unknown active sheet keeps the strict comparison.
+    workbenchMock.sheets.value = []
+    await flushUi()
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_unknown_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(3)
+  })
+
+  // #5750 review: a host that posts only { baseId } gets sheetId/viewId filled in from the CURRENT
+  // ones (MultitableEmbedHost.handleNavigateMessage), so it lands on exactly the comparison above.
+  // A base id the workbench knows is a real base switch and must never be ignored -- otherwise that
+  // request is answered 'applied' while the frame stays where it was.
+  it('#5750 never ignores a base id that names another KNOWN base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // base_sales comes from the listBases() mock -- a known base, same sheet/view as now.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_known_other_base' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // An UNKNOWN id for the base the active sheet already lives in is still ignored (that is the
+    // URL-slug case this fast path exists for).
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_slug' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+  })
+
+  // #5750 follow-up: the LOADED context, not the caller, decides the active triple --
+  // useMultitableWorkbench.syncContextState falls activeViewId back to views[0] when the requested
+  // view is not in ctx.views (a deleted/renamed view id in the host's URL is the common case). The
+  // sync SUCCEEDS there, so the request is 'applied' while the workbench sits on another view; an
+  // echo carrying the REQUESTED view hands the embed host a dead triple to pin into the URL and
+  // re-send forever. The echo has to report what is on screen.
+  it('#5750 follow-up echoes the RESOLVED context (dead viewId falls back to views[0]) instead of the requested one', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    // The composable's real view fallback, in mock form.
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view' },
+    )
+    await flushUi()
+
+    // The request still goes out verbatim -- only the ECHO is resolved.
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_deleted',
+    })
+    expect(workbenchMock.activeViewId.value).toBe('view_grid')
+    expect(result.context.viewId).not.toBe('view_deleted')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view',
+    })
+  })
+
+  // Same resolution for the DEFERRED path: the replay echo (an emitted event, not a return value)
+  // is the only answer a host gets for a request that was parked, so it must resolve too.
+  it('#5750 follow-up echoes the RESOLVED context on the deferred replay path as well', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    // Park the request behind an open dirty draft, then clear it so the replay runs.
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    const deferred = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view_replay' },
+    )
+    expect(deferred.status).toBe('deferred')
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-clean="true"]')!.click()
+    await flushUi()
+
+    expect(hostState.externalContextResults).toContainEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view_replay',
+    })
+  })
+
+  // #5750 follow-up, review round 2: echoing "what is on screen" is only honest while what is on
+  // screen is still THIS request's resolution. applyExternalContext awaits, and the composable
+  // documents that window as reachable (loadBaseContext applies the context and only then awaits
+  // /fields, so a rail click or a second sync can move the active triple inside it -- pinned green by
+  // tests/multitable-external-context-sync.spec.ts, where a sheet_orders sync resolves true with
+  // sheet_deals on screen). An intruder's triple echoed as 'applied' would make the embed host pin
+  // the sheet the host never asked for and drop the navigation while reporting success.
+  it('#5750 follow-up echoes the REQUEST, not the intruding triple, when another sheet lands during the apply', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        // This sync's own application...
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        // ...then the rail click that lands inside the /fields await window.
+        workbenchMock.selectSheet('sheet_orders')
+        workbenchMock.selectView('view_grid')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      { requestId: 'req_raced_sheet' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_orders')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      requestId: 'req_raced_sheet',
+    })
+  })
+
+  // Same race, one level finer: the intruder stays on the sheet and only changes the VIEW. The view
+  // the request named EXISTS here, so the views[0] fallback cannot explain the difference -- someone
+  // else moved, and the echo must not report their view as this request's result.
+  it('#5750 follow-up echoes the REQUEST when a concurrent writer switches to another existing view', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectView('view_timeline')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_raced_view' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeViewId.value).toBe('view_timeline')
+    // view_gallery is a real view of this sheet, so nothing about it licenses the swap.
+    expect(workbenchMock.views.value.some((view) => view.id === 'view_gallery')).toBe(true)
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      requestId: 'req_raced_view',
+    })
+  })
+
+  // ...and the base half. A host that posts only { baseId } has the sheet/view filled in from the
+  // current ones, so a base switch that is stomped back leaves a triple whose sheet AND view still
+  // match the request -- only the base gives the race away.
+  it('#5750 follow-up echoes the REQUEST when the base switch is stomped back by another writer', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectBase('base_ops')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_raced_base' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeBaseId.value).toBe('base_ops')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_raced_base',
+    })
+  })
 
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
@@ -2281,7 +2811,10 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): plain `select-record` no longer opens the
+    // inspector (W2 lock §3.1 erratum) — `expand-record` (the row-number icon in the real grid) is
+    // this stub's explicit-open equivalent.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -2351,18 +2884,638 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('loads comment mention suggestions for the active sheet when opening comments', async () => {
+  // #5795: the mention-candidate endpoint is search-required, so opening a thread must NOT fetch a
+  // term-less roster any more; instead the workbench hands every mention editor a search bound to the
+  // active sheet (the SAME function to the grid and the inspector), and remembers what it returned.
+  it('opens comments without a term-less mention request and wires a sheet-bound mention search', async () => {
     mountWorkbench()
     await flushUi()
 
     container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
     await flushUi()
 
-    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
-      spreadsheetId: 'sheet_orders',
-      limit: 100,
+    expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-mention-suggestions-count="0"]')).not.toBeNull()
+    const search = inspectorStubSeen.mentionSearch
+    expect(typeof search).toBe('function')
+    expect(gridStubSeen.mentionSearch).toBe(search)
+
+    // An empty term is asked of the server, whose `requiresQuery` marker is passed through untouched.
+    workbenchMock.client.listCommentMentionSuggestions.mockResolvedValueOnce({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
     })
+    await expect(search!('')).resolves.toEqual({ items: [], requiresQuery: true, hasMore: false })
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: '',
+      limit: 20,
+    })
+
+    // A real term returns the matches and remembers them (labels of picked people stay resolvable).
+    const found = await search!('ja')
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: 'ja',
+      limit: 20,
+    })
+    expect(found).toEqual({
+      items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
+      requiresQuery: false,
+      hasMore: false,
+    })
+    await flushUi()
     expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
+  })
+
+  // #5808: an old comment whose mentions are NOT `@[label](id)` tokens in its body (e.g. created via the
+  // API with an explicit `mentions` array). Since #5795 there is no roster to find their names in, so
+  // the list response carries `mentionLabels`; a mention nobody could name must still survive the edit.
+  // Driven through the REAL MetaCommentsPanel + MetaCommentComposer (see inspectorStubRealComments).
+  describe('#5808 editing a comment keeps mentions that are not tokens in its body', () => {
+    const MENTION_SEARCH_SETTLE_MS = 220
+
+    function composerChipLabels(): string[] {
+      return Array.from(container!.querySelectorAll('.meta-comment-composer__mention-chip span:first-child'))
+        .map((node) => node.textContent?.trim() ?? '')
+    }
+
+    async function openEditOf(comment: Record<string, unknown>) {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      commentsStateMock.comments.value = [comment]
+      await flushUi()
+      const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')
+      expect(editButton).toBeTruthy()
+      editButton!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function typeInto(textarea: HTMLTextAreaElement, value: string) {
+      textarea.value = value
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function submitComposer() {
+      container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__submit')!.click()
+      await flushUi()
+    }
+
+    it('shows the server label or a neutral placeholder, and a keystroke + save keeps both ids', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Please double-check the totals',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      expect(textarea.value).toBe('Please double-check the totals')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+      const composer = container!.querySelector('[data-real-comments-panel] .meta-comment-composer')!
+      expect(composer.textContent).not.toContain('user_fake_gone')
+      expect(composer.textContent).not.toContain('user_fake_robin')
+
+      await typeInto(textarea, 'Please double-check the totals!')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_1', {
+        content: 'Please double-check the totals!',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+      })
+      // resolving a label never issues a mention search
+      expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    })
+
+    it('a body token keeps its own label even when a remembered search hit names the same id differently', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      // a search remembers `user_jamie` as "Jamie" (the default client mock)
+      await inspectorStubSeen.mentionSearch!('ja')
+      await flushUi()
+      commentsStateMock.comments.value = [{
+        id: 'comment_token_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: '@[J. Example](user_jamie) hi',
+        mentions: ['user_jamie'],
+        mentionLabels: { user_jamie: 'Jamie' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      }]
+      await flushUi()
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')!
+        .click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')!
+      expect(textarea.value).toBe('@J. Example hi')
+      expect(composerChipLabels()).toEqual(['@J. Example'])
+
+      await typeInto(textarea, '@J. Example hi!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_token_1', {
+        content: '@[J. Example](user_jamie) hi!',
+        mentions: ['user_jamie'],
+      })
+    })
+
+    it('a mention picked during the edit survives later searches (the edit starts from a snapshot)', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_2',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Totals',
+        mentions: ['user_fake_robin'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      await typeInto(textarea, 'Totals @ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      // a second search refreshes the workbench's remembered-people cache
+      await typeInto(textarea, `${textarea.value}@jo`)
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledTimes(2)
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_2', {
+        content: 'Totals @[Jamie](user_jamie) @jo',
+        mentions: ['user_fake_robin', 'user_jamie'],
+      })
+    })
+
+    it('mention ids that are Object.prototype keys open the edit and are kept under a placeholder', async () => {
+      // an own non-string value and an inherited string are not labels either (read by own string key only)
+      const labels = Object.assign(Object.create({ user_fake_inherited: 'Fake Inherited' }), { user_fake_numeric: 42 })
+      const textarea = await openEditOf({
+        id: 'comment_proto_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Odd ids',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+        mentionLabels: labels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+      expect(textarea.value).toBe('Odd ids')
+      expect(composerChipLabels()).toEqual(Array(5).fill('@Unknown user'))
+
+      await typeInto(textarea, 'Odd ids!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_proto_1', {
+        content: 'Odd ids!',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+      })
+    })
+
+    // Fix round: a person picked for one NEW comment must not be mentioned again by the next one. The
+    // workbench clears the draft after a send and on a record switch but keeps passing the same empty
+    // `initialMentions`, so only the composer can drop the picked chip.
+    async function openNewCommentOn(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-open-comments="${recordId}"]`)!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function pickJamie(textarea: HTMLTextAreaElement) {
+      await typeInto(textarea, '@ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Jamie'])
+    }
+
+    it('after sending a comment that mentions someone, the next comment mentions nobody', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        targetId: 'rec_1',
+        content: '@[Jamie](user_jamie)',
+        mentions: ['user_jamie'],
+      }))
+      expect(textarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(textarea, 'thanks everyone')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(2)
+      expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        targetId: 'rec_1',
+        content: 'thanks everyone',
+        mentions: [],
+      }))
+    })
+
+    it('a person picked on one record is not mentioned by a note sent on the next record', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const nextTextarea = await openNewCommentOn('rec_2')
+      const confirmMessages = confirmSpy.mock.calls.map((call) => call[0])
+      confirmSpy.mockRestore()
+      expect(confirmMessages).toEqual(['Discard unsaved record changes?'])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(nextTextarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(nextTextarea, 'note for record two')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(1)
+      expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+        targetId: 'rec_2',
+        content: 'note for record two',
+        mentions: [],
+      }))
+    })
+
+    // #5813: the REAL inspector unmounts its comments tabpanel on every tab switch; the picked (or
+    // removed) mentions must come back with the tab, and still be cleared by a send / record switch /
+    // another edit — including one that happens while the comments tab is away.
+    describe('#5813 switching inspector tabs keeps the picked and removed mentions', () => {
+      const DISCARD_COMMENT_EDIT_PROMPT = 'Discard your unsaved edit to this comment?'
+
+      function inspectorTab(label: string): HTMLButtonElement {
+        const tab = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] [role="tab"]'))
+          .find((button) => button.textContent?.trim() === label)
+        expect(tab).toBeTruthy()
+        return tab!
+      }
+
+      function composerTextarea(): HTMLTextAreaElement | null {
+        return container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] .meta-comment-composer textarea')
+      }
+
+      async function switchToTab(label: string) {
+        inspectorTab(label).click()
+        await flushUi()
+      }
+
+      async function roundTripTabs(): Promise<HTMLTextAreaElement> {
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+        await switchToTab('Comments')
+        const textarea = composerTextarea()
+        expect(textarea).not.toBeNull()
+        return textarea!
+      }
+
+      async function mountRealInspector() {
+        inspectorStubRealComments.enabled = true
+        inspectorStubRealComments.realInspector = true
+        mountWorkbench()
+        await flushUi()
+      }
+
+      async function removeChip(label: string) {
+        const chip = Array.from(container!.querySelectorAll<HTMLButtonElement>('.meta-comment-composer__mention-chip'))
+          .find((button) => button.querySelector('span')?.textContent?.trim() === label)
+        expect(chip).toBeTruthy()
+        chip!.click()
+        await flushUi()
+      }
+
+      async function openEditInRealInspector(comment: Record<string, unknown>) {
+        commentsStateMock.comments.value = [...(commentsStateMock.comments.value as unknown[]), comment] as never
+        await flushUi()
+        const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+          .filter((button) => button.textContent?.trim() === 'Edit')
+          .at(-1)
+        expect(editButton).toBeTruthy()
+        editButton!.click()
+        await flushUi()
+      }
+
+      const apiComment = (id: string, content: string, mentions: string[], mentionLabels: Record<string, string>) => ({
+        id,
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content,
+        mentions,
+        mentionLabels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      it('new comment: a person picked before a tab switch is still mentioned after it', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+          targetId: 'rec_1',
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+
+        // after the send, the next comment mentions nobody — tab switch or not
+        expect(composerChipLabels()).toEqual([])
+        const next = await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(next, 'thanks everyone')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+          content: 'thanks everyone',
+          mentions: [],
+        }))
+      })
+
+      it('edit: a mention removed before a tab switch stays removed and is not saved', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_api_5813',
+          'Please double-check the totals',
+          ['user_fake_robin', 'user_fake_gone'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('Please double-check the totals')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        await typeInto(textarea, 'Please double-check the totals!')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_5813', {
+          content: 'Please double-check the totals!',
+          mentions: ['user_fake_gone'],
+        })
+      })
+
+      it("edit: opening a different comment after a tab switch starts from that comment's mentions", async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_a', 'First', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual([])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+
+        await openEditInRealInspector(apiComment('comment_b', 'Second', ['user_fake_robin', 'user_fake_sam'], {
+          user_fake_robin: 'Robin Example',
+          user_fake_sam: 'Sam Example',
+        }))
+        expect(composerTextarea()!.value).toBe('Second')
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+      })
+
+      it('edit: the header Comments button ends the edit and clears its text, so no mention-less copy is sent', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_toggle_5813',
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        // the edit has text, so dropping it is confirmed first (accepted here)
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          expect(confirmSpy.mock.calls).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      // #5813 final review: the header Comments button is also reachable from the Details tab, where
+      // the inspector does not switch back to Comments (the edit already set `openComments`), so the
+      // edited text must not vanish there without a question.
+      async function pressHeaderCommentsAnswering(answer: boolean): Promise<unknown[][]> {
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(answer)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          return confirmSpy.mock.calls.map((call) => [...call])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+      }
+
+      async function openMentionEditThenGoToDetails(id: string) {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          id,
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+      }
+
+      it('edit, from Details: cancelling the header Comments prompt keeps the edit, its text and its mention', async () => {
+        await openMentionEditThenGoToDetails('comment_keep_5813')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await typeInto(textarea, 'Hi @Robin Example, thanks')
+        await submitComposer()
+        expect(addCommentSpy).not.toHaveBeenCalled()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_keep_5813', {
+          content: 'Hi @[Robin Example](user_fake_robin), thanks',
+          mentions: ['user_fake_robin'],
+        })
+      })
+
+      it('edit, from Details: accepting the header Comments prompt drops the edit, and the next send is a new comment', async () => {
+        await openMentionEditThenGoToDetails('comment_drop_5813')
+
+        expect(await pressHeaderCommentsAnswering(true)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledTimes(1)
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('edit with an emptied text: the header Comments button ends it without asking', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_empty_5813', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await typeInto(composerTextarea()!, '   ')
+        await switchToTab('Details')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('new comment: the header Comments button keeps an unsent draft and its picked mention', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        // nothing is discarded on this path, so nothing is asked
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+        try {
+          container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')!.click()
+          await flushUi()
+          expect(confirmSpy).not.toHaveBeenCalled()
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        expect(composerTextarea()!.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+      })
+
+      it('a pick made before leaving the tab is not mentioned on the next record, switched to while the tab was away', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+        expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'note for record two')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'note for record two',
+          mentions: [],
+        }))
+      })
+
+      it('an edit ended by a record switch while the tab was away does not carry its mentions into a new comment', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_c', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+
+        await switchToTab('Comments')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(composerTextarea()!, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+    })
   })
 
   it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {
@@ -2485,7 +3638,9 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` is this stub's explicit-open
+    // equivalent — plain `select-record` no longer opens the inspector.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -2506,7 +3661,9 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` is this stub's explicit-open
+    // equivalent — plain `select-record` no longer opens the inspector.
+    container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
@@ -2521,6 +3678,8 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
+  // #5743: same contract (refresh while open, silence after close), slower clock — the cadence now
+  // comes from DIALOG_META_REFRESH_INTERVAL_MS instead of a hard-coded 1200 ms.
   it('refreshes sheet metadata while the view manager is open and stops after close', async () => {
     vi.useFakeTimers()
     mountWorkbench()
@@ -2535,7 +3694,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
     expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
 
-    await vi.advanceTimersByTimeAsync(1200)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
@@ -2545,7 +3704,7 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
     workbenchMock.loadSheetMeta.mockClear()
 
-    await vi.advanceTimersByTimeAsync(2400)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS * 2)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
@@ -2808,6 +3967,19 @@ describe('MultitableWorkbench view wiring', () => {
       expect(workbenchMock.loadSheetMeta).toHaveBeenCalled()
       // optimistic-local: toolbar reflects the new density immediately
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('compact')
+    })
+
+    it('#5863c set-frozen-rows: persists frozenTopRowCount AND preserves sibling config keys', async () => {
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-frozen-rows="2"]')!.click()
+      await flushUi()
+
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const [viewId, body] = workbenchMock.client.updateView.mock.calls[0]
+      expect(viewId).toBe('view_grid')
+      expect(body.config).toEqual({ ...SIBLINGS, frozenTopRowCount: 2 })
     })
 
     it('group collapse: persists scoped {fieldId, fieldIds, collapsedKeys} AND preserves siblings', async () => {
@@ -3117,7 +4289,9 @@ describe('MultitableWorkbench view wiring', () => {
 
       expect(toggleEl().getAttribute('aria-expanded')).toBe('true') // rail starts expanded (pre-S7 default)
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` (this stub's explicit-open
+      // equivalent) — plain `select-record` no longer opens the inspector (W2 lock §3.1 erratum).
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy() // inspector opened
       expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(false) // push, not overlay
@@ -3140,7 +4314,7 @@ describe('MultitableWorkbench view wiring', () => {
       mountWorkbench()
       await flushUi()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(true)
@@ -3166,7 +4340,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
       expect(inspectorEl()).toBeNull()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy() // inspector opened
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false) // rail drawer auto-closed
@@ -3178,7 +4352,7 @@ describe('MultitableWorkbench view wiring', () => {
       mountWorkbench()
       await flushUi()
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
@@ -3189,23 +4363,921 @@ describe('MultitableWorkbench view wiring', () => {
       expect(inspectorEl()).toBeNull() // inspector auto-closed
     })
 
+    // Regression test (2026-09-05): `openRecord`/`resolveDeepLink` used to set `inspectorOpen=true`
+    // BEFORE calling `selectRecord`, whose OWN discard-guard can still abort the navigation — a
+    // DECLINED confirm then left `inspectorOpen=true` dangling (reopening the panel on the
+    // PREVIOUSLY selected record) even though the navigation itself was cancelled. Repro needs the
+    // panel CLOSED with a genuinely dirty draft still held: the rail-drawer mutual-exclusion watcher
+    // (just above) force-closes the inspector WITHOUT running `confirmDiscardRecordChanges` (a
+    // separate, pre-existing, undisputed behavior) — a dirty comment draft set before that survives
+    // it untouched, unlike `onCloseDrawer`'s own close path, which clears it via its own guard.
+    it('a declined discard-confirm on expand-record (closed panel, dirty draft) leaves the panel closed and the selection unchanged', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+
+      // Force-close WITHOUT the discard guard (rail-drawer mutual exclusion) — the draft survives.
+      toggleEl().click()
+      await flushUi()
+      expect(inspectorEl()).toBeNull() // panel closed, selectedRecordId (rec_1) retained underneath
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_2"]')!.click()
+      await flushUi()
+
+      expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      // The navigation was cancelled — the panel must stay CLOSED, not reopen on rec_1.
+      expect(inspectorEl()).toBeNull()
+    })
+
     it('narrow width: switching from one selected record to another while the rail drawer is open still closes the drawer', async () => {
       setViewportWidth(600)
       mountWorkbench()
       await flushUi()
 
-      // Open the inspector on rec_1 first (narrow, no drawer yet), then open the rail drawer —
-      // by the previous test this already closes the inspector; this test instead re-opens the
-      // inspector by switching records while the drawer is open, proving the guard is keyed off
-      // "selectedRecordId changed to non-null", not just "off -> on".
+      // Open the rail drawer first (no inspector open yet), then OPEN the inspector on rec_2 while
+      // it's open — proving the guard fires on "the inspector actually opened", not just "some
+      // record got selected" (record inspector v3, 2026-09-05, PR-A §1.1: `expand-record`, this
+      // stub's explicit-open equivalent, since plain `select-record` no longer opens the panel).
       toggleEl().click()
       await flushUi()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
 
-      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_2"]')!.click()
       await flushUi()
       expect(inspectorEl()).toBeTruthy()
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum): the `#recordId=` hash means
+  // "this record is EXPANDED" — written only while `inspectorOpen && selectedRecordId`, stripped the
+  // moment either goes false. A plain cursor move (select-record, panel closed) must write nothing.
+  describe('hash lifecycle (§1.1)', () => {
+    function hash(): string {
+      return window.location.hash
+    }
+
+    it('select-record with the panel closed writes no hash', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(hash()).toBe('')
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('')
+    })
+
+    it('expand-record writes #recordId=<id>; close strips it (selectedRecordId itself survives)', async () => {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('#recordId=rec_1')
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(hash()).toBe('')
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the inspector only emits `copy-link`;
+  // the workbench writes `window.location.href` — which carries `#recordId=<id>` while the panel is
+  // open (hash lifecycle above) — via `navigator.clipboard.writeText`, and reports the outcome through
+  // MetaToast (the `aria-live="polite"` / `role="status"` region, stubbed here as `showSuccessSpy` /
+  // `showErrorSpy`) with the reserved `record.copyLinkDone` / `record.copyLinkFailed` keys. The
+  // inspector-side "button disabled when the Clipboard API is absent" gate is pinned in
+  // multitable-record-fields-sections.spec.ts (it needs the REAL inspector, stubbed out here).
+  describe('copy link (§1.3 PR-B1)', () => {
+    // jsdom has no `navigator.clipboard`; each test installs exactly the shape it needs and restores
+    // the original descriptor (absent → deleted again) so no test sees another's stub.
+    function stubClipboard(clipboard: { writeText: (text: string) => Promise<void> } | undefined): () => void {
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+      Object.defineProperty(navigator, 'clipboard', { value: clipboard, configurable: true })
+      return () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original)
+        else delete (navigator as unknown as Record<string, unknown>).clipboard
+      }
+    }
+
+    it('writes window.location.href (carrying #recordId=<id>) to the clipboard and reports record.copyLinkDone', async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+      const restore = stubClipboard({ writeText })
+      try {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        expect(window.location.hash).toBe('#recordId=rec_1')
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(writeText.mock.calls[0][0]).toBe(window.location.href)
+        expect(writeText.mock.calls[0][0]).toContain('#recordId=rec_1')
+        expect(showSuccessSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+        expect(showErrorSpy).not.toHaveBeenCalled()
+      } finally {
+        restore()
+      }
+    })
+
+    it('a rejected clipboard write reports record.copyLinkFailed (never copyLinkDone) and does not throw', async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error('denied'))
+      const restore = stubClipboard({ writeText })
+      try {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(writeText).toHaveBeenCalledTimes(1)
+        expect(showErrorSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkFailed', false))
+        expect(showSuccessSpy).not.toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+      } finally {
+        restore()
+      }
+    })
+
+    it('with no Clipboard API at all the handler reports record.copyLinkFailed instead of throwing (positive control for the absent-API branch)', async () => {
+      const restore = stubClipboard(undefined)
+      try {
+        expect((navigator as unknown as { clipboard?: unknown }).clipboard).toBeUndefined()
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(showErrorSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkFailed', false))
+        expect(showSuccessSpy).not.toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+      } finally {
+        restore()
+      }
+    })
+  })
+
+  // Record inspector v3 (2026-09-05, PR-A §1.1, §2 graft table "comment fetch out of selectRecord
+  // (P12)"): a closed-panel `select-record` (arrow/click cursor move) must make ZERO comment
+  // requests; the positive control proves the fetch-once-opened path is still live (not merely
+  // silenced everywhere).
+  describe('comment fetch gating (§1.1 P12)', () => {
+    it('three closed-panel select-record calls make zero comment fetches; expand-record then fetches exactly once', async () => {
+      mountWorkbench()
+      await flushUi()
+      loadCommentsSpy.mockClear()
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(loadCommentsSpy).not.toHaveBeenCalled()
+
+      // Positive control: the SAME record, now opened, DOES fetch — proving the gate is load-bearing
+      // (not merely a dead branch that never fires under this harness).
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(loadCommentsSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // Also required by the design brief directly (§1.1): a plain cursor move must not merely "write
+  // no hash" (the hash-lifecycle describe's own assertion above) — the inspector shell itself must
+  // never mount/show at all while the panel is closed.
+  describe('closed select-record does not mount/show the inspector (§1.1)', () => {
+    it('select-record with the panel closed does not mount/show the inspector', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+    })
+  })
+
+  // P2-B (2026-09-05, verified finding): "close retains selectedRecordId" had NO assertion in this
+  // suite before this — re-adding `selectedRecordId.value = null` inside `onCloseDrawer` (the
+  // pre-PR-A behavior, when `selectedRecordId` alone WAS the panel's visibility) would leave every
+  // pre-existing test in this file green. Proven here via the grid's own `selected-record-id` prop
+  // (WB → MetaGridTable, `:selected-record-id="selectedRecordId"`) — the grid stub declares no such
+  // prop, so Vue's normal attrs-fallthrough renders it as a literal DOM attribute on the stub's root.
+  describe('close retains selectedRecordId (§1.1, P2-B)', () => {
+    function gridSelectedRecordId(): string | null {
+      return container!.querySelector('[data-grid-column-widths]')?.getAttribute('selected-record-id') ?? null
+    }
+
+    it('expand-record selects the row; closing the panel keeps that row selected — only the panel itself closes', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(gridSelectedRecordId()).toBeNull()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(gridSelectedRecordId()).toBe('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy()
+
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
+      expect(gridSelectedRecordId()).toBe('rec_1') // row STAYS selected — the P2-B assertion itself
+    })
+  })
+
+  // Record inspector v3 PR-B1 round 2 (2026-09-05, refuter P2): the WB PRODUCER `inspectorFieldLayout`
+  // (view order ∩ layer-2 ∩ layer-3; `hiddenInView` = the two-layer-visible remainder) and the two
+  // `<MetaRecordInspector>` bindings `:inspector-field-layout` / `:fetch-record` had zero coverage —
+  // dropping either binding, or replacing view order with sheet order, left tests/multitable green
+  // (round-1 refuter probes M16/M17/M18b). The stub records both props on every render (holder near
+  // the top of this file); these tests pin the producer's SHAPE against a fixture that exercises all
+  // three layers and the `fetchRecord` binding by IDENTITY with the grid's own.
+  describe('inspectorFieldLayout producer + fetchRecord wiring reach <MetaRecordInspector> (§1.3 PR-B1, round 2)', () => {
+    // Sheet order (grid.fields): a, b, c, secret(layer-2 property-hidden), denied(layer-3), d.
+    // Active view (grid.visibleFields): HIDES field 0 (`fld_a`) and REORDERS the rest — d, b, c — while
+    // still listing the property-hidden and the permission-denied field (the producer must strike both).
+    const SHEET_FIELDS = [
+      { id: 'fld_a', name: 'A', type: 'string' },
+      { id: 'fld_b', name: 'B', type: 'string' },
+      { id: 'fld_c', name: 'C', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+      { id: 'fld_denied', name: 'Denied', type: 'string' },
+      { id: 'fld_d', name: 'D', type: 'string' },
+    ]
+    const VIEW_ORDER = [SHEET_FIELDS[5], SHEET_FIELDS[1], SHEET_FIELDS[2], SHEET_FIELDS[3], SHEET_FIELDS[4]]
+    function arrangeThreeLayerFixture() {
+      workbenchMock.fields.value = [...SHEET_FIELDS]
+      gridMock.fields.value = [...SHEET_FIELDS]
+      // `createGridMock` aliases visibleFields to the SAME ref as fields; give the view its own order.
+      gridMock.visibleFields = ref([...VIEW_ORDER])
+      gridMock.hiddenFieldIds.value = ['fld_a']
+      // grid.fieldPermissions stays {} so `effectiveFieldPermissions` falls through to the workbench's
+      workbenchMock.fieldPermissions.value = {
+        fld_denied: { visible: false, readOnly: false },
+      }
+    }
+    const ids = (fields: Array<{ id: string }> | undefined) => (fields ?? []).map((field) => field.id)
+
+    it('`ordered` follows the VIEW order intersected with layer-2 and layer-3 (not sheet order); `hiddenInView` is the two-layer-visible remainder', async () => {
+      arrangeThreeLayerFixture()
+      mountWorkbench()
+      await flushUi()
+      expect(inspectorStubSeen.renders).toBeGreaterThan(0)
+      const layout = inspectorStubSeen.fieldLayout
+      expect(layout).toBeTruthy() // the binding is present — an absent prop would leave `undefined`
+      // view order d, b, c — secret (layer-2) and denied (layer-3) struck; `fld_a` is view-hidden
+      expect(ids(layout!.ordered)).toEqual(['fld_d', 'fld_b', 'fld_c'])
+      // NOT the sheet-order two-layer list (what `twoLayerVisibleFields` alone would hand over)
+      expect(ids(layout!.ordered)).not.toEqual(['fld_a', 'fld_b', 'fld_c', 'fld_d'])
+      // §2 = fields this viewer may see (layer-2 ∩ layer-3) that the view hides: only `fld_a`
+      expect(ids(layout!.hiddenInView)).toEqual(['fld_a'])
+      // disjoint by construction, and neither list leaks a masked field
+      const all = [...ids(layout!.ordered), ...ids(layout!.hiddenInView)]
+      expect(new Set(all).size).toBe(all.length)
+      expect(all).not.toContain('fld_secret')
+      expect(all).not.toContain('fld_denied')
+    })
+
+    it('positive control for the fixture: with a view that hides nothing and reorders nothing, `ordered` equals the two-layer sheet order and `hiddenInView` is empty', async () => {
+      arrangeThreeLayerFixture()
+      gridMock.visibleFields = ref([...SHEET_FIELDS])
+      gridMock.hiddenFieldIds.value = []
+      mountWorkbench()
+      await flushUi()
+      expect(ids(inspectorStubSeen.fieldLayout!.ordered)).toEqual(['fld_a', 'fld_b', 'fld_c', 'fld_d'])
+      expect(ids(inspectorStubSeen.fieldLayout!.hiddenInView)).toEqual([])
+    })
+
+    it('`fetchRecord` reaches the inspector as the SAME function object the grid receives (`fetchLinkedRecordFn`, HI-1) and it calls client.getRecord once with the id', async () => {
+      workbenchMock.client.getRecord.mockResolvedValue({ record: { id: 'rec_x', data: {} } })
+      mountWorkbench()
+      await flushUi()
+      expect(typeof inspectorStubSeen.fetchRecord).toBe('function')
+      expect(typeof gridStubSeen.fetchRecord).toBe('function')
+      // IDENTITY: one `fetchLinkedRecordFn` bound at both call sites, not two wrappers
+      expect(inspectorStubSeen.fetchRecord).toBe(gridStubSeen.fetchRecord)
+      workbenchMock.client.getRecord.mockClear()
+      await inspectorStubSeen.fetchRecord!('rec_x')
+      expect(workbenchMock.client.getRecord).toHaveBeenCalledTimes(1)
+      expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_x')
+    })
+  })
+
+  // Round 3 (2026-09-05, refuter finding on round 2): round 2 covered `openRecord`'s STATE but never
+  // that the captured opener actually REACHES the child — the `:opener-el="inspectorOpenerEl"`
+  // binding on `<MetaRecordInspector>` (MultitableWorkbench.vue template) had zero coverage as a
+  // binding. The stub near the top of this file now declares `openerEl` and records the exact object
+  // it was rendered with (`inspectorStubSeen`), so this asserts the wiring by IDENTITY.
+  describe('opener-el wiring: openRecord\'s captured opener reaches <MetaRecordInspector openerEl> by identity (§1.1, round 3)', () => {
+    it('expand-record with a focused opener passes that exact element as openerEl; after the inspector emits close the workbench CLEARS it (null)', async () => {
+      mountWorkbench()
+      await flushUi()
+      expect(inspectorStubSeen.renders).toBeGreaterThan(0) // the stub really rendered (holder is live)
+      expect(inspectorStubSeen.openerEl).toBeNull() // nothing opened yet → the ref's initial null
+
+      // A real, connected element as the opener. The grid's `expand-record` handler
+      // (`onExpandRecord(id)` → `openRecord(id)`) passes NO explicit opener, so `openRecord` falls back
+      // to `document.activeElement` at the instant the grid's synchronous emit handler runs — exactly
+      // what the real grid's row-number icon relies on (see `openRecord`'s own doc comment). jsdom's
+      // `.click()` does NOT move focus, so focusing the opener first and then clicking the stub's
+      // expand button leaves it as the active element for that capture.
+      const opener = document.createElement('button')
+      opener.textContent = 'row-expand-opener'
+      document.body.appendChild(opener)
+      opener.focus()
+      expect(document.activeElement).toBe(opener)
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy() // panel open
+      expect(inspectorStubSeen.openerEl).toBe(opener) // IDENTITY — the exact element, not a stringified attr
+      const rendersWhileOpen = inspectorStubSeen.renders
+
+      // Close via the inspector's own `close` emit (× and Esc both route to `onCloseDrawer`).
+      // `onCloseDrawer` sets `inspectorOpen=false`, RETAINS `selectedRecordId`, and — round 4
+      // (2026-09-05, refuter P2) — CLEARS `inspectorOpenerEl`, so the child is handed `null` after
+      // close. Round 3 pinned the opposite ("retained") with a "safe by construction" argument that
+      // was false: not every later open goes through `openRecord` (the `openComments: true`
+      // click-through callers and `resolveDeepLink` do not), so a retained opener WAS consulted stale
+      // — see the next two tests.
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed
+      expect(inspectorStubSeen.renders).toBeGreaterThan(rendersWhileOpen) // the stub DID re-render on close…
+      expect(inspectorStubSeen.openerEl).toBeNull() // …and was handed null — the opener is consumed by the close
+      expect(opener.isConnected).toBe(true) // (the element itself is untouched — only the workbench's reference is dropped)
+
+      opener.remove()
+    })
+
+    // Round 5 (2026-09-05, refuter P3 — `body` handed through as the opener): the test above focuses
+    // its opener first because jsdom's `.click()` does not move focus — but "nothing focused at the
+    // expand click" is exactly the production state in Safari and Firefox/macOS (a mouse click does
+    // NOT focus a `<button>`) and after ANY programmatic `.click()`: `document.activeElement` is
+    // `document.body` when the grid's synchronous expand handler runs. `openRecord` used to forward
+    // that `body` verbatim as the opener; the inspector's body filter covered only ITS OWN
+    // activeElement fallback, so the `body` reached `restoreFocusToOpener`, passed its connected check,
+    // and close called `body.focus()` — never falling through to the `.meta-grid` root. `openRecord`
+    // now resolves body (and a disconnected element) to `null` via `resolveOpenerEl`. Mutation: drop
+    // the `candidate === document.body` clause there → this reds at `toBeNull()` (the stub is handed
+    // `<body>`); the identity test above stays green, so the red is the filter's, not the wiring's.
+    it('expand-open while document.activeElement is body (nothing focused) hands the inspector openerEl === null, not document.body', async () => {
+      mountWorkbench()
+      await flushUi()
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.activeElement).toBe(document.body)
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy() // panel open
+      expect(inspectorStubSeen.openerEl).toBeNull() // body is "no opener", not an opener
+      expect(inspectorStubSeen.openerEl).not.toBe(document.body)
+    })
+
+    // Round 4 (2026-09-05, refuter P2, reproduced in Chromium on the round-3 head): expand-icon open
+    // (opener A) → Escape → focus back on A (correct) → focus + click row 2's grid comment button C
+    // (`.meta-grid__comment-action`) → panel opens on record 2 via `onOpenRecordComments` →
+    // `selectRecord(rec_2, { openComments: true })`, which never goes through `openRecord` → Escape →
+    // focus landed on A (row 1's stale expand icon), not on C. Root cause: `inspectorOpenerEl` kept A
+    // across the close and the comment path never overwrote it, so the inspector's
+    // `props.openerEl ?? <activeElement at open>` preference picked the stale A over C. Fixed on both
+    // sides: `onCloseDrawer` nulls the opener, and `selectRecord`'s open branch nulls it on any
+    // opener-less FRESH open. The inspector's own fallback then restores focus to C — pinned against
+    // the real component in multitable-record-inspector-header.spec.ts (round 4 block).
+    it('stale opener: expand-open (opener A) → close → comment click-through open hands the inspector openerEl === null, not A', async () => {
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      openerA.textContent = 'row-1-expand-icon'
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBe(openerA) // positive control: the expand path DOES pass A
+
+      container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+
+      // Row 2's comment button, focused the way a real click leaves it, then the grid's
+      // `open-comments` emit → `onOpenRecordComments` → `selectRecord(rec_2, { openComments: true })`.
+      const commentBtnC = document.createElement('button')
+      commentBtnC.textContent = 'row-2-comment-button'
+      document.body.appendChild(commentBtnC)
+      commentBtnC.focus()
+      expect(document.activeElement).toBe(commentBtnC)
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy() // panel open on record 2
+      expect(inspectorStubSeen.openerEl).toBeNull() // NOT openerA — the stale-opener bug itself
+      expect(inspectorStubSeen.openerEl).not.toBe(openerA)
+
+      openerA.remove()
+      commentBtnC.remove()
+    })
+
+    // The open-side half of the fix is independently load-bearing: two close paths bypass
+    // `onCloseDrawer` entirely (the rail-drawer watcher, and the `selectedRecordId → null` force-close
+    // watcher that a record delete trips — see the P3-5 block below), so a close-side reset alone
+    // would leave A behind for the next opener-less open. Mutation: delete only the
+    // `inspectorOpenerEl.value = null` in `onCloseDrawer` → this test stays green; delete only the
+    // `else if (!inspectorOpen.value) inspectorOpenerEl.value = null` in `selectRecord` → this reds.
+    it('stale opener via a close that bypasses onCloseDrawer: expand-open (A) → record deleted (force-close) → comment click-through open hands openerEl === null', async () => {
+      gridMock.deleteRecord.mockResolvedValueOnce(true)
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorStubSeen.openerEl).toBe(openerA)
+
+      container!.querySelector<HTMLButtonElement>('[data-delete-record="true"]')!.click()
+      await flushUi()
+      expect(gridMock.deleteRecord).toHaveBeenCalledWith('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // force-closed by the watcher, not via onCloseDrawer
+
+      const commentBtnC = document.createElement('button')
+      document.body.appendChild(commentBtnC)
+      commentBtnC.focus()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBeNull()
+
+      openerA.remove()
+      commentBtnC.remove()
+    })
+
+    // Preserved behaviour (not a fix): an opener-less call while the panel is ALREADY open — a comment
+    // click-through on another row from inside an open panel — leaves the CURRENT open's opener in
+    // place; only a fresh (closed → open) opener-less open resets it. Pinned so the round-4 reset is
+    // visibly scoped to the closed→open edge, not "every openComments call nulls the opener".
+    it('an opener-less comment click-through while the panel is already open keeps the current opener (only a fresh open resets it)', async () => {
+      mountWorkbench()
+      await flushUi()
+
+      const openerA = document.createElement('button')
+      document.body.appendChild(openerA)
+      openerA.focus()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(inspectorStubSeen.openerEl).toBe(openerA)
+
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy() // panel followed to record 2, still open
+      expect(inspectorStubSeen.openerEl).toBe(openerA) // unchanged — this open never closed
+
+      openerA.remove()
+    })
+  })
+
+  // P3-5 (2026-09-05, verified finding): the force-close watcher
+  // (`watch(selectedRecordId, rid => { if (!rid) inspectorOpen.value = false }`) had ZERO coverage.
+  // Deleting a record while the panel is open nulls `selectedRecordId` (`onDeleteRecord`) WITHOUT
+  // going through `onCloseDrawer` — this watcher is the ONLY thing that resets `inspectorOpen` in
+  // that path. Because `visible = inspectorOpen && !!selectedRecordId`, the panel closing right
+  // after the delete is NOT, by itself, proof the watcher ran (`!!selectedRecordId` alone already
+  // hides it) — the discriminating assertion is what happens on the NEXT plain cursor move: with the
+  // watcher in place, `inspectorOpen` is back to `false`, so a later PLAIN `select-record` on a
+  // different row must NOT reopen the panel; with the watcher deleted, `inspectorOpen` stays stuck
+  // `true` from before the delete, and that same plain select-record WOULD reopen it (`visible =
+  // true && !!rec_2` = true) — a real explicit-open-discipline violation.
+  describe('force-close watcher resets inspectorOpen when selectedRecordId is cleared out-of-band (§1.1, P3-5)', () => {
+    it('deleting the open record closes the panel, and a later plain select-record on another row does NOT reopen it', async () => {
+      gridMock.deleteRecord.mockResolvedValueOnce(true)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeTruthy()
+
+      container!.querySelector<HTMLButtonElement>('[data-delete-record="true"]')!.click()
+      await flushUi()
+      expect(gridMock.deleteRecord).toHaveBeenCalledWith('rec_1')
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull() // panel closed by the delete
+
+      // The discriminating step: a PLAIN cursor move (not expand-record) on a DIFFERENT record must
+      // not reopen the panel — it would, if `inspectorOpen` were left stuck `true` by the delete.
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer]')).toBeNull()
+    })
+  })
+
+  // P3-2 (2026-09-05, verified finding): `mentionDisplayFieldId` (above) is now routed through
+  // `resolveMentionDisplayField` — pure-function coverage of both branches named by the finding,
+  // plus a source pin proving the WB computed actually calls it (a future edit re-forking the two
+  // idioms would not itself red any DOM-level test, since no mock in this file renders
+  // `displayFieldId`).
+  describe('mention display field resolution unification (P3-2)', () => {
+    const TEXT_PRIMARY: MetaField[] = [
+      { id: 'fld_name', name: 'Name', type: 'string' } as MetaField,
+      { id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField,
+    ]
+    const NON_TEXT_PRIMARY: MetaField[] = [
+      { id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField,
+      { id: 'fld_status', name: 'Status', type: 'select' } as MetaField,
+      { id: 'fld_notes', name: 'Notes', type: 'longText' } as MetaField,
+    ]
+
+    it('when the primary field IS text (string/longText), it wins — same field the title/bulk-fill idioms already read', () => {
+      expect(resolveMentionDisplayField(TEXT_PRIMARY)?.id).toBe('fld_name')
+      expect(resolveMentionDisplayField(TEXT_PRIMARY)?.id).toBe(resolvePrimaryField(TEXT_PRIMARY)?.id)
+    })
+
+    it('when the primary field is NOT text, falls back to the first string/longText field instead (mention chips need a readable value)', () => {
+      expect(resolvePrimaryField(NON_TEXT_PRIMARY)?.id).toBe('fld_qty') // the primary field itself is NOT text
+      expect(resolveMentionDisplayField(NON_TEXT_PRIMARY)?.id).toBe('fld_notes') // mention display falls back
+    })
+
+    it('no string/longText field anywhere resolves to undefined (never throws)', () => {
+      const noTextFields: MetaField[] = [{ id: 'fld_qty', name: 'Qty', type: 'number' } as MetaField]
+      expect(resolveMentionDisplayField(noTextFields)).toBeUndefined()
+    })
+
+    it('[source] MultitableWorkbench.vue routes mentionDisplayFieldId through resolveMentionDisplayField, not a second inline .find() idiom', () => {
+      const src = readFileSync(join(__dirname, '..', 'src/multitable/views/MultitableWorkbench.vue'), 'utf8')
+      const block = src.match(/const mentionDisplayFieldId = computed\(\(\) =>[\s\S]*?\n\)/)?.[0] ?? ''
+      expect(block).toMatch(/resolveMentionDisplayField\(grid\.visibleFields\.value\)/)
+      expect(block).toMatch(/resolveMentionDisplayField\(grid\.fields\.value\)/)
+    })
+  })
+
+  // Record inspector v3 PR-B2 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §1.3 "Field-anchored server errors", §3 B2 "workbench" tests, §4 item 11). The composable is mocked
+  // (`gridMock`), so each test plays the composable: it sets `error.value` exactly as the real
+  // `patchCell` would and RETURNS the `GridPatchFailure` the real `patchCell` returns for that call
+  // (round 2: per-call return value, no shared ref) — and, for the conflict case, `conflict.value` (the
+  // banner's own driver, unchanged by B2). The inline node is the MetaRecordInspector stub's rendering
+  // of the `fieldErrors` prop (see the stub); whether the alert CAN render is the stub's
+  // `canAnchorFieldError` answer (`inspectorStubAnchor`, default true). The real panel's
+  // alert/aria/draft behaviour and the real inspector's `canAnchorFieldError` predicate are pinned in
+  // multitable-record-inspector-field-errors.spec.ts.
+  describe('onDrawerPatch — field-anchored server errors (PR-B2 §1.3)', () => {
+    const ATTEMPTED = 'Patched title' // what the stub's `data-patch-record="fld_title"` button emits
+    const ATTEMPTED_STATUS = 'Patched status' // …and its `fld_status` sibling
+
+    beforeEach(() => {
+      inspectorStubAnchor.mockImplementation(() => true)
+    })
+
+    async function openRec1() {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+    }
+    function fieldErrorEl(fieldId: string): HTMLElement | null {
+      return container!.querySelector<HTMLElement>(`[data-test="drawer-field-error"][data-field-id="${fieldId}"]`)
+    }
+    async function patchTitle() {
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+    }
+    type PlayedFailure = Record<string, unknown>
+    function failureFor(fieldId: string, message: string, failure: PlayedFailure) {
+      return { recordId: 'rec_1', fieldId, attemptedValue: fieldId === 'fld_title' ? ATTEMPTED : ATTEMPTED_STATUS, message, ...failure }
+    }
+    /** The composable's observable state after a REJECTED patchCell (rollback is internal to it): `error.value`
+     *  set, and the call's own `GridPatchFailure` returned. */
+    function rejectNextPatch(message: string, failure: PlayedFailure) {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string) => {
+        gridMock.error.value = message
+        return failureFor(fieldId, message, failure)
+      })
+    }
+    function acceptNextPatch() {
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        return null
+      })
+    }
+
+    it('422 with fieldErrors → NO toast, inline error under that field (no success toast either)', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
+      // The workbench asked the inspector about THIS record + field before writing.
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
+    })
+
+    it('400 VALIDATION_ERROR with NO fieldErrors (the shape /patch actually sends) → inline too, message = the server message', async () => {
+      await openRec1()
+      rejectNextPatch('Select value must be string: fld_title', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Select value must be string: fld_title')
+    })
+
+    it('a plain 400 with a NON-validation code (record-lock refusal ships as 400 FORBIDDEN) keeps the toast, no inline (round 2: code-keyed, not status-keyed)', async () => {
+      await openRec1()
+      rejectNextPatch('Record is locked: rec_1', { status: 400, code: 'FORBIDDEN' })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Record is locked: rec_1')
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('403 still toasts (positive control for "no toast") and renders NO inline error', async () => {
+      await openRec1()
+      rejectNextPatch('Insufficient permissions', { status: 403, code: 'FORBIDDEN' })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Insufficient permissions')
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('a failure recorded for a DIFFERENT record/field is never attributed to this control — toast as before', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Title is too long'
+        return failureFor('fld_other', 'Title is too long', { recordId: 'rec_9', status: 422, code: 'VALIDATION_ERROR' })
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledWith('Title is too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('a failure for the SAME record but ANOTHER field is not attributed to this control either — toast, no inline (pins the fieldId half of the guard)', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Status is invalid'
+        return failureFor('fld_other', 'Status is invalid', { status: 422, code: 'VALIDATION_ERROR' }) // recordId stays rec_1
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Status is invalid')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('a failure for ANOTHER record but the SAME field is not attributed to this control either — toast, no inline (round 3: pins the recordId half of the guard)', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Title is too long'
+        // fieldId stays fld_title (the edited field); ONLY recordId is foreign. The round-2 fixture above
+        // flips both ids, so it stayed green with the recordId half of `own` deleted.
+        return failureFor('fld_title', 'Title is too long', { recordId: 'rec_9', status: 422, code: 'VALIDATION_ERROR' })
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Title is too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      // A foreign failure never reaches the anchorability ask (`own` short-circuits before it).
+      expect(inspectorStubAnchor).not.toHaveBeenCalled()
+    })
+
+    it('the LOCAL row-action refusal (error.value set, patchCell returns null) keeps today\'s toast', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Record editing is not allowed for this row.'
+        return null
+      })
+      await patchTitle()
+      expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('VERSION_CONFLICT → the existing conflict banner + a field marker carrying the banner text + the pre-existing toast (kept, round 2); marker clears with the conflict', async () => {
+      await openRec1()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Row changed elsewhere'
+        gridMock.conflict.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: ATTEMPTED, message: 'Row changed elsewhere', serverVersion: 8 }
+        return failureFor('fld_title', 'Row changed elsewhere', { status: 409, code: 'VERSION_CONFLICT' })
+      })
+      await patchTitle()
+      // Banner: exactly the pre-B2 text pinned by 'renders conflict recovery actions…' above.
+      expect(container!.textContent).toContain('Update conflict')
+      expect(container!.textContent).toContain('Title changed elsewhere. Latest version is 8.')
+      // Toast: this path ALWAYS toasted pre-B2; round 1 suppressed it, round 2 keeps it so §4 item 11's
+      // "all other codes keep the toast" holds verbatim — banner + marker + toast, exactly once.
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Row changed elsewhere')
+      // Field marker with the SAME text as the banner — compared against the banner's own text node, not a
+      // literal, so the two can never drift (the banner copy is `fmtConflictMessage`'s full sentence).
+      const bannerText = container!.querySelector('.mt-workbench__conflict-copy span')?.textContent
+      expect(bannerText).toContain('Title changed elsewhere. Latest version is 8.')
+      expect(fieldErrorEl('fld_title')?.textContent).toBe(bannerText)
+      // Reload / retry / dismiss all null `conflict` in the real composable; the marker follows it.
+      gridMock.conflict.value = null
+      await flushUi()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('a conflict raised and cleared on a field that carries a VALIDATION alert leaves that alert alone (round 2: origin-tagged clear)', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
+      // The GRID path (onPatchCell, untouched by B2) hits a VERSION_CONFLICT on the same field: the real
+      // composable sets `conflict`, then the user reloads/dismisses → `conflict` clears.
+      gridMock.conflict.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: 'grid edit', message: 'Row changed elsewhere', serverVersion: 9 }
+      await flushUi()
+      gridMock.conflict.value = null
+      await flushUi()
+      // Round 1 wiped the validation alert here (it cleared whatever sat under `previous.fieldId`).
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a later SUCCESSFUL patch of the same field clears its inline error and toasts success as before', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      acceptNextPatch()
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['same-record', 'success'], ['same-record', 'failure'],
+      ['another-record', 'success'], ['another-record', 'failure'],
+      ['round-trip', 'success'], ['round-trip', 'failure'],
+    ])('B2 lifetime: %s late %s preserves the newer field error', async (navigation, outcome) => {
+      await openRec1()
+      let settle: ((result: PlayedFailure | null) => void) | undefined
+      gridMock.patchCell.mockImplementationOnce(() => new Promise<PlayedFailure | null>(resolve => { settle = resolve }))
+      await patchTitle()
+      if (navigation !== 'same-record') {
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        if (navigation === 'round-trip') {
+          container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+          await flushUi()
+        }
+      }
+      const currentRecord = navigation === 'another-record' ? 'rec_2' : 'rec_1'
+      expect(container!.querySelector(`[data-record-drawer="${currentRecord}"]`)).toBeTruthy()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === currentRecord)
+      rejectNextPatch('Newer edit rejected', { recordId: currentRecord, status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Newer edit rejected')
+      // A different field's successful patch clears the composable's shared error, not this alert.
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
+      await flushUi()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Newer edit rejected')
+      settle!(outcome === 'success' ? null : failureFor('fld_title', 'Old edit rejected', { status: 400, code: 'VALIDATION_ERROR' }))
+      await flushUi()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Newer edit rejected')
+    })
+
+    it.each([false, true])('B2 context: round-trip=%s gates an old rejection without a newer request', async (roundTrip) => {
+      await openRec1()
+      let settle: ((failure: PlayedFailure) => void) | undefined
+      gridMock.patchCell.mockImplementationOnce(() => new Promise<PlayedFailure>(resolve => { settle = resolve }))
+      await patchTitle()
+      if (roundTrip) {
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+      }
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      settle!(failureFor('fld_title', 'Old context rejected', { status: 400, code: 'VALIDATION_ERROR' }))
+      await flushUi()
+      if (roundTrip) {
+        expect(fieldErrorEl('fld_title')).toBeNull()
+        expect(showErrorSpy).toHaveBeenCalledWith('Old context rejected')
+      } else {
+        expect(fieldErrorEl('fld_title')?.textContent).toBe('Old context rejected')
+        expect(showErrorSpy).not.toHaveBeenCalled()
+      }
+    })
+
+    it('record change clears inline errors (navigate to another record from the inspector)', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
+
+    it('field-routed rejection the inspector CANNOT anchor (attachments tab / hidden field) → toast with the server message, NO entry written', async () => {
+      await openRec1()
+      inspectorStubAnchor.mockImplementation(() => false)
+      rejectNextPatch('Attachment id too long', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Attachment id too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      // …and nothing surfaces later either: the inspector "opens the details tab" (stub: anchorable again),
+      // the map is still empty — there is no orphan entry waiting to double-report.
+      inspectorStubAnchor.mockImplementation(() => true)
+      await flushUi()
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('VERSION_CONFLICT the inspector cannot anchor → banner + toast, NO field marker', async () => {
+      await openRec1()
+      inspectorStubAnchor.mockImplementation(() => false)
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Row changed elsewhere'
+        gridMock.conflict.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: ATTEMPTED, message: 'Row changed elsewhere', serverVersion: 8 }
+        return failureFor('fld_title', 'Row changed elsewhere', { status: 409, code: 'VERSION_CONFLICT' })
+      })
+      await patchTitle()
+      expect(container!.textContent).toContain('Update conflict')
+      expect(showErrorSpy).toHaveBeenCalledWith('Row changed elsewhere')
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    it('a rejection landing AFTER the user navigated to another record asks about the ORIGINAL record and never writes into the new record\'s map', async () => {
+      await openRec1()
+      let settle: ((failure: Record<string, unknown>) => void) | null = null
+      gridMock.patchCell.mockImplementation(() => new Promise<Record<string, unknown>>((resolve) => { settle = resolve }))
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      // In flight: user moves to rec_2 (the workbench resets the map on that edge).
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      // The real inspector answers false for a record it is not showing; the stub plays that answer.
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      gridMock.error.value = 'Title is too long'
+      settle!(failureFor('fld_title', 'Title is too long', { status: 400, code: 'VALIDATION_ERROR' }))
+      await flushUi()
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title') // asked about rec_1, not rec_2
+      expect(showErrorSpy).toHaveBeenCalledWith('Title is too long')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    it('an EMPTY anchored message falls back to the toast with the generic label (nothing to render inline)', async () => {
+      await openRec1()
+      rejectNextPatch('', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Failed to patch cell') // metaCoreLabel('grid.errorPatchCell', en)
+    })
+
+    it('…and in zh-CN the generic label is the localised copy, not the English literal (round 3: pins the zh half of metaCoreLabel(\'grid.errorPatchCell\'))', async () => {
+      useLocale().setLocale('zh-CN') // reset to 'en' by the top-level afterEach
+      await openRec1()
+      rejectNextPatch('', { status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('更新单元格失败') // metaCoreLabel('grid.errorPatchCell', zh) — meta-core-labels.ts
+      expect(showErrorSpy).not.toHaveBeenCalledWith('Failed to patch cell')
+    })
+
+    // --- round 2: per-call failure — two in-flight drawer patches never read each other's outcome ---
+
+    it('two in-flight patches whose rejections settle in the SAME flush each get their own alert / toast (no cross-talk)', async () => {
+      await openRec1()
+      const pending: Array<{ fieldId: string; resolve: (failure: Record<string, unknown>) => void }> = []
+      gridMock.patchCell.mockImplementation((_recordId: string, fieldId: string) =>
+        new Promise<Record<string, unknown>>((resolve) => { pending.push({ fieldId, resolve }) }))
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
+      await flushUi()
+      expect(pending.map((p) => p.fieldId)).toEqual(['fld_title', 'fld_status'])
+      // Both rejections land in one microtask flush. The composable's single `error.value` (a real shared
+      // ref, unchanged by B2) ends up holding the LAST message — fld_status's 403 text — which is exactly
+      // what a shared-slot read after `await` would mis-attribute to fld_title.
+      for (const p of pending) {
+        const message = p.fieldId === 'fld_title' ? 'Title is too long' : 'Insufficient permissions'
+        gridMock.error.value = message
+        p.resolve(failureFor(p.fieldId, message, p.fieldId === 'fld_title'
+          ? { status: 400, code: 'VALIDATION_ERROR' }
+          : { status: 403, code: 'FORBIDDEN' }))
+      }
+      await flushUi()
+      // fld_title: its OWN validation message, inline.
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
+      // fld_status: its OWN 403, toasted once — and no inline node for it.
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Insufficient permissions')
+      expect(fieldErrorEl('fld_status')).toBeNull()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
     })
   })
 })

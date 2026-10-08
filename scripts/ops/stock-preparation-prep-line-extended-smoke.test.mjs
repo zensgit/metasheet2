@@ -1,25 +1,34 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 
 // T4 (#3751, closeout §5b) companion contract test — the harness itself, no live server needed.
 // Same posture as stock-preparation-mvp-postdeploy-smoke.test.mjs: pin the fixture invariants the
 // deployed run depends on, the closed values-free projections, and the sanitizing output layer.
 
 import {
+  ALWAYS_PREP_LINE_ROUTES,
+  OPTIONAL_PREP_LINE_ROUTES,
+  PREP_LINE_ROUTE_UNIVERSE,
   PREP_LINE_ROW_KEYS,
   SUMMARY_HEADER,
   T4_ALLOWED_ERROR_CODES,
   T4_ALLOWED_MODES,
+  buildApprovedErpSourcePrelude,
   buildApprovedSourcePrelude,
   buildExtendedSmokeFixture,
+  buildTargetOptionSetsFixture,
   formatSummaryBlock,
+  normalizePrepLineRouteTemplate,
   prepLineRowProjectionValid,
   prepLineRowResolved,
   buildRequestDefaults,
   requestJson,
+  runApprovedErpSourcePrelude,
   runApprovedSourcePrelude,
   safeCode,
   safeT4Mode,
+  parseArgs,
 } from './stock-preparation-prep-line-extended-smoke.mjs'
 
 import {
@@ -31,6 +40,8 @@ import {
   buildOptionSetsFixture,
   leakScan,
 } from './stock-preparation-mvp-postdeploy-smoke.mjs'
+
+const require = createRequire(import.meta.url)
 
 test('fixture: salted, 3-line BOM with parent refs, and every value-bearing token is a sentinel', () => {
   const fixture = buildExtendedSmokeFixture('t123', 'stockprep-t4')
@@ -352,4 +363,298 @@ test('request defaults: main()\'s per-request wiring carries --tenant-id into EV
   assert.deepEqual(defaults, { token: 'tok_9', timeoutMs: 1234, tenantId: 'tenant_probe' })
   const noTenant = buildRequestDefaults({ tenantId: '', timeoutMs: 1234 }, 'tok_9')
   assert.equal(noTenant.tenantId, '', 'empty stays empty — requestJson/buildRequestHeaders omit the header')
+})
+
+// ── R5 (route-coverage 22/33 -> 33/33): 11 previously-untouched prep-line routes ─────────────────
+
+test('R5 fixture: sandboxObjectId carries the required namespace prefix and salts per run; both new fields are sentinels', () => {
+  const fixture = buildExtendedSmokeFixture('t123')
+  assert.match(fixture.sandboxObjectId, /^plm_stock_preparation_sandbox_smoke_t123$/)
+  assert.ok(fixture.sandboxLabel.length > 0)
+  assert.ok(fixture.sentinels.includes(fixture.sandboxObjectId))
+  assert.ok(fixture.sentinels.includes(fixture.sandboxLabel))
+  const other = buildExtendedSmokeFixture('t124')
+  assert.notEqual(other.sandboxObjectId, fixture.sandboxObjectId)
+})
+
+test('R5 target option-set fixture covers exactly the 4 declared source keys of the canonical/sandbox template', () => {
+  const sets = buildTargetOptionSetsFixture()
+  assert.deepEqual(Object.keys(sets).sort(), [
+    'blank_type', 'material_type', 'plm_stock_preparation_decision_v1', 'stock_preparation_status',
+  ])
+  for (const [key, options] of Object.entries(sets)) {
+    assert.ok(Array.isArray(options) && options.length > 0, `${key} must be a non-empty option array`)
+    for (const option of options) assert.ok(typeof option.value === 'string' && option.value.length > 0)
+  }
+})
+
+test('R5 normalizePrepLineRouteTemplate: strips the query string and normalizes the two dynamic snapshot-batch segments', () => {
+  assert.equal(normalizePrepLineRouteTemplate('/api/integration/status?tenantId=t1'), '/api/integration/status')
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/mvp/readiness?tenantId=t1&workspaceId=w1'),
+    '/api/integration/stock-preparation/mvp/readiness',
+  )
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches/smoke_t4_batch_t123/diff?tenantId=t1'),
+    '/api/integration/stock-preparation/snapshot-batches/:id/diff',
+  )
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches/smoke_t4_batch_t123/diff/rows?tenantId=t1'),
+    '/api/integration/stock-preparation/snapshot-batches/:id/diff/rows',
+  )
+  // A plain (non-dynamic) route with no query string is left untouched.
+  assert.equal(
+    normalizePrepLineRouteTemplate('/api/integration/stock-preparation/snapshot-batches'),
+    '/api/integration/stock-preparation/snapshot-batches',
+  )
+})
+
+// ── The registered stock-preparation route surface, PINNED BY NAME ───────────────────────────────
+//
+// This roster is a security-adjacent TRIPWIRE: it exists to notice when the stock-preparation route
+// surface changes. It used to cross-check a bare COUNT (`registeredStockPrepPaths.size === 32`), and
+// it sat red on main as `42 !== 32` — a message that names no route. A count-only tripwire cannot
+// distinguish a deliberate feature landing from an accidental exposure or a copy-pasted double
+// registration, so the cheapest way to make it green is to bump the number without reading anything,
+// and a tripwire that gets blind-bumped has stopped being a tripwire. Pinned by NAME (method + path),
+// an added or removed route reds with that route spelled out in the failure.
+//
+// Each of the 42 below was confirmed intended when this pin was written: no method+path is registered
+// twice (42 entries, 42 distinct paths, 42 distinct handlers), and every one sits behind a
+// requireAccess() gate. The 10 that landed after the original 32 are the `preflight` readiness probe
+// (stock-prep:read), the five `confirmation-decisions/*` workbench routes (O2/R-11 — read/operate/
+// admin, enforced by stock-preparation-permission-matrix.test.cjs) and the four `customer-packs/*`
+// pack routes (platform 'admin', enforced by stock-preparation-customer-pack-routes.test.cjs).
+//
+// Adding a route here is meant to be a deliberate act: confirm it is gated, tenant-scoped and not a
+// debug leftover BEFORE you paste it in.
+const SP = '/api/integration/stock-preparation'
+const REGISTERED_STOCK_PREP_ROUTES = Object.freeze([
+  `GET ${SP}/preflight`,
+  `GET ${SP}/target/readiness`,
+  `POST ${SP}/target/ensure`,
+  `GET ${SP}/sandbox-target/readiness`,
+  `POST ${SP}/sandbox-target/ensure`,
+  `POST ${SP}/options/sync`,
+  `GET ${SP}/mvp/readiness`,
+  `POST ${SP}/mvp/ensure`,
+  `POST ${SP}/mvp/options/sync`,
+  `POST ${SP}/mvp/sync/plan`,
+  `POST ${SP}/mvp/sync/persist`,
+  `POST ${SP}/mvp/source-runs/plm-bom`,
+  `POST ${SP}/mvp/source-runs/erp-materials`,
+  `POST ${SP}/mvp/erp-materials/sync`,
+  `GET ${SP}/projects`,
+  `GET ${SP}/snapshot-batches`,
+  `GET ${SP}/snapshot-batches/:snapshotBatchId/diff`,
+  `GET ${SP}/snapshot-batches/:snapshotBatchId/diff/rows`,
+  `GET ${SP}/material-mappings/summary`,
+  `GET ${SP}/material-mappings/candidates`,
+  `GET ${SP}/unit-conversions/summary`,
+  `GET ${SP}/unit-conversions/candidates`,
+  `POST ${SP}/material-mappings/candidates/sync`,
+  `POST ${SP}/material-mappings/confirm`,
+  `POST ${SP}/material-mappings/retire`,
+  `POST ${SP}/unit-conversions/confirm`,
+  `POST ${SP}/unit-conversions/retire`,
+  `POST ${SP}/generation/run`,
+  `POST ${SP}/exceptions/resolve`,
+  `POST ${SP}/exceptions/bulk-resolve`,
+  `GET ${SP}/exceptions`,
+  `GET ${SP}/prep-lines`,
+  `GET ${SP}/audit`,
+  `GET ${SP}/confirmation-decisions/readiness`,
+  `POST ${SP}/confirmation-decisions/ensure`,
+  `POST ${SP}/confirmation-decisions/confirm`,
+  `GET ${SP}/confirmation-decisions/value-entry`,
+  `GET ${SP}/confirmation-decisions`,
+  `GET ${SP}/customer-packs`,
+  `GET ${SP}/customer-packs/installs`,
+  `POST ${SP}/customer-packs/:packId/dry-run`,
+  `POST ${SP}/customer-packs/:packId/install`,
+])
+
+// The registered routes this smoke deliberately does NOT exercise, pinned by name alongside where
+// each IS covered. Derived-minus-pinned, so a NEW route cannot quietly land with no coverage anywhere:
+// its author must either give it a leg in the smoke roster or consciously record it here.
+const SMOKE_UNCOVERED_STOCK_PREP_ROUTES = Object.freeze([
+  // stock-preparation-preflight.test.cjs
+  `GET ${SP}/preflight`,
+  // stock-preparation-permission-matrix.test.cjs (O2/R-11 actor x route matrix)
+  `GET ${SP}/confirmation-decisions/readiness`,
+  `POST ${SP}/confirmation-decisions/ensure`,
+  `POST ${SP}/confirmation-decisions/confirm`,
+  `GET ${SP}/confirmation-decisions/value-entry`,
+  `GET ${SP}/confirmation-decisions`,
+  // stock-preparation-customer-pack-routes.test.cjs
+  `GET ${SP}/customer-packs`,
+  `GET ${SP}/customer-packs/installs`,
+  `POST ${SP}/customer-packs/:packId/dry-run`,
+  `POST ${SP}/customer-packs/:packId/install`,
+])
+
+function registeredStockPrepRoutes() {
+  const { ROUTES } = require('../../plugins/plugin-integration-core/lib/http-routes.cjs')
+  return ROUTES.filter(([, path]) => path.startsWith(`${SP}/`)).map(([method, path]) => `${method} ${path}`)
+}
+
+test('R5 route roster: the registered stock-preparation surface matches the by-name pin, and nothing is registered twice', () => {
+  const registered = registeredStockPrepRoutes()
+
+  // Count duplicates BEFORE collapsing to a Set — a Set would silently swallow the accidental
+  // double-registration this tripwire exists to catch, and name it as nothing at all.
+  const occurrences = new Map()
+  for (const entry of registered) occurrences.set(entry, (occurrences.get(entry) ?? 0) + 1)
+  assert.deepEqual(
+    [...occurrences].filter(([, n]) => n > 1).map(([entry]) => entry), [],
+    'the same method+path is registered more than once in ROUTES — a double registration, not a new route',
+  )
+
+  // The two halves are asserted separately so the failure says which DIRECTION moved and names the route.
+  const pinned = new Set(REGISTERED_STOCK_PREP_ROUTES)
+  const live = new Set(registered)
+  assert.deepEqual(
+    registered.filter((route) => !pinned.has(route)), [],
+    'stock-preparation route(s) ADDED but not blessed into the roster. Confirm EACH is intended — gated by requireAccess(), tenant-scoped, not a debug/dev leftover, not a duplicate — and only then add it to REGISTERED_STOCK_PREP_ROUTES',
+  )
+  assert.deepEqual(
+    REGISTERED_STOCK_PREP_ROUTES.filter((route) => !live.has(route)), [],
+    'roster route(s) no longer registered in ROUTES — remove them from the pin only if the removal is intended',
+  )
+  assert.deepEqual([...registered].sort(), [...REGISTERED_STOCK_PREP_ROUTES].sort())
+})
+
+test('R5 route roster: every registered route is either exercised by this smoke or pinned as covered elsewhere', () => {
+  const smokePaths = new Set(
+    [...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES]
+      .filter((route) => route !== '/api/integration/status')
+      // Path-param routes are registered with ':snapshotBatchId', not our ':id' — normalize before compare.
+      .map((route) => route.replace('/snapshot-batches/:id/', '/snapshot-batches/:snapshotBatchId/')),
+  )
+  const uncovered = registeredStockPrepRoutes().filter((route) => !smokePaths.has(route.split(' ')[1]))
+  assert.deepEqual(
+    [...uncovered].sort(), [...SMOKE_UNCOVERED_STOCK_PREP_ROUTES].sort(),
+    'a registered stock-preparation route is neither exercised by this smoke nor recorded as covered elsewhere',
+  )
+})
+
+test('R5 smoke roster: 30 always + 3 optional = 33, no duplicates, and every entry is a REAL registered route (or the auth status route)', () => {
+  assert.equal(ALWAYS_PREP_LINE_ROUTES.length, 30)
+  assert.equal(OPTIONAL_PREP_LINE_ROUTES.length, 3)
+  assert.equal(PREP_LINE_ROUTE_UNIVERSE.size, 33)
+  const all = [...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES]
+  assert.equal(new Set(all).size, all.length, 'no duplicate route template in the roster')
+
+  // Cross-check against the ACTUAL registered route table — the roster is not a free-standing guess.
+  const registeredStockPrepPaths = new Set(registeredStockPrepRoutes().map((route) => route.split(' ')[1]))
+  for (const route of all) {
+    if (route === '/api/integration/status') continue
+    // Path-param routes are registered with ':snapshotBatchId', not our ':id' — normalize before compare.
+    const registeredForm = route.replace('/snapshot-batches/:id/', '/snapshot-batches/:snapshotBatchId/')
+    assert.ok(registeredStockPrepPaths.has(registeredForm), `roster entry ${route} is not a registered route`)
+  }
+})
+
+test('R5 B4 fixture: closed body shape, own sentinel — never reuses the PLM prelude\'s config id', () => {
+  const prelude = buildApprovedErpSourcePrelude('t123', { approvedErpSourceConfigId: 'cfg_erp_ref_1' })
+  assert.deepEqual(Object.keys(prelude.body).sort(), ['readSourceConfigId', 'syncRunId'])
+  assert.equal(prelude.body.readSourceConfigId, 'cfg_erp_ref_1')
+  assert.deepEqual(prelude.sentinels, ['cfg_erp_ref_1'])
+  assert.throws(() => buildApprovedErpSourcePrelude('t123', {}))
+  const scoped = buildApprovedErpSourcePrelude('t123', { approvedErpSourceConfigId: 'cfg_erp_ref_1', workspaceId: 'w9' })
+  assert.equal(scoped.body.workspaceId, 'w9')
+})
+
+test('R5 B4 run: auto-persist OFF (byte-for-byte read-only projection) -> ok, but the must() detail never claims the write path', async () => {
+  const offResponse = {
+    status: 200,
+    body: { ok: true, data: { sourceRun: 'erp_material', status: 'succeeded', mode: 'dry_run', evidence: { sourceChannel: 'erp:k3-wise-webapi' } } },
+  }
+  const { calls, req } = scriptedReq([offResponse])
+  const { checks, must } = collectMust()
+  const summary = {}
+  const registered = []
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req, must, summary,
+    registerSentinels: (list) => registered.push(...list),
+  })
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].pathname.endsWith('/mvp/source-runs/erp-materials'))
+  assert.equal(checks.length, 1)
+  assert.equal(checks[0].ok, true)
+  assert.match(checks[0].name, /auto-persist OFF/)
+  assert.match(checks[0].name, /NOT claimed as verified/)
+  assert.equal(summary.erpSourceRunAutoPersistArm, 'OFF')
+  assert.deepEqual(registered, ['cfg_erp_ref_1'])
+})
+
+test('R5 B4 run: auto-persist ON (a real internal write is claimed and evidenced) -> ok, must() detail claims the write path', async () => {
+  const onResponse = {
+    status: 201,
+    body: {
+      ok: true,
+      data: {
+        mode: 'internal_persist',
+        evidence: { internalWriteExecuted: true },
+        autoPersist: { persisted: true, mode: 'created', created: { materials: 2, run: 1 } },
+      },
+    },
+  }
+  const { checks, must } = collectMust()
+  const summary = {}
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req: scriptedReq([onResponse]).req, must, summary,
+    registerSentinels: () => {},
+  })
+  assert.equal(checks.length, 1)
+  assert.equal(checks[0].ok, true)
+  assert.match(checks[0].name, /auto-persist ON/)
+  assert.equal(summary.erpSourceRunAutoPersistArm, 'ON')
+})
+
+test('R5 B4 run: a response that claims internal_persist WITHOUT internalWriteExecuted/autoPersist evidence FAILS (no free pass on the mode string alone)', async () => {
+  const lying = { status: 201, body: { ok: true, data: { mode: 'internal_persist', evidence: { internalWriteExecuted: false } } } }
+  const { checks, must } = collectMust()
+  await runApprovedErpSourcePrelude({
+    salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req: scriptedReq([lying]).req, must, summary: {},
+    registerSentinels: () => {},
+  })
+  assert.equal(checks[0].ok, false, 'a claimed internal_persist without real evidence must fail, not pass on the mode string')
+})
+
+test('R5 B4 run: the sentinel-registration callback is REQUIRED — omitting it throws before any request', async () => {
+  const { calls, req } = scriptedReq([{ status: 200, body: { ok: true, data: { mode: 'dry_run', evidence: {} } } }])
+  const { must } = collectMust()
+  await assert.rejects(
+    () => runApprovedErpSourcePrelude({ salt: 't123', args: { approvedErpSourceConfigId: 'cfg_erp_ref_1' }, req, must, summary: {} }),
+    /registerSentinels/,
+  )
+  assert.equal(calls.length, 0, 'no request may run without the leak-scan registration contract')
+})
+
+// ── R5 P1 fix: options/sync is a DESTRUCTIVE canonical overwrite and must be opt-in ────────────────
+// The adversarial gate on #4736 found this route full-replaces operator-curated option sets on the
+// canonical table, with no read face to restore from, on a workflow whose default base URL is the
+// shared deployed host. These assertions pin the gating so it cannot silently regress to always-arm.
+test('R5 P1: options/sync is OPTIONAL, never ALWAYS — it must not be armed by default', () => {
+  const route = '/api/integration/stock-preparation/options/sync'
+  assert.ok(!ALWAYS_PREP_LINE_ROUTES.includes(route),
+    'options/sync must NOT be in the unconditional roster: it destroys curated canonical option sets')
+  assert.ok(OPTIONAL_PREP_LINE_ROUTES.includes(route),
+    'options/sync must be declared OPTIONAL so the coverage count stays honest when it is skipped')
+  // Not merely "somewhere in the universe" — the two lists must be disjoint, or membership proves nothing.
+  assert.equal(ALWAYS_PREP_LINE_ROUTES.filter((r) => OPTIONAL_PREP_LINE_ROUTES.includes(r)).length, 0)
+})
+
+test('R5 P1: --allow-canonical-option-overwrite is required, defaults off, and a lookalike cannot arm it', () => {
+  const base = ['node', 'x', '--base-url', 'http://localhost:1']
+  assert.equal(parseArgs(base).allowCanonicalOptionOverwrite, undefined,
+    'absent flag must leave the destructive write disarmed')
+  assert.equal(parseArgs([...base, '--allow-canonical-option-overwrite']).allowCanonicalOptionOverwrite, true)
+  // Negative control. parseArgs is fail-closed on unknown flags, which is STRONGER than silently
+  // ignoring them: a misspelling aborts the run rather than producing a quietly-unarmed one that an
+  // operator would misread as "I passed the flag, so the overwrite happened / did not happen".
+  assert.throws(() => parseArgs([...base, '--allow-canonical-option-overwrites']), /unknown flag/)
+  // A different opt-in flag must not arm this one — proves the flags are not aliased.
+  assert.equal(parseArgs([...base, '--approved-source-config-id', 'cfg']).allowCanonicalOptionOverwrite, undefined)
 })

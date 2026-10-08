@@ -255,6 +255,53 @@ async function main() {
     assert.equal(result.evidence.syncRun.runType, 'plm_sync')
   })
 
+  // ---- D-C: a TRUNCATED expansion must not persist as a SUCCEEDED run ----
+  //
+  // `computeFlags` reads the LINES, and the one thing the rowError cap can take away is a line: the
+  // mapper never sees a `missing_child_bom` that landed past the cap, so it synthesizes no incomplete
+  // line, so no flag is raised, so a flags-only rule calls the run SUCCEEDED and persists a snapshot
+  // that is knowingly short. The mapper's verdict closes it.
+  await run('a truncated expansion whose missing_child_bom was dropped is PARTIAL, not SUCCEEDED', () => {
+    const result = planBomSnapshotSyncRun(baseInput({
+      expansionResult: {
+        rows: cleanExpansionResult(),
+        // The retained sample is a different type entirely — the 5000-blank-part_id prefix case.
+        rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+        summary: {
+          rowErrorsTruncated: true,
+          rowErrorsTotal: 5002,
+          rowErrorsRetained: 1,
+          rowErrorTypeCounts: { missing_component_source_id: 5001, missing_child_bom: 1 },
+        },
+      },
+    }))
+    assert.equal(result.syncRun.status, RUN_STATUS_PARTIAL, 'the run is PARTIAL even though no line carries a flag')
+    assert.equal(result.flags.hasFlags, false, 'and the line-derived flags really are empty — this is the mapper talking')
+    assert.equal(result.evidence.mapping.result.unstampedMissingChildBomRowErrors, 1)
+    const inputShape = JSON.parse(result.syncRun.inputShape)
+    assert.equal(inputShape.rowErrors, 5002, 'the persisted run row records the TRUE rowError count')
+    assert.equal(inputShape.missingChildBomRowErrors, 1)
+    assert.equal(inputShape.rowErrorsTruncated, true)
+    assert.equal(inputShape.rowErrorsRetained, 1, 'with the sample size kept beside it')
+    assert.equal(JSON.stringify(result.evidence).includes(SECRET), false, 'and the stanza stays values-free')
+  })
+
+  await run('an untruncated clean expansion still produces the byte-identical pre-D-C inputShape', () => {
+    const result = planBomSnapshotSyncRun(baseInput())
+    assert.equal(result.syncRun.status, RUN_STATUS_SUCCEEDED)
+    assert.equal(
+      result.syncRun.inputShape,
+      JSON.stringify({
+        expansionRows: 2,
+        rowErrors: 0,
+        missingChildBomRowErrors: 0,
+        previousLines: 0,
+        previousBatchProvided: false,
+      }),
+      'no truncation => not one extra key, in the original order',
+    )
+  })
+
   // ---- input guard ----
   await run('non-object input is a 422 config error', () => {
     assert.throws(

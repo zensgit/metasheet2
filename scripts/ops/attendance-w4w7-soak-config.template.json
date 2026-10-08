@@ -1,0 +1,43 @@
+{
+  "$template": "attendance-w4w7-soak-config.template.json — shape reference for the W4+W7 combined-soak load generator (scripts/ops/attendance-w4w7-soak-load-generator.mjs; field semantics in that file's header). action=soak-seed of attendance-staging-window-runner writes the real, org-filled copy of this shape to $HOME/.metasheet2/window-runner/soak/soak-config.json on the deploy host; action=soak-run reads it. This template is INERT BY CONSTRUCTION: tokenOrCreds is empty, and the generator refuses to start when any configured userId lacks a token. tokenOrCreds is NEVER filled in a committed file — action=soak-run obtains every token at run time through the real POST /api/auth/login route (never minted) and injects them into a host-local 0600 temp copy that is deleted after the run.",
+  "$posture_note": "entries[] order and posture labels follow the runbook's three-posture design (C3): org1 legacy_only (W4 legacy + W7 off), org2 w4_only_legacy_arm (W4 allowlisted, W7 off), org3 both_machines_group_arm (W4 allowlisted + W7 group arm). posture is a config-declared LABEL for tally attribution — the generator never reads the posture tables (armAttributionSource=config_declared in its summary).",
+  "$user_naming": "userIds are the closed family USERNAMES seeded by action=soak-seed: synth-w4w7-<first-8-of-org-uuid>-u<NN>, NN = 01..users_per_org (default 10, per the ruled §2A.7 parameter row: 10 users/org x 3 orgs x 8 punches/user/day = 240/day). They are login identifiers (POST /api/auth/login `identifier`) and generator-local attribution keys, NOT DB user ids — the users' DB ids are minted UUIDs, because the W4C0 §4.1 canonical identity gate fail-closes non-UUID user ids at the W4 live shadow boundary.",
+  "baseUrl": "http://127.0.0.1:8900",
+  "sourceTag": "synthetic_w4w7_soak_accelerator_v1",
+  "entries": [
+    {
+      "orgId": "<org1-lowercase-uuid legacy-only>",
+      "posture": "legacy_only",
+      "minCleanPunches": 20,
+      "userIds": [
+        "synth-w4w7-<org1first8>-u01",
+        "synth-w4w7-<org1first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
+    },
+    {
+      "orgId": "<org2-lowercase-uuid w4-only>",
+      "posture": "w4_only_legacy_arm",
+      "minCleanPunches": 20,
+      "userIds": [
+        "synth-w4w7-<org2first8>-u01",
+        "synth-w4w7-<org2first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
+    },
+    {
+      "orgId": "<org3-lowercase-uuid both-machines>",
+      "posture": "both_machines_group_arm",
+      "minCleanPunches": 20,
+      "userIds": [
+        "synth-w4w7-<org3first8>-u01",
+        "synth-w4w7-<org3first8>-u02"
+      ],
+      "tokenOrCreds": {},
+      "dailyCapTimezone": "<org group IANA timezone, written by action=soak-seed — REQUIRED: the 2/day cap and the same-day guard count against the ORG calendar day>"
+    }
+  ],
+  "$cadence_note": "CADENCE: the generator default is 2 punches/user/wall-day = exactly ONE check_in/check_out pair per user per day (server clock; occurredAt never sent). Same-day session packing (the old 8/day row) floods §4.2-critical review_required diffs (soak-status 31962440160), and backdated acceleration is rejected by the route's global-latest punch ordering (#4932 gate P1-1) — the honest accelerator is users_per_org at seed time; the runbook's cumulative count criteria accrue across daily soak-run batches (DB-side soak-status judgments)."
+}

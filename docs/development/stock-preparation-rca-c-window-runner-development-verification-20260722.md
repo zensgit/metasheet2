@@ -1,0 +1,199 @@
+# Stock Preparation RC-A C-Stage No-Git Runner - Development and Verification (2026-07-22)
+
+Issue: #4437. Status: implementation proposed; merge, sidecar publication, and entity-machine
+execution remain separate owner/operator gates.
+
+## 1. Problem
+
+The entity machine completed the flag-OFF sidecar-v2 diagnostic, but it had no executable channel
+for the authorized C-stage window. Free-form instructions were not sufficient because the window
+must temporarily enable a write-bearing internal feature, execute the exact frozen smoke once, and
+restore the service to OFF even when any intermediate step fails.
+
+This change adds a tested Windows PowerShell 5.1 sidecar. It does not change product runtime code,
+the deployed RC-A package, any database schema, or the `externalWrite=false` product invariant.
+
+## 2. Frozen Inputs
+
+The sidecar pins the previously accepted RC-A runtime at
+`d87e086fd1218b4cfb150177d43f2c52904b1d6d` and copies these helpers into one private temporary
+directory before execution:
+
+| Helper | SHA-256 |
+| --- | --- |
+| `stock-preparation-prep-line-extended-smoke.mjs` | `912f3ef75c4487dbdd946486d4cb7374f1c3ea1eb126c3b68381ad11963f0049` |
+| `stock-preparation-mvp-postdeploy-smoke.mjs` | `e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4` |
+
+The new PM2 projection helper is pinned by the runner as a third digest. A missing file, reparse
+point, digest mismatch, malformed PM2 payload, duplicate target process, or non-closed projection
+fails before the flag-ON window.
+
+## 3. Execution Contract
+
+The runner performs exactly this sequence:
+
+1. Require private approved-config preflight attestation, tenant input, token, and config reference.
+   The API origin must be a bare loopback HTTP(S) origin; authenticated PowerShell calls do not
+   follow redirects.
+2. Acquire an exclusive machine-wide `Global\` named mutex. A second PowerShell process cannot
+   enter the window, including from another Windows logon session.
+3. Verify and privately copy all frozen helpers.
+4. Prove the current PM2 process is online, token-clean, and effectively flag-OFF; prove health.
+5. Set `MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED=true`, restart PM2, prove stable online,
+   effective ON, token-clean, and healthy.
+6. Execute the frozen extended smoke at most once with fixed `timeoutMs=15000`.
+7. Require `201 internal_persist`, exact replay `200 internal_noop`, the full T4 chain,
+   `selfScanClean=true`, and `externalWrite=false`.
+8. Read the internal project and snapshot-batch endpoints and prove exactly one expected project,
+   exactly one expected batch, `lineCount>=1`, the exact run handle, and `incomplete=false`.
+9. In independent cleanup blocks: scrub token carriers, set the flag literal false, restart/stabilize
+   PM2, then re-sample and recompute effective OFF, online stability, and token hygiene from the
+   final PM2 state. Prove health, revoke the token, remove helpers, and release the lock.
+10. Emit one 17-field values-free block. Exit 0 is possible only when every result is PASS; all
+    blocked or failed outcomes exit 2.
+
+The physical readback accepts JSON booleans only. Strings such as `"true"` and `"false"` are rejected
+instead of being coerced by PowerShell.
+
+## 4. Native Process and Environment Safety
+
+Windows PowerShell 5.1 can promote native stderr into a terminating `NativeCommandError` under
+`$ErrorActionPreference='Stop'`. Both PM2 command execution and the Node projection therefore:
+
+- scope `Continue` only around the native call;
+- discard native stderr and never echo raw PM2 output;
+- preserve the native exit code;
+- restore the caller error policy in `finally`.
+
+PM2 `--update-env` otherwise imports every variable in the operator shell. The native PM2 boundary
+temporarily reduces its inherited environment to a fixed operational allowlist plus the one feature
+flag, then restores the parent PowerShell environment. Plant-and-assert tests prove unrelated
+database-password and cloud-key sentinels are absent from the PM2 process while still present in the
+operator process afterward.
+
+The approved config reference remains a command-line argument to the frozen helper because that
+exact helper has no environment-variable interface. It is an opaque internal reference, not a
+credential. The login token remains environment-scoped only for the child and is cleared in the
+same capture `finally`.
+
+## 5. No-Git Delivery Channel
+
+`.github/workflows/stock-preparation-rca-window-sidecar.yml` is the executable transport path.
+After merge, an owner dispatch on `main` produces a ZIP artifact containing exactly:
+
+- the C-stage PowerShell runner;
+- the values-free PM2 projection helper;
+- both frozen exact-RC-A smoke helpers;
+- an operator README;
+- `BUILD_PROVENANCE.json` with sidecar source SHA and frozen runtime SHA;
+- `SHA256SUMS` covering every payload file.
+
+The workflow does not publish a GitHub Release. Public/private release publication remains an
+explicit owner action after the exact-main artifact is verified.
+
+For pull requests, the workflow explicitly checks out the PR head SHA rather than GitHub's synthetic
+merge commit, records that same SHA in provenance, and rejects the build unless `git rev-parse HEAD`
+equals it. For manual dispatch, both values resolve to the selected ref's `github.sha`. The Actions
+artifact name includes that exact source SHA so a PR build cannot be confused with the reviewed
+post-merge `main` build by name alone.
+
+## 6. Verification
+
+Local verification after the first adversarial correction:
+
+| Gate | Result |
+| --- | --- |
+| PM2 projection Node tests | 8/8 PASS |
+| PowerShell contract tests | 38/38 PASS |
+| PowerShell behavior tests | 41/41 PASS |
+| Sidecar builder and provenance-wiring tests | 3/3 PASS |
+| Frozen extended + MVP + abort-provenance regressions | 95/95 PASS |
+| PowerShell parser | zero errors under the 5.1 grammar |
+| Diff hygiene | `git diff --check` PASS |
+
+The Windows job runs both the target-shell suite and the full behavior suite under real Windows
+PowerShell 5.1. Its PM2 `.cmd` shim writes a sentinel to stderr for both `jlist` and `restart`; the
+projection/restart must still succeed, preserve exit 0, exclude the sentinel, and restore
+`$ErrorActionPreference='Stop'`. A contract guard fails if the behavior suite is removed from that
+job. Scoped `.gitattributes` rules keep the three digest-pinned JavaScript helpers at LF in Windows
+checkouts, so target-shell tests exercise the same bytes shipped in the sidecar instead of failing
+on Git working-tree line-ending conversion.
+
+Behavior tests additionally prove:
+
+- helper tamper is rejected before execution;
+- a second smoke invocation is child-free and refused;
+- duplicate smoke fields and `externalWrite=true` cannot pass;
+- duplicate project, zero lines, incomplete batch, and string-booleans fail physical proof;
+- smoke failure restores OFF and performs no readback or retry;
+- helper disappearance after ON cannot suppress the literal-false PM2 restart attempt;
+- the real PM2 stability loop takes repeated samples and independently rejects restart-time drift
+  with stable uptime and uptime drift with stable restart time;
+- real loopback HTTP probes require exactly `200` health and `200 + {success:true}` logout;
+- every PowerShell HTTP leg rejects redirects; a real `302 -> 200` health fixture must remain FAIL;
+- restore failure overrides an otherwise green run;
+- final PM2 sampling failure cannot skip token logout, helper cleanup, or lock release;
+- final flag re-enable, non-online state, or restart-counter drift revokes prior restoration PASS
+  evidence and fails at `PM2_RESTORE`;
+- the machine-wide mutex blocks a second real PowerShell process and can be reacquired after release;
+- planted token, config, tenant, database-secret, and cloud-key sentinels do not enter evidence or PM2.
+
+Thirty-three committed-head mutations were applied one at a time in detached worktrees and all were
+killed by the focused tests: helper-dependent restore, PM2 environment bypass, external-write gate
+removal, physical-readback bypass, smoke-once bypass, boolean coercion, loopback removal, incomplete
+archive manifest, helper-digest bypass, cleanup-failure unlatching, PM2 stderr-scope removal, and
+redirect refusal removal, plus removal of the artifact checkout ref pin and checkout-SHA runtime
+guard. The final nine mutations disabled the PM2 stability loop, weakened its baseline comparison,
+broadened the health status, bypassed logout boolean/status checks, removed the SHA-qualified artifact
+name, accepted duplicate smoke headers, accepted zero created lines, and accepted URL query/fragment
+inputs. The final four mutations independently removed the restart-time comparison, removed the
+uptime comparison, removed the full behavior suite from the real Windows PowerShell 5.1 job, and
+replaced that suite's `$powershell51` invocation with `pwsh`; each failed its dedicated guard. The
+last mutation removed one frozen-helper `eol=lf` attribute and failed the checkout-byte contract.
+The final five mutations restored permissive final-PM2 evidence, removed health redirect refusal,
+bypassed mutex contention, removed the `Global\` namespace, and removed the manual-main workflow
+gate; each failed its dedicated behavior or contract test.
+Every mutation ran in its own disposable worktree; the source
+worktree remained clean.
+
+## 7. Independent Adversarial Review
+
+A read-only Kimi K3 pass verified the frozen digests and locally ran the first 8/25/18 test set. It
+found one blocking P2: an unguarded final PM2 sample could throw under PowerShell 5.1 and skip token
+revocation, helper cleanup, and lock release. The final implementation closes that gap with native
+boundaries and isolated cleanup blocks, then adds the target-shell stderr and cleanup-continuation
+tests above.
+
+The exact-head follow-up found one delivery P2: pull-request checkout defaulted to GitHub's synthetic
+merge commit while provenance named the PR head SHA. The workflow now checks out `SOURCE_SHA`,
+verifies the local HEAD equals it, and records that same value. Two mutations prove both the ref pin
+and runtime equality guard are load-bearing.
+
+The same review identified three smaller fail-open shapes, all closed here: PowerShell boolean
+coercion, a vacuous `IndexOf` contract assertion, and deleting the lock inode after release. It also
+identified whole-shell `--update-env` inheritance; the fixed minimum PM2 environment closes that
+risk rather than documenting it away.
+
+A final exact-head read-only pass reported no P1/P2 and a bounded merge-ready verdict. It found that
+the PM2 stability loop and the real health/logout predicates were not behaviorally exercised, and
+that PR and `main` artifacts shared a display name. The follow-up tests execute those real paths and
+the workflow now includes `SOURCE_SHA` in the artifact name. A second pass found that one PM2 fixture
+changed both baseline counters, that the new behavior paths were not yet exercised by Windows
+PowerShell 5.1, and that the HTTP fixture passed temporary paths through `Start-Process`. The final
+tests isolate both counters, run the full behavior suite on the target shell, derive fixture paths
+from `import.meta.url`, and wait for the child process before cleanup. The frozen smoke contract still
+requires the approved config reference as a local child argument; the README distinguishes that
+internal boundary from the prohibited operator command line and evidence surfaces.
+
+The final exact-head owner review found four additional delivery/safety gaps and closed them before
+approval: final PM2 evidence had been latched instead of recomputed, the health request followed
+redirects, the file lock lived in a per-user temp directory, and manual workflow dispatch was not
+restricted to `main`. The corrected runner recomputes all final evidence, uses a machine-wide named
+mutex, refuses every HTTP redirect, and fails manual delivery builds outside `refs/heads/main`.
+
+## 8. Honest Boundary
+
+Local tests cannot prove the entity machine's PM2 layout, approved source data, service health, or
+the final ON/OFF window. Those remain the purpose of one controlled entity run after merge and
+exact-main artifact publication. A PASS closes only the #4437 RC-A acceptance scope; it does not
+authorize production rollout, external writes, or any later value-plane gate.

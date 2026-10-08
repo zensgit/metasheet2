@@ -2,13 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 // Real-DB spec: runs only with a Postgres DATABASE_URL (DB-backed CI step in
 // plugin-tests.yml + local); excluded from the no-DB default test job, skipped here.
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 type JsonRecord = Record<string, unknown>
+const FORM_FIELD_APPROVER_ID = 'p1c-manager-driven'
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -19,6 +20,7 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  await grantApprovalWriteForIntegrationActor(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
@@ -176,6 +178,13 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     const canListen = await canListenOnEphemeralPort()
     expect(canListen).toBe(true)
     await ensureApprovalSchemaReady()
+    const pool = poolManager.get()
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'x', TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [FORM_FIELD_APPROVER_ID, `${FORM_FIELD_APPROVER_ID}@x.test`],
+    )
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     const address = server.getAddress()
@@ -198,6 +207,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
         await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
       }
+      await pool.query('DELETE FROM users WHERE id = $1', [FORM_FIELD_APPROVER_ID])
     } catch {
       // ignore cleanup failures
     }
@@ -226,8 +236,28 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     )
     expect(created.currentNodeKey).toBe('approval_1')
 
+    // Lock-10 (S1) OD-S1-12: detail now gates per-INSTANCE participation before this
+    // field-level redaction is even reachable — a bystander with no relationship to the
+    // instance gets 404 (values-free), never 200 with a redacted field (P1c). This test's
+    // actual subject is the SEPARATE, node-level field-permission redaction layer, which
+    // requires a real subject to observe at all. `p1c-observer` and `p1c-admin` are minted
+    // as JWT-only claims (no matching `users` row) by `authToken` and are not otherwise
+    // related to this instance, so both are made CC targets (arm 4 — real S1 participation,
+    // OD-S1-7) while remaining WITHOUT any assignment/seat — preserving the original
+    // "an observer/admin with no assignment" scenario the comment below describes, now
+    // honestly satisfying the newly-added per-instance gate too.
+    const pool = poolManager.get()
+    for (const bystanderId of ['p1c-observer', 'p1c-admin']) {
+      await pool.query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+         VALUES ($1, 'cc', $2, 'Requester', 'pending', 1, $3::jsonb)`,
+        [created.id, 'p1c-requester', JSON.stringify({ targetType: 'user', targetId: bystanderId })],
+      )
+    }
+
     // DETAIL: while AT approval_1 the hidden field is absent for active approver,
-    // requester, AND an observer/admin with no assignment — but `reason` stays.
+    // requester, AND an observer/admin with no assignment (but CC'd — real S1 participants
+    // via arm 4) — but `reason` stays.
     for (const token of [manager1Token, requesterToken, observerToken, adminToken]) {
       const detail = await jsonRequest(baseUrl, `/api/approvals/${created.id}`, token)
       expect(detail.status).toBe(200)
@@ -248,7 +278,6 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     expect(listRow?.formSnapshot).toHaveProperty('reason', 'trip')
 
     // The DB form_snapshot is intact (redaction is echo-only, not a write).
-    const pool = poolManager.get()
     const stored = await pool.query<{ form_snapshot: JsonRecord }>(
       'SELECT form_snapshot FROM approval_instances WHERE id = $1',
       [created.id],
@@ -335,7 +364,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     const formSchema = {
       fields: [
         { id: 'reason', type: 'text', label: '事由', required: true },
-        { id: 'approver', type: 'user', label: '审批人' },
+        { id: 'approver', type: 'user', label: '审批人', required: true },
       ],
     }
     // approval_1 resolves its approver FROM `approver` AND hides `approver`. The assignee is resolved
@@ -366,7 +395,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
       `p1c-driver-${Date.now()}`,
       formSchema,
       graph,
-      { reason: 'trip', approver: 'p1c-manager-driven' },
+      { reason: 'trip', approver: FORM_FIELD_APPROVER_ID },
       bookkeeping,
     )
     expect(created.currentNodeKey).toBe('approval_1')
@@ -381,7 +410,7 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     expect(body.formSnapshot).not.toHaveProperty('approver')
     expect(body.formSnapshot).toHaveProperty('reason', 'trip')
     // ...but the assignee was resolved from its stored value (routing unaffected).
-    expect(body.assignments.some((assignment) => assignment.assigneeId === 'p1c-manager-driven' && assignment.isActive)).toBe(true)
+    expect(body.assignments.some((assignment) => assignment.assigneeId === FORM_FIELD_APPROVER_ID && assignment.isActive)).toBe(true)
   })
 
   it('routes a downstream condition on a hidden driver field unchanged while redacting it at the hiding node', async () => {

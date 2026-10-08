@@ -17,6 +17,8 @@
 import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import { withAutomationEventId } from './automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
   createYjsInvalidationPostCommitHook,
@@ -24,7 +26,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
 import {
   HierarchyCycleError,
@@ -35,6 +37,7 @@ import {
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import { mintOperation, sealOperation, OperationLedger } from './operation-ledger'
 import {
   notifyRecordSubscribersBestEffort,
@@ -42,6 +45,12 @@ import {
 } from './record-subscription-service'
 import { ensureRecordNotLocked } from './record-lock'
 import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
+import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  prepareLinkWriterFencePlan,
+} from './link-writer-fence'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -56,6 +65,19 @@ export interface ConnectionPool {
   query: QueryFn
   transaction: <T>(handler: TransactionHandler<T>) => Promise<T>
 }
+
+/**
+ * P1#2 REPLACE — adapt this service's `pool.transaction` query handle to the shared produce-seam's
+ * TransactionalQueryable. Only ever built from a handle INSIDE `this.pool.transaction(...)`; the seam's
+ * xid probe (pg-transaction-guard) rejects a pool/autocommit handle at runtime, so the marker cannot lie.
+ */
+const asProducerTrx = (query: QueryFn): TransactionalQueryable => ({
+  isTransaction: true,
+  query: async (sql, params) => {
+    const r = await query(sql, params)
+    return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+  },
+})
 
 export type UniverMetaField = {
   id: string
@@ -554,11 +576,11 @@ export class RecordWriteService {
         }
 
         if (field.type === 'select') {
-          if (typeof change.value !== 'string') {
+          const verdict = classifySelectCellValue(change.value, field.options ?? [])
+          if (verdict === 'not_string') {
             throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
           }
-          const allowed = new Set(field.options ?? [])
-          if (change.value !== '' && !allowed.has(change.value)) {
+          if (verdict === 'not_in_options') {
             throw new RecordValidationError(`Invalid select option for ${change.fieldId}: ${change.value}`)
           }
         }
@@ -777,12 +799,55 @@ export class RecordWriteService {
     // W0-1 L6-a: hoisted so the post-txn response echo can use the operation id as batch_id (below). Inert
     // unless the L4 fence flag is on and the L6 migration is deployed.
     let ledger: OperationLedger = new OperationLedger(sheetId, null)
+    // P1#2 REPLACE — build each record's updated-event payload ONCE, BEFORE the transaction (stable `_eventId`
+    // per record), so the same-txn durable enqueue (flag ON, inside the txn) and the legacy post-commit Step-7
+    // emit (flag OFF) carry the same event identity. The `changes` object is the SAME construction Step 7
+    // used (`changesByRecord` is never mutated by the txn). A record skipped in-txn (`applied === 0` → not in
+    // `updated`) simply never uses its payload — building one is pure (a uuid stamp, no side effects).
+    const updatedEventPayloadByRecord = new Map(
+      Array.from(changesByRecord.entries(), ([recordId, changes]) => [
+        recordId,
+        withAutomationEventId({
+          sheetId,
+          recordId,
+          changes: Object.fromEntries(changes.map((change) => [change.fieldId, change.value])),
+          actorId,
+        }),
+      ] as const),
+    )
+    const candidateFieldIds = Array.from(
+      changesByRecord.values(),
+      (changes) => changes.map((change) => change.fieldId),
+    ).flat()
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      candidateFieldIds,
+    )
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const updates = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
       // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
       // revert-execute's own in-fence patch loop (it owns the block).
-      await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan, {
+          bypassBlockCheck: input.bypassWriterBlock === true,
+        })
+      } else {
+        await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      }
+      // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
+      // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
+      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the conversion flag AND the writer fence are both on.
+      await assertFieldSchemaUnchangedAfterFence(
+        query,
+        sheetId,
+        fieldById,
+        [...changesByRecord.values()].flatMap((changes) => changes.map((change) => change.fieldId)),
+      )
       // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
       // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
       // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.
@@ -805,8 +870,10 @@ export class RecordWriteService {
       // injected sheet-member loader (h.loadSheetMemberUserIds) so the existing unit seam is preserved.
       const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId, h.loadSheetMemberUserIds)
 
-      // #16: source each person field's restrictToMemberGroupIds from the property-bearing `fields`
-      // list (the per-change `fieldById` guard does not carry property). Built once per patch op.
+      // #16: source each person field's restrictToMemberGroupIds from the `fields` list. (The per-change
+      // `fieldById` guard ALSO carries `property` on both write paths — routes/univer-meta.ts
+      // buildFieldMutationGuardMap and the Yjs bridge guard in index.ts — but this map is built once per
+      // patch op from the field list rather than per change.) Built once per patch op.
       const personRestrictByFieldId = new Map<string, string[]>()
       for (const f of fields as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
         if (!f || f.type !== 'person') continue
@@ -1101,6 +1168,9 @@ export class RecordWriteService {
                   [h.buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
                 )
               } catch (err) {
+                if (isRetryableLiveLinkDatabaseConflict(err)) {
+                  throw new RecordValidationError('Linked records changed concurrently; retry the write')
+                }
                 throw err
               }
             }
@@ -1123,6 +1193,16 @@ export class RecordWriteService {
       // wrote, event_count = the number written. No-op when inert or zero-event. This is THE multi-event
       // anchor case (G-BATCH-ENDPOINT): the endpoint sits after ALL rows, never at an intermediate seq.
       await sealOperation(query, ledger)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — one event per record
+      // ACTUALLY written (mirrors Step 7's per-update legacy emit: skipped records emit nothing), atomic with
+      // every UPDATE + revision this bulk txn wrote. A throw anywhere above rolls back and enqueues nothing.
+      // Flag OFF ⇒ no-op (Step 7 emits legacy post-commit instead).
+      for (const update of updated) {
+        const payload = updatedEventPayloadByRecord.get(update.recordId)
+        if (payload) {
+          await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.updated', payload)
+        }
+      }
       return updated
     })
 
@@ -1442,16 +1522,15 @@ export class RecordWriteService {
       // -------------------------------------------------------------------
       // Step 7: EventBus emit
       // -------------------------------------------------------------------
+      // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit per written record (byte-identical — same payload
+      // objects built pre-txn from the same `changesByRecord` construction); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue inside the Step-1 transaction is the delivery path — keep-both would double-deliver
+      // the non-idempotent webhook sink).
       for (const update of updates) {
-        const changes = Object.fromEntries(
-          (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
-        )
-        this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-          sheetId,
-          recordId: update.recordId,
-          changes,
-          actorId,
-        }))
+        const payload = updatedEventPayloadByRecord.get(update.recordId)
+        if (payload) {
+          emitRecordEventIfLegacy(this.eventBus, 'multitable.record.updated', payload)
+        }
       }
     }
 

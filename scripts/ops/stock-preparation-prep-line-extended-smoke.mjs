@@ -48,9 +48,32 @@
 //                  sentinels; the ONLY exempt response is /mvp/sync/plan (same-origin echo), counted
 //                  and asserted to stay at exactly 1.
 //
+// R5 (route-coverage 22/33 -> 33/33) — 11 PREVIOUSLY UNTOUCHED routes added:
+//   target       : target/readiness -> target/ensure x2 (idempotent — CANONICAL, tenant-level, no
+//                  request baseId per the GHSA-m6qv-2rpf-q7mh write-path hardening) -> sandbox-target/
+//                  readiness -> sandbox-target/ensure x2 (idempotent — a FRESH per-run-salted sandbox
+//                  table) -> options/sync (the CANONICAL non-MVP route; distinct from mvp/options/sync)
+//   snapshot     : snapshot-batches (list) -> snapshot-batches/:id/diff -> .../diff/rows, the :id read
+//                  back from the LIST response (never hardcoded)
+//   summaries    : material-mappings/summary + unit-conversions/summary — BOTH tables are TENANT-LEVEL
+//                  (no projectId column), so the confirmed-count assertion is a DELTA against a
+//                  baseline read taken before this run's own confirms, not an absolute >=1 (which a
+//                  stale row from a prior run could satisfy)
+//   erp source   : mvp/source-runs/erp-materials — OPT-IN via --approved-erp-source-config-id (its own
+//                  approved external-system config; requiredKind is read off the CONFIG row, so it can
+//                  never reuse the PLM-BOM prelude's --approved-source-config-id). Absent the flag this
+//                  issues NO request (byte-for-byte omitted), same posture as the PLM prelude.
+//   no retire    : NEITHER target/ensure route has a retire surface. The canonical PLM target is
+//                  tenant-level and stays provisioned forever after the first successful run (idempotent
+//                  — later runs just find it ready). Each run's sandbox-target/ensure additionally
+//                  leaves ONE NEW per-run-salted sandbox table behind (this module has no sandbox-target
+//                  retire route at all) — an accumulating artifact this smoke does not hide.
+//
 // HARD BOUNDARY (closeout §5b): every write above lands in the 9 INTERNAL MVP tables through the
 // same admin-gated HTTP surface the views use. externalWrite stays false — no K3 Save/Submit/Audit,
-// no apply-writer, no external system call of any kind exists on any route this smoke touches.
+// no apply-writer, no external system call of any kind exists on any route this smoke touches. (The
+// R5 canonical/sandbox target-provisioning writes are the SAME kind of internal-only structure write
+// C1b/C6 already used elsewhere in this module — still no external system call.)
 //
 // Pattern parity: arg parsing, requestJson, values-free-by-construction output (P2-2 sanitizing
 // registries), summary block, PASS/FAIL exit, and the leak-scan discipline are IMPORTED from the W6
@@ -64,7 +87,8 @@
 //   METASHEET_AUTH_TOKEN=... node scripts/ops/stock-preparation-prep-line-extended-smoke.mjs \
 //     --base-url http://HOST:PORT [--tenant-id t] [--workspace-id w] \
 //     [--project-prefix stockprep-t4] [--timeout-ms 15000] [--out-dir output/dir] \
-//     [--approved-source-config-id cfg_ref]   # T4-final OD-6 prelude (service T3b flag must be ON)
+//     [--approved-source-config-id cfg_ref]     # T4-final OD-6 prelude (service T3b flag must be ON)
+//     [--approved-erp-source-config-id cfg_ref] # R5 B4 prelude (service ERP autopersist flag optional)
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -115,6 +139,9 @@ export function safeCode(value) { return registeredValue(value, T4_ALLOWED_ERROR
 export const T4_ALLOWED_MODES = Object.freeze(new Set([
   ...ALLOWED_MODES,
   'dry_run', 'internal_persist', 'internal_noop',
+  // R5: canonical/sandbox target-provisioning modes (target/ensure, sandbox-target/ensure + readiness).
+  'canonical_create', 'canonical_existing', 'canonical_incomplete', 'canonical_missing',
+  'sandbox_create', 'sandbox_existing', 'sandbox_incomplete', 'sandbox_missing',
 ]))
 
 export function safeT4Mode(value) { return registeredValue(value, T4_ALLOWED_MODES) }
@@ -159,6 +186,11 @@ export function buildExtendedSmokeFixture(salt, projectPrefix = 'stockprep-t4') 
   const projectId = `${projectPrefix}-${salt}`
   const snapshotBatchId = `smoke_t4_batch_${salt}`
   const syncRunId = `smoke_t4_syncrun_${salt}`
+  // R5 B2: a per-run-salted sandbox-target objectId (must carry the 'plm_stock_preparation_sandbox'
+  // namespace prefix the provisioning module enforces) — never reused across runs, so
+  // sandbox-target/ensure's first call in THIS run is a genuine create, never a stale leftover.
+  const sandboxObjectId = `plm_stock_preparation_sandbox_smoke_${salt}`
+  const sandboxLabel = `T4 Smoke Sandbox Target ${salt}`
   const drawingA = `T4DWG-A-${salt}`
   const drawingB = `T4DWG-B-${salt}`
   const drawingC = `T4DWG-C-${salt}`
@@ -205,6 +237,8 @@ export function buildExtendedSmokeFixture(salt, projectPrefix = 'stockprep-t4') 
     erpItemC,
     sourceProjectNo,
     projectName,
+    sandboxObjectId,
+    sandboxLabel,
     defaultDesignUnit: unitPlm,
     expansionResult: {
       rows: [
@@ -221,9 +255,93 @@ export function buildExtendedSmokeFixture(salt, projectPrefix = 'stockprep-t4') 
       drawingA, drawingB, drawingC, pathA, pathB, pathC, unitPlm, unitErp,
       erpItemA, erpItemB, erpItemC, materialNameA, materialNameB, materialNameC,
       String(qtyA), String(qtyB), String(qtyC), sourceProjectNo, projectName,
+      // R5: neither ever crosses in cleartext (sandbox target/option-sync responses only ever project
+      // an objectIdHash, never the raw objectId or label), but every value-bearing request token this
+      // fixture mints doubles as a leak-scan sentinel per this file's own convention (see header).
+      sandboxObjectId, sandboxLabel,
     ],
   }
 }
+
+// R5 (target/ensure, sandbox-target/ensure, options/sync): the CANONICAL non-MVP stock-preparation
+// target template declares exactly 4 select/option fields (stock-preparation-templates.cjs
+// STOCK_PREPARATION_MAIN_TABLE_TEMPLATE — lastPlmRefreshDecision/materialType/blankType/
+// stockPreparationStatus). Every declared option source key must be covered or the ensure/sync route
+// 422s OPTION_SYNC_NO_FIELDS (sandbox-target/ensure) — this is NOT the same fixture as
+// buildOptionSetsFixture() above, which is keyed for the 9 frozen MVP tables' DIFFERENT template.
+export function buildTargetOptionSetsFixture() {
+  const set = (values) => values.map((value) => ({ value }))
+  return {
+    plm_stock_preparation_decision_v1: set(['add', 'update', 'skip', 'inactive', 'manual_confirm']),
+    material_type: set(['raw_material', 'semi_finished', 'finished']),
+    blank_type: set(['casting', 'forging', 'sheet']),
+    stock_preparation_status: set(['pending', 'in_progress', 'completed']),
+  }
+}
+
+// R5 route-coverage bookkeeping. `${API}/snapshot-batches/:id/diff(/rows)` carry a real batch id in the
+// issued pathname — normalize it back to the registered route SHAPE so the touched-route Set collapses
+// to one entry regardless of which batch id was used, matching every other (parameterless) route here.
+export function normalizePrepLineRouteTemplate(pathname) {
+  const bare = String(pathname).split('?')[0]
+  return bare
+    .replace(/\/snapshot-batches\/[^/]+\/diff\/rows$/, '/snapshot-batches/:id/diff/rows')
+    .replace(/\/snapshot-batches\/[^/]+\/diff$/, '/snapshot-batches/:id/diff')
+}
+
+// R5: the FULL roster of prep-line route templates this smoke is designed to exercise, as DATA — one
+// entry per real registered route in plugins/plugin-integration-core/lib/http-routes.cjs ROUTES (32
+// '/stock-preparation/*' entries + the 1 auth round-trip = 33 total). 30 are unconditional (every
+// self-contained run); 3 are OPTIONAL (the 2 approved-source preludes, plus `options/sync` which
+// R5's own P1 fix moved to opt-in because it is a destructive canonical overwrite — see 94dda0bfa).
+// (THIRD fabrication caught on this very line: the split still read 31/2 after that move. The
+// mechanical values are ALWAYS_PREP_LINE_ROUTES.length = 30 and OPTIONAL_PREP_LINE_ROUTES.length = 3;
+// the total 33 was right, which is exactly why a wrong SPLIT survived — the number that changed was
+// not the one being sanity-checked.) The two prepLineRoutes* summary fields below are ALWAYS `.length`/`.size`
+// derived from this roster and from the SET of routes the run actually issued a request against — never
+// a hand-written count (this line has twice been caught fabricating one; see the R5 acceptance battery).
+export const ALWAYS_PREP_LINE_ROUTES = Object.freeze([
+  '/api/integration/status',
+  `${API}/mvp/readiness`,
+  `${API}/mvp/ensure`,
+  `${API}/mvp/options/sync`,
+  `${API}/mvp/sync/plan`,
+  `${API}/mvp/sync/persist`,
+  `${API}/mvp/erp-materials/sync`,
+  `${API}/projects`,
+  `${API}/material-mappings/candidates`,
+  `${API}/material-mappings/candidates/sync`,
+  `${API}/material-mappings/confirm`,
+  `${API}/material-mappings/retire`,
+  `${API}/unit-conversions/candidates`,
+  `${API}/unit-conversions/confirm`,
+  `${API}/unit-conversions/retire`,
+  `${API}/generation/run`,
+  `${API}/exceptions/resolve`,
+  `${API}/exceptions/bulk-resolve`,
+  `${API}/exceptions`,
+  `${API}/prep-lines`,
+  `${API}/audit`,
+  // R5 additions (10 of the 11 — B4 is the one OPTIONAL route, listed separately below):
+  `${API}/target/readiness`,
+  `${API}/target/ensure`,
+  `${API}/sandbox-target/readiness`,
+  `${API}/sandbox-target/ensure`,
+  `${API}/snapshot-batches`,
+  `${API}/snapshot-batches/:id/diff`,
+  `${API}/snapshot-batches/:id/diff/rows`,
+  `${API}/material-mappings/summary`,
+  `${API}/unit-conversions/summary`,
+])
+
+export const OPTIONAL_PREP_LINE_ROUTES = Object.freeze([
+  `${API}/mvp/source-runs/plm-bom`,
+  `${API}/mvp/source-runs/erp-materials`,
+  // DESTRUCTIVE — opt-in only, see --allow-canonical-option-overwrite below.
+  `${API}/options/sync`,
+])
+
+export const PREP_LINE_ROUTE_UNIVERSE = new Set([...ALWAYS_PREP_LINE_ROUTES, ...OPTIONAL_PREP_LINE_ROUTES])
 
 // T4-final (T3b design-lock OD-6): the approved-source prelude request. A per-run salted business
 // scope for a SEPARATE internal project/batch/run id space, so the prelude can never collide with
@@ -312,13 +430,70 @@ export async function runApprovedSourcePrelude({ salt, args, req, must, summary,
   return prelude
 }
 
+// R5 B4: the ERP/K3-plane approved-source prelude request for POST mvp/source-runs/erp-materials. This
+// is a SEPARATE approved config from buildApprovedSourcePrelude's PLM one — the route resolves
+// `requiredKind` off the referenced read-source-config ROW itself (http-routes.cjs
+// loadStockPreparationReadonlySource -> read-source-read-runtime.cjs prepareConfiguredRead), so a
+// config approved for the PLM BOM plane can never satisfy the ERP/K3 material-master plane and
+// vice versa — there is no fixture-only substitute for a real approved config reference here.
+export function buildApprovedErpSourcePrelude(salt, { approvedErpSourceConfigId, workspaceId = '' } = {}) {
+  if (!approvedErpSourceConfigId) throw new Error('approvedErpSourceConfigId is required for the ERP source-run prelude')
+  const body = {
+    syncRunId: `smoke_t4_erp_source_run_${salt}`,
+    readSourceConfigId: approvedErpSourceConfigId,
+  }
+  if (workspaceId) body.workspaceId = workspaceId
+  return {
+    body,
+    sentinels: [approvedErpSourceConfigId],
+  }
+}
+
+// R5 B4 prelude execution. UNLIKE the PLM prelude, this route's auto-persist gate
+// (MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED) is a SERVER-side env var this HTTP client has no way
+// to read in advance — so the assertion below does NOT assume an arm; it BRANCHES on the response shape
+// the route actually returned and records which arm fired. Per the R5 acceptance battery: the OFF arm
+// is byte-for-byte the read-only projection (mode stays 'dry_run', no autoPersist field) and the
+// must() below never claims the write path was verified in that case; the ON arm adds
+// mode:'internal_persist' + evidence.internalWriteExecuted:true + an autoPersist block, and only THEN
+// does the must() claim a real internal write happened.
+export async function runApprovedErpSourcePrelude({ salt, args, req, must, summary, registerSentinels }) {
+  if (typeof registerSentinels !== 'function') {
+    throw new Error('runApprovedErpSourcePrelude requires a registerSentinels callback — the prelude sentinels MUST join the run-level leak scan')
+  }
+  const prelude = buildApprovedErpSourcePrelude(salt, {
+    approvedErpSourceConfigId: args.approvedErpSourceConfigId,
+    workspaceId: args.workspaceId,
+  })
+  registerSentinels(prelude.sentinels)
+  const sourceRun = await req(`${API}/mvp/source-runs/erp-materials`, {
+    method: 'POST', body: prelude.body, accept: [200, 201], label: 'erp-source-run',
+  })
+  const data = (sourceRun.body && sourceRun.body.data) || {}
+  const autoPersistOn = data.mode === 'internal_persist'
+  summary.erpSourceRunHttp = sourceRun.status
+  summary.erpSourceRunMode = safeT4Mode(data.mode)
+  summary.erpSourceRunAutoPersistArm = autoPersistOn ? 'ON' : 'OFF'
+  must(
+    autoPersistOn
+      ? 'R5 B4 ERP source-run succeeds, auto-persist ON: a real internal write is claimed and evidenced'
+      : 'R5 B4 ERP source-run succeeds, auto-persist OFF: byte-for-byte read-only projection — the write path is NOT claimed as verified',
+    sourceRun.ok && (
+      (autoPersistOn && data.evidence?.internalWriteExecuted === true && data.autoPersist !== undefined) ||
+      (!autoPersistOn && data.mode === 'dry_run' && data.autoPersist === undefined)
+    ),
+    `http=${sourceRun.status} arm=${summary.erpSourceRunAutoPersistArm} mode=${summary.erpSourceRunMode}`,
+  )
+  return prelude
+}
+
 export function formatSummaryBlock(summary) {
   const lines = [SUMMARY_HEADER]
   for (const [key, value] of Object.entries(summary)) lines.push(`${key}=${value}`)
   return lines.join('\n')
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     baseUrl: '',
     tenantId: '',
@@ -327,6 +502,7 @@ function parseArgs(argv) {
     timeoutMs: 15000,
     outDir: '',
     approvedSourceConfigId: '',
+    approvedErpSourceConfigId: '',
   }
   for (let i = 2; i < argv.length; i++) {
     const flag = argv[i]
@@ -338,6 +514,8 @@ function parseArgs(argv) {
     else if (flag === '--timeout-ms') args.timeoutMs = Number(next())
     else if (flag === '--out-dir') args.outDir = next()
     else if (flag === '--approved-source-config-id') args.approvedSourceConfigId = next()
+    else if (flag === '--approved-erp-source-config-id') args.approvedErpSourceConfigId = next()
+    else if (flag === '--allow-canonical-option-overwrite') args.allowCanonicalOptionOverwrite = true
     else throw new Error(`unknown flag: ${flag}`)
   }
   if (!args.baseUrl) throw new Error('--base-url is required')
@@ -408,7 +586,13 @@ async function main() {
   const S = RESULT.summary
   let failed = false
   const must = (name, ok, detail) => { if (!check(name, ok, detail)) failed = true }
-  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { ...buildRequestDefaults(args, token), ...options })
+  // R5 route-coverage bookkeeping: every req() call is recorded (by its normalized route template,
+  // deduped) regardless of which section issued it — see ALWAYS_PREP_LINE_ROUTES / prepLineRoutesExercised.
+  const touchedRouteTemplates = new Set()
+  const req = (pathname, options) => {
+    touchedRouteTemplates.add(normalizePrepLineRouteTemplate(pathname))
+    return requestJson(args.baseUrl, pathname, { ...buildRequestDefaults(args, token), ...options })
+  }
   const scope = (extra) => scopeQuery(args, extra)
   SELF_SCAN_SENTINELS = [...fixture.sentinels, ...ENGINE_MESSAGE_SENTINELS]
   S.salt = salt
@@ -425,6 +609,81 @@ async function main() {
   S.readinessTableCount = safeCount(readiness.body?.data?.evidence?.tableCount)
   must('mvp readiness http 200 + 9 frozen tables', readiness.ok && S.readinessTableCount === 9,
     `http=${readiness.status} tables=${S.readinessTableCount}`)
+
+  // ── 1a. R5 A1/B1/A2/B2/B3: the CANONICAL + SANDBOX target-provisioning surface (a SEPARATE target
+  // from the 9 frozen MVP tables above — C1b/C6, not #3751 MVP). target/ensure and sandbox-target/
+  // ensure are each called TWICE: idempotency is proven by requiring BOTH calls to succeed with
+  // ready:true and the SECOND call to no longer be in the *_create mode tier (the only signal that
+  // discriminates "really provisioned, found on retry" from "always answers 200 and does nothing").
+  const targetReadiness = await req(`${API}/target/readiness${scope()}`, { label: 'target-readiness' })
+  S.targetReadinessHttp = targetReadiness.status
+  must('R5 A1 target/readiness -> 200, object response, never 501',
+    targetReadiness.ok && targetReadiness.status !== 501 &&
+    Boolean(targetReadiness.body?.data) && typeof targetReadiness.body.data === 'object',
+    `http=${targetReadiness.status}`)
+
+  const targetEnsure1 = await req(`${API}/target/ensure${scope()}`, { method: 'POST', body: {}, accept: [200, 201], label: 'target-ensure-1' })
+  const targetEnsure2 = await req(`${API}/target/ensure${scope()}`, { method: 'POST', body: {}, accept: [200, 201], label: 'target-ensure-2' })
+  S.targetEnsure1Http = targetEnsure1.status
+  S.targetEnsure1Mode = safeT4Mode(targetEnsure1.body?.data?.mode)
+  S.targetEnsure2Http = targetEnsure2.status
+  S.targetEnsure2Mode = safeT4Mode(targetEnsure2.body?.data?.mode)
+  must('R5 B1 target/ensure is idempotent: both calls succeed + ready, second call is NOT the *_create tier',
+    targetEnsure1.ok && targetEnsure1.body?.data?.ready === true &&
+    targetEnsure2.ok && targetEnsure2.body?.data?.ready === true &&
+    targetEnsure2.body?.data?.mode !== 'canonical_create',
+    `http1=${targetEnsure1.status} mode1=${S.targetEnsure1Mode} http2=${targetEnsure2.status} mode2=${S.targetEnsure2Mode}`)
+
+  const sandboxReadiness = await req(`${API}/sandbox-target/readiness${scope({ objectId: fixture.sandboxObjectId })}`, { label: 'sandbox-target-readiness' })
+  S.sandboxReadinessHttp = sandboxReadiness.status
+  must('R5 A2 sandbox-target/readiness -> 200, never 501', sandboxReadiness.ok && sandboxReadiness.status !== 501,
+    `http=${sandboxReadiness.status}`)
+
+  const sandboxEnsureBody = { objectId: fixture.sandboxObjectId, label: fixture.sandboxLabel, optionSets: buildTargetOptionSetsFixture() }
+  const sandboxEnsure1 = await req(`${API}/sandbox-target/ensure${scope()}`, { method: 'POST', body: sandboxEnsureBody, accept: [200, 201], label: 'sandbox-target-ensure-1' })
+  const sandboxEnsure2 = await req(`${API}/sandbox-target/ensure${scope()}`, { method: 'POST', body: sandboxEnsureBody, accept: [200, 201], label: 'sandbox-target-ensure-2' })
+  S.sandboxEnsure1Http = sandboxEnsure1.status
+  S.sandboxEnsure1Mode = safeT4Mode(sandboxEnsure1.body?.data?.mode)
+  S.sandboxEnsure2Http = sandboxEnsure2.status
+  S.sandboxEnsure2Mode = safeT4Mode(sandboxEnsure2.body?.data?.mode)
+  must('R5 B2 sandbox-target/ensure is idempotent (fresh per-run-salted objectId): both calls succeed + ready, second call is NOT the *_create tier',
+    sandboxEnsure1.ok && sandboxEnsure1.body?.data?.ready === true &&
+    sandboxEnsure2.ok && sandboxEnsure2.body?.data?.ready === true &&
+    sandboxEnsure2.body?.data?.mode !== 'sandbox_create',
+    `http1=${sandboxEnsure1.status} mode1=${S.sandboxEnsure1Mode} http2=${sandboxEnsure2.status} mode2=${S.sandboxEnsure2Mode}`)
+
+  // ── R5 B3 options/sync — OPT-IN ONLY, and deliberately so ────────────────────────────────────
+  // This route is DESTRUCTIVE on a SHARED CURATED surface and there is no way to aim it elsewhere:
+  //   * the request face accepts only { tenantId, workspaceId, projectId, optionSets }
+  //     (http-routes.cjs stockPreparationOptionSyncInput; the GHSA-m6qv-2rpf-q7mh hardening
+  //     deliberately strips every steering vector, INCLUDING `template`), so the handler always falls
+  //     through to STOCK_PREPARATION_MAIN_TABLE_TEMPLATE — the CANONICAL table
+  //     (stock-preparation-option-sync.cjs default `input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE`);
+  //   * the write is a documented FULL OVERWRITE — field-option-sync-runtime.cjs:
+  //     "replace + update_from_source = full overwrite, no read, no merge";
+  //   * a first-party producer of these exact keys ships in the product: the admin Integration
+  //     Workbench posts operator-authored option sets to this same route, so the values being
+  //     overwritten are curated, not incidental;
+  //   * there is NO read face for current options (readCurrentOptions is internal to the runtime and
+  //     used only for non-default modes), so this smoke CANNOT read-then-restore. Section 10 retires
+  //     every other tenant-level asset this run mutates; this one is not restorable at all.
+  // And the blast radius is not hypothetical: this script's own workflow defaults METASHEET_BASE_URL to
+  // the shared deployed host, so an always-armed version would silently flatten curated option sets
+  // there on any dispatch that did not override base_url.
+  // Hence: opt-in. The operator passing --allow-canonical-option-overwrite is accepting the overwrite.
+  if (args.allowCanonicalOptionOverwrite) {
+    const targetOptionsSync = await req(`${API}/options/sync${scope()}`, {
+      method: 'POST', body: { optionSets: buildTargetOptionSetsFixture() }, accept: [200], label: 'target-options-sync',
+    })
+    S.targetOptionsSyncHttp = targetOptionsSync.status
+    must('R5 B3 options/sync (CANONICAL, non-MVP, opt-in destructive) -> 200',
+      targetOptionsSync.ok && targetOptionsSync.body?.data?.ok === true,
+      `http=${targetOptionsSync.status}`)
+  } else {
+    // NOT_RUN, never PASS — a route that was deliberately not exercised must not read as covered.
+    S.targetOptionsSyncHttp = 'NOT_RUN_OPT_IN_REQUIRED'
+    process.stderr.write('[t4-smoke] R5 B3 options/sync NOT_RUN: destructive canonical overwrite; pass --allow-canonical-option-overwrite to exercise it\n')
+  }
 
   const ensure = await req(`${API}/mvp/ensure${scope()}`, { method: 'POST', body: {}, accept: [200, 201], label: 'mvp-ensure' })
   S.ensureHttp = ensure.status
@@ -505,6 +764,31 @@ async function main() {
     ourProject.snapshotBatchCount >= 1 && !('projectName' in ourProject) && !('sourceProjectNo' in ourProject),
     `http=${projectList.status} status=${S.projectStatus}`)
 
+  // ── 2c. R5 A3/A4/A5: snapshot-batches list -> diff -> diff/rows. The batch definitely exists here
+  // (§2 already persisted it). `:id` is read back from A3's OWN response — the fixture's
+  // snapshotBatchId is already known, but the point of A3-A5 is proving the LIST route round-trips a
+  // real id, not reusing what this script already knows.
+  const snapshotBatchList = await req(`${API}/snapshot-batches${scope({ projectId: fixture.projectId })}`, { label: 'snapshot-batches-list' })
+  const snapshotBatchRows = Array.isArray(snapshotBatchList.body?.data?.batches) ? snapshotBatchList.body.data.batches : []
+  S.snapshotBatchListHttp = snapshotBatchList.status
+  S.snapshotBatchListCount = safeCount(snapshotBatchList.body?.data?.batchCount)
+  must('R5 A3 snapshot-batches -> 200, non-empty batch set, never 501',
+    snapshotBatchList.ok && snapshotBatchList.status !== 501 && snapshotBatchRows.length > 0 && S.snapshotBatchListCount > 0,
+    `http=${snapshotBatchList.status} batches=${S.snapshotBatchListCount}`)
+  const listedBatchId = snapshotBatchRows[0]?.snapshotBatchId || ''
+
+  const snapshotDiff = await req(`${API}/snapshot-batches/${listedBatchId}/diff${scope()}`, { label: 'snapshot-batch-diff' })
+  S.snapshotDiffHttp = snapshotDiff.status
+  must("R5 A4 snapshot-batches/:id/diff -> 200, never 501, :id taken from A3's real response (never hardcoded)",
+    snapshotDiff.ok && snapshotDiff.status !== 501 && Boolean(listedBatchId),
+    `http=${snapshotDiff.status} idFromA3=${Boolean(listedBatchId)}`)
+
+  const snapshotDiffRows = await req(`${API}/snapshot-batches/${listedBatchId}/diff/rows${scope()}`, { label: 'snapshot-batch-diff-rows' })
+  S.snapshotDiffRowsHttp = snapshotDiffRows.status
+  must('R5 A5 snapshot-batches/:id/diff/rows -> 200, never 501 (same :id as A4)',
+    snapshotDiffRows.ok && snapshotDiffRows.status !== 501,
+    `http=${snapshotDiffRows.status}`)
+
   // ── 3. T2 cache seed: material A only (code === drawing A) ───────────────────────────────────
   const erpSyncA = await req(`${API}/mvp/erp-materials/sync${scope()}`, {
     method: 'POST',
@@ -534,6 +818,35 @@ async function main() {
   must('PROBE body tenantId on erp-materials/sync -> 400 closed-allowlist rejection',
     erpSteer.ok && S.probeErpSteerCode === 'STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_INVALID' && S.probeErpSteerField === 'tenantId',
     `http=${erpSteer.status} code=${S.probeErpSteerCode} field=${S.probeErpSteerField}`)
+
+  // ── 3a. R5 B4: mvp/source-runs/erp-materials — OPT-IN via --approved-erp-source-config-id, the
+  // ERP/K3-plane counterpart of the §1b PLM-BOM prelude. Absent the flag this issues NO request
+  // (byte-for-byte the pre-R5 smoke) — see runApprovedErpSourcePrelude's header for why the two
+  // approved configs can never be the same reference.
+  if (args.approvedErpSourceConfigId) {
+    await runApprovedErpSourcePrelude({
+      salt, args, req, must, summary: S,
+      registerSentinels: (sentinels) => { SELF_SCAN_SENTINELS = [...SELF_SCAN_SENTINELS, ...sentinels] },
+    })
+  }
+
+  // ── 3b. R5 A6/A7 baseline reads: material-mappings/summary + unit-conversions/summary are BOTH
+  // TENANT-LEVEL tables (no projectId column on either — see their own module comments), so an
+  // absolute >=1 confirmed-count assertion after §8 could be satisfied by a stale row from a PRIOR run,
+  // not by anything THIS run's §4/§5/§8 confirms did. Reading both HERE — before this run has issued
+  // any confirm — lets A6/A7 below assert a DELTA instead, the only signal that actually attributes the
+  // count to this run's own confirms.
+  const mappingSummaryBaseline = await req(`${API}/material-mappings/summary${scope({ projectId: fixture.projectId })}`, { label: 'material-mappings-summary-baseline' })
+  S.mappingSummaryBaselineHttp = mappingSummaryBaseline.status
+  const mappingSummaryBaselineMatched = safeCount(mappingSummaryBaseline.body?.data?.matchStatusCounts?.matched)
+  must('R5 A6 baseline read: material-mappings/summary -> 200, never 501 (pre-confirm tenant-level snapshot)',
+    mappingSummaryBaseline.ok && mappingSummaryBaseline.status !== 501, `http=${mappingSummaryBaseline.status}`)
+
+  const unitSummaryBaseline = await req(`${API}/unit-conversions/summary${scope({ projectId: fixture.projectId })}`, { label: 'unit-conversions-summary-baseline' })
+  S.unitSummaryBaselineHttp = unitSummaryBaseline.status
+  const unitSummaryBaselineActive = safeCount(unitSummaryBaseline.body?.data?.activeRuleCount)
+  must('R5 A7 baseline read: unit-conversions/summary -> 200, never 501 (pre-confirm tenant-level snapshot)',
+    unitSummaryBaseline.ok && unitSummaryBaseline.status !== 501, `http=${unitSummaryBaseline.status}`)
 
   // ── 4. auto-match: the cache drives EXACTLY ONE exact_code candidate ─────────────────────────
   const candidateRows = async (label) => {
@@ -737,6 +1050,33 @@ async function main() {
     resolveBulk.ok && resolveBulkData.mode === 'resolved' && resolveBulkData.resolved === 1 && resolveBulkData.exceptionType === 'missing_mapping',
     `http=${resolveBulk.status} resolved=${S.resolveBulkResolved}`)
 
+  // ── 8b. R5 A6/A7: material-mappings/summary + unit-conversions/summary, confirmed-count DELTA vs
+  // the pre-confirm §3b baseline — proves THIS run's §4 (cache-driven candidate A confirm), §5
+  // (generic unit rule confirm), and §8 (candidates B/C confirm) each actually landed a row, not just
+  // that the tenant-level table happens to be non-empty from an earlier run.
+  const mappingSummary = await req(`${API}/material-mappings/summary${scope({ projectId: fixture.projectId })}`, { label: 'material-mappings-summary' })
+  S.mappingSummaryHttp = mappingSummary.status
+  const mappingSummaryMatched = safeCount(mappingSummary.body?.data?.matchStatusCounts?.matched)
+  S.mappingSummaryMatchedDelta = mappingSummaryMatched - mappingSummaryBaselineMatched
+  // safeCount collapses a missing/non-numeric field to -1: without the >=0 guard on BOTH sides, a
+  // response that dropped matchStatusCounts.matched entirely (baseline -1, current -1) or dropped it
+  // only on the baseline read (baseline -1, current a real N) could manufacture a passing delta from
+  // the -1 sentinel rather than from a real confirmed row — the exact failure mode this A6 delta
+  // exists to rule out.
+  must('R5 A6 material-mappings/summary -> 200, never 501, matched-count delta >=1 vs the §3b baseline (this run confirmed >=1 mapping)',
+    mappingSummary.ok && mappingSummary.status !== 501 &&
+    mappingSummaryBaselineMatched >= 0 && mappingSummaryMatched >= 0 && S.mappingSummaryMatchedDelta >= 1,
+    `http=${mappingSummary.status} delta=${S.mappingSummaryMatchedDelta}`)
+
+  const unitSummary = await req(`${API}/unit-conversions/summary${scope({ projectId: fixture.projectId })}`, { label: 'unit-conversions-summary' })
+  S.unitSummaryHttp = unitSummary.status
+  const unitSummaryActive = safeCount(unitSummary.body?.data?.activeRuleCount)
+  S.unitSummaryActiveDelta = unitSummaryActive - unitSummaryBaselineActive
+  must('R5 A7 unit-conversions/summary -> 200, never 501, active-rule-count delta >=1 vs the §3b baseline (this run confirmed the generic unit rule)',
+    unitSummary.ok && unitSummary.status !== 501 &&
+    unitSummaryBaselineActive >= 0 && unitSummaryActive >= 0 && S.unitSummaryActiveDelta >= 1,
+    `http=${unitSummary.status} delta=${S.unitSummaryActiveDelta}`)
+
   // ── 9. generation run 2: the FULL ready flip — 3/3 lines, zero unresolved blocking ───────────
   const run2 = await req(`${API}/generation/run${scope()}`, { method: 'POST', body: generationBody, accept: [201], label: 'generation-run-2' })
   const run2Data = run2.body?.data || {}
@@ -833,6 +1173,23 @@ async function main() {
     leakingLabels.length ? `leaking=${leakingLabels.join(',')}` : `scanned=${scanned.length}`)
   must('exactly one leak-exempt response (the /plan same-origin echo)',
     exempted.length === 1 && exempted[0].label === 'sync-plan', `exempted=${exempted.length}`)
+
+  // ── 13. R5 route-coverage bookkeeping — DERIVED from the routes this run actually issued a request
+  // against (touchedRouteTemplates, built by the req() wrapper above), never a hand-written count.
+  // Computed HERE (the natural single end of a fully-run main(), not inside finish()) so an EARLY
+  // return above — a real failure — never also emits a second, unrelated "coverage" failure on top of
+  // it; those runs simply carry no prepLineRoutes* summary fields. `prepLineRoutesExpected` is
+  // CONDITIONAL on which opt-in preludes this invocation's flags actually requested, so a bare
+  // self-contained run (no approved-source flags) is expected to reach ALWAYS_PREP_LINE_ROUTES.length,
+  // not a fixed 33 — that would make the default, credential-free run permanently red.
+  const exercisedRoutes = [...touchedRouteTemplates].filter((route) => PREP_LINE_ROUTE_UNIVERSE.has(route))
+  S.prepLineRoutesExercised = exercisedRoutes.length
+  S.prepLineRoutesExpected = ALWAYS_PREP_LINE_ROUTES.length +
+    (args.approvedSourceConfigId ? 1 : 0) + (args.approvedErpSourceConfigId ? 1 : 0) +
+    (args.allowCanonicalOptionOverwrite ? 1 : 0)
+  must("R5 prep-line route coverage: routes exercised this run === expected for this run's opt-in flags",
+    S.prepLineRoutesExercised === S.prepLineRoutesExpected,
+    `exercised=${S.prepLineRoutesExercised} expected=${S.prepLineRoutesExpected}`)
 
   return finish(failed, args)
 }

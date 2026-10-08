@@ -208,10 +208,11 @@ function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
  * integration UNPINS the delivery — which refuses earlier as `integration_unpinned`. A delivery can never
  * point at a missing integration (the FK forbids it).
  *
- * What IS reachable: the row exists but its corp cannot be read — `corp_id` is NOT NULL yet '' is still
- * accepted, and this lookup also requires `provider='dingtalk'`. Both are misconfigurations on OUR side,
- * and they surface as `delivery_corp_unresolved` — deliberately NOT as `corp_anchor_absent`, because the
- * two demand opposite responses (fix our config vs. close the flag because DingTalk sends no corp field).
+ * What IS reachable: the row exists but is not a DingTalk integration. This lookup deliberately requires
+ * `provider='dingtalk'`, so a delivery pinned to a differently typed directory integration cannot supply
+ * an authoritative DingTalk corp. That misconfiguration surfaces as `delivery_corp_unresolved` —
+ * deliberately NOT as `corp_anchor_absent`, because the two demand opposite responses (fix our config vs.
+ * close the flag because DingTalk sends no corp field).
  */
 async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): Promise<string> {
   const result = await query(
@@ -384,6 +385,9 @@ async function resolveOperatorLocalUser(
             COALESCE(u.name, u.id) AS local_user_name,
             u.is_active AS local_user_active
        FROM directory_accounts a
+       JOIN directory_integrations i
+         ON i.id = a.integration_id
+        AND i.provider = 'dingtalk'
        JOIN directory_account_links l
          ON l.directory_account_id = a.id
         AND l.link_status = 'linked'
@@ -392,7 +396,9 @@ async function resolveOperatorLocalUser(
       WHERE a.provider = 'dingtalk'
         AND a.external_user_id = $1
         AND a.is_active = TRUE
-        AND a.integration_id = $2::uuid`,
+        AND a.integration_id = $2::uuid
+        AND NULLIF(BTRIM(a.corp_id), '') IS NOT NULL
+        AND NULLIF(BTRIM(a.corp_id), '') = NULLIF(BTRIM(i.corp_id), '')`,
     [operatorDingTalkUserId, integrationId],
   )
   const rows = result.rows as Array<{ local_user_id: string; local_user_name: string | null; local_user_active: boolean }>

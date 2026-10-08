@@ -14,7 +14,9 @@
 //      parameterized SQL with whitelisted identifiers and never concatenate
 //      user values into the statement.
 //   6. updateRow / deleteRows refuse empty where clauses (no unbounded ops).
-//   7. transaction() exposes the same scoped surface, no rawQuery.
+//   7. transaction() exposes the same scoped surface, no rawQuery — plus ONE handle-only method,
+//      setTransactionIsolationLevel, whose level is a whitelist key rendering a fixed literal
+//      (never on the root helper: outside a transaction block PostgreSQL only warns and ignores).
 //   8. No rawQuery export at all.
 //
 // Run: node __tests__/db.test.cjs
@@ -84,7 +86,16 @@ async function main() {
   const publicKeys = Object.keys(db).sort()
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
-    'select', 'selectOne', 'transaction', 'updateRow',
+    'select', 'selectOne',
+    // selectOneForKeyShare: the writer's half of the external-system delete lock protocol
+    // (external-system-pointer-lock.cjs). Same whitelist, same parameterization as
+    // selectOneForUpdate; only the locking clause differs.
+    'selectOneForKeyShare',
+    'selectOneForUpdate', 'transaction', 'updateRow',
+    // upsertOne is the module header's sanctioned extension form ("added here as a new validated
+    // method"), NOT a raw-SQL hook: table, row columns and conflict columns all pass the same
+    // identifier whitelist, and every value stays parameterized.
+    'upsertOne',
   ]
   assert.deepEqual(publicKeys, expected, 'no rawQuery / execute / any raw SQL hook')
 
@@ -163,6 +174,52 @@ async function main() {
     'arrays/plain objects are serialized as JSON text before reaching node-postgres',
   )
 
+  // upsertOne: single-statement INSERT ... ON CONFLICT DO UPDATE on a UNIQUE key.
+  const mockDb6c = mockDatabase()
+  const db6c = createDb({ database: mockDb6c })
+  await db6c.upsertOne(
+    'integration_stock_prep_pack_installs',
+    { id: 'i1', tenant_id: 't1', project_id: 'p1', object_id: 'o1', pack_id: 'pk1', status: 'installed' },
+    { conflictColumns: ['tenant_id', 'project_id', 'object_id', 'pack_id'] },
+  )
+  const q6c = mockDb6c.calls[0]
+  assert.match(q6c.sql, /^INSERT INTO "integration_stock_prep_pack_installs" \("id", "tenant_id", "project_id", "object_id", "pack_id", "status"\) VALUES \(\$1, \$2, \$3, \$4, \$5, \$6\)/)
+  assert.match(q6c.sql, / ON CONFLICT \("tenant_id", "project_id", "object_id", "pack_id"\) DO UPDATE SET /)
+  // conflict columns are never in the SET list (updating a key column by EXCLUDED is a no-op at best)
+  assert.match(q6c.sql, /DO UPDATE SET "id" = EXCLUDED\."id", "status" = EXCLUDED\."status" RETURNING \*$/)
+  assert.deepEqual(q6c.params, ['i1', 't1', 'p1', 'o1', 'pk1', 'installed'])
+
+  // explicit updateColumns narrows what a conflict may overwrite, and may name a column the INSERT
+  // omits (EXCLUDED carries that column's DEFAULT for the proposed row).
+  await db6c.upsertOne(
+    'integration_stock_prep_pack_installs',
+    { id: 'i2', tenant_id: 't1', project_id: 'p1', object_id: 'o1', pack_id: 'pk1', status: 'partial' },
+    { conflictColumns: ['tenant_id', 'project_id', 'object_id', 'pack_id'], updateColumns: ['status', 'last_install_at'] },
+  )
+  assert.match(mockDb6c.calls[1].sql, /DO UPDATE SET "status" = EXCLUDED\."status", "last_install_at" = EXCLUDED\."last_install_at" RETURNING \*$/)
+
+  // an UNKEYED upsert is refused: without conflict columns it is just an INSERT that can duplicate.
+  for (const badOptions of [undefined, {}, { conflictColumns: [] }, { conflictColumns: 'tenant_id' }]) {
+    let upsertErr = null
+    try { await db6c.upsertOne('integration_pipelines', { id: 'x' }, badOptions) } catch (e) { upsertErr = e }
+    assert.ok(upsertErr && /conflictColumns/.test(upsertErr.message), 'unkeyed upsert refused')
+  }
+
+  // identifier injection through a conflict column is rejected by the same whitelist.
+  let upsertIdentErr = null
+  try {
+    await db6c.upsertOne('integration_pipelines', { id: 'x', name: 'y' }, { conflictColumns: ['id"; DROP TABLE users; --'] })
+  } catch (e) { upsertIdentErr = e }
+  assert.ok(upsertIdentErr instanceof ScopeViolationError, 'conflict column injection rejected')
+
+  // an upsert whose every column is a conflict column has nothing to update — refused, not silently
+  // turned into DO NOTHING (which would be a different statement than the caller asked for).
+  let upsertNoSetErr = null
+  try {
+    await db6c.upsertOne('integration_pipelines', { id: 'x' }, { conflictColumns: ['id'] })
+  } catch (e) { upsertNoSetErr = e }
+  assert.ok(upsertNoSetErr && /no updatable column/.test(upsertNoSetErr.message))
+
   // insertMany with consistent keys
   const mockDb7 = mockDatabase()
   const db7 = createDb({ database: mockDb7 })
@@ -226,6 +283,48 @@ async function main() {
   const row = await db6b_one.selectOne('integration_pipelines', { id: 'p1' })
   assert.ok(row && row.id === 'p1', 'selectOne unwraps array-return shape')
 
+  const mockDb6b_lock = mockDatabase({ nextRows: [
+    [{ id: 'p1', status: 'approved' }],
+  ] })
+  const db6b_lock = createDb({ database: mockDb6b_lock })
+  const locked = await db6b_lock.selectOneForUpdate(
+    'integration_pipelines',
+    { id: 'p1', status: 'approved' },
+  )
+  assert.equal(locked.id, 'p1')
+  assert.match(
+    mockDb6b_lock.calls[0].sql,
+    /^SELECT \* FROM "integration_pipelines" WHERE "id" = \$1 AND "status" = \$2 LIMIT 1 FOR UPDATE$/,
+  )
+  assert.deepEqual(mockDb6b_lock.calls[0].params, ['p1', 'approved'])
+
+  // selectOneForKeyShare renders the KEY SHARE clause — not FOR SHARE, not FOR UPDATE — and is
+  // otherwise byte-identical in shape to selectOneForUpdate (whitelist, quoting, parameters).
+  const mockDb6b_keyShare = mockDatabase({ nextRows: [
+    [{ id: 'sys_1', tenant_id: 't1' }],
+  ] })
+  const db6b_keyShare = createDb({ database: mockDb6b_keyShare })
+  const pinned = await db6b_keyShare.selectOneForKeyShare(
+    'integration_external_systems',
+    { tenant_id: 't1', id: 'sys_1' },
+  )
+  assert.equal(pinned.id, 'sys_1')
+  assert.match(
+    mockDb6b_keyShare.calls[0].sql,
+    /^SELECT \* FROM "integration_external_systems" WHERE "tenant_id" = \$1 AND "id" = \$2 LIMIT 1 FOR KEY SHARE$/,
+  )
+  assert.deepEqual(mockDb6b_keyShare.calls[0].params, ['t1', 'sys_1'])
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('users', { id: 'x' }),
+    /outside the "integration_" scope/,
+    'selectOneForKeyShare enforces the same table whitelist',
+  )
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('integration_external_systems'),
+    /where clause is required/,
+    'selectOneForKeyShare refuses an unbounded lock',
+  )
+
   const mockDb6b_count = mockDatabase({ nextRows: [
     [{ count: 42 }],
   ] })
@@ -255,12 +354,69 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'updateRow'],
+      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+        // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
+        // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
+        'setTransactionIsolationLevel',
+        'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })
   })
   assert.ok(mockDb9.calls.some((c) => c.tx && /INSERT INTO "integration_runs"/.test(c.sql)))
+
+  // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
+  assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',
+    'setTransactionIsolationLevel is NOT on the root helper (autocommit would make it a silent no-op)')
+  const mockDb9b = mockDatabase()
+  const db9b = createDb({ database: mockDb9b })
+  await db9b.transaction(async (trx) => {
+    await trx.setTransactionIsolationLevel('read committed')
+    await trx.setTransactionIsolationLevel('repeatable read')
+    await trx.setTransactionIsolationLevel('serializable')
+  })
+  assert.deepEqual(
+    mockDb9b.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE', params: [], tx: true },
+    ],
+    'each whitelisted level renders its ONE fixed statement, on the transaction connection, with no parameters',
+  )
+  const hostile = [
+    'READ COMMITTED', // case is part of the key: only the exact whitelist spellings pass
+    'read uncommitted', // deliberately absent (PostgreSQL runs it as read committed)
+    "read committed; DROP TABLE users; --",
+    'read committed ',
+    '',
+    null,
+    undefined,
+    42,
+    { toString: () => 'read committed' },
+    ['read committed'],
+    'constructor',
+    '__proto__',
+    'hasOwnProperty',
+  ]
+  const mockDb9c = mockDatabase()
+  const db9c = createDb({ database: mockDb9c })
+  await db9c.transaction(async (trx) => {
+    for (const level of hostile) {
+      await assert.rejects(
+        () => trx.setTransactionIsolationLevel(level),
+        (error) => error instanceof ScopeViolationError
+          && /not one of the whitelisted levels/.test(error.message)
+          // values-free: the refusal never echoes what it was handed
+          && !error.message.includes('DROP') && !error.message.includes('READ COMMITTED'),
+        `setTransactionIsolationLevel refuses ${JSON.stringify(String(level))}`,
+      )
+    }
+  })
+  assert.equal(mockDb9c.calls.length, 0, 'a refused level issues NO statement at all')
+  assert.deepEqual(Object.keys(__internals.TRANSACTION_ISOLATION_STATEMENTS).sort(),
+    ['read committed', 'repeatable read', 'serializable'], 'the isolation whitelist is exactly three levels')
+  assert.ok(Object.isFrozen(__internals.TRANSACTION_ISOLATION_STATEMENTS), 'the isolation whitelist is frozen')
 
   // --- 8. No rawQuery export ------------------------------------------
   assert.equal(typeof db.rawQuery, 'undefined', 'db has no rawQuery')

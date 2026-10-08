@@ -1,0 +1,667 @@
+# 备料功能(K3 WISE 首 profile)开发及验证报告 — 2026-08-05
+
+> 本文是本交付线的**汇总报告**:开发了什么、每一项如何被验证、剩什么、窗口怎么执行。
+> 权威计划与逐条勘误在 `stock-preparation-k3wise-first-profile-delivery-plan-20260804.md`
+> (正文 + 附录 A–E);B4 绑定的 RATIFIED 记录在
+> `k3wise-material-list-b4-binding-draft-20260805.md`。本文不另立记录点,冲突时以上述为准。
+> 全文 values-free:只含计数、闭集 token、run/PR 引用与 PASS/FAIL。
+>
+> **2026-08-11 现行状态**:当前交付目标已收窄为单客户、只读、零外部写，并已按 §8 完成
+> 实体机功能 dry-run 验收。本文后续 Save-only 内容保留为历史规划/未来独立写操作，不得据此扩大本次结论；
+> 权威优先级见计划文档 §0。
+
+## 1. 范围(owner 四项裁决,20260805,基点 `d368700536`)
+
+`P4VerificationDecision=OPEN_MAIN_BUILD_VERIFY_MATRIX_V1`
+`K3WriteDecision=REQUIRE_NAMED_PROFILE_MAX3_AND_CONTENT_BOUND_APPROVAL`
+`EndpointMirrorDecision=KEEP_EXISTING_EXHAUSTIVE_TEST`
+`B4ProvenanceDecision=ACTION_PROFILE_VERSION_PLUS_APPROVED_CONFIG_IDENTITY`
+
+首版边界(不变):单客户、人工触发、K3 Material **Save-only**、最多 **1–3 行**;
+Submit/Audit、BOM 写、定时任务、批量自动写、MES、全面通用化 **全关**。
+
+## 2. 交付清单(全部 MERGED,含模型分配实录)
+
+| 切片 | PR | 内容 | 模型 |
+|---|---|---|---|
+| S4 | #4757 | GetList 投影补 `FItemID`(缺它则每行被 intake 拒);两个孤儿套件接线 | opus 判据 / 机械落地 |
+| S2 | #4758 | `maxApplyRows=3` 三层锁(字面量→merge 后钉→login 前拒)+ FE 无条件选 profile | opus(全为闸) |
+| S3 | #4761 | C6 K3 write profile(内容绑定 token 生命周期)+ 独立对抗审修复轮 | opus |
+| S1 | #4760 | `stock-prep-main-package-verify` lane(build→五检→同源→负控→PG 矩阵) | opus 判据(后台代理起草) |
+| S7 | #4759 | 计划附录 E(勘误 + 裁决记录) | fable(后台代理) |
+| S5-1 | #4763 | B4 合同冻结(模板 contentKey 钉字面量;profileId 语法勘误) | opus |
+| 修钉 | #4764 | 五检器 runbook 代际钉(闭集双值) | opus |
+| 整链 | #4765 | 裁决链六环单工件跑通(mock,值校验回读 + 负控) | opus |
+| 守卫 | #4766 | RATIFY 落地:Guard A(material 写必须命名 profile)+ Guard B(K3 replay 禁用) | opus 闸 / **sonnet** 套件机械变换(代理) |
+
+模型分配规则本身是实证产物(计划 §4):**判据与对抗门=opus;判据定死后的机械落地=sonnet;
+形状固定后的成文=fable**。本线四次独立审的多数发现是「过强声明」而非坏代码,佐证该分配。
+
+## 3. 验证证据表
+
+| 验证物 | 方式 | 证据 |
+|---|---|---|
+| 从 main 出包可验证 | lane **两次**运行时证据 | run 30975655789(首绿)、**run 30979764981(7/7)** —— 二者证明的是**通道可用**;30979764981 当时被指认为候选包,现已因 #4769 合入而**过期**(见 §6 步 6 的自检);074/075 于 PG 15/16/17 逐字 `executed successfully`;一字节篡改负控排他失败;排除集与 migration-replay 逐字对齐 |
+| 首跑失败的价值 | shakedown 抓真缺陷 | 五检器代际钉漂移(冻结代 vs R12 措辞)⇒ #4764 闭集双值修复;**全类机械横扫恰一处失配** |
+| 写路径三重锁 | 套件 + mutation | profile 字面量删/merge 钉删/守卫短路/FE 常量差一位/payload 去 profile ⇒ 各自红;3 行正控放行 `1 login+3 Save+0 Submit/Audit` |
+| C6 内容绑定 | 真 planner×真 adapter×mock 线 | 批准后改行 ⇒ 409 `C6_WRITE_DRY_RUN_TOKEN_MISMATCH` 且零 Save;第 4 源行 ⇒ `not_applyable` 不发 token |
+| 对抗审 P1 修复 | 交集 allowlist + fail-closed | 「预览≠写出」旁路:字面量/有效 schema 双向钉(`K3_C6_UNSUPPORTED_TARGET_FIELD`);四 mutation 红 |
+| 裁决链整链 | 单工件端到端(mock) | 读→清洗→dry-run→token→Save-only→**GetDetail 回读值校验**+未写入负控;Save 不存储/回读陈旧值两 mutation 红 |
+| Guard A/B | 双向 mutation | 武装移除⇒正控红;判定短路⇒拒绝红;replay 拒绝不消费死信(letter 保持 open),mock-target replay 成功为正控 |
+| B4 冻结 | contentKey 字面量钉 + 镜像 + 负控 | 模板漂移即红;投影镜像=活预设;`FUnitID→baseUnit` 缺失时 `baseUnit===null`(显式映射承重) |
+| 测试变换零降级 | 台账(计划 E.5) | 机制迁 BOM 逐条保留;5 行夹具被 cap 逼拆 3+2(上限真咬) |
+
+## 4. 写路径安全姿态(叠层)
+
+```
+JSON config(不可伪造 Symbol 武装)
+  └─ 命名 profile 选中 ⇒ save-only lifecycle(Submit/Audit 运行期不可达)
+       └─ maxApplyRows=3(字面量单源;adapter login 前拒;C6 plan 层同源上限)
+            └─ C6 内容绑定 token(单次/30min/绑 rowFingerprints)覆盖 dry-run→apply
+无 profile ⇒ K3_WISE_MATERIAL_PROFILE_REQUIRED(零网络)
+replay ⇒ K3_WISE_REPLAY_DISABLED(先于任何读/run 记录/adapter 创建)
+```
+
+## 5. 诚实限定
+
+- **mock pass ≠ customer live pass** —— demo 自陈;窗口执行同一条链于实体机。
+- lane 的迁移矩阵证明的是「包内迁移 **减排除集**」(逐条有档,与 migration-replay 逐字防漂)。
+- GetDetail 业务级失败映射为「缺席」:存在但因权限/锁失败的行会预览为 `add`
+  (写结果不受影响,Save 同体;1–3 行人工审为补偿控制,已文档化)。
+- 服务端证据面 values-free:脚本化回读到**存在性/业务成功**层;**值级**确认由操作员在客户 K3 客户端完成。
+
+## 6. 实体机窗口 runbook(操作员逐步)
+
+前置:#4628 五步完成(部署、迁移前建角色、external-system 记录、B4 mint 并记三元组、授权位翻正)。
+以下路由均已在 main 的路由表核实;`<...>` 为环境占位,不含真实值。
+
+### 步 0(新增,窗口**开始前**做,不在窗口内):baseUrl 字符集预检
+
+`#4769` 起,`config.baseUrl` 的**路径部分**与其它路径字段走同一条正向白名单
+(`/^\/[A-Za-z0-9\-._~/]*$/`,并整类拒绝百分号编码)。这带来一条**此前不存在的部署约束**:
+
+| baseUrl 形状 | 结果 |
+|---|---|
+| `https://k3/K3API`、`https://k3/k3cloud/K3API`、`https://192.168.1.5/K3API` | ✅ 接受 |
+| `https://k3/金蝶API`(**非 ASCII 虚拟目录**) | ❌ 拒 `K3_WISE_ENDPOINT_NOT_SAFE_RELATIVE` |
+| `https://k3/K3 API`(路径含空格) | ❌ 同上 |
+
+**为什么不放宽**:ASCII-only 是这道白名单挡住 Unicode 形近字(全角 Ｓubmit 等)的承重属性,
+放宽等于把前九轮关掉的一整类重新打开。**所以这是预检,不是待修缺陷。**
+
+**操作**:窗口前向客户取实际 baseUrl,确认路径段只含 ASCII 字母数字与 `-._~`。若客户 IIS
+用了中文虚拟目录,在**窗口之前**协商改用 ASCII 别名站点/虚拟目录,或升 owner 裁决。
+**窗口不可重试**,而这条会在 adapter 构造期即失败(读、写都进不去),故必须前置排除。
+
+### 步 0-b(新增,窗口**开始前**做):客户侧必须建**两条** K3 external-system 记录
+
+**结论**:一条 K3 记录**不能**同时承担「list 读」与「armed 写」。窗口需要两条。
+
+> ## ⚠️ 相同 baseUrl **不够** —— 必须同时满足下面四条,否则写门不可满足(owner 复审 P1)
+>
+> 本节原先只要求「相同 baseUrl」。**那会让窗口卡死**:生产路由只有在 **K3-write 的 config 带
+> `pairedReadSystemId`** 时,才把 K3-read 纳入 B4 的关系集合
+> (`http-routes.cjs`:`pipelineSystemIds: [source, target, targetSystem.config.pairedReadSystemId]`)。
+> 彩排驱动器**设了**这个字段,runbook 却漏写 —— 照 runbook 配出来的环境跑不通。
+>
+> | # | 值 | 必须是 |
+> |---|---|---|
+> | 1 | pipeline **source** | **已批准的 SQL Server source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`) |
+> | 2 | pipeline **target** | **K3-write** 记录 |
+> | 3 | K3-write 的 `config.pairedReadSystemId` | **`<K3-read 的 id>`** ← 漏了它,B4 绑不上真实 K3-read |
+> | 4 | B4 binding 的 `config.systemId` | **`<K3-read 的 id>`**(**不是** target —— 绑 target 会被 `K3_C6_B4_BINDING_SELF_REFERENTIAL` 拒) |
+>
+> ### 而且两条记录必须落在**同一个 D2 认证身份分支**上
+>
+> D2 摘要 = `HMAC(kind | origin | 该记录实际会用来认证的身份)`,**逐字镜像 adapter 的解析**。
+> 所以「相同 baseUrl」只满足 `origin` 那一项,**认证身份也必须相同**:
+>
+> | adapter 分支(按此顺序) | 两条记录必须 |
+> |---|---|
+> | `credentials.sessionId` 为真 | **相同 `sessionId`** |
+> | `authMode` ∈ {`authority-code`,`authorityCode`,`token`} | **相同 authority code**(`authorityCode`/`authCode`/`config.authorityCode`) |
+> | 否则(login) | **相同 `acctId`**(取第一个**已定义**值:`acctId`→`accountSet`→`accountSetId`) |
+>
+> 不一致的后果是 `K3_C6_B4_BINDING_INSTANCE_MISMATCH`;任一侧无法确立身份则是
+> `K3_C6_B4_BINDING_INSTANCE_UNVERIFIABLE`。两者都是 fail-closed —— **不会写错账套,但窗口会卡死**。
+>
+> ⚠️ 并且两条都必须用 **`config.baseUrl`**,不要用 `config.url` 别名 ——
+> adapter 认 `baseUrl || url`,而 D2 摘要只读 `baseUrl`,用别名会令摘要为 null(#4793,窗口后 P2)。
+
+两条记录指向**同一台**物理 K3(相同 baseUrl):
+
+| 记录 | config | 用途 |
+|---|---|---|
+| K3-read(**不选 profile**) | 带 list 读配置(`readMode:'list'`、`readList*` 一族) | 步骤 1 的 read-smoke;B4 契约描述的就是它 |
+| K3-write(**选 `material-k3wise-customer-profile-v1`**) | profile 武装,save-only + maxApplyRows=3 | C6 dry-run→apply 的写目标 |
+
+**为什么不能合并成一条**(实测,非推断):`#4769` 把 `readMode`、`readListBodyKey`、
+`readListFields`、`readListOrderBy`、`topField`、`pageIndexField`、`pageSizeField`、
+`maxListLimit`、`readListBodyTemplate` 全部列为 profile 的 forbidden overlay key。在一条
+armed 记录上,这些键在 adapter 归一化时被**静默剥除**(实测全部变 `undefined`,且 `readPath`
+被钉成 `/K3API/Material/GetDetail`)。
+
+**连首方冻结预设也被剥**:`read-smoke` 的 `k3wise.material-list.v1` 自带 `readConfigOverlay`
+(含完整 list 形状),`applyReadSmokePresetOverlay` 会把它并上去 —— 但随后的 adapter 归一化
+仍然剥掉。也就是说这道加固**不区分「操作员覆盖」与「首方预设覆盖」**。方向是 fail-closed
+(安全的那一侧),但后果是:**armed 记录做不了 list read-smoke**。
+
+**操作**:窗口前确认客户环境里这两条记录都已建、baseUrl 相同、且 K3-read 那条**没有**选
+profile。窗口不可重试,而这条会在步骤 1(read-smoke)当场失败。
+
+> ~~关联未决项:B4 绑定的 systemId 只能是 pipeline 的 source/target 之一(`#4769` 关系检查),
+> 而 K3-read 记录在「非 K3 source」的管道里两者都不是。~~
+> **已闭合(2026-08-06)**:关系集合现为 `[source, target, target.config.pairedReadSystemId]`,
+> 所以 B4 **必须**绑 `<K3-read.id>` —— 见步 0-b 的四值表。绑 target 会被
+> `K3_C6_B4_BINDING_SELF_REFERENTIAL` 拒。**此处不再有未决冲突。**
+
+1. **只读预检**:`POST /api/integration/external-systems/<K3-read.id>/read-smoke`
+   (**用 K3-read 记录**,不是 K3-write —— armed 记录的 readList* 已被 #4769 剥离)
+   (preset `k3wise.material-list.v1`)⇒ 期望 values-free 证据:业务成功、行数 ≤10、零泄漏键。
+2. **建/核窗口 pipeline**:`POST /api/integration/pipelines` —— target=K3 系统(config 已含
+   `objects.material.profile`,由部署包 FE/记录保证)、fieldMappings 与 B4 一致。
+   ⚠️ **source 必须是非 K3 系统**(见 §7.2)。本步原文只写了 target,没写 source ——
+   彩排驱动器正是在这个空白处猜了「K3 当 source」,而那**在结构上不可能成立**。窗口不可重试,
+   所以 source 必须在建 pipeline 前就被指定并核实。
+3. **dry-run**:`POST /api/integration/pipelines/<id>/external-write/dry-run`
+   (body 仅 `tenantId/workspaceId/maxRows?`;K3 目标 maxRows 天花板=3)
+   ⇒ 核验 `status=ready`、counts(`sourceRows≤3`,add/update 分布符合预期)、取得 `dryRunToken`。
+   **人工批准点 = 此预览。** 不满意即止,无任何写发生。
+4. **apply**:`POST /api/integration/pipelines/<id>/external-write/apply`
+   (body `confirm.dryRunToken`;30 分钟 TTL,单次)⇒ `written` 与预览一致,rowErrors 空。
+5. **回读**:重复步骤 1 的 read-smoke(single-record preset,按写入行键)⇒ 业务成功 + 记录存在;
+   **值级确认**:操作员在客户 K3 客户端打开该物料核对名称/规格。
+6. **留证**:dry-run/apply 响应的 values-free 字段(counts、status、closed tokens)+ run 引用
+   归档;三元组(B4 mint 时已记)与**实际部署的** `serviceRuntimeSha`、包 digest 并列。
+   ⚠️ **不要照抄任何历史 SHA。** 本步原文钉的是 `e1b91594e`,那是 #4769 门**合入之前**的
+   候选包 —— 其树中不含 `K3_WISE_PIPELINE_RUN_DISABLED` 与 `assertWireEndpointIntent`
+   (各 0 文件,已核)。装它等于把 owner 在 #4768 复审中点名的两个敞口原样带进不可重试的窗口。
+   **部署前自检(勘误 2026-08-06:改为钉「批准包身份」,并修正判定方向)**
+
+   ⚠️ **不要再追「最新 K3 合入点」。** 那个做法每次有影响 K3 写路径的修复合入就过期一次
+   (已发生两次:`e1b91594e` 早于 #4769 的安全门,`65edb98c6` 早于 #4784),而窗口不可重试。
+   正确的做法是钉**最终批准包的精确身份**:
+
+   ```
+   批准包 serviceRuntimeSha:  aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7
+   packageTgzSha256:         93aa75c9ea88ef8e52a6ebd96378ddb049e5c3bed785a40bdb4f7f2e8659d90f
+   packageZipSha256:         d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
+   出包 run:                 31103351286   (Stock-prep main package verify)
+   彩排 run:                 31103021849   (同一 head,17/17)
+   ```
+
+   **这三个值的取得方式**:出包 lane 以 `expected_sha` 钉死 —— checkout 的 HEAD 与它不符即失败,
+   所以不需要事后核对包出自哪个 commit。该 run 自报 `buildShaSourcesAgree=PASS`、
+   `buildProvenanceGitCommitMatchesBuildSha=PASS`、`packageSource=BUILT_FROM_DISPATCHED_COMMIT`,
+   且 074/075 在 PostgreSQL 15/16/17 三个版本上均 `executed successfully`。
+
+   ⚠️ **这是一个可复现的身份,不是「客户可用」的背书。** 出包 lane 自己写明其证据类是
+   **受控合成功能证据**:它证明包过五检、含并真的应用 074/075、在临时 PG 15/16/17 上干净幂等;
+   它**不建立**关于真实客户生产、sealed-snapshot 语义、规模、外部写、rollout 或
+   PLM/ERP/CRM/SRM 泛化的任何结论。三层仍是三层:
+   `mock pass ≠ rehearsal pass ≠ customer live pass`。
+
+   现场只接受**逐字等于**上面那个 SHA 的包。相等判定不会过期,也不需要有人判断
+   「哪些修复算数」。
+
+   **辅助安全检查(方向修正)** —— 若需确认某候选包**含有**某个必需修复:
+
+   ```bash
+   git merge-base --is-ancestor <必需修复的 SHA> "$serviceRuntimeSha"   # 非零 ⇒ 不含 ⇒ 拒绝
+   ```
+
+   ⚠️ **此前写反了**:原文是 `is-ancestor <候选> e6523c949`。那个方向问的是「候选是不是修复的
+   祖先」——对**恰好等于修复提交**的包也成立,于是把**正确的包判成过期包误拒**;而一个不含该
+   修复的**分叉**提交并不是修复的祖先,反而被放行。**方向反了会同时产生误拒与漏放。**
+
+   ⚠️ **为什么下界从 `65edb98c6` 上移**——这是本步记录过的**同一类失效,一个 merge 之后重演**。
+   原钉 `e1b91594e` 失效是因为它早于 #4769 的安全门;现在 `65edb98c6` 同样失效,因为它早于
+   **#4784**(`e6523c949`,"C6 loaded the TARGET with the credential-stripped accessor")。
+   在这两点之间构建的包**满足旧自检、却在窗口要跑的那一步必死**:C6 用去凭据的公开访问器
+   载入 adapter-backed 的写 target,适配器在**发出任何 wire 调用之前**抛
+   `K3_WISE_CREDENTIALS_MISSING`。**窗口不可重试**,所以这不是"跑一次看看"能兜住的。
+
+   ⚠️ **下界会继续上移。** 每次有影响 K3 写路径的修复合入 main,本行的 SHA 就过期一次。
+   照抄本行的历史 SHA 与照抄 `e1b91594e` 是同一个错误 —— 出包前请核对 main 上最后一个
+   影响该路径的合入点。
+
+**PASS 判据**:1–6 全绿且 `0 Submit / 0 Audit`。
+
+> **该不变量的实际载体**(复审后更正 —— 原文只写"服务端不变量"而未说由什么保证,
+> 而当时它确实**可被绕过**):① save-only profile 在运行期强制 `autoSubmit/autoAudit=false`
+> 并删除 submit/audit 端点;② profile 拥有的请求形状键 merge 后重钉、未声明的整形键删除
+> (含 `readBodyTemplate`/`bodyTemplate`/`passThroughBody` 等 body 注入通道);
+> ③ **无条件**守卫:任何 K3 读路径不得指向生命周期写端点(`K3_WISE_READ_PATH_IS_WRITE_ENDPOINT`)
+> —— 这一条不依赖是否选了 profile,因为 K3 **source** 管道合法无 profile;
+> ④ material 写与**预览**均要求命名 profile(`K3_WISE_MATERIAL_PROFILE_REQUIRED`);
+> ⑤ `/run` 对 K3 目标整体 fail-closed(`K3_WISE_PIPELINE_RUN_DISABLED`),C6 是唯一写入口;
+> ⑥ 预览的 auto-flag 镜像 save-only 锁 —— **预览等于写**。
+> 前三条各自由独立对抗复审构造的可执行利用推动;每条都有 mutation 探针。
+**异常恢复**:任何一步失败 ⇒ 修正后**从步骤 3 重走**(重新人工批准)。replay 已禁用,by design。
+
+## 6b. 对抗复审记录(2026-08-05,**共十一轮**;下表为前四轮)
+
+窗口 runbook 落地后经**十一轮**独立 exact-head 对抗复审(本节表格记前四轮;第五至十一轮见 #4769
+的逐轮 disposition 评论)。**同一缺陷类累计逃逸八次**:字段→跨文件→跨 profile 条件→检查早于
+归一化→`?`/`#`→单点段→段内尾点→匹配锚点。终局解法不是第九条正则,而是把守卫移到**唯一线上
+咽喉点**(`requestJson`)并对**产出的** pathname 判定,再以必填 `intent` 关闭覆盖面。
+另一再现模式:「守卫被测但**接线**未被测」出现四次(healthPath、wire gate、B4 scope、apply 侧)。
+
+前四轮累计 **3 P1 + 8 P2 CONFIRMED**,全部已修。
+P1 的三条是**同一个类的三条轴**,而我每轮只封住了刚被展示的那个实例:
+
+| 轴 | 逃逸方式 | 修法 |
+|---|---|---|
+| 字段 | 钉了 `savePath`,`readPath` 更宽(dry-run 期驱动) | 钉整个请求形状类 |
+| **跨文件** | `k3-save-body-composer.cjs` 从同一份配置读 `passThroughBody`/`bodyTemplate` | sweep 扫全部消费者,消费者清单对全仓遍历比对 |
+| **跨条件** | 整个钉在 `if (saveOnlyProfile)` 内 —— 由被防御者自愿启用 | 读路径守卫**无条件**,覆盖两个填充循环 |
+
+其余 P2 含:集合是标签而非行为(键在集合间移动全绿)、B4 绑定失去与本 pipeline 的关系、
+`previewUpsert` 缺守卫且不镜像 save-only 锁、零调用断言无正控、类型混淆探针被降级而台账称"零降级"。
+
+**方法学结论**:声称"某一类已关闭"时,**交付物必须是机械断言而非清单** ——
+本线现有 sweep 契约(遍历源码枚举读取点、要求三集合全覆盖、带匹配下限防空过)即为此。
+
+## 7. 历史未完成项与后续收口（现行状态见 §8）
+
+### 7.0 勘误(2026-08-05,owner 复审后):本节原文「代码侧无剩余工作」为**假**,撤回
+
+原文断言「唯一未完成项 = 实体机窗口执行本身;代码侧无剩余工作」。owner 复审 staging 彩排
+PR #4768 时**当场证伪**,点名两条仍然敞开的写入口:
+
+| 敞口 | 内容 |
+|---|---|
+| A | 普通 `POST /api/integration/pipelines/:id/run` 仍可**绕过 C6 token** 直接写 K3 |
+| B | 命名 profile 的 `savePath` 仍可被操作员覆盖成 `Submit`/`Audit` |
+
+两条都不是窗口操作问题,是代码侧的写路径敞口 —— 即本节当时的断言方向就是错的。
+**教训按仓内纪律记录**:「收官」类断言必须由独立门审给出,不能由交付方自证;本节原文正是
+自证。见 `feedback_completion_claim_phrasing` 与 `feedback_adversarial_review_catches_overclaims_not_just_bugs`。
+
+> ---
+> # 🔒 §7.1–§7.3 为**历史块**(裁决前的当前时态陈述,已被取代 —— 2026-08-06)
+>
+> 以下三节写于 owner 裁决与最终跑之前,通篇使用**现在时**("等待裁决"、"彩排未开始"、
+> "最终包未出"、"建议 = PLM"、"此项未定")。**这些句子在今天全部为假**,且后文的最终记录
+> **不会**让它们自动失效 —— 一个现在时声明必须在**它自己所在的位置**被撤回。
+>
+> 现况(以此为准):
+>
+> | 旧陈述 | 现况 |
+> |---|---|
+> | #4768 等待裁决 | **已合** `9a061909c`(四轮门审) |
+> | 彩排未开始 | **已跑两次**:首跑 `31084631813`、**最终跑 `31103021849` @ `aa48c3f18`**,均 17/17 |
+> | 最终包未出 | **已出并冻结**:runtime `aa48c3f18…` / tgz `93aa75c9…` / zip `d66392d9…`(出包 `31103351286`) |
+> | 建议 = PLM;此项未定 | **已裁**:当前客户源 = **已批准的 SQL Server source**;`plm:yuantus-wrapper` 为**未来 profile**、无 E2E 证据、**非当前阻塞** |
+> | R2/R3 不可推进 | 该前置已解除 |
+>
+> 逐字 token:`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`、
+> `ownerYuantusDecision=DEFERRED_FUTURE_PROFILE_NOT_CURRENT_BLOCKER`。
+>
+> 保留原文的唯一理由是**它记录了当时的判断依据**;凡与上表冲突处,一律以上表为准。
+> ---
+
+### 7.1 当前真实剩余(2026-08-05)
+
+> **状态时点提示(2026-08-07 追加)**:本表是 **2026-08-05 的时点记录**,不改写。
+> R2/R3/R4 此后已完成(#4768 已 MERGED,彩排最终跑 17/17 见 §8')。
+> §7.6 是 2026-08-07 的后续历史状态;**最终现行状态以 §8 为准**。
+
+| # | 项 | 状态 | 阻塞于 |
+|---|---|---|---|
+| R1 | **#4769** 前置门:C6-only 写入口(`/run` 与 replay 双拒)、Save endpoint 钉死、C6 消费 approved B4 binding | ✅ **MERGED 2026-08-05T18:01Z**(main `65edb98c6`),9/9 required 绿含 `integration-guard` | — |
+| R2 | **#4768** staging 彩排 | 已 rebase 到 main;exact-head 复审 **CHANGES-REQUESTED**:驱动器把 K3 当 pipeline **source**,而任何 K3 配置都不能充当 C6 source(`readSourceRows` 发裸 read ⇒ `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`/`K3_WISE_READ_KEY_REQUIRED`,**零 HTTP 调用**)⇒ 步骤 3–9 不可达 | **owner 裁决:换哪个 source**(见下 §7.2) |
+| R3 | 彩排跑绿(dispatch-only workflow,PR checks **不**执行它) | 未开始 | R2 |
+| R4 | 本 MD 与计划按彩排实测同步(§8' 前置) | **已完成(2026-08-06)**:见 §8' | R3 |
+| R5 | 目标环境 mint B4 并记三元组 | 未开始 | 运维授权(#4628) |
+| R6 | 出最终包(从 main,走 P4 lane) | 未开始 | R5 |
+| R7 | 实体机窗口执行 + 本文 §8 验收记录 | 未开始 | R6 + 三项授权位 |
+
+**R5–R7 全部阻塞在 owner/运维侧**(部署授权、建角色、external-system 记录、翻授权位、排窗),
+**不是编码工作**。R1–R4 是代码/文档侧,其中 R1 已达合并水位。
+
+### 7.2 待 owner 裁决:窗口/彩排的 **source 系统**
+
+**结论先说**:**K3 不能充当 C6 pipeline 的 source。** 这不是配置问题,是结构问题 ——
+`external-write-dry-run.cjs:427` 的 `readSourceRows()` 发的是裸 `read({object, limit, cursor})`,
+不带 key、不带 read-smoke marker。对真 adapter 用驱动器逐字配置实测三种写法:
+
+| 变体 | 结果 | HTTP 调用 |
+|---|---|---|
+| `readMode:'list'`(驱动器原样) | `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` | **0** |
+| 省略 `readMode`(默认 detail) | `K3_WISE_READ_KEY_REQUIRED` | **0** |
+| `readMode:'single_record_detail'` | `K3_WISE_READ_KEY_REQUIRED` | **0** |
+
+「零 HTTP 调用」是要点:失败发生在**任何字节上线之前**,所以 dry-run/token/apply/回读/负控
+全部不可达 —— 而那正是彩排与窗口的全部内容。
+
+**不可采取的修法**:把 read-smoke marker 透传进 `readSourceRows` 以放宽
+`K3_WISE_READ_LIST_ROUTE_UNSUPPORTED`。那是**借诊断通道夹带安全放宽**,须升 owner 裁,
+不能由彩排 lane 自行决定。
+
+**选项**(选择直接决定彩排/窗口证明了什么):
+
+| 选项 | 需要 | 证明力 |
+|---|---|---|
+| `data-source:sql-readonly` | staging 可达的库凭据 | 与仓内已裁先例一致(C6 套件与 offline demo 均用它) |
+| `metasheet:staging-source` | 先经 API 建并灌一张表 | 完全自足、无外部依赖;离客户形态最远 |
+| `plm:yuantus-wrapper` | 可达的 PLM 端点 | **最接近真实形态**(`PLM material → K3 WISE` 是本线的规范管道) |
+
+**owner 已裁(2026-08-06)**:当前客户源 = **已批准的 SQL Server source**;
+`plm:yuantus-wrapper` 为未来 profile、无 E2E 证据、非当前阻塞。上表的「推荐」一栏就此作废。
+
+**彩排落地的不是上表任一项 —— 结论补记(2026-08-06)。** 彩排跑的是
+`metasheet:staging`(证据里记作 `sourceLeg=stand-in`),它与上表的
+`metasheet:staging-source` **名称相近但不是同一条**,更不是被推荐的 `plm:yuantus-wrapper`。
+
+原因不是取舍偏好,而是**硬约束**:C6 的 `readSourceRows` 发的是裸 `read({object,limit,cursor})`,
+K3 以 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝且**零 fetch**;而 `plm:yuantus-wrapper` 的适配器
+要求 `context.api.plm` 宿主绑定,不是能 mock 的 HTTP 端点。两条推荐路径在彩排底座上都不可达。
+
+⚠️ **因此上表的推荐项至今未被验证过。** 彩排证明的是 C6 写生命周期,**不是**
+`PLM material → K3 WISE` 这条规范管道 —— 后者仍无任何端到端证据。
+这一栏保留在此,是为了防止有人读到「彩排全绿」就以为推荐路径已经跑通。
+
+~~**建议 = PLM**:彩排的价值与它同窗口的相似度成正比。代价是 staging 需要一个可达 PLM。~~
+~~**此项未定之前,R2/R3 不可推进,窗口 §6 步 2 也不完整。**~~
+
+**已撤回(2026-08-06 裁决)**:当前客户源 = **已批准的 SQL Server source**;
+`plm:yuantus-wrapper` 为未来 profile、尚无 E2E 证据、**不是当前阻塞**。此项不再"未定",
+R2/R3 的该前置已解除。
+
+### 7.3 窗口 PASS 后
+
+在本文追加「§8 实体机验收记录」(日期、run/三元组引用、PASS 表)。**已于 2026-08-11 履行。**
+
+## 7.5 实体机窗口(已授权排期,2026-08-06)
+
+`ownerEntityWindowDecision=AUTHORIZED_TO_SCHEDULE_WITH_FROZEN_AA48_PACKAGE`
+
+冻结证据:
+
+```
+runtime  aa48c3f187685b6f37aceed8cec1c5bcccc8b9a7
+tgz      93aa75c9ea88ef8e52a6ebd96378ddb049e5c3bed785a40bdb4f7f2e8659d90f
+zip      d66392d9035fd8259d1086e21d613b29f609b10762746bae3eb1836c44cfe273
+彩排     31103021849      出包验证  31103351286
+```
+
+**现场必须**:真实 SQL Server approved source、真实 K3;且**两条 K3 配置都写 `config.baseUrl`**。
+
+⚠️ **不要用 `config.url` 别名。** adapter 认 `config.baseUrl || config.url`,而 D2 的实例摘要
+只读 `config.baseUrl` —— 用别名会让摘要为 null ⇒ `INSTANCE_UNVERIFIABLE` ⇒ **写门不可满足**。
+方向是 fail-closed(不会写错账套),故登记为**窗口后 P2**(issue #4793),不阻塞本次 baseUrl 场景。
+
+---
+
+## 7.6 历史配置修复阻塞:两道门与正确的修复前提(2026-08-07,已解除)
+
+> **历史状态,已解除(2026-08-11)**:本节记录 2026-08-07 的配置阻塞;最终配置、读取和实体机结果见 §8。
+
+窗口未能开始。链条卡在**配置面修复**这一步,`readyForControlledWindow=NO`。
+
+### 7.6.1 现场报告
+
+配置负责人在 [#4628](https://github.com/zensgit/metasheet2/issues/4628) 报
+`CONFIGURATION_REPAIR_NOT_SAVED`:**已部署**的 K3 WebAPI adapter 被声明为 target-only,
+把既有 K3 target 的草稿改成 `role=source` 后**保存按钮立即被禁用**;V1 只读核验因此
+`independentVerification=FAIL`、`blockerReason=K3_CONFIG_MISMATCH`。
+
+### 7.6.2 两道门,顺序触发(与构建无关)
+
+在 `7bf2bd7a1`(0725 release)、`aa48c3f18`(冻结窗口包)、`3c9160d09`(已关闭的 #4798 head)
+三个候选构建上**逐一核验,结论一致**:
+
+| # | 门 | 位置 | 三构建 |
+|---|---|---|---|
+| 1 | 前端按 adapter 声明拦下 `role=source` | `IntegrationWorkbenchView.vue:1265` → `adapterSupportsSide` | ✓✓✓ |
+| 2 | 服务端对**已存在**记录抛 `kind and role cannot be changed after creation` | `external-systems.cjs:257-268`(`upsertExternalSystem`) | ✓✓✓ |
+
+服务端 role 是固定三值枚举(`VALID_ROLES`,`external-systems.cjs:21`),**不与 adapter 声明的
+roles 交叉校验**(`upsertExternalSystem` 全文无 adapter registry / adapter metadata 引用)。
+
+⇒ 现场看到的"保存被禁用"是**门 1 先触发**,服务端并未应答。**门 2 是下一步才会撞上的**:
+若绕过前端但仍在**现有 target 记录**上改 role,服务端不可变性会拒绝。
+
+> **因此:修复必须新建一条 K3-read 记录,而不是把现有 target 改成 source。**
+> 这一条**不依赖任何 PR 的合并**:门 2 是记录级不可变性(`external-systems.cjs:257-268`),
+> 与 adapter 怎么声明 roles 无关,任何构建下都成立。
+> 而**新建的那条记录也不需要 `source` 角色** —— 见 §7.6.3。
+
+**与本阻塞无关的一项独立就绪项**:`approvedSqlServerSourceRefPresent=NO` 现在就能按既有授权补齐 ——
+pipeline 的 source 一直是**已批准的 SQL Server source**,其 adapter 本就声明 source 侧
+(`data-source-sql-readonly-source-adapter.cjs:433`),从不经过上面两道门。
+
+### 7.6.3 正确的修复前提:K3 保持 target-only,K3-read 不需要 `source` 角色
+
+**#4798 已 CLOSED(2026-08-07T14:27:43Z),不是修复路径。** 它给 K3 adapter 加 `source` 角色,
+而那会对外宣告一项**运行期不成立**的通用 pipeline source 能力 —— UI 会允许操作员建出一条
+**首跑必失败**的 source。核验于 main `4e6a35d99`:
+
+| 事实 | 位置 |
+|---|---|
+| C6 dry-run 的 `readSourceRows` 发**字面裸读** `read({ object, limit, cursor })` | `external-write-dry-run.cjs:427` |
+| pipeline runner 的读**带** `options`,但其来源是 `pipeline.options.source` —— DB/JSON 上的普通对象 | `pipeline-runner.cjs:631` ← `resolveSourceReadOptions` `:85-103` |
+| 而 list 读的放行键是**模块私有 `Symbol`** ⇒ 任何 JSON 配置都表达不了它 | `read-smoke-marker.cjs:5` |
+| ⇒ 记录配 `readMode:'list'` 时,两个调用点的读都因缺该 Symbol 被 `K3_WISE_READ_LIST_ROUTE_UNSUPPORTED` 回绝 | `k3-wise-webapi-adapter.cjs:975-980` |
+| ⇒ 未写 `readMode` 时默认 `single_record_detail`,改由 `K3_WISE_READ_KEY_REQUIRED` 回绝(§7.2 三变体表) | `k3-wise-webapi-adapter.cjs:972` |
+
+**provenance**:§7.2 记的是 dry-run 那一条(`readSourceRows` 确为**字面**裸读),它只讲了那条路径;
+runner 这一条是**本节新增**的相邻发现,不是对 §7.2 的更正。两条的判据也不同 ——
+runner 那条并非"漏传参数",而是**结构上传不进去**:私有 Symbol 不可能出现在 JSON 配置里。
+adapter 在 main 上仍是 `roles: ['target']`(`k3-wise-webapi-adapter.cjs:2579`),**保持不变**。
+
+**而 runbook 本来就不需要 K3 持有 `source` 角色。** pipeline 的 source 仍是**已批准的 SQL Server
+source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`,§7.2);K3-read **不进 pipeline 的
+任何一端**,它在三条使用路径上全部**按 id 被引用**,而这三条**都不查 `role`**:
+
+| 用途 | 判定 | 位置 |
+|---|---|---|
+| 步 0-b / 步骤 1 的 read-smoke | 只比 `kind` 与 preset 的 `requiredKind`,**无 role 检查** | `http-routes.cjs:2810-2812` |
+| B4 关系集合 | `[source, target, target.config.pairedReadSystemId]` —— 纯 id | `http-routes.cjs:1114-1118` |
+| B4 自指守卫 | `binding.config.systemId === system.id` —— 纯 id | `k3-wise-c6-write-profile.cjs:377-384` |
+
+⇒ **K3-read = 一条无 write profile 的独立读探针记录。** 它的 `role` 由建它的路径决定
+(照工作台复制则继承 target,见 §7.6.4),**不必、也不应当是 `source`**;
+而按门 2,建成之后 role 不可再改(`external-systems.cjs:257-268`),所以这一点必须在**建记录时**就定。
+
+### 7.6.4 未决:K3-read 的凭据从哪来(待配置负责人答一个问题)
+
+两条**既有**创建路径各缺一半,合不成"有凭据 + 无 profile"的那条记录:
+
+| 路径 | 给得了 | 给不了 | 位置 |
+|---|---|---|---|
+| 工作台「复制为新连接」 | `kind`/`role`/`config`/`capabilities`(可在 config JSON 里去掉 profile) | **凭据** —— 草稿无凭据输入,保存也不发 `credentials` | `IntegrationWorkbenchView.vue:2092-2106`、`:2210-2219` |
+| K3 配置向导 | 凭据 | **无 profile 的记录** —— `role:'target'` 与 material profile 都**无条件**写死 | `k3WiseSetup.ts:1969`、`:1987` |
+
+复制也**不可能在浏览器侧补上凭据**:公开读取面只回 `hasCredentials`/`credentialFormat`/
+`credentialFingerprint`,**从不回明文**(`external-systems.cjs:115-136`)。而新建时不带 `credentials`
+⇒ 后端写 `null`(`external-systems.cjs:297`)⇒ 该记录读时必抛 `K3_WISE_CREDENTIALS_MISSING`。
+
+> **待配置负责人回答(本侧不预设答案,两条都未裁)**:
+> **现场能否重新录入 K3-read 的那份凭据?**
+>
+> - **能** ⇒ **零代码配置路径**。受控 API `POST /api/integration/external-systems` 的 create 分支
+>   **本来就收 `credentials`**:路由把 `requestBody(req)` 原样下传、无字段白名单
+>   (`http-routes.cjs:2748-2751`),规范化保留 `credentials`(`external-systems.cjs:100`),
+>   落库前加密(`:241`)。建一条 `kind=erp:k3-wise-webapi`、**不带 `objects.material.profile`**、
+>   带 list 读配置、带凭据的**新**记录即可,并按步 0-b 四值表回填
+>   `pairedReadSystemId` 与 B4 `config.systemId`。
+> - **不能** ⇒ 需要一条**窄口径的、服务端保凭据的复制**能力(明文只在服务端流转,浏览器侧做不到)。
+>   ⚠️ **它必须只做"带着凭据复制一条记录"这一件事,不得顺带给 K3 开 `source` 角色** ——
+>   那正是 #4798 被关闭的原因(§7.6.3)。
+>
+> 本侧不自行选:前者动的是**受控配置面上的数据**,后者是**新增能力面**,都不在本侧授权内。
+
+> **原 §7.6.4「本侧不自行选 (a)」的理由已作废(留痕)**:旧理由是"以 API 达成的正是为 #4798
+> 保留的那一项能力变更,绕开评审与放行"。在正确前提下 K3-read **不需要 `source` 角色**,
+> 该 API 路径**不再夹带任何能力变更**。不自行选的理由改为上面那条(动受控配置面的数据)。
+> 旧 §7.6.3(「#4798 与"合并即解除"的撤回」)所依赖的两种构建情形随 #4798 关闭一并作废:
+> 不再有等待部署的 adapter 声明变更,`packageDeployment=NOT_AUTHORIZED` 也不再是本阻塞的分支条件。
+
+### 7.6.5 时限
+
+`operationId=stockprep_aa48_readiness_verify_20260807_02`、
+`authorizationEnd=2026-08-08T08:00:00+08:00`,前置 `CONFIGURATION_REPAIR_SAVED` 未满足。
+owner 曾指示"修复保存后可直接执行 V2,无需再等 owner 回复" ⇒ 若 §7.6.4 的凭据问题不落定,
+该授权将**静默失效**,链条停在此处。是否随裁定一并重发 V2,待 owner 决定。
+
+---
+
+## 7.7 CI 侧阻碍:#4791 flake 的机制已确定性复现(2026-08-07)
+
+与窗口并行、**不需要任何授权**的一项:#4791 的 57P01 teardown flake 会红**必需**的 `test` 检查,
+拖住任何 PR。issue 原文把根因记为"in-flight query 的 rejection",**偏了一步**:
+
+> `DROP DATABASE … WITH (FORCE)` 调 `pg_terminate_backend` 后,`pg` 把终止以 **`'error'` 事件**
+> 交给拥有连接的 Client/Pool,**不是**在途 query 的 rejection —— query 上的 `.catch()` **拿不到它**。
+> 无监听器 ⇒ node uncaught ⇒ vitest `Errors: N` ⇒ **全绿但退出码 1**。
+
+复现来自 PR #4799 新套件的第一版(未给持有 client 挂 `'error'` 监听器):
+本地 `5 passed / Errors 2 / exit 1`,与 CI 签名逐字一致。**机制自此可按需复现**(时序仍不可)。
+
+修法(#4799):`ALLOW_CONNECTIONS false` → 轮询 `pg_stat_activity` 排空 → 普通 `DROP`;
+仅超时才 force 并**点名**持有者。判据是两个调用点无条件打的
+`scratchDrain=CLEAN|FORCED` —— 强制 drop 就是修复前行为,所以"CI 变绿"分不出排空生效与运气好。
+**#4791 不随 #4799 关闭**,等 CI 实报 `CLEAN`。
+
+---
+
+## 8. 实体机只读验收记录（2026-08-11）
+
+### 8.1 范围与运行身份
+
+本次验收只覆盖：真实 SQL Server approved source、真实 K3 只读探针、备料清洗与一次 C6 dry-run。
+不执行 Apply、普通 pipeline run、dead-letter replay、K3 Save/Submit/Audit，也不读取客户生产业务行。
+
+```text
+issue=4628
+baseRuntimeCommit=bb0574fcde4ad4dc1d059065c6c2348b96b54ed1
+baseArtifactId=9087053934
+reviewedOverlayPr=4860
+reviewedOverlayMergeCommit=d9a3feba2615a9c3660907451f27c3a3bff1d6c6
+reviewedOverlayRuntimeFileCount=5
+reviewedOverlayPrFileCount=7
+finalOperationId=stockprep_d9a3feba_readonly_entity_20260811_10_VALUES_FREE_TENANT_PROCESS_AUDIT_SINGLE_DRY_RUN_AND_EXACT_UNUSED_TOKEN_DELETE
+```
+
+实体机使用已验证的 `bb0574fc…` 基础运行时，加上 #4860 中部署的五个非测试运行时/配置文件;
+#4860 另含两个测试文件,PR 总计七个文件。该组合经过 owner 单独批准；不得把它改写成
+“`d9a3feba…` 完整包已重新构建并原字节验证”。
+
+### 8.2 前置与业务结果
+
+| 层 | values-free 证据 | 结果 |
+|---|---|---|
+| 包与运行时 | `_06` Phase 0：checksum、provenance、packaged/deployed K3 runtime hash；迁移与健康 | PASS |
+| 配置与真实读取 | `_07`：前后端及 tenant 绑定、配置回读、SQL Server 只读源、两行受控视图、D2 身份、K3 read-smoke 10 行 | PASS |
+| 审计能力 | #4860：tenant 分区、process epoch、values-free 闭合计数；当前 main 必需检查全绿 | PASS |
+| 单次 dry-run | `_10`：`sourceRows=2`、`planned=2`、`add=2`、`update=skip=held=failed=0`，源完整且未截断 | PASS |
+| 独立零写证据 | 同 epoch/tenant：`GetDetail=2` 正控；Save/Submit/Audit/其它生命周期写、Apply/普通 run/replay 全部 0 | PASS |
+| 内部 token 收口 | 只按锁定行定位删除恰一条未使用 `_10` token；未读取、输出或持久化 token 值 | PASS |
+
+最终回执：[comment 5249278343](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249278343)；
+阶段关闭：[comment 5249316596](https://github.com/zensgit/metasheet2/issues/4628#issuecomment-5249316596)。
+#4628 已以 `COMPLETED` 关闭。
+
+### 8.3 验收判定
+
+```text
+stageDisposition=COMPLETED
+acceptedEvidenceClass=CONTROLLED_TEST_ONLY_FUNCTIONAL_DRY_RUN
+singleFinalDryRun=PASS
+externalWrites=0
+apply=NOT_RUN
+k3SaveCalls=0
+k3SubmitCalls=0
+k3AuditCalls=0
+flagsRestoredOff=YES
+customerProductionCertification=NOT_CLAIMED
+```
+
+因此，当前**单客户、只读、零外部写**交付目标的实体机业务功能验收完成。S4 已由 #4757 合入，
+数据库读取、K3 读取、备料清洗、dry-run 计划和零写证据形成闭环。
+
+### 8.4 复跑与结论边界
+
+`_10` 已关闭且禁止重试。复跑必须使用新 operation id、新 owner 授权和新冻结运行时身份；before/after
+审计必须绑定同一 tenant 与同一 `processEpoch`，以 `GetDetail` 非零增量为正控，并再次证明所有写计数为 0。
+任一计数不可用或 epoch 改变都不得判 PASS。完整复跑规则以权威计划 §0.3 为准。
+
+本次证据不授权或证明 Save-only Apply、回滚、生产认证、客户生产业务行读取、规模能力，亦不证明
+PLM/ERP/CRM/SRM 全面通用化。上述能力进入后续独立路线。
+
+## 8'. staging 彩排实测(最终跑,2026-08-06)
+
+> **编号说明（已履行）**:本文 §7.3 与 R7 早已把「§8」预留给**实体机验收记录**，
+> 该记录现已在上节产生。本节仍是 staging 彩排(第二层)，与实体机验收(第三层)是不同的东西，
+> **不得互相顶替**，故继续编号为 §8'。
+
+### 8'.1 运行标识
+
+- workflow:`Stock-prep staging window rehearsal (ephemeral substrate)`
+- **run id `31103021849`,head `aa48c3f18`(#4790 D2 窄修复的合并点)—— 这是最终跑**
+- 首跑 `31084631813` @ `9a061909c` 保留作历史:彼时 D2 门还是 origin 相等,
+  且在 offline PoC 里**结构性缺席**。**同样的 17/17,证明力不同**
+- 结论 success,28 个 step 全过,0 失败
+- 起止 `2026-08-06T12:48:48Z → 2026-08-06T12:51:44Z`
+- 这是该 lane 的**第二次运行**,也是**最终跑**。
+  首跑为 `31084631813` @ `9a061909c`,`08:22:31Z → 08:25:17Z` —— 该 lane 建成以来的首次运行
+  (此前 dispatch-only、零运行时证据)。
+  ⚠️ **勘误**:本节曾把最终跑的 run id 与**首跑的时间戳**并列。两次跑的证据不得混用 ——
+  行数相同(17/17)不代表是同一次运行,更不代表证明力相同(见 §8'.4)。
+
+### 8'.2 逐步实测值
+
+| 步 | 实测 |
+|---|---|
+| create-source-system | 201 |
+| create-target-system | 201 |
+| staging-install | 201,`sheetCount=5`,`projectIdPresent=true` |
+| create-staging-source | 201,`sourceLeg=stand-in` |
+| mint-seed-token | 201,`usableShape=true` |
+| resolve-staging-field-map | 200,`mappedFields=9` |
+| seed-staging-rows | `requested=2 accepted=2` |
+| b4-mint | 201,`mintedVersion=1`,`contentKeyPresent=true` |
+| b4-approve | 200,`bindingStatus=approved` |
+| preflight-list-shape-probe | `listRowCountKey=recordCount` |
+| preflight-list-read-smoke | 200,`evidenceOk=true`,`rowCount=2`,`errorCode=null` |
+| create-pipeline | 201 |
+| **dry-run** | 200,`planStatus=ready`,**`sourceRows=2 add=2 failed=0 held=0`**,`tokenPresent=true` |
+| **apply** | 200,**`written=2 failed=0`** |
+| token-single-use | **409 `C6_WRITE_DRY_RUN_TOKEN_INVALID`** |
+| read-back-written-key | 200,`evidenceOk=true`,`recordPresent=true`,`recordCount=1` |
+| read-back-negative-control | 200,`evidenceOk=false`,`errorCode=K3_WISE_READ_BUSINESS_ERROR` |
+
+lane 级实测:
+
+- 迁移:`migrationsKnown=309 migrationsConsidered=303 migrationsSkippedByName=6` —— 差值恰为排除集大小
+- `migrationProvenApplied=074_repair_sealed_export_runtime_authority_privileges.sql`
+- `migrationProvenApplied=075_grant_sealed_export_runtime_authority_row_lock.sql`
+- `integrationPluginStatus=active`,`loginTokenObtained=PASS`
+- wire:`wireGetListCallsLogged=1`,`wireSaveCallsLogged=2`,Submit/Audit 为 0
+
+### 8'.3 `add=2` 为什么是那条 P1 的判别器
+
+两条 fieldMapping 都带 `required`;`validateRecord` 的 required 用 `isEmpty()`,覆盖
+undefined / null / 纯空白;校验失败即 `counts.failed += 1; continue`,该行到不了
+`counts[decision]`;而 `canApply` 要求 `failed===0 && held===0`。所以 `code`/`name` 为空
+**在结构上无法**产出 `add=2`。这不是「没看见错误」,是空值产不出这个数。
+
+### 8'.4 这次绿的边界(必须与 8'.2 同等醒目)
+
+0. **当前客户源 = 已批准的 SQL Server source**(`ownerCurrentSourceDecision=SQLSERVER_APPROVED_SOURCE`)。
+   `plm:yuantus-wrapper` 留作**未来 profile**、尚无 E2E 证据、**不是当前阻塞**
+   (`ownerYuantusDecision=DEFERRED_FUTURE_PROFILE_NOT_CURRENT_BLOCKER`)。
+   **staging 只证明写生命周期**,不证明任何客户源连接器。
+1. **源腿是替身。** 证据自己携带了这句(`sourceLeg=stand-in`,`customer source connector
+   NOT exercised`)。**C6 写生命周期被证明了,客户真实源连接器没有。**
+2. **对端是仓内 mock K3,不是实体机。** 三层是 `mock pass ≠ rehearsal pass ≠ customer live pass`,
+   本次跑通的是第二层。
+3. **B4 的 D2 已按 owner 裁决定形为「职责分离」**(`ownerD2CeilingDecision=ACCEPT_SEPARATION_NO_DISSOLVE`):
+   **D2 只负责**证明 K3 读回绑定与 K3 写目标属于**同一认证身份**(判据已由 #4790 升级为
+   逐字镜像 adapter 的认证解析:session / authority-code|token / login-acctId);
+   **SQL Server 来源与数据血缘**由 pipeline/source binding、dry-run token 与实体机运行证据负责。
+   两者本来就是不同责任,**不要求** K3 read 记录成为 C6 数据来源。DISSOLVE 当前不授权。
+
+准确表述是「窗口 runbook 已对着真实部署包整条跑通」,而不是「备料功能已完整验证」。

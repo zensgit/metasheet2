@@ -1,5 +1,6 @@
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
+import { isDurableDeliveryEnabled } from '../multitable/automation-durable-delivery'
 
 const logger = new Logger('ApprovalCompletionEvent')
 
@@ -121,6 +122,12 @@ export function buildApprovalCompletionEvent(input: {
 }
 
 export function emitApprovalCompletionEvent(event: ApprovalCompletionEventV1): void {
+  // P1#2e producer family 1 — REPLACE guard (the load-bearing suppression). When durable delivery is ON, the
+  // SAME-transaction outbox enqueue at every completion build site (ApprovalProductService completion sites ×6,
+  // via `enqueueApprovalEventIfDurable`) is the delivery path; the family-1 invariant is that EVERY build site
+  // enqueues in-txn, so this legacy post-commit emit would DOUBLE-deliver (the durable consumers call the same
+  // handlers, and the webhook sink is not cross-path idempotent). Flag OFF ⇒ legacy emit (byte-identical).
+  if (isDurableDeliveryEnabled()) return
   try {
     eventBus.emit(event.eventType, event)
   } catch (error) {

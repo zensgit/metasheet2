@@ -6,6 +6,8 @@ import { issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { translateRecoveryConflict } from '../db/recovery-conflict'
+import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   fetchDingTalkAppAccessToken,
   getDingTalkDepartmentDetail,
@@ -32,12 +34,35 @@ import {
   isNamespaceAdmissionControlledResource,
   normalizeNamespace,
 } from '../rbac/namespace-admission'
+import { assignUserRoles, type RoleAssignmentScope } from '../rbac/role-assignment'
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import {
+  buildUnusablePasswordHash,
+  isDirectoryPendingActivationEnabled,
+} from '../auth/user-activation'
+import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import {
+  captureApprovalDepartureManagerContexts,
+  type ApprovalDepartureManagerContext,
+} from '../services/ApprovalDirectoryOrg'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
+import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
+import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
+import {
+  DIRECTORY_DEPROVISION_POLICIES,
+  resolveDirectoryDeprovisionPolicy,
+  selectLeastDestructiveDirectoryDeprovisionPolicy,
+  type DirectoryDeprovisionPolicy,
+} from './deprovision-planner'
+import {
+  lockUsersForAccessGraphWrite,
+  supersedeDeprovisionEvidenceForAccessGraphWrite,
+  type AccessGraphTransactionClient,
+} from './access-graph-mutex'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -158,6 +183,7 @@ type DirectoryAccountRow = {
   name: string
   email: string | null
   mobile: string | null
+  is_active: boolean
 }
 
 type DirectoryAccountLinkRow = {
@@ -259,6 +285,7 @@ type DirectoryBindingTargetAccountRow = {
   name: string
   email: string | null
   mobile: string | null
+  is_active: boolean
 }
 
 type DirectoryAccountLinkedUserRow = {
@@ -266,6 +293,14 @@ type DirectoryAccountLinkedUserRow = {
   local_user_email: string | null
   local_user_username: string | null
   local_user_name: string | null
+}
+
+type DirectorySyncPriorAccessRow = {
+  account_id: string
+  external_user_id: string
+  is_active: boolean
+  link_status: string | null
+  local_user_id: string | null
 }
 
 export type DirectoryIntegrationSummary = {
@@ -599,7 +634,11 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   }
   temporaryPassword?: string
   inviteToken: string | null
-  onboarding: ReturnType<typeof buildOnboardingPacket>
+  /** Null when pending_activation — no usable password / login messaging. */
+  onboarding: ReturnType<typeof buildOnboardingPacket> | null
+  /** Actual grant applied (pending forces false regardless of request). */
+  enableDingTalkGrantApplied: boolean
+  activationStatus: 'pending_activation' | 'activated'
 }
 
 export type DirectoryAccountBatchAdmissionOutcome = {
@@ -1198,9 +1237,12 @@ export type DirectoryIdentityExistingLink = {
 }
 
 export type DirectoryIdentityMatchMaps = {
-  externalIdentityMap: Map<string, string>
+  scopedExternalIdentityMap: Map<string, string>
   scopedUnionIdentityMap: Map<string, string>
   scopedOpenIdentityMap: Map<string, string>
+  ambiguousScopedExternalIdentityKeys: Set<string>
+  ambiguousScopedUnionIdentityKeys: Set<string>
+  ambiguousScopedOpenIdentityKeys: Set<string>
   emailMap: Map<string, string>
   mobileMap: Map<string, string>
   ambiguousEmailKeys: Set<string>
@@ -1218,8 +1260,10 @@ export type DirectoryIdentityMatchOutcome =
 /**
  * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
  * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
- * instead of approximating it. Order matters and mirrors apply: already-linked short-circuit,
- * then external-identity (union/open id or external_key), then unique email, then unique
+ * instead of approximating it. Order matters and mirrors apply: ambiguous external identity
+ * first (including an account that was linked before the duplicate appeared), then the
+ * already-linked short-circuit, external-identity (union/open id or external_key), unique email,
+ * then unique
  * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
  * apply reaches the auto-admission branch — that is the exact condition preview must gate
  * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
@@ -1230,13 +1274,26 @@ export function resolveDirectoryIdentityMatch(
   existingLink: DirectoryIdentityExistingLink | null | undefined,
   maps: DirectoryIdentityMatchMaps,
 ): DirectoryIdentityMatchOutcome {
+  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
+  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
+  const scopedExternalIdentityKey = buildScopedIdentityKey(account.corpId, account.externalKey)
+  const hasAmbiguousExternalIdentity = (
+    (scopedExternalIdentityKey !== null
+      && maps.ambiguousScopedExternalIdentityKeys.has(scopedExternalIdentityKey))
+    || (scopedOpenIdentityKey !== null
+      && maps.ambiguousScopedOpenIdentityKeys.has(scopedOpenIdentityKey))
+    || (scopedUnionIdentityKey !== null
+      && maps.ambiguousScopedUnionIdentityKeys.has(scopedUnionIdentityKey))
+  )
+  if (hasAmbiguousExternalIdentity) return { matched: 'ambiguous' }
+
   if (existingLink && existingLink.link_status === 'linked' && existingLink.local_user_id) {
     return { matched: 'already_linked' }
   }
 
-  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
-  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
-  const externalIdentityUserId = maps.externalIdentityMap.get(account.externalKey)
+  const externalIdentityUserId = (scopedExternalIdentityKey
+    ? maps.scopedExternalIdentityMap.get(scopedExternalIdentityKey)
+    : undefined)
     || (scopedOpenIdentityKey ? maps.scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
     || (scopedUnionIdentityKey ? maps.scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
   if (externalIdentityUserId) {
@@ -1275,13 +1332,11 @@ export function resolveDirectoryIdentityMatch(
  * off — the shipped default — nothing is written and the run reports exactly what it
  * WOULD have done, giving an operator the preview the roadmap asks for before enabling.
  */
-export type DirectoryDeprovisionPolicy = 'manual_review' | 'disable_grant_only' | 'mark_inactive'
-
-export const DIRECTORY_DEPROVISION_POLICIES: readonly DirectoryDeprovisionPolicy[] = [
-  'manual_review',
-  'disable_grant_only',
-  'mark_inactive',
-]
+export {
+  DIRECTORY_DEPROVISION_POLICIES,
+  resolveDirectoryDeprovisionPolicy,
+}
+export type { DirectoryDeprovisionPolicy }
 
 export function isDirectoryDeprovisionEnabled(): boolean {
   return ['true', '1', 'yes'].includes(
@@ -1293,29 +1348,87 @@ export function isDirectoryDeprovisionEnabled(): boolean {
  * An unrecognised stored value must never be interpreted as "do something destructive".
  * Anything we do not understand degrades to review-only.
  */
-export function resolveDirectoryDeprovisionPolicy(
-  integrationDefault: string | null | undefined,
-  accountOverride: string | null | undefined,
-): DirectoryDeprovisionPolicy {
-  const candidate = normalizeText(accountOverride) || normalizeText(integrationDefault)
-  return (DIRECTORY_DEPROVISION_POLICIES as readonly string[]).includes(candidate)
-    ? (candidate as DirectoryDeprovisionPolicy)
-    : 'manual_review'
-}
-
 export type DirectoryDeprovisionOutcome = {
   applied: boolean
-  /** Number of PEOPLE, not accounts — a user reached through two departed accounts counts once. */
+  /**
+   * W4-PRE-1d (owner P2 item 1, #4530 review, issuecomment-5043752399, 2026-07-22): the
+   * ORG-MEMBERSHIP candidate set — number of PEOPLE (not accounts; a user reached through two
+   * departed accounts counts once) who, in THIS run's org, hold no OTHER active linked
+   * directory account in that SAME org. This is now the circuit breaker's own input (owner P2
+   * item 3) — see `evaluateDirectoryDeprovisionCircuitBreaker`'s call site below. Before
+   * W4-PRE-1d this field was computed from a GLOBAL "no active binding ANYWHERE" guard, which
+   * silently dropped a person who departed org A but is still employed in org B out of
+   * candidacy entirely — see the file-level W4-PRE-1d note on `applyDirectoryDeprovisionPolicies`
+   * for the full owner-confirmed defect. That global guard still exists — see
+   * `globalCandidateCount` below — but it no longer gates membership candidacy, only the
+   * grant/platform-user actions.
+   */
   candidateCount: number
   manualReviewCount: number
+  /**
+   * W4-PRE-1d (owner P2 item 2): the GLOBAL candidate set, restricted to non-`manual_review`
+   * org-membership candidates (`candidateCount` above) who ALSO hold no other active linked
+   * directory account ANYWHERE (any org) — the pre-existing "任意位置无活跃绑定" guard,
+   * relocated here from candidate selection. This is the set eligible for
+   * `grantsDisabledCount` / `usersDeactivatedCount` this run; by construction it equals
+   * `grantsDisabledCount` (both increment on the exact same condition, before the `enabled`
+   * gate, mirroring that field's own attempt-not-flip semantics) — named separately so the
+   * SET is visible on its own in run stats/logs per the two-candidate-set observability
+   * requirement, not only inferable from the grant-specific field.
+   */
+  globalCandidateCount: number
   grantsDisabledCount: number
   usersDeactivatedCount: number
+  /**
+   * W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22, review-finding observability gap):
+   * how many PEOPLE this run attempted a `user_orgs` deactivation for — every non-`manual_review`
+   * org-membership candidate (W4-PRE-1d: no longer the same set as `grantsDisabledCount` — see
+   * that field's own doc-comment on the W4-PRE-1d split), since the write is gated by the exact
+   * same `if (options.enabled)` block for the exact same candidates. Named separately so the
+   * `user_orgs` consequence is visible on its own in run stats/logs rather than requiring the
+   * reader to know it is implied by `grantsDisabledCount`. Like that field, this counts an
+   * ATTEMPT (preview mode included) — it does NOT mean the row actually flipped:
+   * `deactivateUserOrgMembershipIfNoOtherActiveBinding` no-ops (without erroring) when the
+   * org-scoped sibling check finds another active binding, or when no `user_orgs` row exists
+   * yet. Whether it actually flipped is not tracked (the shared
+   * helper's `UPDATE` has no `RETURNING`); this is attempt-visibility, not flip-visibility.
+   */
+  membershipDeactivationAttemptedCount: number
+  /**
+   * Delta-review NIT-D3: per-candidate races (vanished user / concurrently-unbound source) are
+   * SKIPPED rather than aborting the run — counted here so a run that silently skipped people is
+   * distinguishable from one that considered them, without digging through logs.
+   */
+  skippedCandidateCount: number
   /** Set when the circuit breaker refused to act; `applied` is forced false. */
   abortedReason: DirectoryDeprovisionAbortReason | null
   affected: Array<{
     directoryAccountId: string
     localUserId: string
     policy: DirectoryDeprovisionPolicy
+    /**
+     * W4-PRE-1d (owner P2 item 2): whether this person was in `globalCandidateCount` — no
+     * other active linked directory account ANYWHERE (any org) at the time the global check
+     * ran. `false` means org-membership deactivation was (maybe) attempted but grant-disable
+     * and platform-user deactivation were NOT — they stayed exactly as they were. Values-free:
+     * a boolean, not the sibling's identity.
+     */
+    globallyClear: boolean
+  }>
+  /**
+   * W4-PRE-1c item B (owner 裁决②, #4522 rev3 review, 2026-07-22): `manual_review` never
+   * writes anything — `manualReviewCount` alone cannot answer WHO is pending. This is the
+   * same (directoryAccountId, localUserId) shape as `affected`, plus `orgId` (every entry
+   * from one call shares the same org, but the run-stats consumer — `GET
+   * /integrations/:integrationId/runs`, see `admin-directory.ts` — should not have to
+   * cross-reference the integration to learn it). Populated regardless of `enabled`
+   * (preview and real runs both resolve policy the same way; only the WRITE is gated).
+   * Values-free: ids only, no name/email/mobile.
+   */
+  manualReviewPending: Array<{
+    directoryAccountId: string
+    localUserId: string
+    orgId: string
   }>
 }
 
@@ -1323,16 +1436,6 @@ type DeprovisionCandidateRow = {
   directory_account_id: string
   local_user_id: string
   deprovision_policy_override: string | null
-}
-
-/**
- * Least-destructive wins. A user reached through several departed accounts is deprovisioned
- * by the *safest* policy any of them names: if one binding says review-only, a human looks.
- */
-const DEPROVISION_POLICY_SEVERITY: Record<DirectoryDeprovisionPolicy, number> = {
-  manual_review: 0,
-  disable_grant_only: 1,
-  mark_inactive: 2,
 }
 
 /**
@@ -1363,10 +1466,35 @@ export function evaluateDirectoryDeprovisionCircuitBreaker(options: {
   return null
 }
 
+/**
+ * W4-PRE-1d — candidate-set split (owner P1/P2, #4530 review, issuecomment-5043752399,
+ * 2026-07-22).
+ *
+ * Owner's confirmed P1, verbatim: "全局 sibling guard（directory-sync.ts:1425）把「A 离职但仍
+ * 在 B 任职」的用户整体排除出候选集 ⇒ A/B membership 都保持 active"。Before this PR, the ONE
+ * candidate-selection query used a GLOBAL "no active linked directory account anywhere" guard
+ * for everything: whether a person was a candidate AT ALL, whether their `user_orgs` row for
+ * THIS org got deactivated, and whether their grant/platform account did too. A person who left
+ * org A's directory but is still genuinely employed via org B's directory was globally
+ * disqualified from candidacy — org A's own membership stayed active forever, with no other
+ * mechanism to ever clear it.
+ *
+ * The fix splits candidacy into the two sets the owner named:
+ *   1. ORG-MEMBERSHIP candidates (`candidateCount` / `byUser` below) — org-scoped: excluded
+ *      only by another ACTIVE linked account in THIS SAME org. Governs `user_orgs` deactivation
+ *      AND is now the circuit breaker's input (owner P2 item 3).
+ *   2. GLOBAL candidates (`globalCandidateCount` / `globallyClearUserIds` below) — the
+ *      pre-existing "anywhere" guard, relocated here. Governs ONLY the DingTalk grant-disable
+ *      and (for `mark_inactive`) `users.is_active` writes.
+ * A person can now be set-1-yes/set-2-no: org A membership deactivates, grant and platform
+ * account survive because org B still vouches for them.
+ */
 export async function applyDirectoryDeprovisionPolicies(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
     integrationId: string
+    runId: string
+    triggeredBy: string
     /** Ids of the accounts this run *transitioned* to inactive. NOT the lifetime backlog. */
     deactivatedAccountIds: string[]
     /** How many accounts the DingTalk fetch actually returned — the circuit breaker's input. */
@@ -1380,22 +1508,35 @@ export async function applyDirectoryDeprovisionPolicies(
     applied: options.enabled,
     candidateCount: 0,
     manualReviewCount: 0,
+    globalCandidateCount: 0,
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
+    membershipDeactivationAttemptedCount: 0,
+    skippedCandidateCount: 0,
     abortedReason: null,
     affected: [],
+    manualReviewPending: [],
   }
 
   if (options.deactivatedAccountIds.length === 0) return outcome
 
-  // Accounts this run just deactivated, whose linked local user has NO other active linked
-  // directory account ANYWHERE.
+  // W4-PRE-1d (owner P2, #4530 review, issuecomment-5043752399, 2026-07-22): resolved EAGERLY
+  // now — the org-membership candidate SELECT below is itself org-scoped and needs it as a
+  // WHERE parameter. (Pre-W4-PRE-1d this was resolved lazily; that is no longer possible.)
+  const orgId = await resolveDirectoryAccountOrgId(client, options.integrationId)
+
+  // W4-PRE-1d item 1 (owner P2, #4530 review — the owner's own confirmed-fact quote: "全局
+  // sibling guard（directory-sync.ts:1425）把「A 离职但仍在 B 任职」的用户整体排除出候选集 ⇒
+  // A/B membership 都保持 active"):
   //
-  // The sibling guard is deliberately NOT scoped by integration_id, and that is the whole
-  // point: `directory_account_links` is unique on directory_account_id only — local_user_id
-  // carries a plain index — so N accounts map to 1 user. A rehire (the old account departs,
-  // the new one links via the stable unionId) or a second integration would otherwise
-  // deactivate a person who is actively employed, with no way to undo it.
+  // ORG-MEMBERSHIP candidates — accounts this run just deactivated, whose linked local user
+  // has no OTHER active linked directory account in THIS SAME org (`i.org_id = $2`). Mirrors
+  // `deactivateUserOrgMembershipIfNoOtherActiveBinding`'s own org-scoped predicate exactly
+  // (same three clauses: linked, active, same org) so candidate SELECTION and the WRITE agree
+  // on who still "works here". A user who departed org A but is still actively employed in a
+  // DIFFERENT org B is now correctly a candidate for org A (the P1 defect this fixes) — the
+  // separate GLOBAL guard below decides only whether the grant/platform-user actions may also
+  // fire, never whether org A's own membership may be deactivated.
   const candidates = await client.query(
     `SELECT a.id::text AS directory_account_id,
             l.local_user_id,
@@ -1406,15 +1547,18 @@ export async function applyDirectoryDeprovisionPolicies(
         AND l.link_status = 'linked'
         AND l.local_user_id IS NOT NULL
       WHERE a.id = ANY($1::uuid[])
+        AND a.is_active = FALSE
         AND NOT EXISTS (
           SELECT 1
             FROM directory_account_links sibling_link
             JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+            JOIN directory_integrations sibling_integration ON sibling_integration.id = sibling.integration_id
            WHERE sibling_link.local_user_id = l.local_user_id
              AND sibling_link.link_status = 'linked'
              AND sibling.is_active = true
+             AND sibling_integration.org_id = $2::text
         )`,
-    [options.deactivatedAccountIds],
+    [options.deactivatedAccountIds, orgId],
   )
 
   // One decision per PERSON, not per account: a user reached through two departed accounts
@@ -1423,11 +1567,24 @@ export async function applyDirectoryDeprovisionPolicies(
   for (const row of candidates.rows as DeprovisionCandidateRow[]) {
     const policy = resolveDirectoryDeprovisionPolicy(options.integrationDefaultPolicy, row.deprovision_policy_override)
     const existing = byUser.get(row.local_user_id)
-    if (!existing || DEPROVISION_POLICY_SEVERITY[policy] < DEPROVISION_POLICY_SEVERITY[existing.policy]) {
-      byUser.set(row.local_user_id, { directoryAccountId: row.directory_account_id, policy })
+    const selectedPolicy = existing
+      ? selectLeastDestructiveDirectoryDeprovisionPolicy([
+          existing.policy,
+          policy,
+        ])
+      : policy
+    if (!existing || selectedPolicy !== existing.policy) {
+      byUser.set(row.local_user_id, {
+        directoryAccountId: row.directory_account_id,
+        policy: selectedPolicy,
+      })
     }
   }
 
+  // W4-PRE-1d item 3 (owner P2 — "breaker 改用组织成员候选数（防大批跨组织失活绕上限）"): the
+  // breaker's input is the ORG-MEMBERSHIP candidate count computed above, not a
+  // globally-filtered count — a batch of cross-org membership deactivations can no longer
+  // slip under the cap just because each person also holds an active binding elsewhere.
   outcome.candidateCount = byUser.size
 
   const abortReason = evaluateDirectoryDeprovisionCircuitBreaker({
@@ -1446,40 +1603,81 @@ export async function applyDirectoryDeprovisionPolicies(
     return outcome
   }
 
-  for (const [localUserId, { directoryAccountId, policy }] of byUser) {
+  const orderedCandidates = [...byUser.entries()].sort(([leftUserId], [rightUserId]) =>
+    leftUserId.localeCompare(rightUserId),
+  )
+  for (const [localUserId, { directoryAccountId, policy }] of orderedCandidates) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
+      // Owner 裁决② (#4522 rev3 review — issuecomment-5042388830: "manual_review 保持 active
+      // 并暴露待人工确认状态") — never a write, membership stays exactly as it was; only the
+      // pending-confirmation state is exposed (org/membership-scoped) on the existing
+      // run-stats surface.
+      outcome.manualReviewPending.push({ directoryAccountId, localUserId, orgId })
       continue
     }
 
-    outcome.affected.push({ directoryAccountId, localUserId, policy })
-
-    outcome.grantsDisabledCount += 1
-    if (options.enabled) {
-      await client.query(
-        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-         VALUES ($1, $2, FALSE, $3, NOW(), NOW())
-         ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
-        [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
+    // D4: in write mode the helper acquires the canonical `users` row lock FIRST (its own
+    // statement), then re-reads both candidacy scopes in a SEPARATE statement whose snapshot
+    // postdates the lock — the two must never share a statement, or the subqueries evaluate on
+    // the pre-wait snapshot (adversarial-review P1, proved with a two-connection race; see
+    // `lockCandidateUser` in deprovision-ledger.ts). Access graph, generation, event and effects
+    // then commit or roll back together on this SAME transaction client.
+    const result = await applyDirectoryDeprovisionCandidate(client, {
+      localUserId,
+      orgId,
+      integrationId: options.integrationId,
+      directoryAccountId,
+      runId: options.runId,
+      triggeredBy: options.triggeredBy,
+      policy,
+      write: options.enabled,
+    })
+    if (result.skipReason) {
+      // Per-candidate race (user vanished / source unbound mid-run): skip THIS person, never
+      // abort the whole sync run — with the flag off this path must be indistinguishable from
+      // a no-op preview. Counted on the outcome so skips are visible in run stats, not only in
+      // logs (delta-review NIT-D3).
+      outcome.skippedCandidateCount += 1
+      logger.warn(
+        `Directory deprovision skipped ${localUserId} for ${options.integrationId}: ${result.skipReason}`,
       )
+      continue
     }
+    const effectTypes = new Set(result.plan.effects.map((effect) => effect.type))
+    if (effectTypes.size === 0) continue
 
-    if (policy === 'mark_inactive') {
+    outcome.affected.push({
+      directoryAccountId,
+      localUserId,
+      policy,
+      globallyClear: result.globallyClear,
+    })
+    if (effectTypes.has('membership_changed')) {
+      outcome.membershipDeactivationAttemptedCount += 1
+    }
+    if (result.globallyClear) {
+      outcome.globalCandidateCount += 1
+    }
+    // ATTEMPT semantics, matching this field's own doc-comment and the OPS-01 run-stats pinned
+    // by the orchestration suite: every globally-clear candidate gets the disabled-grant
+    // bookkeeping upsert (whether or not a grant previously existed), so the count follows the
+    // bookkeeping write. Whether a grant was ACTUALLY taken away is the ledger's job — the
+    // `grant_changed` effect stays gated on the pre-locked "was enabled" read.
+    if (result.globallyClear) {
+      outcome.grantsDisabledCount += 1
+    }
+    if (effectTypes.has('user_changed')) {
       outcome.usersDeactivatedCount += 1
-      if (options.enabled) {
-        await client.query(
-          `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
-          [localUserId],
-        )
-      }
     }
   }
 
   if (!options.enabled && outcome.candidateCount > 0) {
     logger.info(
-      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} person(s) — `
-      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled. `
+      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} org-membership `
+      + `candidate(s) (${outcome.globalCandidateCount} also globally clear) — `
+      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled, `
+      + `and ${outcome.membershipDeactivationAttemptedCount} org membership(s) (user_orgs) would be deactivation-attempted. `
       + `Affected: ${outcome.affected.map((a) => a.localUserId).join(', ') || '(none)'}. `
       + 'Set DIRECTORY_DEPROVISION_ENABLED=true to apply.',
     )
@@ -1804,19 +2002,18 @@ function buildScopedIdentityKey(corpId: string | null | undefined, providerId: s
   const normalizedProviderId = normalizeText(providerId)
   if (!normalizedProviderId) return null
   const normalizedCorpId = normalizeText(corpId)
-  return normalizedCorpId ? `${normalizedCorpId}:${normalizedProviderId}` : `global:${normalizedProviderId}`
+  // Delimiter concatenation is not injective: ('a:b', 'c') and ('a', 'b:c') collide.
+  return JSON.stringify([normalizedCorpId || null, normalizedProviderId])
 }
 
 function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, openId: string | null | undefined, unionId: string | null | undefined): string {
   const normalizedCorpId = normalizeText(corpId)
   const normalizedOpenId = normalizeText(openId)
   const normalizedUnionId = normalizeText(unionId)
+  const primaryId = normalizedOpenId || normalizedUnionId
 
-  if (normalizedCorpId && normalizedOpenId) {
-    return `${normalizedCorpId}:${normalizedOpenId}`
-  }
-
-  return normalizedUnionId || normalizedOpenId
+  if (!primaryId) return ''
+  return normalizedCorpId ? `${normalizedCorpId}:${primaryId}` : primaryId
 }
 
 function assertDirectoryAccountCanEnableDingTalkGrant(
@@ -1882,12 +2079,29 @@ function buildRecommendationStatus(
   }
 }
 
+function addScopedIdentityCandidate(
+  uniqueMap: Map<string, string>,
+  ambiguousKeys: Set<string>,
+  key: string | null,
+  localUserId: string,
+): void {
+  if (!key || ambiguousKeys.has(key)) return
+  const existingUserId = uniqueMap.get(key)
+  if (existingUserId && existingUserId !== localUserId) {
+    uniqueMap.delete(key)
+    ambiguousKeys.add(key)
+    return
+  }
+  uniqueMap.set(key, localUserId)
+}
+
 function doesExternalIdentityMatchAccount(
   identity: DirectoryIdentityByUserRow,
   account: Pick<DirectoryReviewItemRow, 'corp_id' | 'external_key' | 'open_id' | 'union_id'>,
 ): boolean {
+  const sameCorpScope = normalizeText(identity.corp_id) === normalizeText(account.corp_id)
   const externalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
-  if (externalKey && identity.external_key === externalKey) return true
+  if (sameCorpScope && externalKey && identity.external_key === externalKey) return true
 
   const scopedOpenKey = buildScopedIdentityKey(account.corp_id, account.open_id)
   const identityOpenKey = buildScopedIdentityKey(identity.corp_id, identity.provider_open_id)
@@ -1897,7 +2111,9 @@ function doesExternalIdentityMatchAccount(
   const identityUnionKey = buildScopedIdentityKey(identity.corp_id, identity.provider_union_id)
   if (scopedUnionKey && identityUnionKey && scopedUnionKey === identityUnionKey) return true
 
-  return normalizeText(identity.external_key) !== '' && identity.external_key === normalizeText(account.external_key)
+  return sameCorpScope
+    && normalizeText(identity.external_key) !== ''
+    && identity.external_key === normalizeText(account.external_key)
 }
 
 async function loadDirectoryReviewRecommendations(
@@ -2111,6 +2327,9 @@ function normalizeIntegrationInput(
 
   if (!name) throw new Error('Integration name is required')
   if (!corpId) throw new Error('corpId is required')
+  if (!/^[!-~]+$/.test(corpId)) {
+    throw new Error('corpId must be a printable ASCII token without whitespace')
+  }
   if (!appKey) throw new Error('appKey is required')
   if (!appSecret) throw new Error('appSecret is required')
   assertDingTalkCorpAllowed(corpId, { context: 'Directory integration corpId' })
@@ -2447,13 +2666,13 @@ export async function updateDirectoryIntegration(
   // integration; a genuine organization change must go through the org-transfer workflow. There is
   // deliberately NO production escape hatch.
   //
-  // Initial set (current empty → a value) and same-corp resend pass through. `normalized.corpId` cannot
-  // be empty here — normalizeIntegrationInput throws 'corpId is required' earlier — so a "clear" is
-  // already unreachable.
+  // A legacy empty corp cannot be repaired through this generic update either. Existing child
+  // accounts retain their old corp value, and a concurrent first sync can create one after any
+  // pre-update probe. Delete/recreate or use a dedicated transactional repair workflow.
   const currentCorpId = normalizeText(current.corp_id)
-  if (currentCorpId !== '' && normalized.corpId !== currentCorpId) {
+  if (normalized.corpId !== currentCorpId) {
     throw new DirectoryTenantChangeBlockedError(
-      `corp_id is immutable once set on directory integration ${integrationId} (currently "${currentCorpId}", attempted "${normalized.corpId}"): changing it via a generic integration edit would make the next sync mass-deactivate the previous organization's accounts and departments. To correct a mis-entered corp_id before the first sync, delete and recreate the integration; to move to a different organization, use the org-transfer workflow.`,
+      `corp_id is immutable on directory integration ${integrationId}: a generic integration edit cannot set, clear, or change the tenant. Delete and recreate an empty legacy integration, or use the dedicated org-transfer workflow.`,
     )
   }
 
@@ -2468,6 +2687,13 @@ export async function updateDirectoryIntegration(
   const rawCurrentConfig = parseJsonRecord(current.config)
   const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
   const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
+  // Same carry-through, same reason, for the DingTalk todo mirror's operator unionId
+  // (`todoOperatorUnionId`, design §8.2): there is no FE field for it — the owner sets it directly on
+  // the integration row — so the rebuild below would WIPE it on the next unrelated integration-form
+  // save and every mirrored todo would fail `todo_operator_union_id_missing` until someone noticed.
+  // Carry-through ONLY: this is deliberately not a writable input of the generic form, so the PUT's
+  // key whitelist is not widened by one character.
+  const carriedTodoOperatorUnionId = normalizeText(rawCurrentConfig.todoOperatorUnionId) || null
   // Roadmap §7.8: unlike `scheduleCron` (the existing FE form always resends it verbatim, so
   // a plain "always overwrite from input" is safe), there is no FE field for `scheduleTimezone`
   // yet. An absent key (the FE's payload shape today) must PRESERVE whatever is already saved,
@@ -2513,6 +2739,7 @@ export async function updateDirectoryIntegration(
         memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
         approvalCardLinkSecret: carriedApprovalCardLinkSecret,
         approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
+        todoOperatorUnionId: carriedTodoOperatorUnionId,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
@@ -2945,6 +3172,55 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
+/**
+ * Terminal run state for a DELIBERATE abort: the apply-time freeze recheck found an active
+ * org transfer and rolled the apply back (see `DirectorySyncFrozenByTransferError`).
+ *
+ * A frozen source is a deliberate transfer state, not an outage — every other surface in this
+ * lane already says so (the scheduler skips quietly, the route answers a deliberate 409 that
+ * must never page monitoring). Routing this through `markSyncFailure` contradicted all of them
+ * and, worse, was not self-healing: `directory_integrations.last_error` is only cleared inside
+ * the SUCCESSFUL apply transaction, and the freeze is exactly what prevents a successful apply —
+ * so a multi-day transfer (the designed steady state) left the integration reading "errored"
+ * for its whole duration and fed `countConsecutiveFailedRuns` escalation.
+ *
+ * What this leaves behind instead:
+ *  - the run reaches a TERMINAL, non-'running' state, so the partial unique index frees the
+ *    lease immediately and nothing has to wait for stale-lease reclaim;
+ *  - status is 'aborted', a distinct value: `countConsecutiveFailedRuns` filters
+ *    `status IN ('completed','failed')`, so a deliberate abort can never drive failure
+ *    escalation, and no migration is needed (the column is bare `text`, no CHECK constraint);
+ *  - `error_message` stays NULL — the admin run panel styles that field as an error;
+ *    the reason lives in `meta` (which no summary/toast surface reads);
+ *  - `directory_integrations` is NOT touched at all: no `last_error`, no `last_sync_at` bump
+ *    (nothing was synced);
+ *  - no `directory_sync_alerts` 'sync_failed' row and therefore no failure-alert delivery.
+ *
+ * Unlike `markSyncFailure` this UPDATE IS guarded on `status = 'running'`: if the lease was
+ * reclaimed while this run was alive, the row already carries the reclaimer's truthful
+ * `failed`/orphaned record and this run no longer owns it — overwriting it with a softer
+ * 'aborted' would erase a real liveness incident. Either way the row is terminal and the
+ * lease is free.
+ */
+async function markSyncAbortedByFreeze(runId: string, transferId: string): Promise<void> {
+  await query(
+    `UPDATE directory_sync_runs
+        SET status = 'aborted',
+            finished_at = NOW(),
+            meta = COALESCE(meta, '{}'::jsonb) || jsonb_build_object(
+              'abortReason', 'frozen_by_org_transfer',
+              'transferId', $2::text
+            ),
+            updated_at = NOW()
+      WHERE id = $1
+        AND status = 'running'`,
+    [runId, transferId],
+  )
+  logger.info(
+    `Directory sync run ${runId} aborted: source frozen by active org transfer ${transferId} (deliberate state, not a failure)`,
+  )
+}
+
 export function buildUniqueLocalUserMatchMap(
   rows: LocalUserRow[],
   readKey: (row: LocalUserRow) => string,
@@ -2970,7 +3246,163 @@ export function buildUniqueLocalUserMatchMap(
   return { uniqueMap, ambiguousKeys }
 }
 
-async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
+async function lockDirectorySyncAccessGraphUsers(
+  client: AccessGraphTransactionClient,
+  options: {
+    integrationId: string
+    users: DingTalkDirectoryUser[]
+  },
+): Promise<{
+  lockedUserIds: Set<string>
+  openRehireAccountIds: Set<string>
+  priorAccessByExternalUserId: Map<string, DirectorySyncPriorAccessRow>
+}> {
+  const externalKeys = Array.from(new Set(
+    options.users
+      .map((user) => normalizeText(user.unionId || user.openId || user.userId))
+      .filter(Boolean),
+  ))
+  const unionIds = Array.from(new Set(
+    options.users.map((user) => normalizeText(user.unionId)).filter(Boolean),
+  ))
+  const openIds = Array.from(new Set(
+    options.users.map((user) => normalizeText(user.openId)).filter(Boolean),
+  ))
+  const emails = Array.from(new Set(
+    options.users
+      .map((user) => normalizeText(user.email).toLowerCase())
+      .filter(Boolean),
+  ))
+  const mobiles = Array.from(new Set(
+    options.users
+      .map((user) => normalizeMobileIdentifier(user.mobile))
+      .filter(Boolean),
+  ))
+
+  const candidates = await client.query(
+    `SELECT DISTINCT candidate.local_user_id
+       FROM (
+         SELECT link.local_user_id
+           FROM directory_account_links link
+           JOIN directory_accounts account
+             ON account.id = link.directory_account_id
+          WHERE account.integration_id = $1::uuid
+            AND link.local_user_id IS NOT NULL
+         UNION ALL
+         SELECT identity.local_user_id
+           FROM user_external_identities identity
+          WHERE identity.provider = $2::text
+            AND (
+              identity.external_key = ANY($3::text[])
+              OR identity.provider_union_id = ANY($4::text[])
+              OR identity.provider_open_id = ANY($5::text[])
+            )
+         UNION ALL
+         SELECT candidate_user.id
+           FROM users candidate_user
+          WHERE lower(candidate_user.email) = ANY($6::text[])
+             OR regexp_replace(candidate_user.mobile, '\\s+', '', 'g') = ANY($7::text[])
+         UNION ALL
+         -- D5 review P1: the payload-built arms above under-covered the loop, which iterates
+         -- EVERY account of the integration (retained-but-departed included) and resolves
+         -- against match maps built from all of them. One retained account whose email/mobile
+         -- or identity keys newly matched a local user made the loop resolve a user the
+         -- inventory never locked -> 'resolved after the mutex inventory' -> the whole run
+         -- failed, and every subsequent run failed identically. These two DB-side arms make the
+         -- inventory a superset of anything the loop can resolve; over-locking a user is safe,
+         -- under-locking kills the run.
+         SELECT db_identity.local_user_id
+           FROM user_external_identities db_identity
+           JOIN directory_accounts db_account
+             ON db_account.integration_id = $1::uuid
+            AND (
+              db_identity.external_key = db_account.external_key
+              OR (db_account.union_id IS NOT NULL AND db_identity.provider_union_id = db_account.union_id)
+              OR (db_account.open_id IS NOT NULL AND db_identity.provider_open_id = db_account.open_id)
+            )
+          WHERE db_identity.provider = $2::text
+         UNION ALL
+         SELECT db_user.id
+           FROM users db_user
+           JOIN directory_accounts db_match
+             ON db_match.integration_id = $1::uuid
+          WHERE (db_match.email IS NOT NULL AND lower(db_user.email) = lower(db_match.email))
+             OR (
+               db_match.mobile IS NOT NULL
+               AND db_user.mobile IS NOT NULL
+               AND regexp_replace(db_user.mobile, '\\s+', '', 'g') = regexp_replace(db_match.mobile, '\\s+', '', 'g')
+             )
+       ) candidate
+      WHERE candidate.local_user_id IS NOT NULL`,
+    [
+      options.integrationId,
+      DEFAULT_PROVIDER,
+      externalKeys,
+      unionIds,
+      openIds,
+      emails,
+      mobiles,
+    ],
+  )
+  const candidateUserIds = candidates.rows
+    .map((row) => normalizeText(row.local_user_id))
+    .filter(Boolean)
+  const lockedUsers = await lockUsersForAccessGraphWrite(client, candidateUserIds)
+
+  const recheckedPrior = await client.query(
+    `SELECT account.id::text AS account_id,
+            account.external_user_id,
+            account.is_active,
+            link.local_user_id,
+            link.link_status
+       FROM directory_accounts account
+       LEFT JOIN directory_account_links link
+         ON link.directory_account_id = account.id
+      WHERE account.integration_id = $1::uuid`,
+    [options.integrationId],
+  )
+  const priorAccessByExternalUserId = new Map<string, DirectorySyncPriorAccessRow>()
+  for (const row of recheckedPrior.rows as DirectorySyncPriorAccessRow[]) {
+    if (row.local_user_id && !lockedUsers.has(row.local_user_id)) {
+      throw new Error('Directory sync account binding changed before the user mutex was acquired; retry the run')
+    }
+    priorAccessByExternalUserId.set(row.external_user_id, row)
+  }
+  const openRehireEvidence = await client.query(
+    `SELECT DISTINCT event.directory_account_id::text AS account_id
+       FROM directory_deprovision_events event
+       JOIN directory_account_links link
+         ON link.directory_account_id = event.directory_account_id
+        AND link.local_user_id = event.local_user_id
+        AND link.link_status = 'linked'
+      WHERE event.integration_id = $1::uuid
+        AND event.status = 'applied'
+        AND EXISTS (
+          SELECT 1
+            FROM directory_deprovision_effects effect
+           WHERE effect.event_id = event.id
+             AND effect.status = 'applied'
+        )`,
+    [options.integrationId],
+  )
+
+  return {
+    lockedUserIds: new Set(lockedUsers.keys()),
+    openRehireAccountIds: new Set(
+      openRehireEvidence.rows
+        .map((row) => normalizeText(row.account_id))
+        .filter(Boolean),
+    ),
+    priorAccessByExternalUserId,
+  }
+}
+
+async function loadMatchMaps(
+  accounts: DirectoryAccountRow[],
+  identityClient?: {
+    query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+  },
+) {
   const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
   const unionIds = Array.from(new Set(
     accounts
@@ -2993,9 +3425,9 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
       .filter(Boolean),
   ))
 
-  const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
-    externalKeys.length > 0 || unionIds.length > 0 || openIds.length > 0
-      ? query<ExternalIdentityRow>(
+  const externalIdentityPromise = externalKeys.length > 0 || unionIds.length > 0 || openIds.length > 0
+    ? identityClient
+      ? identityClient.query(
         `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
          FROM user_external_identities
          WHERE provider = $1
@@ -3006,7 +3438,21 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
            )`,
         [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
       )
-      : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<ExternalIdentityRow>>>),
+      : query<ExternalIdentityRow>(
+        `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
+         FROM user_external_identities
+         WHERE provider = $1
+           AND (
+             external_key = ANY($2::text[])
+             OR provider_union_id = ANY($3::text[])
+             OR provider_open_id = ANY($4::text[])
+           )`,
+        [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
+      )
+    : Promise.resolve({ rows: [] })
+
+  const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
+    externalIdentityPromise,
     emails.length > 0
       ? query<LocalUserRow>(
         `SELECT id, email
@@ -3025,13 +3471,32 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<LocalUserRow>>>),
   ])
 
+  const scopedExternalIdentityMap = new Map<string, string>()
   const scopedUnionIdentityMap = new Map<string, string>()
   const scopedOpenIdentityMap = new Map<string, string>()
-  for (const row of externalIdentities.rows) {
-    const unionKey = buildScopedIdentityKey(row.corp_id, row.provider_union_id)
-    if (unionKey) scopedUnionIdentityMap.set(unionKey, row.local_user_id)
-    const openKey = buildScopedIdentityKey(row.corp_id, row.provider_open_id)
-    if (openKey) scopedOpenIdentityMap.set(openKey, row.local_user_id)
+  const ambiguousScopedExternalIdentityKeys = new Set<string>()
+  const ambiguousScopedUnionIdentityKeys = new Set<string>()
+  const ambiguousScopedOpenIdentityKeys = new Set<string>()
+  for (const rawRow of externalIdentities.rows) {
+    const row = rawRow as ExternalIdentityRow
+    addScopedIdentityCandidate(
+      scopedExternalIdentityMap,
+      ambiguousScopedExternalIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.external_key),
+      row.local_user_id,
+    )
+    addScopedIdentityCandidate(
+      scopedUnionIdentityMap,
+      ambiguousScopedUnionIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.provider_union_id),
+      row.local_user_id,
+    )
+    addScopedIdentityCandidate(
+      scopedOpenIdentityMap,
+      ambiguousScopedOpenIdentityKeys,
+      buildScopedIdentityKey(row.corp_id, row.provider_open_id),
+      row.local_user_id,
+    )
   }
 
   const emailMatches = buildUniqueLocalUserMatchMap(
@@ -3044,9 +3509,12 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   )
 
   return {
-    externalIdentityMap: new Map(externalIdentities.rows.map((row) => [row.external_key, row.local_user_id])),
+    scopedExternalIdentityMap,
     scopedUnionIdentityMap,
     scopedOpenIdentityMap,
+    ambiguousScopedExternalIdentityKeys,
+    ambiguousScopedUnionIdentityKeys,
+    ambiguousScopedOpenIdentityKeys,
     emailMap: emailMatches.uniqueMap,
     mobileMap: mobileMatches.uniqueMap,
     ambiguousEmailKeys: emailMatches.ambiguousKeys,
@@ -3096,6 +3564,110 @@ export class DirectorySyncInProgressError extends Error {
     )
     this.name = 'DirectorySyncInProgressError'
     this.activeRunId = activeRunId
+  }
+}
+
+/**
+ * Async callers may reserve the run UUID before the request so a lost 202 response
+ * never loses correlation with a destructive sync. Reusing that UUID is an
+ * idempotent observation of the original run, not permission to execute it again.
+ */
+export class DirectorySyncRunReplayError extends Error {
+  readonly code = 'DIRECTORY_SYNC_RUN_REPLAY'
+  readonly runId: string
+
+  constructor(runId: string) {
+    super(`Directory sync run ${runId} already exists`)
+    this.name = 'DirectorySyncRunReplayError'
+    this.runId = runId
+  }
+}
+
+/**
+ * Transfer MVP T2 (§12.2): an ACTIVE org transfer freezes its SOURCE integration's sync. The
+ * dangerous write a mid-transfer sync performs is the unconditional absence sweep — a source
+ * tenant being emptied/migrated looks exactly like "everyone left", and the sweep would mark the
+ * whole directory inactive. The cheap entry check runs BEFORE the run lease is claimed, so a
+ * freeze already active at trigger time creates no run row and leaves nothing to reclaim. The
+ * admin override (§12.2 "unless an explicit admin override is supplied") is the transfer row's
+ * `freeze_source_sync` flag; the supported operator mutation surface is the platform-admin
+ * PATCH .../source-sync-freeze API — flipping it to false un-freezes THIS transfer without
+ * cancelling it.
+ *
+ * Linearization (P1 closeout): create / freeze=true refreeze and the sync local-apply
+ * transaction share a transaction-scoped advisory lock keyed by source integration
+ * (`directory:source-sync-freeze:${id}`). Inside the apply transaction the lock is acquired
+ * FIRST and the active-freeze recheck runs before ANY local directory mutation (department
+ * upsert, absence sweep, membership rewrite, identity/link write, local-user admission, group
+ * projection, deprovision, integration completion write, run completion write). If freeze
+ * linearized first, the apply rolls back and this error is thrown; if apply owns the lock
+ * first, its local writes may commit before freeze becomes active.
+ *
+ * Honest late-race window: the entry check is still one-shot, so a transfer create / refreeze
+ * that commits after entry may still allow the provider pull to run and a `failed` run row to
+ * exist (lease already claimed). What must never happen is a local directory mutation
+ * committing after a freeze that linearized first — that is what the shared lock + apply-time
+ * recheck close. T1 fail-closed unregistered-adapter scan/apply and the DT-OPS-01 mass-
+ * departure breaker remain independent safety nets; the runbook still orders the transfer
+ * record BEFORE any provider-side draining.
+ */
+export class DirectorySyncFrozenByTransferError extends Error {
+  readonly statusCode = 409
+  readonly code = 'DIRECTORY_SYNC_FROZEN_BY_TRANSFER'
+  readonly transferId: string
+
+  constructor(transferId: string) {
+    super(`Directory sync is frozen by an active org transfer for this integration (transfer ${transferId})`)
+    this.name = 'DirectorySyncFrozenByTransferError'
+    this.transferId = transferId
+  }
+}
+
+type FreezeCheckClient = {
+  query: <T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>
+}
+
+/**
+ * T2 freeze gate. `to_regclass` first: environments whose schema predates the T1 migration have
+ * no transfer table and therefore no transfers — proceeding unfrozen is the semantically correct
+ * outcome there (logged loudly so a mis-deployed production schema cannot stay silent), while a
+ * bare query would brick every sync with a relation-not-found error.
+ *
+ * Used at entry (pool `query`) and again inside the local-apply transaction (transaction
+ * client) after the shared source freeze lock is held. Removing the apply-time recheck
+ * re-opens the create/refreeze-vs-sync race: the barrier suite must go red.
+ */
+async function assertDirectorySyncNotFrozenByTransfer(
+  integrationId: string,
+  /**
+   * Optional transaction client. Entry uses the pool `query` helper (a bare function);
+   * apply-time recheck must pass the transaction client so it observes freeze commits that
+   * linearized under the shared source lock.
+   */
+  client?: FreezeCheckClient,
+): Promise<void> {
+  // Pool `query` is a bare function; transaction clients are `{ query }`. Normalize once.
+  const q: FreezeCheckClient = client ?? { query: (sql, params) => query(sql, params) }
+  const tableProbe = await q.query<{ reg: string | null }>(
+    `SELECT to_regclass('provider_org_transfers')::text AS reg`,
+  )
+  if (!tableProbe.rows[0]?.reg) {
+    logger.warn('provider_org_transfers table absent — T2 sync-freeze gate inert (schema predates the T1 migration?)')
+    return
+  }
+  const frozen = await q.query<{ id: string }>(
+    `SELECT id FROM provider_org_transfers
+      WHERE source_integration_id = $1
+        AND status NOT IN ('applied', 'cancelled')
+        AND freeze_source_sync = true
+      LIMIT 1`,
+    [integrationId],
+  )
+  if (frozen.rows.length > 0) {
+    throw new DirectorySyncFrozenByTransferError(frozen.rows[0].id)
   }
 }
 
@@ -3173,18 +3745,36 @@ async function claimDirectorySyncRun(
   integrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler',
+  requestedRunId?: string,
 ): Promise<{ rows: DirectoryRunRow[] }> {
   try {
     return await query<DirectoryRunRow>(
       `INSERT INTO directory_sync_runs (
-         integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
+         id, integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
        )
-       VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
+       VALUES (COALESCE($4::uuid, gen_random_uuid()), $1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
        RETURNING id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at`,
-      [integrationId, triggeredBy, triggerSource],
+      [integrationId, triggeredBy, triggerSource, requestedRunId ?? null],
     )
   } catch (error) {
     if (isUniqueViolation(error)) {
+      if (requestedRunId) {
+        const replay = await query<{ id: string }>(
+          `SELECT id
+             FROM directory_sync_runs
+            WHERE id = $1
+              AND integration_id = $2
+            LIMIT 1`,
+          [requestedRunId, integrationId],
+        )
+        if (replay.rows.length === 1) {
+          const activeRunId = await findActiveDirectorySyncRunId(integrationId)
+          if (activeRunId && activeRunId !== replay.rows[0].id) {
+            throw new DirectorySyncInProgressError(activeRunId)
+          }
+          throw new DirectorySyncRunReplayError(requestedRunId)
+        }
+      }
       throw new DirectorySyncInProgressError(await findActiveDirectorySyncRunId(integrationId))
     }
     throw error
@@ -3192,7 +3782,7 @@ async function claimDirectorySyncRun(
 }
 
 export async function syncDirectoryIntegration(
-  integrationId: string,
+  rawIntegrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
   /**
@@ -3200,24 +3790,47 @@ export async function syncDirectoryIntegration(
    * caller that wants to answer 202 needs the runId, and only the runId, up front — it
    * cannot wait for a large-tenant walk to finish inside an HTTP request.
    */
-  hooks: { onRunStarted?: (runId: string) => void } = {},
+  hooks: { onRunStarted?: (runId: string) => void; requestedRunId?: string } = {},
 ): Promise<{
   integration: DirectoryIntegrationSummary
   run: DirectorySyncRunSummary
   autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[]
 }> {
   const governedUserIds = new Set<string>()
-  const integration = await getIntegrationRow(integrationId)
+  const integration = await getIntegrationRow(rawIntegrationId)
   if (!integration) throw new Error('Directory integration not found')
+  // T2 lock-correctness P1: the manual-sync route passes req.params.integrationId VERBATIM
+  // (admin-directory.ts). `directory_integrations.id` is a uuid column, so a case-variant
+  // (e.g. uppercase) id still resolves THIS row via uuid casting — but the shared source
+  // freeze advisory lock hashes the RAW TEXT key (`hashtext(sourceSyncFreezeLockKey(id))`),
+  // so an uppercase caller would hash a DIFFERENT lock key than the transfer side's
+  // DB-canonical `source.id` and silently lose sync↔freeze mutual exclusion (a freeze
+  // committing after the entry check could race this sync's local apply). Canonicalize to
+  // the DB-read-back id here, and use it for EVERYTHING downstream: entry freeze check,
+  // stale-run reclaim, run-lease claim, apply-txn lock, under-lock recheck, and every write.
+  const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
+  const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
+  let directoryApplyCommitted = false
+  // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
+  // must not create a run row, consume provider quota, or reach local apply. The apply
+  // transaction re-checks under the shared source freeze lock (see below) so a freeze that
+  // commits after this entry check cannot still land directory mutations.
+  await assertDirectorySyncNotFrozenByTransfer(integrationId)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
+  let approvalDepartureManagerContexts = new Map<string, ApprovalDepartureManagerContext>()
   // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
   // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
   // later apply would not protect it. Expired leases are reclaimed first so a crashed
   // run cannot wedge an integration forever.
   await reclaimStaleDirectorySyncRuns(integrationId)
-  const runResult = await claimDirectorySyncRun(integrationId, triggeredBy, triggerSource)
+  const runResult = await claimDirectorySyncRun(
+    integrationId,
+    triggeredBy,
+    triggerSource,
+    hooks.requestedRunId,
+  )
   const runId = runResult.rows[0].id
   // R5: wall-clock anchor for stats.durationMs. Measured app-side from the lease claim to
   // just before the completion UPDATE (stats is serialized inside the transaction), so it
@@ -3289,7 +3902,42 @@ export async function syncDirectoryIntegration(
     const autoAdmissionInvites: Array<{ userId: string; email: string; inviteToken: string }> = []
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
-    await transaction(async (client) => {
+    // O2-S2: the local-apply transaction writes users (admission / deprovision) — recovery-
+    // authority tables. A marker 40001 (recovery lease held) re-raises as the named retryable
+    // RecoveryConflictError; every other error, DirectorySyncLeaseLostError included,
+    // rethrows unchanged.
+    await translateRecoveryConflict(() => transaction(async (client) => {
+      // T2 lock-correctness P2 (PB4-3 idiom — see local-directory-org.ts's reparent guard): the
+      // pool wrapper issues a bare BEGIN, so on a deployment where default_transaction_isolation
+      // is 'repeatable read' this transaction's snapshot would be taken by the
+      // pg_advisory_xact_lock SELECT itself — BEFORE the lock is granted — and the post-lock
+      // freeze recheck below would read a pre-freeze snapshot, missing a freeze that committed
+      // while we waited on the lock. Pin READ COMMITTED as the FIRST statement (SET TRANSACTION
+      // must precede the transaction's first query) so the recheck takes a fresh per-statement
+      // snapshot. Under the production RC default this is a no-op; its mechanism is proven in
+      // directory-source-freeze-lock-correctness.db.test.ts (RR-default pool harness).
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      // T2 P1: shared source freeze lock is the first REAL operation of the local-apply
+      // transaction (nothing but the isolation pin above may precede it).
+      // Transfer create / freeze=true refreeze take the same key before writing freeze state.
+      // Re-check under the lock before ANY directory upsert, absence sweep, membership rewrite,
+      // identity/link write, local-user admission, group projection, deprovision, integration
+      // completion write, or run completion write. Bypass/remove either the lock or the recheck
+      // → the two-connection create/refreeze-vs-sync barrier suite reds.
+      await acquireSourceSyncFreezeLock(client, integrationId)
+      await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
+      const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
+        integrationId,
+        users: Array.from(users.values()),
+      })
+      const priorAccessByAccountId = new Map(
+        Array.from(syncAccess.priorAccessByExternalUserId.values())
+          .map((row) => [row.account_id, row] as const),
+      )
+      const changedAccessGraphUserIds = new Set<string>()
+      const alreadySupersededUserIds = new Set<string>()
+      const newlyAdmittedUserIds = new Set<string>()
+
       // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
       // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
       // a freshly INSERTed tuple has xmax 0, an ON CONFLICT DO UPDATE tuple carries the updating
@@ -3350,6 +3998,7 @@ export async function syncDirectoryIntegration(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15::jsonb, $16, NOW(), NOW())
            ON CONFLICT (integration_id, external_user_id)
            DO UPDATE SET
+             corp_id = EXCLUDED.corp_id,
              union_id = EXCLUDED.union_id,
              open_id = EXCLUDED.open_id,
              external_key = EXCLUDED.external_key,
@@ -3406,6 +4055,19 @@ export async function syncDirectoryIntegration(
       // whole backlog. Without it the deprovision executor re-processed every account ever
       // deactivated on every sync — audit spam, and it would stomp a reactivation.
       // RETURNING gives the executor exactly the accounts that departed in THIS run.
+      //
+      // W4-PRE-1c (owner 裁决②, #4522 rev3 review, 2026-07-22 — resolves the #4526-review open
+      // gap this comment used to describe): this sweep ALONE still flips only
+      // `directory_accounts.is_active` — it never itself deactivates `user_orgs`. A single
+      // missed sync (one account absent from one fetch) must never, by itself, revoke
+      // membership — owner 裁决② per issuecomment-5042388830: "不因单次同步缺失撤销
+      // membership". The deprovision
+      // executor below (`applyDirectoryDeprovisionPolicies`, OFF by default) is the ONLY path
+      // that may deactivate `user_orgs` for a swept account, and only once ALL of its own gates
+      // clear: circuit breaker passed, `DIRECTORY_DEPROVISION_ENABLED=true`, AND the resolved
+      // policy actually executes a write (`disable_grant_only` / `mark_inactive`; `manual_review`
+      // never writes — see that function's own `manual_review` branch, which instead exposes a
+      // pending-confirmation state on `manualReviewPending`).
       const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
@@ -3414,6 +4076,21 @@ export async function syncDirectoryIntegration(
         [integrationId, syncTimestamp],
       )
       const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
+      // F4-E: preserve only the departed account's source position before the membership rebuild
+      // below removes it. The manager itself is deliberately NOT resolved yet — the post-commit
+      // consumer performs that live read after the exact `user_changed` signal is durable.
+      if (directoryDeprovisionEnabled && deactivatedAccountIds.length > 0) {
+        approvalDepartureManagerContexts = await captureApprovalDepartureManagerContexts(
+          deactivatedAccountIds,
+          (sql, params) => client.query(sql, params),
+        )
+      }
+      for (const accountId of deactivatedAccountIds) {
+        const priorAccess = priorAccessByAccountId.get(accountId)
+        if (priorAccess?.link_status === 'linked' && priorAccess.local_user_id) {
+          changedAccessGraphUserIds.add(priorAccess.local_user_id)
+        }
+      }
 
       const [departmentRows, accountRows] = await Promise.all([
         client.query(
@@ -3423,7 +4100,7 @@ export async function syncDirectoryIntegration(
           [integrationId],
         ),
         client.query(
-          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
+          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile, is_active
            FROM directory_accounts
            WHERE integration_id = $1`,
           [integrationId],
@@ -3454,16 +4131,28 @@ export async function syncDirectoryIntegration(
         departmentIdMap,
       })
 
+      // Phase A mixed-version safety: until the corp-scoped identity indexes from Phase B are
+      // deployed, the database cannot reject a second same-scope union/open identity. Serialize
+      // the match snapshot with every INSERT/UPDATE/DELETE writer by taking a table lock that
+      // conflicts with ROW EXCLUSIVE. The query below must use THIS transaction client; taking
+      // the lock here and reading through the global pool would leave the original TOCTOU open.
+      // SHARE ROW EXCLUSIVE also serializes concurrent directory applies, avoiding lock-upgrade
+      // deadlocks when both later create identities.
+      await client.query('LOCK TABLE user_external_identities IN SHARE ROW EXCLUSIVE MODE')
       const {
-        externalIdentityMap,
+        scopedExternalIdentityMap,
         scopedUnionIdentityMap,
         scopedOpenIdentityMap,
+        ambiguousScopedExternalIdentityKeys,
+        ambiguousScopedUnionIdentityKeys,
+        ambiguousScopedOpenIdentityKeys,
         emailMap,
         mobileMap,
         ambiguousEmailKeys,
         ambiguousMobileKeys,
       } = await loadMatchMaps(
         Array.from(accountIdMap.values()),
+        client,
       )
 
       const existingLinksResult = await client.query(
@@ -3504,7 +4193,18 @@ export async function syncDirectoryIntegration(
             mobile: account.mobile,
           },
           existing,
-          { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
+          {
+            scopedExternalIdentityMap,
+            scopedUnionIdentityMap,
+            scopedOpenIdentityMap,
+            ambiguousScopedExternalIdentityKeys,
+            ambiguousScopedUnionIdentityKeys,
+            ambiguousScopedOpenIdentityKeys,
+            emailMap,
+            mobileMap,
+            ambiguousEmailKeys,
+            ambiguousMobileKeys,
+          },
         )
 
         if (identityMatch.matched !== 'already_linked') {
@@ -3549,8 +4249,17 @@ export async function syncDirectoryIntegration(
                       open_id: account.open_id,
                     })
                 const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
-                const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
-                const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                // T1 pending mode: unusable hash, no temp password, no invite/onboarding packet.
+                // Default-off path keeps temporary password + invite semantics for activated users.
+                const pendingMode = isDirectoryPendingActivationEnabled()
+                let generatedPassword: string | null = null
+                let passwordHash: string
+                if (pendingMode) {
+                  passwordHash = await buildUnusablePasswordHash()
+                } else {
+                  generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                  passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                }
                 // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
                 // condition instead of hardcoding grant=true. A corp-scoped account
                 // (corp_id set) without an openId cannot use DingTalk login and would
@@ -3559,7 +4268,9 @@ export async function syncDirectoryIntegration(
                 // an account is admitted with the grant OFF (directory binding still
                 // happens), and the assertion is enforced before INSERT (see
                 // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
-                const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
+                const canGrantDingTalkLogin = pendingMode
+                  ? false
+                  : resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
                 const created = await createDirectoryAdmittedUserInTransaction(client, {
                   account: {
                     id: account.id,
@@ -3573,6 +4284,7 @@ export async function syncDirectoryIntegration(
                     name: account.name,
                     email: account.email,
                     mobile: account.mobile,
+                    is_active: account.is_active,
                   },
                   adminUserId: triggeredBy,
                   name: cleanName,
@@ -3580,45 +4292,54 @@ export async function syncDirectoryIntegration(
                   username: generatedUsername,
                   mobile: cleanMobile,
                   passwordHash,
-                  mustChangePassword: true,
+                  mustChangePassword: !pendingMode,
                   enableDingTalkGrant: canGrantDingTalkLogin,
                 })
-                let inviteToken: string | null = null
-                if (cleanEmail) {
-                  inviteToken = issueInviteToken({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    presetId: null,
-                  })
-                  autoAdmissionInvites.push({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    inviteToken,
-                  })
-                } else {
-                  autoAdmittedNoEmailCount += 1
-                  autoAdmissionOnboardingPackets.push({
-                    userId: created.userId,
-                    name: cleanName,
-                    email: cleanEmail,
-                    username: generatedUsername,
-                    mobile: cleanMobile,
-                    temporaryPassword: generatedPassword,
-                    onboarding: buildOnboardingPacket({
+                if (!pendingMode) {
+                  let inviteToken: string | null = null
+                  if (cleanEmail) {
+                    inviteToken = issueInviteToken({
+                      userId: created.userId,
                       email: cleanEmail,
-                      accountLabel: resolveDirectoryAdmissionAccountLabel({
-                        email: cleanEmail,
-                        username: generatedUsername,
-                        mobile: cleanMobile,
-                        userId: created.userId,
-                      }),
-                      temporaryPassword: generatedPassword,
-                      preset: null,
+                      presetId: null,
+                    })
+                    autoAdmissionInvites.push({
+                      userId: created.userId,
+                      email: cleanEmail,
                       inviteToken,
-                    }),
-                  })
+                    })
+                  } else if (generatedPassword) {
+                    autoAdmittedNoEmailCount += 1
+                    autoAdmissionOnboardingPackets.push({
+                      userId: created.userId,
+                      name: cleanName,
+                      email: cleanEmail,
+                      username: generatedUsername,
+                      mobile: cleanMobile,
+                      temporaryPassword: generatedPassword,
+                      onboarding: buildOnboardingPacket({
+                        email: cleanEmail,
+                        accountLabel: resolveDirectoryAdmissionAccountLabel({
+                          email: cleanEmail,
+                          username: generatedUsername,
+                          mobile: cleanMobile,
+                          userId: created.userId,
+                        }),
+                        temporaryPassword: generatedPassword,
+                        preset: null,
+                        inviteToken,
+                      }),
+                    })
+                  }
                 }
                 localUserId = created.userId
+                newlyAdmittedUserIds.add(created.userId)
+                if (
+                  existing?.local_user_id
+                  && existing.local_user_id !== created.userId
+                ) {
+                  alreadySupersededUserIds.add(existing.local_user_id)
+                }
                 linkStatus = 'linked'
                 matchStrategy = 'auto_admit'
                 autoAdmittedCount += 1
@@ -3627,11 +4348,27 @@ export async function syncDirectoryIntegration(
                 if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
                 if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
                 if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
-                externalIdentityMap.set(account.external_key, created.userId)
+                const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
+                addScopedIdentityCandidate(
+                  scopedExternalIdentityMap,
+                  ambiguousScopedExternalIdentityKeys,
+                  scopedExternalIdentityKey,
+                  created.userId,
+                )
                 const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-                if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
+                addScopedIdentityCandidate(
+                  scopedOpenIdentityMap,
+                  ambiguousScopedOpenIdentityKeys,
+                  scopedOpenIdentityKey,
+                  created.userId,
+                )
                 const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-                if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
+                addScopedIdentityCandidate(
+                  scopedUnionIdentityMap,
+                  ambiguousScopedUnionIdentityKeys,
+                  scopedUnionIdentityKey,
+                  created.userId,
+                )
               } catch (error) {
                 autoAdmissionFailedCount += 1
                 logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
@@ -3656,6 +4393,70 @@ export async function syncDirectoryIntegration(
           linkedUserIdByExternalUserId.set(account.external_user_id, localUserId)
         }
 
+        if (
+          localUserId
+          && !newlyAdmittedUserIds.has(localUserId)
+          && !syncAccess.lockedUserIds.has(localUserId)
+        ) {
+          throw new Error(
+            'Directory sync resolved a local user after the mutex inventory; retry the run',
+          )
+        }
+        const priorLinkedUserId =
+          existing?.link_status === 'linked' ? existing.local_user_id : null
+        const nextLinkedUserId = linkStatus === 'linked' ? localUserId : null
+        if (
+          priorLinkedUserId !== nextLinkedUserId
+          || existing?.link_status !== linkStatus
+        ) {
+          if (priorLinkedUserId) changedAccessGraphUserIds.add(priorLinkedUserId)
+          if (nextLinkedUserId && !newlyAdmittedUserIds.has(nextLinkedUserId)) {
+            changedAccessGraphUserIds.add(nextLinkedUserId)
+          }
+        }
+
+        // W4-PRE-1b item A: an `external_identity` re-match confirms a PRE-EXISTING user against
+        // this account without going through `applyDirectoryAccountBindInTransaction` (that
+        // helper only runs for the manual-bind / admit call sites) — this is the "auto-match"
+        // writer named in the owner's #4522 review comment. Gated on the ACTUAL outcome
+        // (`linkStatus === 'linked' && localUserId`), not on `matchStrategy`, so it also covers
+        // `auto_admit` (already-active via `createDirectoryAdmittedUserInTransaction`'s own call
+        // into that helper — this second upsert is then an idempotent no-op, not a double-write)
+        // without hand-maintaining a strategy allowlist. `pending` email/mobile candidate matches
+        // are correctly excluded: they never held an ACTIVE membership through this account (item
+        // A activates membership only for `linked`), so no upsert is due until a human confirms.
+        //
+        // Post-#4526-review fix: additionally gated on `account.is_active` (the account's state
+        // AS OF THIS SYNC — the DT-OPS-01 sweep above already ran, so this reflects the sweep's
+        // result within the same transaction, not a stale pre-sweep value). Without this, an
+        // account that DEPARTED the directory long ago but is still walked every sync (this loop
+        // iterates ALL accounts for the integration, not just this run's batch) short-circuits to
+        // `already_linked` (`resolveDirectoryIdentityMatch` returns early on an existing `linked`
+        // row without inspecting `directory_accounts.is_active`) and would otherwise silently
+        // resurrect a deliberately-unbound `user_orgs` row to ACTIVE on every subsequent resync —
+        // reopening the exact stale-access half of the owner's original P1 finding via this line's
+        // OWN new write point (review finding, #4526). A currently-inactive account never confirms
+        // membership through this writer; only a live account does.
+        const preservesOpenRehireEvidence =
+          syncAccess.openRehireAccountIds.has(account.id)
+          && existing?.link_status === 'linked'
+          && existing.local_user_id === localUserId
+          && linkStatus === 'linked'
+        if (
+          linkStatus === 'linked'
+          && localUserId
+          && account.is_active
+          && !preservesOpenRehireEvidence
+        ) {
+          const membershipChanged = await upsertActiveUserOrgMembership(client, {
+            userId: localUserId,
+            orgId: integration.org_id,
+          })
+          if (membershipChanged && !newlyAdmittedUserIds.has(localUserId)) {
+            changedAccessGraphUserIds.add(localUserId)
+          }
+        }
+
         await client.query(
           `INSERT INTO directory_account_links (
              directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at
@@ -3669,6 +4470,20 @@ export async function syncDirectoryIntegration(
              updated_at = NOW()`,
           [account.id, localUserId, linkStatus, matchStrategy],
         )
+      }
+
+      for (const userId of alreadySupersededUserIds) {
+        changedAccessGraphUserIds.delete(userId)
+      }
+      for (const userId of newlyAdmittedUserIds) {
+        changedAccessGraphUserIds.delete(userId)
+      }
+      if (changedAccessGraphUserIds.size > 0) {
+        await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+          userIds: Array.from(changedAccessGraphUserIds),
+          actorId: triggeredBy,
+          reason: 'directory synchronization changed account or binding state',
+        })
       }
 
       const memberGroupPlans = buildDirectoryProjectedMemberGroupPlans({
@@ -3701,12 +4516,14 @@ export async function syncDirectoryIntegration(
       // Default-off: this only counts what it WOULD do unless explicitly enabled.
       deprovisionOutcome = await applyDirectoryDeprovisionPolicies(client, {
         integrationId,
+        runId,
+        triggeredBy,
         deactivatedAccountIds,
         // The circuit breaker's input: how many accounts DingTalk actually returned. Zero
         // means the fetch is broken, not that the company evacuated.
         syncedAccountCount: users.size,
         integrationDefaultPolicy: integration.default_deprovision_policy,
-        enabled: isDirectoryDeprovisionEnabled(),
+        enabled: directoryDeprovisionEnabled,
       })
 
       // R5: per-run manager-binding snapshot. The live GET /manager-coverage endpoint
@@ -3741,10 +4558,21 @@ export async function syncDirectoryIntegration(
         managerCoverage: managerBindingCoverage.coverage,
         durationMs: Date.now() - runStartedAtMs,
         deprovisionApplied: deprovisionOutcome.applied,
+        // W4-PRE-1d (owner P2 item 1/3): org-membership candidates — the circuit breaker's own
+        // input. See `DirectoryDeprovisionOutcome.candidateCount`'s doc-comment.
         deprovisionCandidateCount: deprovisionOutcome.candidateCount,
         deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
+        // W4-PRE-1d (owner P2 item 2, two-candidate-set observability): the GLOBAL candidate
+        // count — non-manual_review org-membership candidates who ALSO have no other active
+        // binding anywhere, i.e. eligible for the grant/platform-user actions below.
+        deprovisionGlobalCandidateCount: deprovisionOutcome.globalCandidateCount,
         deprovisionGrantsDisabledCount: deprovisionOutcome.grantsDisabledCount,
         deprovisionUsersDeactivatedCount: deprovisionOutcome.usersDeactivatedCount,
+        // W4-PRE-1c (owner 裁决②, review-finding observability gap): the new user_orgs
+        // consequence, surfaced on its own so an operator does not have to infer it from
+        // `deprovisionGrantsDisabledCount`. See `membershipDeactivationAttemptedCount`'s own
+        // doc-comment for what "attempted" does and does not mean.
+        deprovisionMembershipDeactivationAttemptedCount: deprovisionOutcome.membershipDeactivationAttemptedCount,
         deprovisionAbortedReason: deprovisionOutcome.abortedReason,
         // Identities, not just a number: an operator deciding whether to flip
         // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
@@ -3752,6 +4580,27 @@ export async function syncDirectoryIntegration(
         // the stats JSONB.
         deprovisionAffected: deprovisionOutcome.affected.slice(0, 100),
         deprovisionAffectedTruncated: deprovisionOutcome.affected.length > 100,
+        // W4-PRE-1c item B (owner 裁决②): manual_review candidates never appear in
+        // `deprovisionAffected` above (nothing was written for them) — this is the minimal
+        // read-only exposure of WHO is pending manual confirmation, org/membership-scoped,
+        // on this same existing queryable surface (`GET /integrations/:integrationId/runs`).
+        // No new table, no new endpoint, no new UI. Values-free: ids only.
+        //
+        // Scope, read carefully (review finding — this is a per-run snapshot, not a queue):
+        // this array is written ONCE, into THIS run's `directory_sync_runs.stats` row, and
+        // reflects only the accounts THIS run's own sweep transitioned to inactive AND
+        // resolved to `manual_review` (see `deactivatedAccountIds`'s own "this run's
+        // transitions, not the lifetime backlog" contract above). A person who is still
+        // pending confirmation after this run does NOT reappear here on the NEXT run (their
+        // `directory_accounts.is_active` is already `false`, so they no longer satisfy the
+        // sweep's `AND is_active = true` transition filter). There is no aggregate "who is
+        // currently still pending" view and no confirm/resolve marker anywhere in this repo
+        // — an operator must enumerate PAST runs' `stats` blobs to find unresolved
+        // manual_review candidates. Acceptable as a minimal read-only exposure per the
+        // owner's "暴露待人工确认状态" bar, but flagged: this is a one-shot audit trail entry,
+        // not a live pending-queue.
+        deprovisionManualReviewPending: deprovisionOutcome.manualReviewPending.slice(0, 100),
+        deprovisionManualReviewPendingTruncated: deprovisionOutcome.manualReviewPending.length > 100,
         linkedCount,
         pendingCount,
         unmatchedCount,
@@ -3798,22 +4647,64 @@ export async function syncDirectoryIntegration(
       if (completion.rows.length === 0) {
         throw new DirectorySyncLeaseLostError(runId)
       }
-    })
+    }))
+    directoryApplyCommitted = true
 
-    for (const invite of autoAdmissionInvites) {
-      await recordInvite({
-        userId: invite.userId,
-        email: invite.email,
-        presetId: null,
-        productMode: 'platform',
-        roleId: null,
-        invitedBy: triggeredBy,
-        inviteToken: invite.inviteToken,
-      })
+    // F4-E — consume the exact durable `user_changed` effects immediately after the directory
+    // transaction commits. No later post-commit sibling may strand these signals. The dispatcher
+    // isolates per-user failures; this guard also covers module/bootstrap failures. Counts are
+    // values-free and give operators a bounded manual-recovery signal.
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      try {
+        const { dispatchApprovalDepartureTransfersForRun } = await import(
+          '../approvals/approval-departure-transfer-dispatch'
+        )
+        const dispatchResult = await dispatchApprovalDepartureTransfersForRun({
+          runId,
+          integrationId,
+          managerContexts: approvalDepartureManagerContexts,
+        })
+        if (
+          dispatchResult.failedCount > 0
+          || dispatchResult.unresolvedContextCount > 0
+          || dispatchResult.signalCount !== deprovisionOutcome.usersDeactivatedCount
+        ) {
+          logger.warn('Approval departure dispatch completed with unresolved work', {
+            signalCount: dispatchResult.signalCount,
+            expectedSignalCount: deprovisionOutcome.usersDeactivatedCount,
+            failedCount: dispatchResult.failedCount,
+            unresolvedContextCount: dispatchResult.unresolvedContextCount,
+          })
+        }
+      } catch (_error) {
+        logger.warn(
+          'Approval departure dispatch failed after directory commit; manual recovery required',
+          { reason: 'departure_dispatch_failed' },
+        )
+      }
     }
 
-    // DT-OPS-01: audit offboarding AFTER the transaction commits (mirrors the invite
-    // ledger below) and only for effects that actually happened. A revoked grant or a
+    for (const invite of autoAdmissionInvites) {
+      try {
+        await recordInvite({
+          userId: invite.userId,
+          email: invite.email,
+          presetId: null,
+          productMode: 'platform',
+          roleId: null,
+          invitedBy: triggeredBy,
+          inviteToken: invite.inviteToken,
+        })
+      } catch (_error) {
+        logger.warn(
+          'Directory auto-admission invite ledger failed after directory commit',
+          { reason: 'invite_ledger_failed' },
+        )
+      }
+    }
+
+    // DT-OPS-01: audit offboarding AFTER the transaction commits, alongside the isolated invite
+    // ledger, and only for effects that actually happened. A revoked grant or a
     // deactivated user must leave a trail — this is the access-closure record.
     if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
       // Imported lazily on purpose. The audit stack binds a repository to the shared pg
@@ -3841,8 +4732,21 @@ export async function syncDirectoryIntegration(
             directoryAccountId: affected.directoryAccountId,
             localUserId: affected.localUserId,
             policy: affected.policy,
-            grantDisabled: true,
-            userDeactivated: affected.policy === 'mark_inactive',
+            // W4-PRE-1d (owner P2 item 2): NO LONGER unconditionally true — grant-disable and
+            // platform-user deactivation only actually ran when this person was also globally
+            // clear (no other active binding anywhere). A false here truthfully records that
+            // this org's membership was (maybe) deactivated but the grant/platform account
+            // were left untouched because the person is still active elsewhere.
+            grantDisabled: affected.globallyClear,
+            userDeactivated: affected.policy === 'mark_inactive' && affected.globallyClear,
+            globallyClear: affected.globallyClear,
+            // W4-PRE-1d: every entry in `deprovisionOutcome.affected` (this loop's source)
+            // attempted the org-membership (user_orgs) deactivation unconditionally when
+            // `applied` is true — this is now a SEPARATE gate from `grantDisabled` above (owner
+            // P2 item 1 vs item 2 split), see `membershipDeactivationAttemptedCount`'s
+            // doc-comment. Attempted, not necessarily flipped (the org-scoped sibling check at
+            // write time may have no-op'd it).
+            membershipDeactivationAttempted: true,
             triggeredBy,
           },
         })
@@ -3869,12 +4773,51 @@ export async function syncDirectoryIntegration(
       throw new Error('Directory sync completed but summary reload failed')
     }
 
+    // B7 Q6 (owner ruling): after a SUCCESSFUL sync commit, reflect remote-department liveness
+    // onto this integration's bindings — NARROWED to the integration that just synced. Strictly
+    // best-effort BY RULING: the sync above already succeeded and committed, so a sweep failure
+    // must never fail (or fail-mark) it — it logs VALUES-FREE BY CONSTRUCTION and the admin sweep
+    // endpoint (`POST /api/admin/directory/department-bindings/sweep`) is the retry path.
+    try {
+      const sweep = await sweepStaleDepartmentBindings(updatedIntegration.org_id, {
+        remoteIntegrationId: integrationId,
+      })
+      if (sweep.staled > 0 || sweep.healed > 0) {
+        logger.info(`Department-binding sweep after sync: staled=${sweep.staled} healed=${sweep.healed}`, {
+          integrationId,
+        })
+      }
+    } catch (_error) {
+      // Values-free BY CONSTRUCTION: fixed message + closed meta only. Never log error.message,
+      // error.name, code, stack, relation, SQL, or any adapter-derived text — those are mutable /
+      // attacker-or-adapter-controlled and can carry values. Admin sweep endpoint is the retry path.
+      logger.warn(
+        'Department-binding sweep after successful sync failed (sync unaffected; retry via admin sweep endpoint)',
+        { integrationId, reason: 'sweep_failed' },
+      )
+    }
+
     return {
       integration: summarizeIntegration(updatedIntegration),
       run: summarizeRun(updatedRun.rows[0]),
       autoAdmissionOnboardingPackets,
     }
   } catch (error) {
+    // A freeze that linearized first is a DELIBERATE abort, not an integration failure —
+    // the apply already rolled back, so there is nothing to alert on. Take the terminal
+    // abort path (see `markSyncAbortedByFreeze`) and re-throw the error UNCHANGED, so the
+    // route's deliberate 409 mapping and the scheduler's quiet info-skip are untouched.
+    if (error instanceof DirectorySyncFrozenByTransferError) {
+      await markSyncAbortedByFreeze(runId, error.transferId)
+      throw error
+    }
+    if (directoryApplyCommitted) {
+      logger.warn(
+        'Directory sync post-commit processing failed; committed run remains completed',
+        { reason: 'post_commit_processing_failed' },
+      )
+      throw error
+    }
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error
@@ -3992,6 +4935,10 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     name: user.name,
     email: normalizeOptionalText(user.email),
     mobile: normalizeOptionalText(user.mobile),
+    // Synthetic "as if pulled from the directory right now" row for match-map building only —
+    // `loadMatchMaps` never reads `is_active` (only external_key/union_id/open_id/email/mobile),
+    // so this is a type-shape fill, not a semantic claim about persisted account state.
+    is_active: true,
   }))
   const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
 
@@ -4065,11 +5012,27 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
         identityMatchMaps.mobileMap.set(mobileKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
         identityMatchMaps.ambiguousMobileKeys.delete(mobileKey)
       }
-      identityMatchMaps.externalIdentityMap.set(account.external_key, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      const scopedExternalIdentityKey = buildScopedIdentityKey(account.corp_id, account.external_key)
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedExternalIdentityMap,
+        identityMatchMaps.ambiguousScopedExternalIdentityKeys,
+        scopedExternalIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
       const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-      if (scopedOpenIdentityKey) identityMatchMaps.scopedOpenIdentityMap.set(scopedOpenIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedOpenIdentityMap,
+        identityMatchMaps.ambiguousScopedOpenIdentityKeys,
+        scopedOpenIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
       const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-      if (scopedUnionIdentityKey) identityMatchMaps.scopedUnionIdentityMap.set(scopedUnionIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      addScopedIdentityCandidate(
+        identityMatchMaps.scopedUnionIdentityMap,
+        identityMatchMaps.ambiguousScopedUnionIdentityKeys,
+        scopedUnionIdentityKey,
+        PREVIEW_ADMIT_SENTINEL_USER_ID,
+      )
     } else if (eligibility.missingEmail) {
       autoAdmissionSkippedMissingEmailCount += 1
     }
@@ -4131,6 +5094,21 @@ export async function listDirectorySyncRuns(
     items: rowsResult.rows.map(summarizeRun),
     total: Number(totalResult.rows[0]?.total ?? 0),
   }
+}
+
+export async function getDirectorySyncRun(
+  integrationId: string,
+  runId: string,
+): Promise<DirectorySyncRunSummary | null> {
+  const result = await query<DirectoryRunRow>(
+    `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
+       FROM directory_sync_runs
+      WHERE integration_id = $1
+        AND id = $2
+      LIMIT 1`,
+    [integrationId, runId],
+  )
+  return result.rows[0] ? summarizeRun(result.rows[0]) : null
 }
 
 export async function listDirectorySyncAlerts(
@@ -4698,22 +5676,252 @@ export async function batchAdmitDirectoryAccountUsers(
   return outcome
 }
 
+type MembershipWriteClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+/**
+ * W4-PRE-1b (owner CHANGES_REQUESTED on the W4 re-ratify PR, 2026-07-21, item A): resolve the
+ * KNOWN AUTHORITATIVE org for a directory account from its OWN `directory_integrations` row —
+ * never a client-supplied value, never a silent 'default' guess. Fail-closed BEFORE any write if
+ * the integration row cannot be found (foreign-key-orphaned `integration_id`). Shared by every
+ * bind-shaped writer below so the resolution logic (and its fail-closed behavior) lives in
+ * exactly one place. Mirrors the inline resolution #4521 (W4-PRE-1) originally wrote only inside
+ * `createDirectoryAdmittedUserInTransaction`.
+ */
+async function resolveDirectoryAccountOrgId(client: MembershipWriteClient, integrationId: string): Promise<string> {
+  const orgResult = await client.query(
+    `SELECT org_id
+     FROM directory_integrations
+     WHERE id = $1::uuid
+     LIMIT 1`,
+    [integrationId],
+  )
+  const orgId = (orgResult.rows[0] as { org_id?: string } | undefined)?.org_id
+  if (!orgId) {
+    throw new Error('Directory integration not found for account org resolution')
+  }
+  return orgId
+}
+
+/**
+ * W4-PRE-1b item A: same-transaction upsert of an ACTIVE `user_orgs` membership for a user who
+ * is now (or still) bound to a directory account in `orgId`. `ON CONFLICT (user_id, org_id) DO
+ * UPDATE SET is_active = EXCLUDED.is_active` — the branch #4521's own review (P3) noted was DEAD
+ * for the brand-new-user admission path (a fresh user can never already hold a `user_orgs` row)
+ * is made LIVE here: an existing user who was previously deactivated in this org (§ below) and is
+ * now rebound reactivates through this exact conflict path. Shape matches #4521's writer
+ * (admin-users.ts, `INSERT INTO user_orgs ... ON CONFLICT (user_id, org_id) DO UPDATE SET
+ * is_active = EXCLUDED.is_active`).
+ */
+export async function upsertActiveUserOrgMembership(
+  client: MembershipWriteClient,
+  options: { userId: string; orgId: string },
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1::text, $2::text, TRUE)
+     ON CONFLICT (user_id, org_id)
+     DO UPDATE SET is_active = EXCLUDED.is_active
+     WHERE user_orgs.is_active IS DISTINCT FROM TRUE
+     RETURNING user_id`,
+    [options.userId, options.orgId],
+  )
+  return result.rows.length > 0
+}
+
+/**
+ * W4-PRE-1b item B: safe deactivation. Flips `user_orgs.is_active` to FALSE for
+ * (userId, orgId) ONLY WHEN the user holds no OTHER active, linked directory account anywhere in
+ * THIS org. Deliberately ORG-SCOPED — and, as of W4-PRE-1d (owner P2 item 1, #4530 review,
+ * issuecomment-5043752399), so is `applyDirectoryDeprovisionPolicies`'s own org-membership
+ * candidate-selection guard now (~L1491-1516, joins `directory_integrations.org_id`): the two
+ * predicates are deliberately mirrored (same three clauses: linked, active, same org) so
+ * candidate SELECTION and this WRITE agree on who still "works here". Only
+ * `applyDirectoryDeprovisionPolicies`'s SEPARATE global "no active binding ANYWHERE" guard
+ * (~L1587, gating the DingTalk grant / `users.is_active` writes, not this one) stays GLOBAL, for
+ * rehire protection: a user can be active in org A and inactive in org B independently, so the
+ * sibling search HERE spans BOTH `local` and `dingtalk` directory accounts of THIS org only (via
+ * the `directory_integrations.org_id` join) — never accounts in a different org. Call this AFTER
+ * the triggering link mutation has already been written in the same transaction, so a
+ * just-severed/reassigned row correctly
+ * self-excludes from the NOT EXISTS.
+ *
+ * Boundary (this PR's own reading, presented to the owner as evidence — NOT an adjudicated owner
+ * ruling; see the PR body's "Deactivation boundary semantics" section): only a BINDING event
+ * (unbind / directory-side link removal / same-account rebind that displaces a prior holder) is
+ * treated as calling this. A user's `users.is_active` PATCH (deactivation) never touches
+ * `user_orgs` — the RD-3 dual-is_active read filter (`user_orgs.is_active=true AND
+ * users.is_active=true`) already excludes a deactivated user from every count and gate without a
+ * membership-row write.
+ *
+ * Concurrency (#4526 review fix — cross-transaction write skew): a plain
+ * `UPDATE ... WHERE ... AND NOT EXISTS (...)` is atomic only for ITS OWN target row; the NOT
+ * EXISTS subquery reads OTHER rows (sibling `directory_account_links`/`directory_accounts`)
+ * through this transaction's own READ COMMITTED snapshot, which cannot see a concurrent sibling-
+ * severing transaction's still-uncommitted write. Two concurrent unbinds of a double-bound user's
+ * two DIFFERENT accounts can each legitimately see the OTHER's account as still linked+active
+ * (neither has committed yet), so BOTH skip deactivation — write skew converging to an ACTIVE
+ * `user_orgs` row with ZERO live bindings. The `SELECT ... FOR UPDATE` below serializes the two
+ * calls on the shared (userId, orgId) row: whichever call reaches it second BLOCKS until the
+ * first commits, then re-reads with a FRESH read-committed snapshot that includes the first call's
+ * already-committed severance — so the second call's NOT EXISTS correctly observes both siblings
+ * gone and performs the deactivation. (The first call legitimately still sees the second's sibling
+ * as not-yet-severed and no-ops — that is correct, not a bug: "no other active binding" only
+ * becomes true once BOTH severances are durable, and the lock guarantees exactly one of the two
+ * racing calls observes that fully-converged state.) If no `user_orgs` row exists yet, the lock
+ * finds nothing and the UPDATE below is a no-op either way.
+ */
+export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
+  client: MembershipWriteClient,
+  options: { userId: string; orgId: string },
+): Promise<void> {
+  await client.query(
+    `SELECT 1 FROM user_orgs WHERE user_id = $1::text AND org_id = $2::text FOR UPDATE`,
+    [options.userId, options.orgId],
+  )
+  await client.query(
+    `UPDATE user_orgs
+     SET is_active = FALSE
+     WHERE user_id = $1::text
+       AND org_id = $2::text
+       AND is_active = TRUE
+       AND NOT EXISTS (
+         SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+         JOIN directory_integrations i ON i.id = a.integration_id
+         WHERE l.local_user_id = $1::text
+           AND l.link_status = 'linked'
+           AND a.is_active = TRUE
+           AND i.org_id = $2::text
+       )`,
+    [options.userId, options.orgId],
+  )
+}
+
+/**
+ * `resolveDirectoryAccountOrgId` additionally exposed here (alongside the two functions that are
+ * ALSO directly exported above for ordinary runtime consumers like `local-directory-org.ts`) so
+ * tests can drive the org-resolution seam directly without a full bind/unbind call.
+ */
+export const __userOrgsMembershipInternalsForTests = {
+  resolveDirectoryAccountOrgId,
+  upsertActiveUserOrgMembership,
+  deactivateUserOrgMembershipIfNoOtherActiveBinding,
+}
+
+async function lockAuthoritativeDirectoryBindingAccount(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  directoryAccountId: string,
+): Promise<DirectoryBindingTargetAccountRow | null> {
+  const result = await client.query(
+    `SELECT
+       account.id,
+       account.integration_id,
+       account.provider,
+       account.corp_id,
+       account.external_user_id,
+       account.union_id,
+       account.open_id,
+       account.external_key,
+       account.name,
+       account.email,
+       account.mobile,
+       account.is_active,
+       integration.provider AS integration_provider,
+       integration.corp_id AS integration_corp_id
+     FROM directory_accounts account
+     JOIN directory_integrations integration ON integration.id = account.integration_id
+     WHERE account.id = $1::uuid
+     FOR UPDATE OF account, integration`,
+    [directoryAccountId],
+  )
+  const row = result.rows[0] as (
+    DirectoryBindingTargetAccountRow
+    & { integration_provider: string; integration_corp_id: string }
+  ) | undefined
+  if (!row) return null
+
+  const accountCorpId = normalizeText(row.corp_id)
+  const integrationCorpId = normalizeText(row.integration_corp_id)
+  if (
+    normalizeText(row.provider) !== normalizeText(row.integration_provider)
+    || !accountCorpId
+    || !integrationCorpId
+    || accountCorpId !== integrationCorpId
+  ) {
+    throw new Error('Directory account tenant scope is inconsistent; synchronize or repair it before binding')
+  }
+
+  return {
+    ...row,
+    corp_id: accountCorpId,
+  }
+}
+
 async function applyDirectoryAccountBindInTransaction(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   options: {
     normalizedAccountId: string
     normalizedAdminUserId: string
     enableDingTalkGrant: boolean
-    account: DirectoryBindingTargetAccountRow
     localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
+    expectedPriorLocalUserId: string | null
+    supersedeTargetUser?: boolean
+    /**
+     * T1 pending create: link + identity only — no active user_orgs until activate (Action C).
+     * Default false preserves W4-PRE-1b membership maintenance for normal bind/admit.
+     */
+    skipUserOrgMembership?: boolean
   },
 ): Promise<void> {
-  const { normalizedAccountId, normalizedAdminUserId, enableDingTalkGrant, account, localUser } = options
+  const {
+    normalizedAccountId,
+    normalizedAdminUserId,
+    enableDingTalkGrant,
+    localUser,
+    expectedPriorLocalUserId,
+    supersedeTargetUser = true,
+    skipUserOrgMembership = false,
+  } = options
+  const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
+  if (!account) throw new Error('Directory account not found')
+  if (!account.is_active) throw new Error('Directory account is inactive and cannot be bound')
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
+
+  // W4-PRE-1b item A: resolve the account's KNOWN AUTHORITATIVE org up front (fail-closed,
+  // shared helper — see `resolveDirectoryAccountOrgId` above) so every caller of this function
+  // (manual bind, admit-over-existing-account, batch variants) maintains `user_orgs` the same
+  // way #4521 already does for brand-new admissions.
+  const orgId = await resolveDirectoryAccountOrgId(client, account.integration_id)
+
+  // W4-PRE-1b item B (same-account rebind displacement): capture whoever THIS account is
+  // CURRENTLY linked to, BEFORE the link upsert below overwrites it. `ON CONFLICT
+  // (directory_account_id) DO UPDATE local_user_id = EXCLUDED.local_user_id` a few statements
+  // down silently reassigns the account from its prior holder to `localUser` in one step — the
+  // prior holder must be re-evaluated for org-membership deactivation, exactly as an explicit
+  // unbind-then-bind would. Scoped to `link_status = 'linked'` on purpose: a 'pending' email/
+  // mobile match candidate (directory-sync.ts's own sync loop can set `local_user_id` on a
+  // 'pending' row) never held an ACTIVE membership via this account in the first place (item A
+  // only activates membership for 'linked'), so it must not trigger a deactivation.
+  const priorLinkResult = await client.query(
+    `SELECT local_user_id
+     FROM directory_account_links
+     WHERE directory_account_id = $1::uuid
+       AND link_status = 'linked'
+     FOR UPDATE
+     LIMIT 1`,
+    [normalizedAccountId],
+  )
+  const priorLocalUserId = (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id ?? null
+  if (priorLocalUserId !== expectedPriorLocalUserId) {
+    throw new Error('Directory account binding changed; retry the operation')
+  }
 
   const profile = JSON.stringify({
     source: 'directory_admin_bind',
@@ -4734,12 +5942,27 @@ async function applyDirectoryAccountBindInTransaction(
      WHERE provider = $1::text
        AND local_user_id <> $5::text
        AND (
-         external_key = $2::text
-         OR ($3::text IS NOT NULL AND provider_union_id = $3::text AND corp_id IS NOT DISTINCT FROM $4::text)
-         OR ($6::text IS NOT NULL AND provider_open_id = $6::text AND corp_id IS NOT DISTINCT FROM $4::text)
-     )
+         (external_key = $2::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR ($3::text IS NOT NULL
+           AND provider_union_id = $3::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR ($6::text IS NOT NULL
+           AND provider_open_id = $6::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+         OR (external_key = $7::text
+           AND NULLIF(BTRIM(corp_id), '') IS NOT DISTINCT FROM NULLIF(BTRIM($4::text), ''))
+       )
      LIMIT 1`,
-    [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
+    [
+      account.provider,
+      identityExternalKey,
+      account.union_id,
+      account.corp_id,
+      localUser.id,
+      account.open_id,
+      account.external_key,
+    ],
   )
   if (conflictingIdentityResult.rows.length > 0) {
     throw new Error('DingTalk account is already bound to another local user')
@@ -4843,6 +6066,31 @@ async function applyDirectoryAccountBindInTransaction(
        updated_at = NOW()`,
     [normalizedAccountId, localUser.id, normalizedAdminUserId],
   )
+
+  // W4-PRE-1b item A: the account is now linked to `localUser` — maintain their ACTIVE
+  // membership in the SAME transaction. Skipped for pending_activation creates (T1 design lock).
+  if (!skipUserOrgMembership) {
+    await upsertActiveUserOrgMembership(client, { userId: localUser.id, orgId })
+  }
+
+  // W4-PRE-1b item B: if this account previously belonged to a DIFFERENT local user, the link
+  // upsert above just displaced them — deactivate their membership in THIS org unless they hold
+  // another active linked account here (org-scoped sibling check, see the helper doc-comment).
+  if (priorLocalUserId && priorLocalUserId !== localUser.id) {
+    await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: priorLocalUserId, orgId })
+  }
+
+  const supersededUserIds = [
+    ...(supersedeTargetUser ? [localUser.id] : []),
+    ...(priorLocalUserId && priorLocalUserId !== localUser.id ? [priorLocalUserId] : []),
+  ]
+  if (supersededUserIds.length > 0) {
+    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+      userIds: supersededUserIds,
+      actorId: normalizedAdminUserId,
+      reason: 'directory account binding changed by an administrator',
+    })
+  }
 }
 
 async function createDirectoryAdmittedUserInTransaction(
@@ -4857,9 +6105,17 @@ async function createDirectoryAdmittedUserInTransaction(
     passwordHash: string
     mustChangePassword: boolean
     enableDingTalkGrant: boolean
+    expectedPriorLocalUserId?: string | null
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
+  // T1: pending-create runtime is default OFF. When enabled, admit creates pending users
+  // (is_active=false, no active user_orgs, grant off). When off, preserve pre-T1 behavior.
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  const enableDingTalkGrant = pendingMode ? false : options.enableDingTalkGrant
+  const isActive = pendingMode ? false : true
+  const activationStatus = pendingMode ? 'pending_activation' : 'activated'
+  const localPasswordSet = pendingMode ? false : true
   // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
   // and most common orphan cause (grant requested for an account that cannot hold one).
   // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
@@ -4868,7 +6124,7 @@ async function createDirectoryAdmittedUserInTransaction(
   // throws, swallowed by the sync loop's catch, historically committed an orphan. The
   // SAVEPOINT around INSERT+bind (below) makes the whole admission all-or-nothing: a bind
   // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
-  assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
+  assertDirectoryAccountCanEnableDingTalkGrant(options.account, enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
@@ -4928,30 +6184,96 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
+  let expectedPriorLocalUserId = options.expectedPriorLocalUserId
+  if (expectedPriorLocalUserId === undefined) {
+    const priorLinkResult = await client.query(
+      `SELECT local_user_id
+         FROM directory_account_links
+        WHERE directory_account_id = $1::uuid
+          AND link_status = 'linked'
+        LIMIT 1`,
+      [options.account.id],
+    )
+    expectedPriorLocalUserId =
+      (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id
+      ?? null
+  }
+  if (expectedPriorLocalUserId) {
+    const lockedPriorUsers = await lockUsersForAccessGraphWrite(client, [expectedPriorLocalUserId])
+    if (!lockedPriorUsers.has(expectedPriorLocalUserId)) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
+  }
+
   // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
   // (missing openId/unionId, or an identity already bound to another local user) would
   // otherwise leave a committed orphan once the sync loop swallows the error — the exact
   // hazard this ticket exists to close, and the one the pre-INSERT assert above does not cover.
+  // W4-PRE-1 extended the same all-or-nothing unit to user_orgs: a user_orgs write failure must
+  // also roll the users row back (fresh-DB atomicity leg, §3.3 item 3), not just a bind failure.
+  // W4-PRE-1b: the org resolution + user_orgs write that #4521 inlined HERE now lives inside
+  // `applyDirectoryAccountBindInTransaction` (single site, shared by every bind-shaped writer —
+  // see that function's own comments) — still inside this SAME savepoint, so the atomicity
+  // guarantee is unchanged; only the resolution failure message text moved with it
+  // ('Directory integration not found for account org resolution').
   await client.query('SAVEPOINT directory_admit_user')
   try {
     await client.query(
-      `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
-      [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+      `INSERT INTO users (
+         id, email, username, name, mobile, password_hash, must_change_password,
+         role, permissions, is_active, is_admin,
+         activation_status, local_password_set,
+         created_at, updated_at
+       )
+       VALUES (
+         $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean,
+         'user', $8::jsonb, $9::boolean, FALSE,
+         $10::text, $11::boolean,
+         NOW(), NOW()
+       )`,
+      [
+        userId,
+        options.email,
+        options.username,
+        options.name,
+        options.mobile,
+        options.passwordHash,
+        options.mustChangePassword,
+        JSON.stringify([]),
+        isActive,
+        activationStatus,
+        localPasswordSet,
+      ],
     )
 
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId: options.account.id,
       normalizedAdminUserId: options.adminUserId,
-      enableDingTalkGrant: options.enableDingTalkGrant,
-      account: options.account,
+      enableDingTalkGrant,
       localUser: {
         id: userId,
         email: options.email,
         username: options.username,
         name: options.name,
       },
+      expectedPriorLocalUserId,
+      supersedeTargetUser: false,
+      skipUserOrgMembership: pendingMode,
     })
+
+    // Alias full-writer: claim only when admission creates an activated user.
+    // pending_activation must claim nothing until T3 activate (design lock).
+    // Load-bearing: removing this branch must fail directory_admit activated writer tests.
+    if (activationStatus === 'activated') {
+      await claimNonEmptyLoginAliasesOrThrow({
+        userId,
+        email: options.email,
+        username: options.username,
+        mobile: options.mobile,
+        source: 'directory_admit',
+        client,
+      })
+    }
   } catch (error) {
     // Undo the users INSERT (and recover the transaction if the throw came from a failed
     // statement), then release, so the outer sync transaction stays usable for the next account.
@@ -4964,16 +6286,11 @@ async function createDirectoryAdmittedUserInTransaction(
   return { userId }
 }
 
-/**
- * DT-HARDEN-02: internals exposed only so the orphan-prevention invariant can be
- * asserted directly — "a grant that cannot be honored must throw BEFORE the users
- * row is inserted". The invariant is not observable through the exported surface
- * (the manual-admission path asserts earlier; the sync path now computes the grant
- * from openId presence), so without this seam a regression at the call site would
- * pass every test.
- */
+/** Narrow internal seams for invariants that are not independently observable at public APIs. */
 export const __directorySyncInternalsForTests = {
   createDirectoryAdmittedUserInTransaction,
+  doesExternalIdentityMatchAccount,
+  lockDirectorySyncAccessGraphUsers,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
@@ -5010,16 +6327,25 @@ async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
   let defaultNamespaceAdmissionsCount = 0
 
   if (grantSet.roleIds.length > 0) {
-    const insertedRolesResult = await client.query(
-      `INSERT INTO user_roles (user_id, role_id)
-       SELECT u.user_id, r.role_id
-       FROM unnest($1::text[]) AS u(user_id)
-       CROSS JOIN unnest($2::text[]) AS r(role_id)
-       ON CONFLICT DO NOTHING
-       RETURNING user_id, role_id`,
-      [grantSet.userIds, grantSet.roleIds],
-    )
-    defaultRoleAssignmentsCount = insertedRolesResult.rows.length
+    // This seam's real constraint is its CONFIG VALIDATOR, not this call: on integration
+    // create and update, `assertDirectoryProjectedGovernanceConfigValid` refuses the
+    // platform-admin role id and every delegated-admin role id and requires each id to exist
+    // in the role registry. The scope below therefore states that authority — "exactly the
+    // role ids the validated configuration declares" — rather than re-deriving a narrower one
+    // here. Deliberately NOT tightened to `grantSet.namespaces`: `memberGroupDefaultRoleIds`
+    // and `memberGroupDefaultNamespaces` are independent config fields and an integration may
+    // legitimately set the first without the second today, so tightening is a behaviour change
+    // that needs its own review against live configurations.
+    const governanceScope: RoleAssignmentScope = { kind: 'fixed', roleIds: grantSet.roleIds }
+    for (const roleId of grantSet.roleIds) {
+      const assigned = await assignUserRoles({
+        userIds: grantSet.userIds,
+        roleId,
+        scope: governanceScope,
+        executor: client,
+      })
+      defaultRoleAssignmentsCount += assigned.affectedUserIds.length
+    }
   }
 
   if (grantSet.namespaces.length > 0) {
@@ -5297,7 +6623,7 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
 
 async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Promise<DirectoryBindingTargetAccountRow | null> {
   const result = await query<DirectoryBindingTargetAccountRow>(
-    `SELECT id, integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
+    `SELECT id, integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile, is_active
      FROM directory_accounts
      WHERE id = $1
      LIMIT 1`,
@@ -5306,6 +6632,20 @@ async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Pr
   return result.rows[0] ?? null
 }
 
+/**
+ * The prior-HOLDER witness for bind/admit CAS checks — `link_status = 'linked'` on purpose, and
+ * this predicate must stay IDENTICAL to the CAS re-reads in
+ * `applyDirectoryAccountBindInTransaction` / `createDirectoryAdmittedUserInTransaction`.
+ *
+ * D5 adversarial review P1: this read used to be status-agnostic while the CAS re-read was
+ * linked-scoped. A 'pending' email/mobile match row (the sync loop itself writes
+ * `local_user_id` onto 'pending' rows as a match HINT) made the witness non-null, the
+ * linked-scoped CAS null, and every manual bind/admit of such an account failed forever with
+ * "binding changed; retry" — the retry could never succeed, on precisely the top-ranked bind
+ * targets in the review workbench. A pending hint is not a holder: it never activated
+ * membership, holds nothing to deactivate, and must neither trip the CAS nor be shown as
+ * `previousLocalUser`.
+ */
 async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<DirectoryAccountLinkedUserRow | null> {
   const result = await query<DirectoryAccountLinkedUserRow>(
     `SELECT l.local_user_id,
@@ -5315,6 +6655,7 @@ async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<Dire
      FROM directory_account_links l
      LEFT JOIN users u ON u.id = l.local_user_id
      WHERE l.directory_account_id = $1
+       AND l.link_status = 'linked'
      LIMIT 1`,
     [directoryAccountId],
   )
@@ -5483,16 +6824,30 @@ export async function bindDirectoryAccount(
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
   if (!localUser) throw new Error('Local user not found')
+  const expectedPriorLocalUserId = previousLinkedUser?.local_user_id ?? null
 
-  await transaction(async (client) => {
+  // O2-S2: binds write users-adjacent recovery-authority state under the access-graph
+  // mutex — marker 40001 → named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
+    const lockedUsers = await lockUsersForAccessGraphWrite(client, [
+      localUser.id,
+      ...(expectedPriorLocalUserId ? [expectedPriorLocalUserId] : []),
+    ])
+    const lockedTargetUser = lockedUsers.get(localUser.id)
+    if (!lockedTargetUser || !lockedTargetUser.isActive) {
+      throw new Error('Local user is no longer active; retry the operation')
+    }
+    if (expectedPriorLocalUserId && !lockedUsers.has(expectedPriorLocalUserId)) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId,
       normalizedAdminUserId,
       enableDingTalkGrant,
-      account,
-      localUser,
+      localUser: lockedTargetUser,
+      expectedPriorLocalUserId,
     })
-  })
+  }))
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
   if (!summary) {
@@ -5522,7 +6877,9 @@ export async function admitDirectoryAccountUser(
   const cleanUsername = sanitizeDirectoryAdmissionUsername(input.username)
   const cleanMobile = sanitizeDirectoryAdmissionMobile(input.mobile)
   const requestedPassword = normalizeText(input.password)
-  const enableDingTalkGrant = input.enableDingTalkGrant !== false
+  const pendingMode = isDirectoryPendingActivationEnabled()
+  // Pending create: never grant DingTalk login; credentials deferred to T3 activate.
+  const enableDingTalkGrant = pendingMode ? false : input.enableDingTalkGrant !== false
 
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
@@ -5534,11 +6891,20 @@ export async function admitDirectoryAccountUser(
   const usernameValidationError = validateDirectoryAdmissionUsername(cleanUsername)
   if (usernameValidationError) throw new Error(usernameValidationError)
 
-  const generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
-  const mustChangePassword = requestedPassword.length === 0
-  const passwordValidation = validatePassword(generatedPassword)
-  if (!passwordValidation.valid) {
-    throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+  // Pending: ignore any requested password — unusable hash only (no temp credentials).
+  let generatedPassword: string | null = null
+  let passwordHash: string
+  let mustChangePassword = false
+  if (pendingMode) {
+    passwordHash = await buildUnusablePasswordHash()
+  } else {
+    generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
+    mustChangePassword = requestedPassword.length === 0
+    const passwordValidation = validatePassword(generatedPassword)
+    if (!passwordValidation.valid) {
+      throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+    }
+    passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   }
 
   const [account, previousLinkedUser] = await Promise.all([
@@ -5552,10 +6918,11 @@ export async function admitDirectoryAccountUser(
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
-  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   let userId = ''
 
-  await transaction(async (client) => {
+  // O2-S2: admission INSERTs a users row — a recovery-authority table. Marker 40001 →
+  // named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
     const created = await createDirectoryAdmittedUserInTransaction(client, {
       account,
       adminUserId: normalizedAdminUserId,
@@ -5566,19 +6933,19 @@ export async function admitDirectoryAccountUser(
       passwordHash,
       mustChangePassword,
       enableDingTalkGrant,
+      expectedPriorLocalUserId: previousLinkedUser?.local_user_id ?? null,
     })
     userId = created.userId
-  })
+  }))
 
-  const resolvedInviteToken = cleanEmail
-    ? issueInviteToken({
+  // Pending: never issue invite or temporary password (T3 owns activation credentials).
+  let resolvedInviteToken: string | null = null
+  if (!pendingMode && cleanEmail) {
+    resolvedInviteToken = issueInviteToken({
       userId,
       email: cleanEmail,
       presetId: null,
     })
-    : null
-
-  if (cleanEmail && resolvedInviteToken) {
     await recordInvite({
       userId,
       email: cleanEmail,
@@ -5594,6 +6961,27 @@ export async function admitDirectoryAccountUser(
   if (!summary) {
     throw new Error('Directory account bound but summary reload failed')
   }
+
+  const isActive = !pendingMode
+  const returnTempPassword = !pendingMode && requestedPassword.length === 0 && generatedPassword
+    ? generatedPassword
+    : undefined
+
+  // Pending: no misleading onboarding (no usable password, cannot login until T3 activate).
+  const onboarding = pendingMode
+    ? null
+    : buildOnboardingPacket({
+      email: cleanEmail || null,
+      accountLabel: resolveDirectoryAdmissionAccountLabel({
+        email: cleanEmail || null,
+        username: cleanUsername,
+        mobile: cleanMobile,
+        userId,
+      }),
+      temporaryPassword: returnTempPassword ?? null,
+      preset: null,
+      inviteToken: resolvedInviteToken,
+    })
 
   return {
     account: summary,
@@ -5611,22 +6999,15 @@ export async function admitDirectoryAccountUser(
       name: cleanName,
       mobile: cleanMobile,
       role: 'user',
-      is_active: true,
+      is_active: isActive,
     },
-    temporaryPassword: requestedPassword.length === 0 ? generatedPassword : undefined,
+    temporaryPassword: returnTempPassword,
     inviteToken: resolvedInviteToken,
-    onboarding: buildOnboardingPacket({
-      email: cleanEmail || null,
-      accountLabel: resolveDirectoryAdmissionAccountLabel({
-        email: cleanEmail || null,
-        username: cleanUsername,
-        mobile: cleanMobile,
-        userId,
-      }),
-      temporaryPassword: requestedPassword.length === 0 ? generatedPassword : null,
-      preset: null,
-      inviteToken: resolvedInviteToken,
-    }),
+    // When pending, onboarding is null — callers must not invent temp-password messaging.
+    onboarding,
+    // Actual grant applied (pending forces false).
+    enableDingTalkGrantApplied: enableDingTalkGrant,
+    activationStatus: pendingMode ? 'pending_activation' : 'activated',
   }
 }
 
@@ -5641,46 +7022,107 @@ export async function unbindDirectoryAccount(
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
 
-  const [account, previousLinkedUser] = await Promise.all([
-    loadDirectoryBindingTargetAccount(normalizedAccountId),
-    loadDirectoryLinkedUser(normalizedAccountId),
-  ])
-  if (!account) throw new Error('Directory account not found')
+  let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
 
-  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+  // O2-S2: unbind writes users / deprovision evidence under the access-graph mutex —
+  // marker 40001 → named retryable RecoveryConflictError; other errors unchanged.
+  await translateRecoveryConflict(() => transaction(async (client) => {
+    // This unlocked read is only an expected-holder snapshot. The first row lock is still the
+    // canonical users row; after it is held, the account/link are locked and re-read. A mismatch
+    // fails closed instead of modifying an unprotected replacement holder.
+    const expectedLinkedUserResult = await client.query(
+      `SELECT l.local_user_id,
+              u.email AS local_user_email,
+              u.username AS local_user_username,
+              u.name AS local_user_name
+         FROM directory_account_links l
+         LEFT JOIN users u ON u.id = l.local_user_id
+        WHERE l.directory_account_id = $1
+        LIMIT 1`,
+      [normalizedAccountId],
+    )
+    const expectedLinkedUser =
+      (expectedLinkedUserResult.rows[0] as DirectoryAccountLinkedUserRow | undefined)
+      ?? null
+    const expectedLocalUserId = expectedLinkedUser?.local_user_id ?? null
+    if (expectedLocalUserId) {
+      const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
+      if (!lockedUsers.has(expectedLocalUserId)) {
+        throw new Error('Directory account binding changed; retry the operation')
+      }
+    }
+    const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
+    if (!account) throw new Error('Directory account not found')
+    const identityExternalKey = buildDingTalkIdentityExternalKey(
+      account.corp_id,
+      account.open_id,
+      account.union_id,
+    )
 
-  await transaction(async (client) => {
+    const linkedUserLockResult = await client.query(
+      `SELECT l.local_user_id,
+              u.email AS local_user_email,
+              u.username AS local_user_username,
+              u.name AS local_user_name
+       FROM directory_account_links l
+       LEFT JOIN users u ON u.id = l.local_user_id
+       WHERE l.directory_account_id = $1
+       FOR UPDATE OF l
+       LIMIT 1`,
+      [normalizedAccountId],
+    )
+    previousLinkedUser = (linkedUserLockResult.rows[0] as DirectoryAccountLinkedUserRow | undefined) ?? null
+    if ((previousLinkedUser?.local_user_id ?? null) !== expectedLocalUserId) {
+      throw new Error('Directory account binding changed; retry the operation')
+    }
+
     if (previousLinkedUser?.local_user_id) {
-      const deleteIdentityParams: unknown[] = [
+      const candidateIdentityParams: unknown[] = [
         account.provider,
         previousLinkedUser.local_user_id,
       ]
-      const deleteIdentityClauses = [
-        'provider = $1',
-        'local_user_id = $2',
-      ]
+      const identityMatchClauses: string[] = []
 
       if (identityExternalKey) {
-        deleteIdentityParams.push(identityExternalKey)
-        deleteIdentityClauses.push(`external_key = $${deleteIdentityParams.length}`)
-      } else if (normalizeText(account.open_id)) {
-        deleteIdentityParams.push(account.open_id, account.corp_id)
-        deleteIdentityClauses.push(
-          `(provider_open_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
-        )
-      } else if (normalizeText(account.union_id)) {
-        deleteIdentityParams.push(account.union_id, account.corp_id)
-        deleteIdentityClauses.push(
-          `(provider_union_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
-        )
+        candidateIdentityParams.push(identityExternalKey)
+        identityMatchClauses.push(`external_key = $${candidateIdentityParams.length}`)
+      }
+      if (normalizeText(account.external_key) && account.external_key !== identityExternalKey) {
+        candidateIdentityParams.push(account.external_key)
+        identityMatchClauses.push(`external_key = $${candidateIdentityParams.length}`)
+      }
+      if (normalizeText(account.open_id)) {
+        candidateIdentityParams.push(account.open_id)
+        identityMatchClauses.push(`provider_open_id = $${candidateIdentityParams.length}`)
+      }
+      if (normalizeText(account.union_id)) {
+        candidateIdentityParams.push(account.union_id)
+        identityMatchClauses.push(`provider_union_id = $${candidateIdentityParams.length}`)
       }
 
-      if (deleteIdentityClauses.length > 2) {
-        await client.query(
-          `DELETE FROM user_external_identities
-           WHERE ${deleteIdentityClauses.join(' AND ')}`,
-          deleteIdentityParams,
+      if (identityMatchClauses.length > 0) {
+        const identityCandidates = await client.query(
+          `SELECT id::text AS id, corp_id
+           FROM user_external_identities
+           WHERE provider = $1
+             AND local_user_id = $2
+             AND (${identityMatchClauses.join(' OR ')})
+           FOR UPDATE`,
+          candidateIdentityParams,
         )
+        if (identityCandidates.rows.some((row) => normalizeText(row.corp_id) !== account.corp_id)) {
+          throw new Error('Directory identity tenant scope is inconsistent; repair it before unbinding')
+        }
+        const candidateIds = identityCandidates.rows
+          .map((row) => normalizeText(row.id))
+          .filter(Boolean)
+        if (candidateIds.length > 0) {
+          await client.query(
+            `DELETE FROM user_external_identities
+             WHERE id = ANY($1::uuid[])`,
+            [candidateIds],
+          )
+        }
       }
 
       if (disableDingTalkGrant) {
@@ -5709,7 +7151,23 @@ export async function unbindDirectoryAccount(
          updated_at = NOW()`,
       [normalizedAccountId, normalizedAdminUserId],
     )
-  })
+
+    // W4-PRE-1b item B: the account was just severed from `previousLinkedUser` — deactivate
+    // their membership in THIS org (org-scoped sibling check) unless they hold another active
+    // linked directory account here. Runs in the SAME transaction as the link severance above.
+    if (previousLinkedUser?.local_user_id) {
+      const orgId = await resolveDirectoryAccountOrgId(client, account.integration_id)
+      await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, {
+        userId: previousLinkedUser.local_user_id,
+        orgId,
+      })
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [previousLinkedUser.local_user_id],
+        actorId: normalizedAdminUserId,
+        reason: 'directory account unbound by an administrator',
+      })
+    }
+  }))
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
   if (!summary) {

@@ -14,6 +14,16 @@ import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from
 import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
+import {
+  assertAliasCutoverAllowed,
+  claimNonEmptyLoginAliasesOrThrow,
+  findUserIdByLoginAlias,
+  isAuthLoginAliasCutoverEnabled,
+} from './login-alias-service'
+import type { AliasQueryClient } from './login-alias-service'
+import { assignUserRoles } from '../rbac/role-assignment'
+import { evaluateUserAuthenticationGate } from './user-activation'
+import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
 export interface User {
   id: string
@@ -26,6 +36,8 @@ export interface User {
   tenantId?: string
   is_active?: boolean
   must_change_password?: boolean
+  activation_status?: string
+  local_password_set?: boolean
   created_at: Date
   updated_at: Date
   // Index signature for compatibility with Express.Request.user
@@ -36,6 +48,9 @@ export interface User {
 interface UserRow extends User {
   password_hash: string
 }
+
+const USER_AUTH_SELECT =
+  'id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
 
 export interface TokenPayload {
   userId: string
@@ -54,7 +69,69 @@ export interface AuthConfig {
 }
 
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
+/** The closed set this service may assign. Both call sites below pass only this id. */
+const SELF_SERVICE_ASSIGNABLE_ROLE_IDS = [ATTENDANCE_SELF_SERVICE_ROLE_ID] as const
 const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:write'] as const
+
+// P23: user_roles (and users) are among exact-anchor recovery's eight recovery-authority
+// tables. A write that lands while recovery holds the per-subject lease fails fast with
+// Postgres SQLSTATE 40001 (see recovery-authorization-stability.ts's
+// isRecoveryAuthorityBusyError / RECOVERY_AUTHORITY_BUSY_MARKER — reused here, not
+// re-derived). That is transient and retryable, so both retry sites below reuse these
+// constants: assignUserRoles retries its standalone INSERT a bounded number of times
+// in-process (read-path backfill in resolveRbacProfile), and register() retries its WHOLE
+// user-creation transaction the same bounded number of times (O2-S1 — a 40001 aborts the
+// open transaction, so per-statement retry inside it is impossible; the retry unit is the
+// transaction). USER_ROLE_ASSIGNMENT_RETRY_LIMIT is the total number of attempts (not
+// "retries after the first"); the backoff is small because a busy lease must not add much
+// latency to every authenticated request for a user missing attendance permissions.
+export const USER_ROLE_ASSIGNMENT_RETRY_LIMIT = 3
+const USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS = 20
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * O2-A3 (gate NIT-2): the register-path discrimination between "identity already taken"
+ * (swallow to `null` → the route's 409 "already exists") and every other failure
+ * (rethrow → the route's real 500). Register claims only the email alias, so an
+ * ALIAS_CONFLICT LoginAliasClaimError here IS an email-identity conflict (a WRITE_FAILED
+ * one is a real write failure and must rethrow); Postgres 23505 on this path is the
+ * users email unique index (user_permissions/user_roles both insert with
+ * ON CONFLICT DO NOTHING, and the id is a fresh randomUUID). NOT a general-purpose
+ * duplicate detector — scoped to register()'s write set only.
+ *
+ * Duck-typed on `.code` rather than a bare `instanceof LoginAliasClaimError` (gate #5018
+ * NIT-3, lesson 判据本身也要被攻击): under a duplicated module instance `instanceof`
+ * silently fails and a genuine ALIAS_CONFLICT would rethrow → generic 500 instead of the
+ * truthful 409. `'ALIAS_CONFLICT'` is produced only by LoginAliasClaimError on this
+ * write set (Postgres errors carry SQLSTATE codes), so the duck-type does not widen the
+ * criterion; `'ALIAS_WRITE_FAILED'` still falls through to rethrow.
+ */
+function isDuplicateIdentityConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  return code === 'ALIAS_CONFLICT' || code === '23505'
+}
+
+/**
+ * Thrown by assignUserRoles when every retry against a recovery-authority-busy (40001) write
+ * is exhausted. Named and exported so callers (and tests) can distinguish "role assignment is
+ * retryable-failed" from every other error assignUserRoles used to swallow unconditionally.
+ */
+export class UserRoleAssignmentRecoveryBusyError extends Error {
+  readonly code = 'USER_ROLE_ASSIGNMENT_RECOVERY_BUSY'
+  readonly retryable = true
+
+  constructor(readonly userId: string, readonly roleIds: readonly string[], cause: unknown) {
+    super('User role assignment did not persist: recovery authority lease is busy')
+    this.name = 'UserRoleAssignmentRecoveryBusyError'
+    if (cause !== undefined) {
+      ;(this as { cause?: unknown }).cause = cause
+    }
+  }
+}
 
 export class AuthService {
   private config: AuthConfig
@@ -118,6 +195,11 @@ export class AuthService {
     return trimmed.length > 0 ? trimmed : undefined
   }
 
+  /**
+   * Dev-only exception (NODE_ENV !== production && RBAC_TOKEN_TRUST): trusts JWT claims
+   * without DB activation gate. Production never enables this path. Not a substitute for
+   * T1 fail-closed verifyToken DB path.
+   */
   private buildTrustedTokenUser(
     payload: TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
   ): User | null {
@@ -152,6 +234,8 @@ export class AuthService {
       permissions,
       ...(tenantId ? { tenantId } : {}),
       is_active: true,
+      activation_status: 'activated',
+      local_password_set: true,
       created_at: new Date(0),
       updated_at: new Date(0),
       roles,
@@ -185,8 +269,8 @@ export class AuthService {
         return null
       }
 
-      // 验证用户是否仍然活跃
-      if (user.role === 'disabled' || user.is_active === false) {
+      // T1: fail-closed on pending / invalid activation / inactive (shared gate).
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 
@@ -203,7 +287,11 @@ export class AuthService {
         }
       }
 
-      return this.sanitizeUser(user)
+      const tenantClaim = this.normalizeClaimString(payload.tenantId)
+      const tenantId = tenantClaim
+        ? await this.resolveSessionTenantId(user.id, tenantClaim)
+        : undefined
+      return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
@@ -255,21 +343,20 @@ export class AuthService {
         return null
       }
 
+      // Password usability gate before bcrypt (pending / SSO-only accounts).
+      const gate = evaluateUserAuthenticationGate(user, { requireLocalPassword: true })
+      if (gate) {
+        return null
+      }
+
       // 验证密码
       const isValid = await bcrypt.compare(password, user.password_hash)
       if (!isValid) {
         return null
       }
 
-      // 检查用户状态
-      if (user.role === 'disabled' || user.is_active === false) {
-        return null
-      }
-
       const sessionId = crypto.randomUUID()
-      const tenantId = typeof options.tenantId === 'string' && options.tenantId.trim().length > 0
-        ? options.tenantId.trim()
-        : undefined
+      const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
       const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
@@ -288,14 +375,87 @@ export class AuthService {
       const safeUser = this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
       return { user: safeUser, token }
     } catch (error) {
+      // Surface alias cutover misconfiguration to operators (do not swallow as null login).
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
     }
   }
 
+  async resolveSessionTenantId(userId: string, requestedTenantId?: string): Promise<string | undefined> {
+    const requested = typeof requestedTenantId === 'string' && requestedTenantId.trim().length > 0
+      ? requestedTenantId.trim()
+      : undefined
+    try {
+      const pool = poolManager.get()
+      if (requested) {
+        const result = await pool.query(
+          `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+           WHERE uo.user_id = $1
+             AND uo.org_id = $2
+             AND uo.is_active = true
+             AND u.is_active = true
+           LIMIT 1`,
+          [userId, requested],
+        )
+        return result.rows[0]?.org_id === requested ? requested : undefined
+      }
+
+      const result = await pool.query(
+        `SELECT uo.org_id
+         FROM user_orgs uo
+         JOIN users u ON u.id = uo.user_id
+         WHERE uo.user_id = $1
+           AND uo.is_active = true
+           AND u.is_active = true
+         ORDER BY uo.org_id ASC
+         LIMIT 2`,
+        [userId],
+      )
+      return result.rows.length === 1 && typeof result.rows[0]?.org_id === 'string'
+        ? result.rows[0].org_id
+        : undefined
+    } catch (error) {
+      this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
+      return undefined
+    }
+  }
+
+  // Reused from #5145's explicit membership selector; login resolution is unchanged.
+  async listActiveMembershipOrgIds(userId: string): Promise<string[]> {
+    const result = await poolManager.get().query(
+      `SELECT uo.org_id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+       ORDER BY uo.org_id ASC`,
+      [userId],
+    )
+    return result.rows
+      .map((row: { org_id?: unknown }) => row.org_id)
+      .filter((orgId: unknown): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+  }
+
   /**
    * 用户注册
    */
+  // W4-PRE-1 policy (§3.3 item 2 of the Wave-4 onboarding design lock, docs/development/
+  // attendance-vnext-wave4-onboarding-design-lock-20260721.md): this signature carries no org
+  // parameter and this deployment-level self-service registration path has no source of an
+  // authoritative org anywhere in its call chain — it is the design lock's own example of an
+  // "org 不可知的路径(如部署级注册)". Per the explicit ticket instruction, an org-unknowable
+  // path MUST record its policy and MUST NOT silently guess an org (e.g. defaulting to
+  // 'default' — that string is the one-time zzzz20260114110000 backfill's semantics, not a
+  // live admission default). Deliberately: this method does NOT write user_orgs. A user
+  // created here has no org membership until an org-aware admission path (POST
+  // /api/admin/users with attendanceOrgId, or directory sync admission) later adds one, or an
+  // operator backfills it explicitly. Verified by
+  // tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
+  // user created via this path).
   async register(email: string, password: string, name: string): Promise<User | null> {
     try {
       // 检查邮箱是否已存在
@@ -304,7 +464,7 @@ export class AuthService {
         return null
       }
 
-      // 加密密码
+      // 加密密码 — self-service register is always activated + local password set
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
       const enableAttendanceSelfService = supportsAttendanceSelfService(process.env.PRODUCT_MODE)
       const registrationPermissions = [
@@ -319,23 +479,83 @@ export class AuthService {
 
       // 创建用户
       const userId = crypto.randomUUID()
-      const newUser = await this.createUser({
-        id: userId,
-        email,
-        name,
-        password_hash: passwordHash,
-        role: 'user',
-        permissions: registrationPermissions
-      })
+      const selfServiceRoleIds = enableAttendanceSelfService
+        ? [ATTENDANCE_SELF_SERVICE_ROLE_ID]
+        : []
 
-      if (newUser && enableAttendanceSelfService) {
-        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
+      // P23 / O2-S1: user creation and self-service role assignment are ONE transaction —
+      // the users, user_login_aliases, user_permissions and user_roles rows all commit or
+      // none do. user_roles (and users) are recovery-authority tables, so any of these
+      // writes can fail fast with 40001 while recovery holds the per-subject lease; a 40001
+      // aborts the whole open transaction (later statements would fail with 25P02), so the
+      // bounded retry re-runs the WHOLE transaction, reusing the same retry-limit/backoff
+      // constants assignUserRoles has always used. Exhaustion throws the same named
+      // UserRoleAssignmentRecoveryBusyError — but now with zero residue, unlike the
+      // pre-slice shape where the user row stayed committed while the role was missing.
+      const pool = poolManager.get()
+      for (let attempt = 1; ; attempt++) {
+        let newUser: User | null
+        try {
+          newUser = await pool.transaction(async (client) => {
+            const created = await this.createUserInTransaction(client, {
+              id: userId,
+              email,
+              name,
+              password_hash: passwordHash,
+              role: 'user',
+              permissions: registrationPermissions,
+            })
+            if (created && selfServiceRoleIds.length > 0) {
+              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds)
+            }
+            return created
+          })
+        } catch (txnError) {
+          if (isRecoveryAuthorityBusyError(txnError)) {
+            if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
+              throw new UserRoleAssignmentRecoveryBusyError(userId, selfServiceRoleIds, txnError)
+            }
+            await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
+            continue
+          }
+          // O2-A3 (gate NIT-2): `null` must mean "identity already taken" and NOTHING
+          // else — the registration route maps null to 409 "User with this email
+          // already exists" (routes/auth.ts). A duplicate-identity conflict (the alias
+          // claim losing a concurrent-register race, or the users email unique index
+          // firing — the race twin of the getUserByEmail pre-check) keeps the
+          // historical swallow-to-null; the whole transaction has rolled back,
+          // fail-closed. Every OTHER transaction failure now rethrows, so the route's
+          // catch answers its real 500 instead of fabricating an "exists" 409.
+          if (isDuplicateIdentityConflict(txnError)) {
+            this.logger.warn('Registration identity conflict', txnError instanceof Error ? txnError : undefined)
+            return null
+          }
+          this.logger.warn('Database insert failed', txnError instanceof Error ? txnError : undefined)
+          throw txnError
+        }
+        if (newUser && selfServiceRoleIds.length > 0) {
+          // Only after the transaction actually committed — invalidating before commit
+          // could refill the cache from a state the commit then supersedes.
+          invalidateUserPerms(userId)
+        }
+        return newUser
       }
-
-      return newUser
     } catch (error) {
       this.logger.error('Registration error', error instanceof Error ? error : undefined)
-      return null
+      // P23: bounded whole-transaction retries exhausted against a busy recovery lease.
+      // Everything rolled back (no user/alias/permission/role residue — O2-S1), but
+      // re-throw so the caller (the registration route in routes/auth.ts, which wraps this
+      // call in its own try/catch) sees a retryable failure instead of a fabricated
+      // success — never swallow this one to `null` alongside the ordinary "email already
+      // exists" case.
+      if (error instanceof UserRoleAssignmentRecoveryBusyError) throw error
+      // O2-A3 (gate NIT-2): the same discrimination as the transaction catch — `null`
+      // is reserved for "identity already taken". Anything else (bcrypt failure,
+      // getUserByEmail infrastructure error, rethrown transaction failures passing
+      // through) propagates to the route's own catch → its real 500, never a
+      // fabricated "email already exists" 409.
+      if (isDuplicateIdentityConflict(error)) return null
+      throw error
     }
   }
 
@@ -348,7 +568,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
+          `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1`,
           [userId]
         )
 
@@ -365,6 +585,8 @@ export class AuthService {
             permissions: resolved.permissions,
             is_active: row.is_active,
             must_change_password: row.must_change_password,
+            activation_status: row.activation_status,
+            local_password_set: row.local_password_set,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -386,6 +608,8 @@ export class AuthService {
           permissions: ['*:*'],
           is_active: true,
           must_change_password: false,
+          activation_status: 'activated',
+          local_password_set: true,
           password_hash: await bcrypt.hash('dev123', this.config.saltRounds),
           created_at: new Date(),
           updated_at: new Date()
@@ -411,14 +635,31 @@ export class AuthService {
       const trimmedIdentifier = identifier.trim()
       if (!trimmedIdentifier) return null
 
-      const normalizedEmail = trimmedIdentifier.toLowerCase()
-      const normalizedUsername = trimmedIdentifier.toLowerCase()
-      const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
-
       try {
         const pool = poolManager.get()
+
+        // T2b: alias-only login (no OR fallback to users.email/username/mobile).
+        // Enforce admin-alias readiness gate on every auth path that would use aliases —
+        // enabling AUTH_LOGIN_USE_ALIASES without a password-capable admin must not lock
+        // operators out while reporting ready:true elsewhere.
+        if (isAuthLoginAliasCutoverEnabled()) {
+          await assertAliasCutoverAllowed()
+          const userId = await findUserIdByLoginAlias(trimmedIdentifier)
+          if (!userId) return null
+          const byId = await pool.query(
+            `SELECT ${USER_AUTH_SELECT} FROM users WHERE id = $1 LIMIT 1`,
+            [userId],
+          )
+          if (!byId.rows[0]) return null
+          return this.mapAuthUserRow(byId.rows[0] as UserRow)
+        }
+
+        // T2a (default): legacy OR-column path remains until cutover.
+        const normalizedEmail = trimmedIdentifier.toLowerCase()
+        const normalizedUsername = trimmedIdentifier.toLowerCase()
+        const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
         const result = await pool.query(
-          `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
+          `SELECT ${USER_AUTH_SELECT}
            FROM users
            WHERE lower(email) = $1
               OR lower(username) = $2
@@ -441,30 +682,45 @@ export class AuthService {
         }
 
         if (result.rows.length > 0) {
-          const row = result.rows[0] as UserRow
-          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
-          return {
-            id: row.id,
-            email: row.email,
-            username: row.username ?? null,
-            mobile: row.mobile ?? null,
-            name: row.name,
-            role: resolved.role,
-            permissions: resolved.permissions,
-            is_active: row.is_active,
-            must_change_password: row.must_change_password,
-            password_hash: row.password_hash,
-            created_at: row.created_at,
-            updated_at: row.updated_at
-          }
+          return this.mapAuthUserRow(result.rows[0] as UserRow)
         }
       } catch (dbError) {
+        if ((dbError as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+          throw dbError
+        }
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
       return null
     } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'ALIAS_CUTOVER_BLOCKED') {
+        throw error
+      }
       this.logger.error('Get user by identifier error', error instanceof Error ? error : undefined)
       return null
+    }
+  }
+
+  private async mapAuthUserRow(row: UserRow): Promise<(User & { password_hash: string })> {
+    const resolved = await this.resolveRbacProfile(
+      row.id,
+      row.role,
+      Array.isArray(row.permissions) ? row.permissions : [],
+    )
+    return {
+      id: row.id,
+      email: row.email,
+      username: row.username ?? null,
+      mobile: row.mobile ?? null,
+      name: row.name,
+      role: resolved.role,
+      permissions: resolved.permissions,
+      is_active: row.is_active,
+      must_change_password: row.must_change_password,
+      activation_status: row.activation_status,
+      local_password_set: row.local_password_set,
+      password_hash: row.password_hash,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     }
   }
 
@@ -495,8 +751,24 @@ export class AuthService {
     }
 
     if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
-      await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
-      permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+      // P23: this call is NOT inside a try today, and assignUserRoles can now throw
+      // (UserRoleAssignmentRecoveryBusyError) instead of always swallowing. resolveRbacProfile
+      // is reached from every getUserById/getUserByIdentifier read (login, verifyToken, ...),
+      // so an uncaught throw here would turn a transient recovery-busy lease into "user not
+      // found" for an otherwise-valid session on every authenticated request. Contain the
+      // failure locally: only merge the backfilled attendance permissions into the in-memory
+      // result once assignUserRoles has confirmed they persisted. If it did not persist, the
+      // permissions must not appear in the returned value even though this is a best-effort
+      // backfill — do not fabricate unpersisted permissions.
+      try {
+        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
+        permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+      } catch (error) {
+        this.logger.warn(
+          'Attendance self-service role backfill did not persist; omitting unpersisted permissions',
+          error instanceof Error ? error : undefined,
+        )
+      }
     }
 
     return { role, permissions }
@@ -509,74 +781,120 @@ export class AuthService {
   }
 
   /**
-   * 创建新用户
+   * 创建新用户 — runs inside the CALLER's open transaction (O2-S1).
+   *
+   * The only caller is register(), which owns the pool.transaction wrapper so that the
+   * self-service user_roles insert commits or rolls back atomically with the users row.
+   * Errors propagate to the transaction owner — retry/swallow semantics live there, because
+   * after a 40001 the transaction is aborted and nothing here could be retried in place.
+   *
+   * Load-bearing alias writer hook: activated self-registration must claim the email
+   * login alias in the same transaction as the users row. Removing
+   * claimNonEmptyLoginAliasesOrThrow here must fail tests/unit/login-alias-writers.test.ts
+   * and tests/integration/login-alias-writers.db.test.ts (auth_register class).
+   * An alias conflict throws and rolls back the users insert (fail-closed).
    */
-  private async createUser(userData: {
-    id: string
-    email: string
-    name: string
-    password_hash: string
-    role: string
-    permissions: string[]
-  }): Promise<User | null> {
-    try {
-      try {
-        const pool = poolManager.get()
-        const permissionsJson = JSON.stringify(userData.permissions)
-        const result = await pool.query(
-          `INSERT INTO users (id, email, name, password_hash, role, permissions, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-           RETURNING id, email, name, role, permissions, must_change_password, created_at, updated_at`,
-          [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
-        )
+  private async createUserInTransaction(
+    client: AliasQueryClient,
+    userData: {
+      id: string
+      email: string
+      name: string
+      password_hash: string
+      role: string
+      permissions: string[]
+    },
+  ): Promise<User | null> {
+    const permissionsJson = JSON.stringify(userData.permissions)
+    const result = await client.query(
+      `INSERT INTO users (
+         id, email, name, password_hash, role, permissions,
+         activation_status, local_password_set, is_active,
+         created_at, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'activated', TRUE, TRUE, NOW(), NOW())
+       RETURNING id, email, name, role, permissions, must_change_password,
+                 activation_status, local_password_set, is_active, created_at, updated_at`,
+      [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson],
+    )
 
-        if (result.rows.length > 0) {
-          const row = result.rows[0] as User
-          if (userData.permissions.length > 0) {
-            const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-            await pool.query(
-              `INSERT INTO user_permissions (user_id, permission_code)
-               VALUES ${values}
-               ON CONFLICT DO NOTHING`,
-              [userData.id, ...userData.permissions]
-            )
-          }
-          return {
-            id: row.id,
-            email: row.email,
-            name: row.name,
-            role: row.role,
-            permissions: Array.isArray(row.permissions) ? row.permissions : [],
-            must_change_password: row.must_change_password,
-            created_at: row.created_at,
-            updated_at: row.updated_at
-          }
-        }
-      } catch (dbError) {
-        this.logger.warn('Database insert failed', dbError instanceof Error ? dbError : undefined)
-      }
-      return null
-    } catch (error) {
-      this.logger.error('Create user error', error instanceof Error ? error : undefined)
-      return null
+    if (result.rows.length === 0) return null
+
+    // Alias full-writer: claim non-empty identifiers (email for self-registration).
+    await claimNonEmptyLoginAliasesOrThrow({
+      userId: userData.id,
+      email: userData.email,
+      source: 'auth_register',
+      client,
+    })
+
+    if (userData.permissions.length > 0) {
+      const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+      await client.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ${values}
+         ON CONFLICT DO NOTHING`,
+        [userData.id, ...userData.permissions],
+      )
+    }
+
+    const row = result.rows[0] as User
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      permissions: Array.isArray(row.permissions) ? row.permissions : [],
+      must_change_password: row.must_change_password,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }
+  }
+
+  /**
+   * Single-shot user_roles insert against the given query surface (pool for the standalone
+   * retry loop in assignUserRoles, transaction client for register). Deliberately does NOT
+   * retry or invalidate caches — the caller owns both.
+   */
+  private async insertUserRolesOnce(
+    client: AliasQueryClient,
+    userId: string,
+    roleIds: readonly string[],
+  ): Promise<void> {
+    for (const roleId of roleIds) {
+      // Self-service assigns from a set fixed in this module, so the authority is stated as
+      // exactly that set rather than as an unbounded one.
+      await assignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
+        executor: client,
+      })
     }
   }
 
   private async assignUserRoles(userId: string, roleIds: string[]): Promise<void> {
     if (roleIds.length === 0) return
-    try {
-      const pool = poolManager.get()
-      for (const roleId of roleIds) {
-        await pool.query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId]
-        )
+    const pool = poolManager.get()
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.insertUserRolesOnce(pool, userId, roleIds)
+        invalidateUserPerms(userId)
+        return
+      } catch (error) {
+        if (isRecoveryAuthorityBusyError(error)) {
+          if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
+            // Bounded retries exhausted — do NOT silently warn-and-swallow like every other
+            // error here: the caller must learn roles were not persisted (P23 requirement).
+            throw new UserRoleAssignmentRecoveryBusyError(userId, roleIds, error)
+          }
+          await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
+          continue
+        }
+        // Unrelated errors keep the pre-existing behavior: warn and swallow.
+        this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
+        return
       }
-      invalidateUserPerms(userId)
-    } catch (error) {
-      this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
     }
   }
 
@@ -614,7 +932,10 @@ export class AuthService {
 
       // 获取用户最新信息
       const user = await this.getUserById(userId)
-      if (!user || user.role === 'disabled' || user.is_active === false) {
+      if (!user) {
+        return null
+      }
+      if (evaluateUserAuthenticationGate(user)) {
         return null
       }
 
@@ -634,8 +955,9 @@ export class AuthService {
         }
       }
 
-      const refreshedUser = this.normalizeClaimString(payload.tenantId)
-        ? { ...user, tenantId: this.normalizeClaimString(payload.tenantId) }
+      const tenantId = await this.resolveSessionTenantId(user.id, this.normalizeClaimString(payload.tenantId))
+      const refreshedUser = tenantId
+        ? { ...user, tenantId }
         : user
       const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
       const refreshedPayload = this.readTokenPayload(refreshedToken)

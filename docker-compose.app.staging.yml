@@ -30,6 +30,11 @@ services:
     container_name: metasheet-staging-backend
     env_file:
       - ${APP_ENV_FILE:-./docker/app.staging.env}
+    # Staging deploys are pinned to an exact IMAGE_TAG. Do not let stale values in the
+    # long-lived env_file override immutable image identity in /api/health.
+    environment:
+      METASHEET_BUILD_COMMIT: ${IMAGE_TAG:-unknown}
+      METASHEET_BUILD_IMAGE_TAG: ${IMAGE_TAG:-unknown}
     volumes:
       - metasheet-staging-attendance-import-data:/app/uploads/attendance-import
     ports:

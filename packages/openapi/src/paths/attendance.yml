@@ -50,6 +50,24 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Outdoor-approval leg only — reachable from POST /api/attendance/punch when an outdoor punch requires approval and enters the request_create boundary. Both refusals are values-free: the response carries no org id, membership count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [APPROVAL_ORG_UNRESOLVED, APPROVAL_ORG_SELECTOR_NOT_PERMITTED]
+                      message:
+                        type: string
   /api/attendance/punch/events:
     x-plugin: plugin-attendance
     get:
@@ -436,6 +454,24 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [APPROVAL_ORG_UNRESOLVED, APPROVAL_ORG_SELECTOR_NOT_PERMITTED]
+                      message:
+                        type: string
     get:
       summary: List attendance requests
       security: [ { bearerAuth: [] } ]
@@ -579,6 +615,24 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [APPROVAL_ORG_UNRESOLVED, APPROVAL_ORG_SELECTOR_NOT_PERMITTED]
+                      message:
+                        type: string
     delete:
       summary: Cancel attendance request by id
       security: [ { bearerAuth: [] } ]
@@ -780,6 +834,24 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [APPROVAL_ORG_UNRESOLVED, APPROVAL_ORG_SELECTOR_NOT_PERMITTED]
+                      message:
+                        type: string
     get:
       summary: List shift-swap requests visible to the current user
       security: [ { bearerAuth: [] } ]
@@ -1021,6 +1093,24 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: string
+                        enum: [APPROVAL_ORG_UNRESOLVED, APPROVAL_ORG_SELECTOR_NOT_PERMITTED]
+                      message:
+                        type: string
     get:
       summary: List schedule-dispatch requests visible to the current actor
       description: Central admins see all rows; scoped actors see rows covered by scheduler-scope dispatch on user, target schedule group, and target department.
@@ -1256,6 +1346,17 @@ paths:
                 end_time: { type: string, deprecated: true }
                 isOvernight: { type: boolean }
                 is_overnight: { type: boolean, deprecated: true }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields. While authoritative
+                    segment calculation is disabled for the org, multi-segment shifts
+                    are authoring preview-only.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 late_grace_minutes: { type: integer, deprecated: true }
                 earlyGraceMinutes: { type: integer }
@@ -1269,6 +1370,8 @@ paths:
                   type: array
                   deprecated: true
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
               required: [name]
       responses:
@@ -1284,6 +1387,14 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID
+            (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS
+            (segments combined with legacy start/end fields), or
+            ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex
+            rejection after request-shape validation, including multi-segment
+            flex or core-hours coverage failure).
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
     get:
@@ -1330,12 +1441,26 @@ paths:
                 timezone: { type: string }
                 workStartTime: { type: string }
                 workEndTime: { type: string }
+                isOvernight: { type: boolean }
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  description: >-
+                    Canonical segments (W3). Mutually exclusive with the legacy
+                    workStartTime/workEndTime/isOvernight fields in the same request.
+                    A start/end-only update on a multi-segment shift is rejected with
+                    a typed 422; a metadata-only update preserves the persisted segments.
+                  items:
+                    $ref: '#/components/schemas/AttendanceShiftSegmentInput'
                 lateGraceMinutes: { type: integer }
                 earlyGraceMinutes: { type: integer }
                 roundingMinutes: { type: integer }
                 workingDays:
                   type: array
                   items: { type: integer }
+                flexPolicy:
+                  $ref: '#/components/schemas/AttendanceShiftFlexPolicy'
                 orgId: { type: string }
       responses:
         '200':
@@ -1350,6 +1475,22 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
+        '409':
+          description: >-
+            Typed conflict with zero writes: CONFLICT (legacy rotation-rule rename
+            ambiguity) or ATTENDANCE_SHIFT_SEGMENT_CONVERSION_BLOCKED (an active
+            assignment, rotation, pending swap, or pending/published dispatch blocks
+            converting one segment to multiple while segment calculation is disabled).
+        '422':
+          description: >-
+            Typed segment rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID,
+            ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS, or
+            ATTENDANCE_SHIFT_ENVELOPE_COLLAPSE_REJECTED (a start/end-only update on a
+            multi-segment shift); or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID for a
+            canonical semantic flex rejection after request-shape validation,
+            including multi-segment flex or core-hours coverage failure.
     delete:
       summary: Delete attendance shift
       security: [ { bearerAuth: [] } ]
@@ -1371,9 +1512,16 @@ paths:
                     type: object
                     properties:
                       id: { type: string }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409':
+          description: >-
+            Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED —
+            the shift is still referenced by any assignment row (including
+            ended/inactive history), a rotation rule, a pending swap snapshot, or a
+            pending/published dispatch target. Historical evidence is preserved.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Shift not found
   /api/attendance/assignments:
     x-plugin: plugin-attendance
     get:
@@ -1432,6 +1580,10 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
@@ -1442,6 +1594,11 @@ paths:
                 shift_id:
                   type: string
                   description: Legacy snake_case alias for shiftId.
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date:
                   type: string
                   format: date
@@ -1508,12 +1665,21 @@ paths:
               properties:
                 userId: { type: string }
                 shiftId: { type: string }
+                slotIndex:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
                 startDate: { type: string, format: date }
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
                 user_id: { type: string }
                 shift_id: { type: string }
+                slot_index:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  description: Legacy snake_case alias for slotIndex.
                 start_date: { type: string, format: date }
                 end_date: { type: string, format: date, nullable: true }
                 is_active: { type: boolean }
@@ -1740,6 +1906,40 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/employee-quick-action-icons:
+    x-plugin: plugin-attendance
+    get:
+      summary: Employee-readable 常用 pictogram keys (icon ids only)
+      description: Returns only the four icon keys. Does not expose the admin settings document.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [makeup, leave, overtime, swap]
+                    properties:
+                      makeup:
+                        type: string
+                        enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+                      leave:
+                        type: string
+                        enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+                      overtime:
+                        type: string
+                        enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+                      swap:
+                        type: string
+                        enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/export:
     x-plugin: plugin-attendance
     get:
@@ -1842,6 +2042,103 @@ paths:
                       to: { type: string, format: date }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance-admin/calculation-group-memberships:
+    get:
+      summary: List a user's effective calculation-group membership timeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Ordered, non-overlapping membership timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceCalculationGroupMembership'
+                    required: [items]
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Calculation-group timeline read failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/attendance-admin/calculation-group-memberships/transition:
+    post:
+      summary: Transition a user to a calculation group on an inclusive effective date
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId: { type: string }
+                userId: { type: string }
+                targetGroupId: { type: string, format: uuid }
+                effectiveOn: { type: string, format: date }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+                correlationId: { type: string, minLength: 1, maxLength: 128 }
+              required: [orgId, userId, targetGroupId, effectiveOn, reason]
+      responses:
+        '200':
+          description: Transition applied or replayed idempotently
+          headers:
+            X-Correlation-Id:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      correlationId: { type: string }
+                      outcome:
+                        type: string
+                        enum: [transitioned, unchanged]
+                      membership:
+                        $ref: '#/components/schemas/AttendanceCalculationGroupMembership'
+                    required: [correlationId, outcome, membership]
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: Target user is not active in the requested organization
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Calculation-group transition failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/attendance/groups:
     x-plugin: plugin-attendance
     get:
@@ -1883,6 +2180,9 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
                 orgId: { type: string }
               required: [name, timezone]
       responses:
@@ -1942,6 +2242,10 @@ paths:
                 timezone: { type: string }
                 ruleSetId: { type: string }
                 description: { type: string }
+                attendanceType:
+                  type: string
+                  enum: [fixed_shift, scheduled_shift, free_time]
+                  description: Accepted for parity with create; runtime rejects type changes after creation (ATTENDANCE_GROUP_TYPE_LOCKED).
                 orgId: { type: string }
       responses:
         '200':
@@ -3459,6 +3763,17 @@ paths:
     post:
       summary: Prepare attendance import commit token
       security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: false
+        description: Send the same organization identifier used by the subsequent preview or commit request.
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId:
+                  type: string
+                  minLength: 1
       responses:
         '200':
           description: OK
@@ -4337,3 +4652,152 @@ paths:
                 type: string
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance-admin/records/{recordId}/calculation-detail:
+    get:
+      summary: Read immutable attendance calculation detail as an administrator
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance/records/{recordId}/calculation-detail:
+    get:
+      summary: Read the signed-in user's immutable attendance calculation detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: calculationId
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Immutable calculation detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceW4CalculationDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/attendance-admin/calculation-shadow-backlog:
+    get:
+      summary: Read values-free attendance shadow difference backlog counts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Values-free shadow difference aggregates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, data]
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceW4ShadowBacklogItem' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # --- W6-2 (#4556) group effective-policy aggregate ---
+  # Promoted from packages/openapi/drafts/attendance-w6-group-effective-policy.draft.yml
+  # per design-lock docs/development/attendance-issue-4556-w6-group-effective-policy-design-lock-20260805.md §7.3.
+  # Verbatim content; do not hand-edit independently of the draft's governing document.
+  /api/attendance/groups/{groupId}/effective-policy:
+    get:
+      summary: Group effective-policy aggregate (values-free, read-only)
+      description: >
+        W6 aggregate read model (design lock section 4). GET-only; org identity
+        comes from the authenticated principal; a delegated attendance admin
+        must also hold active membership in the target org. Unknown,
+        cross-org, and inaccessible groups share one values-free 404 shape.
+        The response never contains member lists, user IDs, punch values, or
+        secrets (red line W6-R2).
+      operationId: getAttendanceGroupEffectivePolicy
+      tags: [attendance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Aggregate effective-policy read model
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceGroupEffectivePolicyResponse'
+        '400':
+          description: >
+            Typed validation failure. Any label/state/posture override input
+            is rejected before aggregate SQL (red line W6-R7); malformed
+            groupId is rejected after the transaction-bound authorization
+            reads but before aggregate SQL. Enum-strict: unknown enum values
+            are rejected, never defaulted (red line W6-R6).
+        '403':
+          description: >
+            Authenticated-but-unscoped principal or org-selector mismatch;
+            issued before any aggregate SQL (red line W6-R3).
+        '404':
+          description: >
+            Unknown, cross-org, or inaccessible group, including a delegated
+            admin without active target-org membership; one shared values-free
+            shape (red line W6-R3).

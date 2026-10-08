@@ -1,4 +1,26 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
+import { createRequire } from 'module'
+import {
+  snapshotAttendanceSettingsRow,
+  restoreAttendanceSettingsRow,
+  type AttendanceSettingsRowSnapshot,
+} from '../utils/attendance-settings-row'
+
+// Shared-DB isolation for the deployment-wide `system_configs` 'attendance.settings' row (see
+// tests/utils/attendance-settings-row.ts for the full rationale): this suite writes that row via
+// PUT /api/attendance/settings against a Postgres shared with every other suite in
+// plugin-tests.yml's attendance step, so it must leave the row EXACTLY as found. The cache reset
+// grabs the SAME plugin module instance the in-process server loaded (CJS require cache) and drops
+// its 60s module-level settings cache so the row restore is what the next test actually reads.
+const settingsRowRequireCjs = createRequire(import.meta.url)
+function resetAttendanceSettingsCacheAfterRestore(): void {
+  const plugin = settingsRowRequireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+    resetAttendanceSettingsCacheForTests?: () => void
+  }
+  plugin.resetAttendanceSettingsCacheForTests?.()
+}
+let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
+
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -48,6 +70,14 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
   async function mintToken(userId: string, perms: string): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Lock-11 §10 W-4 fixture delta: every dev-token subject minted here may go on to create a
+    // shift-swap approval request with no org selector (arm a, falls back to getOrgId's
+    // 'default') — seed exactly one active 'default' membership so arm (a) resolves.
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId],
+    )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -246,6 +276,17 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
+  })
+
+  afterEach(async () => {
+    // Exact-restore the 'attendance.settings' row after EVERY test (including failed ones — an
+    // in-test restore in a `finally` cannot help when the test dies before reaching it), then
+    // drop the plugin's settings cache so the next test re-reads the restored row.
+    if (pool) {
+      await restoreAttendanceSettingsRow(pool, settingsRowSnapshot)
+    }
+    resetAttendanceSettingsCacheAfterRestore()
   })
 
   afterAll(async () => {

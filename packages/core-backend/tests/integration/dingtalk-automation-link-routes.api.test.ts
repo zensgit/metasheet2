@@ -19,6 +19,26 @@ const OTHER_SHEET_FORM_VIEW_ID = 'view_form_other_sheet'
 const INTERNAL_VIEW_ID = 'view_internal_grid'
 const MISSING_INTERNAL_VIEW_ID = 'view_internal_missing'
 const RULE_ID = 'rule_dingtalk_links'
+const ACTOR_ID = 'admin_1'
+
+/**
+ * The sheets this fixture's views and fields belong to.
+ *
+ * These rows used to be MISSING. The fixture modelled `meta_views` and `meta_fields` but never
+ * `meta_sheets`, so every sheet it referenced was, in the database it simulated, a sheet that did not
+ * exist. The automation routes proceeded anyway — they never asked — and the fixture passed while
+ * describing a substrate that cannot occur: a form view and a rule on a sheet with no sheet row.
+ *
+ * `DELETE /sheets/:sheetId` becoming a SOFT delete forced the routes to start asking. Sheet liveness
+ * is now established before any sheet-addressed work (multitable/sheet-liveness.ts), and an absent
+ * sheet is refused 404 — which is the point of that change, not a casualty of it: an automation rule
+ * must not be written against a sheet that isn't there.
+ *
+ * So the fixture is corrected rather than the guard weakened: these sheets now exist and are live,
+ * every test keeps its original intent, and the validation cases still reach their 400 AFTER passing
+ * liveness. Only sheets declared here resolve — an unmodelled sheet id still (correctly) 404s.
+ */
+const LIVE_SHEET_IDS = new Set([SHEET_ID, OTHER_SHEET_ID])
 
 type ViewRow = {
   id: string
@@ -127,6 +147,14 @@ function createMockPool(queryHandler: QueryHandler) {
       || sql.includes('FROM formula_dependencies')
     ) {
       return { rows: [], rowCount: 0 }
+    }
+    // meta_sheets: served here, ahead of the per-test handler, so every case in this file gets the
+    // same substrate (the permission tables above are short-circuited the same way). Covers both the
+    // liveness read (`SELECT deleted_at ...`) and the plain existence reads other routes use.
+    if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
+      const sheetId = typeof params?.[0] === 'string' ? params[0] : ''
+      const rows = LIVE_SHEET_IDS.has(sheetId) ? [{ id: sheetId, deleted_at: null }] : []
+      return { rows, rowCount: rows.length }
     }
     return queryHandler(sql, params)
   })
@@ -1171,7 +1199,7 @@ describe('DingTalk automation link route validation', () => {
         publicFormViewId: VALID_FORM_VIEW_ID,
         internalViewId: INTERNAL_VIEW_ID,
       }),
-    }))
+    }), ACTOR_ID)
     expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
       titleTemplate: 'Please fill',
       bodyTemplate: 'Open form',
@@ -1515,7 +1543,7 @@ describe('DingTalk automation link route validation', () => {
           }),
         }),
       ]),
-    }))
+    }), ACTOR_ID)
     expect(res.body.data.rule.actions).toEqual([
       expect.objectContaining({
         type: 'send_dingtalk_group_message',
@@ -1577,7 +1605,56 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.getRule).not.toHaveBeenCalled()
     expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
       enabled: false,
-    }))
+    }), ACTOR_ID)
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
+  })
+
+  // F9c: the save-time recipient gate throws AutomationRuleValidationError with a NON-default code.
+  // The route already answers `400 { code: err.code, message: err.message }` for this class — these two
+  // specs pin that the new code and the id-bearing Chinese message reach the client UNALTERED (the
+  // editor renders the server message verbatim: useMultitableAutomations.ts:15 → the drawer banner),
+  // so a code added in the service can never silently degrade to a generic 400 or a 500.
+  it('passes a save-time RECIPIENT_NOT_AUTHORIZED refusal through as 400 + code + message (create)', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({ automationService })
+    const { AutomationRuleValidationError, automationSaveRecipientNotAuthorizedMessage } = await import('../../src/multitable/automation-service')
+    // The wording comes from the SERVICE's own builder, never a literal copy: a future rewording must
+    // not leave this lane green while the client sees a different string.
+    const message = automationSaveRecipientNotAuthorizedMessage(['u_ghost'])
+    automationService.createRule = vi.fn(async () => {
+      throw new AutomationRuleValidationError(message, 'RECIPIENT_NOT_AUTHORIZED')
+    }) as never
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_notification',
+        actionConfig: { message: 'ping', userIds: ['u_ghost'] },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({ code: 'RECIPIENT_NOT_AUTHORIZED', message })
+  })
+
+  it('passes a save-time NO_RECIPIENTS refusal through as 400 + code (update)', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({ automationService })
+    const { AutomationRuleValidationError } = await import('../../src/multitable/automation-service')
+    // Same constant the EXECUTOR raises, so save-time and run-time stay one wording by construction.
+    const { AUTOMATION_NO_RECIPIENTS_ERROR } = await import('../../src/multitable/automation-executor')
+    const message = AUTOMATION_NO_RECIPIENTS_ERROR
+    automationService.updateRule = vi.fn(async () => {
+      throw new AutomationRuleValidationError(message, 'NO_RECIPIENTS')
+    }) as never
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({ name: 'renamed' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({ code: 'NO_RECIPIENTS', message })
   })
 })

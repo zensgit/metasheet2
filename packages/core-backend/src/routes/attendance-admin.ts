@@ -2,16 +2,207 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import { sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { MAX_MANAGER_CHAIN_LEVELS } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
+import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  assignUserRoles,
+  isRoleAssignable,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
+import {
+  ATTENDANCE_SETUP_READINESS_PER_STEP,
+  ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
+  computeAttendanceSetupReadinessDeliveryRuntime,
+  computeAttendanceSetupReadinessPreviewReady,
+  readAttendanceSetupReadinessOrgCounts,
+  readAttendanceSetupReadinessOrgRecipientBinding,
+  readAttendancePunchPolicyPosture,
+  runAttendanceSetupReadinessReadOnly,
+  type AttendanceSetupReadinessOrgCounts,
+  type AttendanceSetupReadinessNotify,
+  type AttendanceSetupReadinessQueryFn,
+  type AttendanceSetupReadinessPerStepEntry,
+  type AttendanceSetupStepId,
+  type AttendancePunchPolicyPosture,
+} from '../services/AttendanceSetupReadinessAggregate'
+import {
+  ATTENDANCE_DECISION_TRACE_NOT_FOUND,
+  buildApproverSourceTrace,
+  buildCompTimeBalanceTrace,
+  buildLateEarlyTrace,
+  buildMissingPunchTrace,
+  buildOvertimeSegmentationTrace,
+  buildTodayStatusTrace,
+  isAttendanceDecisionTraceCategory,
+  readAttendanceDecisionTraceSettingsGates,
+  runAttendanceDecisionTraceReadOnly,
+  type AttendanceDecisionTraceCategory,
+  type AttendanceDecisionTraceQueryFn,
+  type AttendanceDecisionTraceResponse,
+  type AttendanceDecisionTraceSettingsGates,
+} from '../services/AttendanceDecisionTrace'
+import {
+  AttendanceCalculationGroupMembershipError,
+  listAttendanceCalculationGroupMemberships,
+  transitionAttendanceCalculationGroupMembership,
+} from '../services/AttendanceCalculationGroupMembership'
+import {
+  ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND,
+  AttendanceCalculationSchemaUnsupportedError,
+  readAttendanceCalculationDetail,
+  readAttendanceW4ShadowBacklog,
+} from '../services/AttendanceW4CalculationDetail'
+import {
+  AttendanceGroupEffectivePolicyServiceError,
+  createAttendanceGroupEffectivePolicyAggregateService,
+  type AttendanceGroupEffectivePolicyFserServiceLike,
+} from '../attendance/w6-group-effective-policy-aggregate'
+import { requirePluginAttendanceLib } from '../util/resolve-plugin-attendance-lib'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// W6-1 (#4556): the aggregate composes the existing FSER service, required
+// directly from its canonical `.cjs` module (the same pattern the real-DB
+// tests already use:
+// `packages/core-backend/tests/integration/attendance-group-fixed-schedule-effectiveness.db.test.ts`).
+// No second effectiveness derivation (W6-R4) and no plugin-activation side
+// effects: this file only defines pure functions and a factory.
+//
+// Resolved via `requirePluginAttendanceLib(__dirname, …)` rather than a
+// literal relative path, because the compiled output's directory depth
+// differs from the source tree's — see `../util/resolve-plugin-attendance-lib`.
+const attendanceGroupFixedScheduleEffectivenessServiceLib = requirePluginAttendanceLib<{
+  createAttendanceGroupFixedScheduleEffectivenessService: (deps: {
+    HttpError: new (status: number, code: string, message: string) => Error
+    buildAttendanceGroupFixedScheduleProducerKey: (input: {
+      groupId: string
+      shiftId: string
+      startDate: string
+      endDate: string | null
+    }) => string
+    now?: () => string
+  }) => AttendanceGroupEffectivePolicyFserServiceLike
+}>(__dirname, 'attendance-group-fixed-schedule-effectiveness-service.cjs')
+const attendanceShiftServiceLib = requirePluginAttendanceLib<{
+  SEGMENT_CALCULATION_IMPLEMENTED: boolean
+}>(__dirname, 'attendance-shift-service.cjs')
+// W6-R4: the canonical producer key, the same function
+// `plugins/plugin-attendance/index.cjs` delegates to. Injecting it here is
+// what makes the two FSER instances (this route's and the plugin's) key on
+// one implementation instead of on an argued equivalence between two.
+const attendanceGroupFixedScheduleProducerKeyLib = requirePluginAttendanceLib<{
+  buildAttendanceGroupFixedScheduleProducerKey: (input: {
+    groupId: string
+    shiftId: string
+    startDate: string
+    endDate: string | null
+  }) => string
+}>(__dirname, 'attendance-group-fixed-schedule-producer-key.cjs')
+
+/**
+ * One injected clock for both timestamps in a `/effective-policy` body: the
+ * aggregate's own `evaluatedAt` and the embedded
+ * `domains.schedule.fixedSchedule.evaluatedAt` are both provably equal under
+ * a fixed clock, which the unit suite asserts. (In production the two
+ * `now()` calls still happen at slightly different moments — this makes one
+ * injection point, not one atomic read.)
+ */
+const attendanceGroupEffectivePolicyNow = (): string => new Date().toISOString()
+
+const attendanceGroupEffectivePolicyFserService = attendanceGroupFixedScheduleEffectivenessServiceLib.createAttendanceGroupFixedScheduleEffectivenessService(
+  {
+    HttpError: AttendanceGroupEffectivePolicyServiceError,
+    buildAttendanceGroupFixedScheduleProducerKey:
+      attendanceGroupFixedScheduleProducerKeyLib.buildAttendanceGroupFixedScheduleProducerKey,
+    now: attendanceGroupEffectivePolicyNow,
+  },
+)
+
+/**
+ * W6-R1 structural backstop. The aggregate service is built PER REQUEST,
+ * inside the read-only transaction, bound to that transaction's client —
+ * there is no pool-bound aggregate service anywhere in this file.
+ *
+ * `runAttendanceSetupReadinessReadOnly` (W4-0, `services/AttendanceSetupReadinessAggregate.ts`)
+ * is reused rather than reinvented: it issues `SET TRANSACTION READ ONLY` as
+ * the first statement of the transaction, so PostgreSQL itself refuses every
+ * subsequent write on that handle with SQLSTATE 25006, regardless of
+ * statement shape or how it was composed.
+ *
+ * The static sweep in `tests/unit/attendance-w6-group-effective-policy-dml-sweep.test.ts`
+ * is a second, independent leg over this module's own call-path closure —
+ * not a substitute for the transaction, which is the mechanism of record.
+ */
+function createAttendanceGroupEffectivePolicyReadOnlyService(
+  readOnlyQuery: AttendanceSetupReadinessQueryFn,
+): ReturnType<typeof createAttendanceGroupEffectivePolicyAggregateService> {
+  return createAttendanceGroupEffectivePolicyAggregateService({
+    // Named `query` deliberately: the DB-seam sweep resolves an adapter's
+    // name from its object-literal property, and this is the seam.
+    query: async (sql: string, params?: unknown[]) => (await readOnlyQuery(sql, params)).rows,
+    fser: attendanceGroupEffectivePolicyFserService,
+    now: attendanceGroupEffectivePolicyNow,
+    segmentCalculationImplemented: attendanceShiftServiceLib.SEGMENT_CALCULATION_IMPLEMENTED,
+  })
+}
+
+/**
+ * W6-1 (#4556) §4.1: org identity for the group effective-policy route comes
+ * only from the authenticated principal — the #4711 §3.2 rules applied
+ * verbatim, mirroring `resolveAttendanceFixedScheduleRouteActorContext` in
+ * `plugins/plugin-attendance/index.cjs` so the same JWT authenticates
+ * identically on both the CJS FSER route and this TS route. A client may
+ * repeat the authenticated org in query/body/header form, but that value is
+ * only a byte-equality assertion; it never selects the organization.
+ */
+function getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req: Request): string | null {
+  const raw = req.user as Record<string, unknown> | undefined
+  const claim = raw?.orgId ?? raw?.workspaceId
+  if (typeof claim === 'string' && claim.trim()) return claim.trim()
+  if (typeof claim === 'number' && Number.isFinite(claim)) return String(claim)
+  const tenant = req.authenticatedTenantId
+  if (typeof tenant === 'string' && tenant.trim()) return tenant.trim()
+  return null
+}
+
+/**
+ * True when any client-supplied org selector is present and does not
+ * byte-equal the authenticated org — the request must fail before any
+ * aggregate SQL (W6-R3 / #4711 §3.2).
+ *
+ * A present-but-empty `x-org-id` is treated as a mismatch (the predicate
+ * tests presence, not non-empty presence). That is fail-closed by
+ * construction; relaxing it to ignore an empty header is a separate,
+ * deliberate change this route does not make.
+ */
+function attendanceGroupEffectivePolicyOrgSelectorMismatch(req: Request, orgId: string): boolean {
+  const headerValue = req.headers['x-org-id']
+  const query = req.query as Record<string, unknown>
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+    ? req.body as Record<string, unknown>
+    : null
+  const selectors = [
+    ...(Object.prototype.hasOwnProperty.call(query, 'orgId') ? [query.orgId] : []),
+    ...(body && Object.prototype.hasOwnProperty.call(body, 'orgId') ? [body.orgId] : []),
+    ...(headerValue !== undefined ? [headerValue] : []),
+  ]
+  return selectors.some((selector) => typeof selector !== 'string' || selector !== orgId)
+}
+
+function readStrictString(value: unknown): string | null {
+  return typeof value === 'string' ? value.trim() : null
+}
+
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
-const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
+export const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   id: AttendanceRoleTemplateId
   roleId: string
   permissions: string[]
@@ -41,6 +232,60 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
     permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
     description: 'Full attendance administration (rules, imports, holidays, groups).',
   },
+}
+
+/**
+ * The authority this router acts under when it changes role membership.
+ *
+ * It is the router's OWN rbac resource — the same literal named by the
+ * `rbacGuard('attendance', 'admin')` mount below — so every role write this router performs
+ * is bounded to the one namespace the mount itself admits, whatever shape the caller's grant
+ * takes. Deriving the list from the router keeps the bound identical for every caller the
+ * mount lets through. A router mounted behind `rbacGuard('foo', 'admin')` would pass `['foo']`.
+ */
+const ATTENDANCE_ROLE_ASSIGNMENT_SCOPE: RoleAssignmentScope = {
+  kind: 'namespaces',
+  namespaces: ['attendance'],
+}
+
+/** Single-object result: this package compiles with `strict: false`, where narrowing a
+ *  boolean-discriminated union is unreliable, so the error is a nullable field instead. */
+type AttendanceRoleResolution = {
+  roleId: string
+  error: { status: number; code: string; message: string } | null
+}
+
+/**
+ * Resolve which role id a role route will act on: a named template, or a caller-supplied
+ * role id constrained to this router's scope.
+ *
+ * One implementation for all four role routes, so the constraint lives in exactly one place
+ * per router and a fifth route gets it by construction, on top of the boundary's own
+ * assertion in `rbac/role-assignment.ts`.
+ */
+function resolveAttendanceRoleAssignment(body: unknown): AttendanceRoleResolution {
+  const record = (body ?? {}) as Record<string, unknown>
+  const templateId = String(record.template || '').trim() as AttendanceRoleTemplateId
+  const roleId = String(record.roleId || '').trim()
+  const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+  const finalRoleId = resolved?.roleId || roleId
+  if (!finalRoleId) {
+    return {
+      roleId: '',
+      error: { status: 400, code: 'ROLE_REQUIRED', message: 'template or roleId is required' },
+    }
+  }
+  if (!isRoleAssignable(finalRoleId, ATTENDANCE_ROLE_ASSIGNMENT_SCOPE)) {
+    return {
+      roleId: finalRoleId,
+      error: {
+        status: 403,
+        code: 'ROLE_OUT_OF_SCOPE',
+        message: 'Role is outside the attendance role-assignment scope',
+      },
+    }
+  }
+  return { roleId: finalRoleId, error: null }
 }
 
 function csvCell(value: unknown): string {
@@ -191,9 +436,9 @@ function withLimit<T>(items: T[], limit = 200): { items: T[]; truncated: boolean
   return { items: items.slice(0, limit), truncated: true }
 }
 
-async function ensureAttendanceRoleTemplates(): Promise<void> {
+async function ensureAttendanceRoleTemplates(runQuery: typeof query = query): Promise<void> {
   // Ensure permission codes exist.
-  await query(
+  await runQuery(
     `INSERT INTO permissions (code, name, description)
      VALUES
       ('attendance:read', 'Attendance Read', 'Read attendance records and summaries'),
@@ -212,7 +457,7 @@ async function ensureAttendanceRoleTemplates(): Promise<void> {
 
   const values = pairs.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
   const params = pairs.flat()
-  await query(
+  await runQuery(
     `INSERT INTO role_permissions (role_id, permission_code)
      VALUES ${values}
      ON CONFLICT DO NOTHING`,
@@ -220,8 +465,11 @@ async function ensureAttendanceRoleTemplates(): Promise<void> {
   )
 }
 
-async function fetchUserProfile(userId: string): Promise<Record<string, unknown> | null> {
-  const { rows } = await query<{
+async function fetchUserProfile(
+  userId: string,
+  runQuery: typeof query = query,
+): Promise<Record<string, unknown> | null> {
+  const { rows } = await runQuery<{
     id: string
     email: string
     name: string | null
@@ -242,8 +490,8 @@ async function fetchUserProfile(userId: string): Promise<Record<string, unknown>
   return rows[0] as unknown as Record<string, unknown>
 }
 
-async function fetchUserRoleIds(userId: string): Promise<string[]> {
-  const { rows } = await query<{ role_id: string }>(
+async function fetchUserRoleIds(userId: string, runQuery: typeof query = query): Promise<string[]> {
+  const { rows } = await runQuery<{ role_id: string }>(
     `SELECT role_id
      FROM user_roles
      WHERE user_id = $1
@@ -251,6 +499,70 @@ async function fetchUserRoleIds(userId: string): Promise<string[]> {
     [userId],
   )
   return rows.map((row) => row.role_id).filter(Boolean)
+}
+
+const ATTENDANCE_ROLE_IDS = Object.values(ATTENDANCE_ROLE_TEMPLATES).map((template) => template.roleId)
+
+async function fetchAttendanceScopedUserProfile(
+  userId: string,
+  runQuery: typeof query,
+): Promise<Record<string, unknown> | null> {
+  const { rows } = await runQuery(
+    `SELECT id, email, name, employee_no AS "employeeNo", department, is_active, created_at
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [userId],
+  )
+  return (rows[0] as Record<string, unknown> | undefined) ?? null
+}
+
+async function fetchAttendanceScopedRoleIds(userId: string, runQuery: typeof query): Promise<string[]> {
+  const { rows } = await runQuery<{ role_id: string }>(
+    `SELECT role_id
+     FROM user_roles
+     WHERE user_id = $1
+       AND role_id = ANY($2::text[])
+     ORDER BY role_id ASC`,
+    [userId, ATTENDANCE_ROLE_IDS],
+  )
+  return rows.map((row) => row.role_id).filter(Boolean)
+}
+
+async function fetchAttendanceScopedPermissionCodes(userId: string, runQuery: typeof query): Promise<string[]> {
+  const admission = await runQuery<{ enabled: boolean }>(
+    `SELECT enabled
+     FROM user_namespace_admissions
+     WHERE user_id = $1 AND namespace = 'attendance'
+     LIMIT 1`,
+    [userId],
+  )
+  if (admission.rows[0]?.enabled !== true) return []
+
+  const { rows } = await runQuery<{ code: string }>(
+    `SELECT DISTINCT permission_code AS code
+     FROM (
+       SELECT up.permission_code
+       FROM user_permissions up
+       WHERE up.user_id = $1
+       UNION ALL
+       SELECT rp.permission_code
+       FROM user_roles ur
+       JOIN role_permissions rp ON rp.role_id = ur.role_id
+       WHERE ur.user_id = $1
+     ) permissions
+     WHERE permission_code LIKE 'attendance:%'
+     ORDER BY permission_code ASC`,
+    [userId],
+  )
+  const legacy = await runQuery<{ permissions: unknown }>(
+    `SELECT permissions FROM users WHERE id = $1 LIMIT 1`,
+    [userId],
+  )
+  const legacyPermissions = Array.isArray(legacy.rows[0]?.permissions)
+    ? legacy.rows[0].permissions.map((code) => String(code)).filter((code) => code.startsWith('attendance:'))
+    : []
+  return Array.from(new Set([...rows.map((row) => row.code), ...legacyPermissions])).sort()
 }
 
 function normalizeBatchUserIds(rawIds: unknown[]): { userIds: string[]; invalidUserIds: string[] } {
@@ -277,7 +589,102 @@ type AttendanceAdminResolvedUser = {
   is_active: boolean
 }
 
-async function resolveBatchUsers(userIds: string[]): Promise<{
+type AttendanceAdminUserScope =
+  | { kind: 'global' }
+  | { kind: 'org'; orgId: string }
+
+class AttendanceAdminUserScopeError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'AttendanceAdminUserScopeError'
+  }
+}
+
+function sendIfAttendanceAdminUserScopeError(res: Response, error: unknown): boolean {
+  if (!(error instanceof AttendanceAdminUserScopeError)) return false
+  jsonError(res, error.status, error.code, error.message)
+  return true
+}
+
+function readAttendanceAdminScopeField(req: Request, field: 'orgId' | 'scope'): string {
+  const queryValue = readStrictString(req.query?.[field])
+  const bodyValue = readStrictString((req.body as Record<string, unknown> | undefined)?.[field])
+  if (queryValue && bodyValue && queryValue !== bodyValue) {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_MISMATCH', `${field} does not match across request inputs`)
+  }
+  return bodyValue || queryValue
+}
+
+/**
+ * Every attendance-admin user-directory request names its authority explicitly.
+ *
+ * `orgId` is the delegated path and requires the authenticated actor to be an active
+ * member of that exact org. Platform status does not implicitly pierce this branch.
+ * Platform administrators who need the global directory must instead ask for
+ * `scope=global`, making the wider authority visible at every call site.
+ *
+ * Write routes call this helper with their transaction client and lock the actor's
+ * membership row, so membership revocation cannot race the target check and role write.
+ */
+async function resolveAttendanceAdminUserScope(
+  req: Request,
+  runQuery: typeof query = query,
+  lockMembership = false,
+): Promise<AttendanceAdminUserScope> {
+  const actorId = getAttendanceAdminRequestUserId(req)
+  if (!actorId) {
+    throw new AttendanceAdminUserScopeError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+
+  const orgId = readAttendanceAdminScopeField(req, 'orgId')
+  const requestedScope = readAttendanceAdminScopeField(req, 'scope')
+  if (requestedScope && requestedScope !== 'org' && requestedScope !== 'global') {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_INVALID', 'scope must be org or global')
+  }
+
+  if (requestedScope === 'global') {
+    if (orgId) {
+      throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_MISMATCH', 'orgId cannot be combined with global scope')
+    }
+    if (!(hasLegacyAdminClaim(req) || await isRbacAdmin(actorId, runQuery))) {
+      throw new AttendanceAdminUserScopeError(403, 'FORBIDDEN', 'Platform admin access required for global user scope')
+    }
+    return { kind: 'global' }
+  }
+
+  if (!orgId) {
+    throw new AttendanceAdminUserScopeError(400, 'USER_SCOPE_REQUIRED', 'orgId or explicit global scope is required')
+  }
+
+  const lockClause = lockMembership ? 'FOR SHARE OF u, uo' : ''
+  const membership = await runQuery(
+    `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.org_id = $2
+       AND uo.is_active = true
+       AND u.is_active = true
+     LIMIT 1
+     ${lockClause}`,
+    [actorId, orgId],
+  )
+  if (membership.rows.length === 0) {
+    throw new AttendanceAdminUserScopeError(403, 'FORBIDDEN', 'Active org membership required')
+  }
+  return { kind: 'org', orgId }
+}
+
+async function resolveBatchUsers(
+  userIds: string[],
+  scope: AttendanceAdminUserScope,
+  runQuery: typeof query = query,
+  lockMembership = false,
+): Promise<{
   items: AttendanceAdminResolvedUser[]
   missingUserIds: string[]
   inactiveUserIds: string[]
@@ -286,12 +693,29 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
     return { items: [], missingUserIds: [], inactiveUserIds: [] }
   }
 
-  const found = await query<AttendanceAdminResolvedUser>(
-    `SELECT id, email, name, employee_no AS "employeeNo", department, is_active
-     FROM users
-     WHERE id = ANY($1::text[])`,
-    [userIds],
-  )
+  const lockClause = lockMembership
+    ? scope.kind === 'org' ? 'FOR SHARE OF u, uo' : 'FOR SHARE OF u'
+    : ''
+  const found = scope.kind === 'org'
+    ? await runQuery<AttendanceAdminResolvedUser>(
+      `SELECT u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department, u.is_active
+       FROM users u
+       JOIN user_orgs uo
+         ON uo.user_id = u.id
+        AND uo.org_id = $2
+        AND uo.is_active = true
+       WHERE u.id = ANY($1::text[])
+         AND u.is_active = true
+       ${lockClause}`,
+      [userIds, scope.orgId],
+    )
+    : await runQuery<AttendanceAdminResolvedUser>(
+      `SELECT u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department, u.is_active
+       FROM users u
+       WHERE u.id = ANY($1::text[])
+       ${lockClause}`,
+      [userIds],
+    )
 
   const byId = new Map(found.rows.map((row) => [String(row.id), row]))
   const items: AttendanceAdminResolvedUser[] = []
@@ -313,12 +737,362 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
   return { items, missingUserIds, inactiveUserIds }
 }
 
+function assertAllRoleTargetsEligible(
+  userIds: string[],
+  resolved: Awaited<ReturnType<typeof resolveBatchUsers>>,
+): void {
+  if (
+    resolved.items.length !== userIds.length
+    || resolved.missingUserIds.length > 0
+    || resolved.inactiveUserIds.length > 0
+  ) {
+    // Foreign-org, inactive and nonexistent identities intentionally share one response.
+    throw new AttendanceAdminUserScopeError(404, 'USER_TARGET_NOT_FOUND', 'User not found in requested scope')
+  }
+}
+
+function assertGlobalAttendanceRoleWriteScope(scope: AttendanceAdminUserScope): void {
+  if (scope.kind === 'global') return
+  // user_roles has no org_id. A delegated write would therefore grant or revoke the role in
+  // every organization the target belongs to, even though this request proved only one org.
+  throw new AttendanceAdminUserScopeError(
+    403,
+    'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE',
+    'Organization-scoped role changes require an organization-scoped role store',
+  )
+}
+
+function getAttendanceAdminRequestUserId(req: Request): string {
+  const raw = req.user as Record<string, unknown> | undefined
+  const userId = raw?.id ?? raw?.userId ?? raw?.sub
+  return typeof userId === 'string' ? userId.trim() : ''
+}
+
+function hasLegacyAdminClaim(req: Request): boolean {
+  const raw = req.user as Record<string, unknown> | undefined
+  if (!raw) return false
+  if (raw.role === 'admin') return true
+  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
+  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
+  return false
+}
+
+/**
+ * S7-5 / OD-S7-6: values-free org readiness for dynamic approval-step authoring.
+ * Pure query helper so unit tests can assert the SQL is org-anchored and returns no PII.
+ */
+export async function readOrgDirectoryReadiness(
+  orgId: string,
+  runQuery: typeof query = query,
+): Promise<{ hasLinkedDirectoryAccounts: boolean; maxManagerChainLevels: number }> {
+  // EXISTS only — never SELECT account ids, names, phones, or raw payloads.
+  // Mirrors the runtime resolver's minimum usable-account predicate
+  // (ApprovalDirectoryOrg: linked + a.is_active = true).
+  const result = await runQuery<{ ready: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+         JOIN directory_integrations i ON i.id = a.integration_id
+        WHERE i.org_id = $1
+          AND l.link_status = 'linked'
+          AND a.is_active = true
+        LIMIT 1
+     ) AS ready`,
+    [orgId],
+  )
+  return {
+    hasLinkedDirectoryAccounts: Boolean(result.rows[0]?.ready),
+    maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
+  }
+}
+
+/**
+ * S7-5: can this attendance:admin read directory readiness for `orgId`?
+ * Platform admins may; delegated attendance admins must be active members of that org
+ * (strict org anchor — never a global directory probe).
+ */
+export async function canReadAttendanceDirectoryReadiness(
+  req: Request,
+  userId: string,
+  orgId: string,
+  runQuery: typeof query = query,
+): Promise<boolean> {
+  if (hasLegacyAdminClaim(req) || await isRbacAdmin(userId, runQuery)) return true
+  // W4-PRE-1b item E (owner CHANGES_REQUESTED on the W4 re-ratify PR #4522, 2026-07-21): dual
+  // is_active filter — a user whose PLATFORM ACCOUNT is deactivated (`users.is_active=false`,
+  // e.g. via PATCH /api/admin/users/:userId/status, which deliberately never touches
+  // `user_orgs` — see the item-B boundary note) must not keep reading this org's readiness just
+  // because their `user_orgs` row is still `is_active=true`. Mirrors the RD-3 population
+  // predicate every readiness COUNT in this line already uses
+  // (`plugins/plugin-attendance/index.cjs:15532`, "target population: active org members only").
+  const member = await runQuery(
+    `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+     LIMIT 1`,
+    [userId, orgId],
+  )
+  return member.rows.length > 0
+}
+
+// ---------------------------------------------------------------------------------------------
+// W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §3/§4/§9): seven-step setup-readiness
+// aggregate. §4.1 OD-W4-1=(a): same org-membership door as S7-5 (`canReadAttendanceDirectoryReadiness`,
+// reused verbatim), and authorization ALWAYS completes before this function is ever invoked — a
+// foreign-org 403 issues zero aggregation SQL, zero transactions (§9 W4-0-G1 case 2). Every
+// aggregation read happens inside ONE `SET TRANSACTION READ ONLY` transaction (R1 / §9 W4-0-G2);
+// the query/posture/notify computations themselves live in
+// `services/AttendanceSetupReadinessAggregate.ts` — this function only assembles them plus the
+// pre-existing `readOrgDirectoryReadiness` (S7-5) into the §4.2-locked response shape.
+// ---------------------------------------------------------------------------------------------
+
+/** Mirrors the §4.2-locked response key set EXACTLY — `directoryLinked` ... `perStep` are the
+ *  §4.2-locked 13 keys verbatim (`perStep` nested as `perStep[stepId].effectiveTime`, per the
+ *  lock's own `perStep.effectiveTime: {...}` JSON-block notation). A prior revision of this file
+ *  also carried `viewerIsPlatformAdmin` as a disclosed, not-yet-owner-ratified 14th key (P2, #4541
+ *  review) — removed: the pure discriminator module
+ *  (`apps/web/src/views/attendance/attendanceSetupReadiness.ts`) has zero consumption of it, so it
+ *  was speculative surface for the §3① role-gated remediation contract, not something this slice
+ *  was authorized to add unilaterally. W4-1, if it needs viewer-role data for that contract, gets
+ *  it via its own owner request to extend this shape — not by resurrecting this field. `scope` is
+ *  NOT a wire field (kept as code-level documentation only, per the design lock's own §4.2
+ *  illustration, which marks scope via comments rather than a runtime key). */
+export interface AttendanceSetupReadinessResponse {
+  directoryLinked: boolean
+  orgActiveMemberCount: number
+  groupCount: number
+  groupsWithMembers: number
+  shiftCount: number
+  scheduledShiftGroupCount: number
+  activeRotationRuleCount: number
+  hasRotationRules: boolean
+  approvalFlowCount: number
+  punchPolicyPosture: AttendancePunchPolicyPosture
+  notify: AttendanceSetupReadinessNotify
+  previewReady: boolean
+  perStep: Readonly<Record<AttendanceSetupStepId, AttendanceSetupReadinessPerStepEntry>>
+}
+
+/** §4.2/§4.5 deployment-scoped signal registry (code-level documentation of the design lock's own
+ *  §4.2 `// scope=...` comments, NOT a response field — see §4.2 键集 note above). Every response
+ *  key NOT listed here is org-scoped. Kept exported so a contract test can assert this list against
+ *  the design lock text rather than re-deriving it from prose each time. */
+export const ATTENDANCE_SETUP_READINESS_DEPLOYMENT_SCOPED_FIELDS = [
+  'punchPolicyPosture',
+  'notify.deliveryRuntime',
+  'notify.recipientScopeConfig',
+] as const
+
+async function buildAttendanceSetupReadiness(orgId: string): Promise<AttendanceSetupReadinessResponse> {
+  return runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+    const [directory, counts, punchPolicyPosture, orgRecipientBinding] = await Promise.all([
+      readOrgDirectoryReadiness(orgId, readOnlyQuery),
+      readAttendanceSetupReadinessOrgCounts(orgId, readOnlyQuery),
+      readAttendancePunchPolicyPosture(readOnlyQuery),
+      readAttendanceSetupReadinessOrgRecipientBinding(orgId, readOnlyQuery),
+    ])
+    const notify: AttendanceSetupReadinessNotify = {
+      deliveryRuntime: computeAttendanceSetupReadinessDeliveryRuntime(),
+      orgRecipientBinding,
+      recipientScopeConfig: ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
+    }
+    return {
+      directoryLinked: directory.hasLinkedDirectoryAccounts,
+      orgActiveMemberCount: counts.orgActiveMemberCount,
+      groupCount: counts.groupCount,
+      groupsWithMembers: counts.groupsWithMembers,
+      shiftCount: counts.shiftCount,
+      scheduledShiftGroupCount: counts.scheduledShiftGroupCount,
+      activeRotationRuleCount: counts.activeRotationRuleCount,
+      hasRotationRules: counts.activeRotationRuleCount > 0,
+      approvalFlowCount: counts.approvalFlowCount,
+      punchPolicyPosture,
+      notify,
+      previewReady: computeAttendanceSetupReadinessPreviewReady(counts),
+      perStep: ATTENDANCE_SETUP_READINESS_PER_STEP,
+    } satisfies AttendanceSetupReadinessResponse
+  })
+}
+
 export function attendanceAdminRouter(): Router {
   const r = Router()
 
   // NOTE: This is an attendance-scoped admin surface. Guard by attendance:admin (not global admin),
   // so tenants can delegate attendance administration without exposing the whole platform.
   r.use('/api/attendance-admin', rbacGuard('attendance', 'admin'))
+
+  // S7-5 / OD-S7-6: smallest values-free, org-anchored readiness read for the approval-flow
+  // authoring warning. Delegated attendance admins MUST NOT call platform-admin directory
+  // endpoints; this seam is the only authoring path. Response carries ONLY a boolean + the
+  // host-authoritative manager-chain max (no account/user/integration payload).
+  r.get('/api/attendance-admin/directory-readiness', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const userId = getAttendanceAdminRequestUserId(req)
+      if (!userId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for directory readiness')
+      }
+      const readiness = await readOrgDirectoryReadiness(orgId)
+      return jsonOk(res, readiness)
+    } catch (_error) {
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'DIRECTORY_READINESS_FAILED', 'Failed to load directory readiness')
+    }
+  })
+
+  r.get('/api/attendance-admin/calculation-group-memberships', async (req: Request, res: Response) => {
+    try {
+      const orgId = readStrictString(req.query.orgId)
+      const targetUserId = readStrictString(req.query.userId)
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, actorId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation-group membership')
+      }
+      const items = await listAttendanceCalculationGroupMemberships(orgId, targetUserId)
+      return jsonOk(res, { items })
+    } catch (error) {
+      if (error instanceof AttendanceCalculationGroupMembershipError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation-group membership tables not ready')
+      }
+      return jsonError(
+        res,
+        500,
+        'CALCULATION_GROUP_MEMBERSHIP_LIST_FAILED',
+        'Failed to load calculation-group membership timeline',
+      )
+    }
+  })
+
+  r.post('/api/attendance-admin/calculation-group-memberships/transition', async (req: Request, res: Response) => {
+    try {
+      const body =
+        req.body && typeof req.body === 'object'
+          ? (req.body as Record<string, unknown>)
+          : {}
+      const orgId = readStrictString(body.orgId)
+      const targetUserId = readStrictString(body.userId)
+      const targetGroupId = readStrictString(body.targetGroupId)
+      const effectiveOn = readStrictString(body.effectiveOn)
+      const reason = readStrictString(body.reason)
+      const suppliedCorrelationId =
+        body.correlationId === undefined
+          ? undefined
+          : readStrictString(body.correlationId)
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      if (!targetGroupId) {
+        return jsonError(res, 400, 'TARGET_GROUP_ID_REQUIRED', 'targetGroupId is required')
+      }
+      if (!UUID_RE.test(targetGroupId)) {
+        return jsonError(res, 400, 'TARGET_GROUP_ID_INVALID', 'targetGroupId must be a UUID')
+      }
+      if (!effectiveOn) {
+        return jsonError(res, 400, 'EFFECTIVE_ON_REQUIRED', 'effectiveOn is required')
+      }
+      if (!reason) {
+        return jsonError(res, 400, 'REASON_REQUIRED', 'reason is required')
+      }
+      if (body.correlationId !== undefined && !suppliedCorrelationId) {
+        return jsonError(
+          res,
+          400,
+          'CORRELATION_ID_INVALID',
+          'correlationId must be a non-empty string when provided',
+        )
+      }
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, actorId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation-group transition')
+      }
+
+      const result = await transitionAttendanceCalculationGroupMembership({
+        orgId,
+        userId: targetUserId,
+        targetGroupId,
+        effectiveOn,
+        actorId,
+        reason,
+        correlationId: suppliedCorrelationId || req.correlationId,
+      })
+      res.setHeader('X-Correlation-Id', result.correlationId)
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationGroupMembershipError) {
+        return jsonError(res, error.status, error.code, error.message)
+      }
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation-group membership tables not ready')
+      }
+      return jsonError(
+        res,
+        500,
+        'CALCULATION_GROUP_MEMBERSHIP_TRANSITION_FAILED',
+        'Failed to transition calculation-group membership',
+      )
+    }
+  })
+
+  // W4-0 (Wave 4 onboarding design-lock 2026-07-21, RATIFIED §4.1 OD-W4-1=(a)): seven-step
+  // setup-readiness aggregate. Same org-membership door as S7-5 above
+  // (`canReadAttendanceDirectoryReadiness`, reused verbatim) — authorization completes BEFORE
+  // `buildAttendanceSetupReadiness` is ever called, so a foreign-org 403 issues zero aggregation
+  // SQL and opens zero transactions (§9 W4-0-G1 case 2). Response is values-free by construction
+  // (§4.2): counts, booleans, and closed enums only — never IDs, names, credentials, or raw
+  // configuration values.
+  r.get('/api/attendance-admin/setup-readiness', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const userId = getAttendanceAdminRequestUserId(req)
+      if (!userId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for setup readiness')
+      }
+      const readiness = await buildAttendanceSetupReadiness(orgId)
+      return jsonOk(res, readiness)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables not ready')
+      }
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'SETUP_READINESS_FAILED', 'Failed to load setup readiness')
+    }
+  })
 
   r.get('/api/attendance-admin/role-templates', async (_req: Request, res: Response) => {
     try {
@@ -338,27 +1112,55 @@ export function attendanceAdminRouter(): Router {
         defaultPageSize: 20,
         maxPageSize: 100,
       })
+      const result = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const term = q ? `%${q}%` : '%'
+        const from = scope.kind === 'org'
+          ? `FROM users u
+             JOIN user_orgs uo
+               ON uo.user_id = u.id
+              AND uo.org_id = $1
+              AND uo.is_active = true`
+          : 'FROM users u'
+        const whereParams: unknown[] = scope.kind === 'org' ? [scope.orgId] : []
+        const clauses: string[] = scope.kind === 'org' ? ['u.is_active = true'] : []
+        if (q) {
+          whereParams.push(term)
+          const termIndex = whereParams.length
+          clauses.push(`(
+            COALESCE(u.email, '') ILIKE $${termIndex}
+            OR COALESCE(u.username, '') ILIKE $${termIndex}
+            OR u.name ILIKE $${termIndex}
+            OR COALESCE(u.mobile, '') ILIKE $${termIndex}
+            OR COALESCE(u.employee_no, '') ILIKE $${termIndex}
+            OR COALESCE(u.department, '') ILIKE $${termIndex}
+            OR u.id ILIKE $${termIndex}
+          )`)
+        }
+        const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+        const countSql = `SELECT COUNT(*)::int AS c ${from} ${where}`
+        const projection = scope.kind === 'org'
+          ? `u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department,
+             u.is_active, u.created_at`
+          : `u.id, u.email, u.name, u.employee_no AS "employeeNo", u.department,
+             u.role, u.is_active, u.is_admin, u.last_login_at, u.created_at`
+        const listSql = `
+          SELECT ${projection}
+          ${from}
+          ${where}
+          ORDER BY u.created_at DESC
+          LIMIT $${whereParams.length + 1} OFFSET $${whereParams.length + 2}
+        `
 
-      const term = q ? `%${q}%` : '%'
-      const where = q
-        ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR COALESCE(employee_no, \'\') ILIKE $1 OR COALESCE(department, \'\') ILIKE $1 OR id ILIKE $1'
-        : ''
-      const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
-      const listSql = `
-        SELECT id, email, name, employee_no AS "employeeNo", department, role, is_active, is_admin, last_login_at, created_at
-        FROM users
-        ${where}
-        ORDER BY created_at DESC
-        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
-      `
+        const count = await runQuery<{ c: number }>(countSql, whereParams)
+        const list = await runQuery(listSql, [...whereParams, pageSize, offset])
+        return { items: list.rows, total: count.rows[0]?.c ?? 0 }
+      })
 
-      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
-      const total = count.rows[0]?.c ?? 0
-      const listParams = q ? [term, pageSize, offset] : [pageSize, offset]
-      const list = await query(listSql, listParams)
-
-      return jsonOk(res, { items: list.rows, page, pageSize, total })
+      return jsonOk(res, { ...result, page, pageSize })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'USER_SEARCH_FAILED', (error as Error)?.message || 'Failed to search users')
     }
   })
@@ -372,7 +1174,11 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const resolved = await resolveBatchUsers(userIds)
+      const resolved = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        return resolveBatchUsers(userIds, scope, runQuery, true)
+      })
       return jsonOk(res, {
         requested: userIds.length,
         found: resolved.items.length,
@@ -381,6 +1187,7 @@ export function attendanceAdminRouter(): Router {
         items: resolved.items,
       })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'BATCH_USER_RESOLVE_FAILED', (error as Error)?.message || 'Failed to resolve users')
     }
   })
@@ -394,53 +1201,40 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolvedTemplate = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolvedTemplate?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
-
-      await ensureAttendanceRoleTemplates()
-
-      const resolvedUsers = await resolveBatchUsers(userIds)
-      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
-      if (eligibleUserIds.length === 0) {
-        return jsonOk(res, {
-          roleId: finalRoleId,
-          requested: userIds.length,
-          eligible: 0,
-          updated: 0,
-          affectedUserIds: [],
-          affectedUserIdsTruncated: false,
-          unchangedUserIds: [],
-          unchangedUserIdsTruncated: false,
-          missingUserIds: resolvedUsers.missingUserIds,
-          inactiveUserIds: resolvedUsers.inactiveUserIds,
-          items: resolvedUsers.items,
-        })
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
       }
+      const finalRoleId = roleResolution.roleId
 
-      const insert = await query<{ user_id: string }>(
-        `INSERT INTO user_roles (user_id, role_id)
-         SELECT unnest($1::text[]), $2
-         ON CONFLICT DO NOTHING
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const { insert, resolvedUsers } = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        assertGlobalAttendanceRoleWriteScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
+        await ensureAttendanceRoleTemplates(runQuery)
+        const result = await assignUserRoles({
+          userIds,
+          roleId: finalRoleId,
+          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          executor: client,
+        })
+        return { insert: result, resolvedUsers: resolved }
+      })
 
-      const affectedUserIdsRaw = insert.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = insert.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
-      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const unchangedUserIdsRaw = userIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
       const unchangedUserIds = withLimit(unchangedUserIdsRaw)
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
-        eligible: eligibleUserIds.length,
-        updated: insert.rowCount ?? insert.rows.length,
+        eligible: userIds.length,
+        updated: insert.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -450,6 +1244,15 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: user_roles is a recovery-authority table — a marker 40001 under a held
+      // recovery lease is a retryable 409, not a 500. Every other error keeps its path.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
     }
   })
@@ -463,50 +1266,39 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
-
-      const resolvedUsers = await resolveBatchUsers(userIds)
-      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
-      if (eligibleUserIds.length === 0) {
-        return jsonOk(res, {
-          roleId: finalRoleId,
-          requested: userIds.length,
-          eligible: 0,
-          updated: 0,
-          affectedUserIds: [],
-          affectedUserIdsTruncated: false,
-          unchangedUserIds: [],
-          unchangedUserIdsTruncated: false,
-          missingUserIds: resolvedUsers.missingUserIds,
-          inactiveUserIds: resolvedUsers.inactiveUserIds,
-          items: resolvedUsers.items,
-        })
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
       }
+      const finalRoleId = roleResolution.roleId
 
-      const del = await query<{ user_id: string }>(
-        `DELETE FROM user_roles
-         WHERE role_id = $2 AND user_id = ANY($1::text[])
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const { del, resolvedUsers } = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        assertGlobalAttendanceRoleWriteScope(scope)
+        const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
+        assertAllRoleTargetsEligible(userIds, resolved)
+        const result = await unassignUserRoles({
+          userIds,
+          roleId: finalRoleId,
+          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          executor: client,
+        })
+        return { del: result, resolvedUsers: resolved }
+      })
 
-      const affectedUserIdsRaw = del.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = del.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
-      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const unchangedUserIdsRaw = userIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
       const unchangedUserIds = withLimit(unchangedUserIdsRaw)
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
-        eligible: eligibleUserIds.length,
-        updated: del.rowCount ?? del.rows.length,
+        eligible: userIds.length,
+        updated: del.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -516,6 +1308,14 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
     }
   })
@@ -525,22 +1325,36 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      const [roles, permissions, isAdmin] = await Promise.all([
-        fetchUserRoleIds(userId),
-        listUserPermissions(userId),
-        isRbacAdmin(userId),
-      ])
+      const scoped = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        if (scope.kind === 'org') {
+          const [profile, roles, permissions] = await Promise.all([
+            fetchAttendanceScopedUserProfile(userId, runQuery),
+            fetchAttendanceScopedRoleIds(userId, runQuery),
+            fetchAttendanceScopedPermissionCodes(userId, runQuery),
+          ])
+          return { profile, roles, permissions, isAdmin: undefined }
+        }
+        const [profile, roles, isAdmin] = await Promise.all([
+          fetchUserProfile(userId, runQuery),
+          fetchUserRoleIds(userId, runQuery),
+          isRbacAdmin(userId, runQuery),
+        ])
+        return { profile, roles, permissions: null, isAdmin }
+      })
+      const permissions = scoped.permissions ?? await listUserPermissions(userId)
 
       return jsonOk(res, {
-        user: profile,
-        roles,
+        user: scoped.profile,
+        roles: scoped.roles,
         permissions,
-        isAdmin,
+        ...(scoped.isAdmin === undefined ? {} : { isAdmin: scoped.isAdmin }),
       })
     } catch (error) {
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
       return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
     }
   })
@@ -550,23 +1364,28 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
-      await ensureAttendanceRoleTemplates()
-
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, finalRoleId],
-      )
+      const profile = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        assertGlobalAttendanceRoleWriteScope(scope)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        await ensureAttendanceRoleTemplates(runQuery)
+        await assignUserRoles({
+          userIds: [userId],
+          roleId: finalRoleId,
+          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          executor: client,
+        })
+        return fetchUserProfile(userId, runQuery)
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -581,6 +1400,14 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
     }
   })
@@ -590,20 +1417,27 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
-      const profile = await fetchUserProfile(userId)
-      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, finalRoleId],
-      )
+      const profile = await transaction(async (client) => {
+        const runQuery = client.query as typeof query
+        const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
+        assertGlobalAttendanceRoleWriteScope(scope)
+        const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
+        assertAllRoleTargetsEligible([userId], resolved)
+        await unassignUserRoles({
+          userIds: [userId],
+          roleId: finalRoleId,
+          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          executor: client,
+        })
+        return fetchUserProfile(userId, runQuery)
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -618,6 +1452,14 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
+      // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfAttendanceAdminUserScopeError(res, error)) return
+      if (sendIfRoleAssignmentRefused(res, error)) return
+      if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
     }
   })
@@ -877,6 +1719,424 @@ export function attendanceAdminRouter(): Router {
       return jsonError(res, 500, 'DELIVERY_REDELIVER_FAILED', (error as Error)?.message || 'Failed to redeliver notification')
     }
   })
+
+  // -----------------------------------------------------------------------------------------------
+  // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §3/§4/§9 — see
+  // docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md): six
+  // read-only decision-trace endpoints, DUAL-HOSTED per §4.1 (owner terminal-review P2-1):
+  //   - admin:  GET /api/attendance-admin/decision-trace  — inside the router-level
+  //             `rbacGuard('attendance','admin')` (`:492` above) + delegated-admin org-membership
+  //             door (`canReadAttendanceDirectoryReadiness`, reused verbatim, S7-5/W4-0 precedent).
+  //   - self:   GET /api/attendance/decision-trace         — deliberately registered under a path
+  //             that does NOT start with `/api/attendance-admin`, so `r.use('/api/attendance-admin',
+  //             rbacGuard('attendance','admin'))` above never applies to it (Express `router.use`
+  //             is a path-PREFIX match). Guarded instead by `rbacGuard('attendance','read')` — the
+  //             existing self-service permission (`ATTENDANCE_SELF_SERVICE_PERMISSIONS`,
+  //             `auth/AuthService.ts:57`). `user` is ALWAYS the token subject
+  //             (`getAttendanceAdminRequestUserId`, same helper as the admin host) — a `userId`
+  //             query parameter is REJECTED outright (400), never silently ignored (§4.1 "绝不接受
+  //             userId 参数" — silent-ignore would itself be a contract bug, same posture as hard
+  //             rule 3's silent-fallback ban).
+  //
+  // Evidence-chain construction lives entirely in `services/AttendanceDecisionTrace.ts` — this
+  // block is authorization + org resolution + thin dispatch only (§4.1: "every trace SQL" only
+  // fires AFTER authorization/org-resolution passes — `runAttendanceDecisionTraceReadOnly` is
+  // invoked strictly after every 400/401/403 branch below returns, so a rejected request opens
+  // ZERO trace SQL / ZERO transactions, W4-0-G1 case 2 precedent, §9 W5-0-G7).
+  // -----------------------------------------------------------------------------------------------
+
+  const ATTENDANCE_DECISION_TRACE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+  interface AttendanceDecisionTraceParsedQuery {
+    category: AttendanceDecisionTraceCategory
+    workDate?: string
+    requestId?: string
+    instanceId?: string
+  }
+
+  // NOTE: `strict`/`strictNullChecks` is OFF in this package's tsconfig (`packages/core-backend/
+  // tsconfig.json`), under which TS does NOT narrow a `{ok:true;value}|{ok:false;code;message}`
+  // discriminated union on a plain `if (!parsed.ok)` check (verified empirically — the boolean-
+  // literal discriminant only narrows under `strictNullChecks`). A single shape with optional
+  // fields sidesteps that entirely rather than fighting the compiler config.
+  interface AttendanceDecisionTraceParseResult {
+    ok: boolean
+    value?: AttendanceDecisionTraceParsedQuery
+    code?: string
+    message?: string
+  }
+
+  /** §3.1 hard rule 3 (enum-strict) / §9 W5-0-G4: an unrecognized or missing `category` is a 400,
+   *  NEVER a silent fallback to some default category. Each category's REQUIRED companion
+   *  parameter (workDate for ①②③, requestId for ④, instanceId for ⑥) is validated here too — a
+   *  missing/malformed one is also a 400, not a query that silently returns an empty/undeterminable
+   *  trace for the wrong reason. */
+  function parseAttendanceDecisionTraceQuery(req: Request): AttendanceDecisionTraceParseResult {
+    const categoryRaw = typeof req.query.category === 'string' ? req.query.category.trim() : ''
+    if (!categoryRaw) {
+      return { ok: false, code: 'CATEGORY_REQUIRED', message: 'category is required' }
+    }
+    if (!isAttendanceDecisionTraceCategory(categoryRaw)) {
+      return { ok: false, code: 'CATEGORY_INVALID', message: 'category is not a recognized decision-trace category' }
+    }
+    if (categoryRaw === 'today_status' || categoryRaw === 'late_early' || categoryRaw === 'missing_punch') {
+      const workDate = typeof req.query.workDate === 'string' ? req.query.workDate.trim() : ''
+      if (!ATTENDANCE_DECISION_TRACE_DATE_RE.test(workDate)) {
+        return { ok: false, code: 'WORK_DATE_REQUIRED', message: 'workDate (YYYY-MM-DD) is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, workDate } }
+    }
+    if (categoryRaw === 'overtime_segmentation') {
+      const requestId = typeof req.query.requestId === 'string' ? req.query.requestId.trim() : ''
+      if (!UUID_RE.test(requestId)) {
+        return { ok: false, code: 'REQUEST_ID_REQUIRED', message: 'requestId (uuid) is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, requestId } }
+    }
+    if (categoryRaw === 'approver_source') {
+      const instanceId = typeof req.query.instanceId === 'string' ? req.query.instanceId.trim() : ''
+      if (!instanceId) {
+        return { ok: false, code: 'INSTANCE_ID_REQUIRED', message: 'instanceId is required for this category' }
+      }
+      return { ok: true, value: { category: categoryRaw, instanceId } }
+    }
+    // comp_time_balance needs no extra target id (org+user scoped, mirrors L5a).
+    return { ok: true, value: { category: categoryRaw } }
+  }
+
+  async function dispatchAttendanceDecisionTrace(
+    orgId: string,
+    userId: string,
+    parsed: AttendanceDecisionTraceParsedQuery,
+    readOnlyQuery: AttendanceDecisionTraceQueryFn,
+    gates: AttendanceDecisionTraceSettingsGates,
+  ): Promise<AttendanceDecisionTraceResponse | typeof ATTENDANCE_DECISION_TRACE_NOT_FOUND> {
+    switch (parsed.category) {
+      case 'today_status':
+        return buildTodayStatusTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'late_early':
+        return buildLateEarlyTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'missing_punch':
+        return buildMissingPunchTrace(orgId, userId, parsed.workDate as string, readOnlyQuery)
+      case 'overtime_segmentation':
+        return buildOvertimeSegmentationTrace(
+          orgId,
+          userId,
+          parsed.requestId as string,
+          readOnlyQuery,
+          gates.overtimeSegmentation,
+        )
+      case 'comp_time_balance':
+        return buildCompTimeBalanceTrace(orgId, userId, readOnlyQuery, gates)
+      case 'approver_source':
+        return buildApproverSourceTrace(
+          orgId,
+          userId,
+          parsed.instanceId as string,
+          readOnlyQuery,
+          gates.dynamicAssigneeSourcesEnabled,
+        )
+      /* istanbul ignore next -- `isAttendanceDecisionTraceCategory` already narrowed the closed set */
+      default:
+        return ATTENDANCE_DECISION_TRACE_NOT_FOUND
+    }
+  }
+
+  r.get('/api/attendance-admin/decision-trace', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      }
+      const requestUserId = getAttendanceAdminRequestUserId(req)
+      if (!requestUserId) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+      const allowed = await canReadAttendanceDirectoryReadiness(req, requestUserId, orgId)
+      if (!allowed) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for decision trace')
+      }
+      const targetUserId = String(req.query.userId || '').trim()
+      if (!targetUserId) {
+        return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      }
+      const parsed = parseAttendanceDecisionTraceQuery(req)
+      if (!parsed.ok || !parsed.value) {
+        return jsonError(res, 400, parsed.code || 'CATEGORY_INVALID', parsed.message || 'Invalid decision-trace query')
+      }
+
+      const result = await runAttendanceDecisionTraceReadOnly(async (readOnlyQuery) => {
+        const gates = await readAttendanceDecisionTraceSettingsGates(readOnlyQuery)
+        return dispatchAttendanceDecisionTrace(orgId, targetUserId, parsed.value, readOnlyQuery, gates)
+      })
+      if (result === ATTENDANCE_DECISION_TRACE_NOT_FOUND) {
+        return jsonError(res, 404, 'DECISION_TRACE_TARGET_NOT_FOUND', 'No such decision-trace target')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables missing')
+      }
+      // Values-free seam: never leak raw DB / driver messages to the client.
+      return jsonError(res, 500, 'DECISION_TRACE_FAILED', 'Failed to load decision trace')
+    }
+  })
+
+  r.get('/api/attendance/decision-trace', rbacGuard('attendance', 'read'), async (req: Request, res: Response) => {
+    try {
+      // §4.1 "绝不接受 userId 参数": presence alone is rejected — never silently ignored (that would
+      // be the exact silent-fallback shape hard rule 3 forbids for other closed-set inputs).
+      if (Object.prototype.hasOwnProperty.call(req.query, 'userId')) {
+        return jsonError(res, 400, 'USER_ID_NOT_ACCEPTED', 'userId is not accepted on the self decision-trace host')
+      }
+      const subject = getAttendanceAdminRequestUserId(req)
+      if (!subject) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      }
+
+      // §4.1 self multi-org four-leg (owner two-round-terminal-review P2-d) — same dual is_active
+      // predicate as `canReadAttendanceDirectoryReadiness` (`:397-404`), never the plugin's
+      // client-trusted `getOrgId(req)` fallback.
+      const memberships = await query<{ org_id: string }>(
+        `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+          WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+          ORDER BY uo.org_id ASC`,
+        [subject],
+      )
+      const activeOrgIds = memberships.rows.map((row) => row.org_id)
+      const requestedOrgId = String(req.query.orgId || '').trim()
+      let orgId: string
+      if (activeOrgIds.length === 0) {
+        return jsonError(res, 403, 'FORBIDDEN', 'No active org membership')
+      } else if (!requestedOrgId && activeOrgIds.length === 1) {
+        orgId = activeOrgIds[0]
+      } else if (!requestedOrgId) {
+        return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required (multiple active org memberships)')
+      } else if (activeOrgIds.includes(requestedOrgId)) {
+        orgId = requestedOrgId
+      } else {
+        return jsonError(res, 403, 'FORBIDDEN', 'orgId does not match an active org membership')
+      }
+
+      const parsed = parseAttendanceDecisionTraceQuery(req)
+      if (!parsed.ok || !parsed.value) {
+        return jsonError(res, 400, parsed.code || 'CATEGORY_INVALID', parsed.message || 'Invalid decision-trace query')
+      }
+
+      // §4.1 subject-constrained horizontal authorization (owner three-round-terminal-review P2-1):
+      // `subject` (never a client value) is threaded into EVERY builder as the ownership column
+      // value alongside `orgId` — this is the query-internal predicate the two-user/same-org G7
+      // matrix mutates against, not a pre-gate.
+      const result = await runAttendanceDecisionTraceReadOnly(async (readOnlyQuery) => {
+        const gates = await readAttendanceDecisionTraceSettingsGates(readOnlyQuery)
+        return dispatchAttendanceDecisionTrace(orgId, subject, parsed.value, readOnlyQuery, gates)
+      })
+      if (result === ATTENDANCE_DECISION_TRACE_NOT_FOUND) {
+        return jsonError(res, 404, 'DECISION_TRACE_TARGET_NOT_FOUND', 'No such decision-trace target')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'DB_NOT_READY', 'Attendance tables missing')
+      }
+      return jsonError(res, 500, 'DECISION_TRACE_FAILED', 'Failed to load decision trace')
+    }
+  })
+
+  r.get('/api/attendance-admin/records/:recordId/calculation-detail', async (req: Request, res: Response) => {
+    try {
+      const recordId = String(req.params.recordId || '').trim()
+      const calculationId = String(req.query.calculationId || '').trim()
+      const orgId = String(req.query.orgId || '').trim()
+      if (!UUID_RE.test(recordId) || (calculationId && !UUID_RE.test(calculationId))) {
+        return jsonError(res, 400, 'CALCULATION_DETAIL_ID_INVALID', 'recordId and calculationId must be UUIDs')
+      }
+      if (!orgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      if (!(await canReadAttendanceDirectoryReadiness(req, actorId, orgId))) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for calculation detail')
+      }
+      const result = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceCalculationDetail(
+          { orgId, recordId, ...(calculationId ? { calculationId } : {}) },
+          readOnlyQuery,
+        ),
+      )
+      if (result === ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND) {
+        return jsonError(res, 404, 'CALCULATION_DETAIL_NOT_FOUND', 'No such calculation detail')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_DETAIL_FAILED', 'Failed to load calculation detail')
+    }
+  })
+
+  r.get('/api/attendance/records/:recordId/calculation-detail', rbacGuard('attendance', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (Object.prototype.hasOwnProperty.call(req.query, 'userId')) {
+        return jsonError(res, 400, 'USER_ID_NOT_ACCEPTED', 'userId is not accepted on the self calculation-detail host')
+      }
+      const recordId = String(req.params.recordId || '').trim()
+      const calculationId = String(req.query.calculationId || '').trim()
+      if (!UUID_RE.test(recordId) || (calculationId && !UUID_RE.test(calculationId))) {
+        return jsonError(res, 400, 'CALCULATION_DETAIL_ID_INVALID', 'recordId and calculationId must be UUIDs')
+      }
+      const subject = getAttendanceAdminRequestUserId(req)
+      if (!subject) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      const memberships = await query<{ org_id: string }>(
+        `SELECT uo.org_id
+           FROM user_orgs uo
+           JOIN users u ON u.id = uo.user_id
+          WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+          ORDER BY uo.org_id ASC`,
+        [subject],
+      )
+      const activeOrgIds = memberships.rows.map((row) => row.org_id)
+      const requestedOrgId = String(req.query.orgId || '').trim()
+      let orgId: string
+      if (activeOrgIds.length === 0) return jsonError(res, 403, 'FORBIDDEN', 'No active org membership')
+      if (!requestedOrgId && activeOrgIds.length === 1) orgId = activeOrgIds[0]
+      else if (!requestedOrgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required (multiple active org memberships)')
+      else if (activeOrgIds.includes(requestedOrgId)) orgId = requestedOrgId
+      else return jsonError(res, 403, 'FORBIDDEN', 'orgId does not match an active org membership')
+
+      const result = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceCalculationDetail(
+          { orgId, recordId, subjectUserId: subject, ...(calculationId ? { calculationId } : {}) },
+          readOnlyQuery,
+        ),
+      )
+      if (result === ATTENDANCE_CALCULATION_DETAIL_NOT_FOUND) {
+        return jsonError(res, 404, 'CALCULATION_DETAIL_NOT_FOUND', 'No such calculation detail')
+      }
+      return jsonOk(res, result)
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_DETAIL_FAILED', 'Failed to load calculation detail')
+    }
+  })
+
+  r.get('/api/attendance-admin/calculation-shadow-backlog', async (req: Request, res: Response) => {
+    try {
+      const orgId = String(req.query.orgId || '').trim()
+      if (!orgId) return jsonError(res, 400, 'ORG_ID_REQUIRED', 'orgId is required')
+      const actorId = getAttendanceAdminRequestUserId(req)
+      if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+      if (!(await canReadAttendanceDirectoryReadiness(req, actorId, orgId))) {
+        return jsonError(res, 403, 'FORBIDDEN', 'Org membership required for shadow backlog')
+      }
+      const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit)
+      if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 200) {
+        return jsonError(res, 400, 'LIMIT_INVALID', 'limit must be an integer between 1 and 200')
+      }
+      const items = await runAttendanceSetupReadinessReadOnly((readOnlyQuery) =>
+        readAttendanceW4ShadowBacklog(orgId, rawLimit, readOnlyQuery),
+      )
+      return jsonOk(res, { items })
+    } catch (error) {
+      if (error instanceof AttendanceCalculationSchemaUnsupportedError) {
+        return jsonError(res, 409, error.code, 'Stored calculation evidence is unsupported')
+      }
+      if (isDatabaseSchemaError(error)) return jsonError(res, 503, 'DB_NOT_READY', 'Attendance calculation tables missing')
+      return jsonError(res, 500, 'CALCULATION_SHADOW_BACKLOG_FAILED', 'Failed to load shadow backlog')
+    }
+  })
+
+  // W6-1 (#4556): group effective-policy READ aggregate. GET-only (W6-R1);
+  // permission `attendance:admin` (aligned with the FSER v1 read route per
+  // design-lock §4.1); org identity from the authenticated principal only,
+  // with a delegated-admin active-org-membership gate on top (W6-R3, parent
+  // lock §3.5 — full/platform admins bypass this second gate via
+  // `canReadAttendanceDirectoryReadiness`'s own bypass, but never bypass
+  // org-identity derivation itself); composes the existing FSER service
+  // (W6-R4); accepts no state-selecting query parameter and no
+  // state-bearing request body (W6-R7).
+  r.get(
+    '/api/attendance/groups/:groupId/effective-policy',
+    rbacGuard('attendance', 'admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const userId = getAttendanceAdminRequestUserId(req)
+        if (!userId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+
+        const orgId = getAuthenticatedAttendanceGroupEffectivePolicyOrgId(req)
+        if (!orgId) return jsonError(res, 403, 'FORBIDDEN', 'Authenticated organization not found')
+        if (attendanceGroupEffectivePolicyOrgSelectorMismatch(req, orgId)) {
+          return jsonError(res, 403, 'FORBIDDEN', 'Insufficient permissions')
+        }
+
+        // W6-R7: only an orgId that byte-equals the authenticated principal
+        // may be repeated by the client; it is an assertion, never a selector.
+        // Every other query/body key is state-bearing and is rejected before
+        // aggregate SQL. An empty JSON object remains explicitly accepted.
+        const queryKeys = Object.keys(req.query).filter((key) => key !== 'orgId')
+        if (queryKeys.length > 0) {
+          return jsonError(res, 400, 'QUERY_NOT_ACCEPTED', 'This endpoint accepts no state-selecting query parameters')
+        }
+        if (req.body !== undefined && req.body !== null
+          && (typeof req.body !== 'object' || Array.isArray(req.body))) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no state-bearing request body')
+        }
+        const bodyKeys = req.body && typeof req.body === 'object'
+          ? Object.keys(req.body as Record<string, unknown>).filter((key) => key !== 'orgId')
+          : []
+        if (bodyKeys.length > 0) {
+          return jsonError(res, 400, 'BODY_NOT_ACCEPTED', 'This endpoint accepts no state-bearing request body fields')
+        }
+
+        // W6-R1: everything from here on that runs through `readOnlyQuery`
+        // shares one `SET TRANSACTION READ ONLY` transaction — the
+        // post-guard platform-admin lookup, membership check, groupId
+        // validation, and the aggregate's and FSER's reads, all on the same
+        // handle. The handler-level authorization reads deliberately stay
+        // inside the transaction so they share the aggregate's and FSER's
+        // read-only client instead of running on the pool.
+        //
+        // A delegated-non-member 404 and an invalid-groupId 400 still open a
+        // transaction (read-only, rolled back with nothing in it); the
+        // ordering guarantee this route asserts is "no aggregate SQL before
+        // authorization", not "zero transactions" (that guarantee belongs to
+        // the setup-readiness route, not this one).
+        const aggregate = await runAttendanceSetupReadinessReadOnly(async (readOnlyQuery) => {
+          const allowed = await canReadAttendanceDirectoryReadiness(req, userId, orgId, readOnlyQuery)
+          if (!allowed) {
+            throw new AttendanceGroupEffectivePolicyServiceError(
+              404,
+              'NOT_FOUND',
+              'Group not found',
+            )
+          }
+
+          const groupId = String(req.params.groupId || '').trim()
+          if (!UUID_RE.test(groupId)) {
+            throw new AttendanceGroupEffectivePolicyServiceError(400, 'GROUP_ID_INVALID', 'groupId must be a UUID')
+          }
+
+          return createAttendanceGroupEffectivePolicyReadOnlyService(readOnlyQuery).getAggregate({ orgId, groupId })
+        })
+        return jsonOk(res, aggregate)
+      } catch (error) {
+        if (error instanceof AttendanceGroupEffectivePolicyServiceError) {
+          return jsonError(res, error.status, error.code, error.message)
+        }
+        if (isDatabaseSchemaError(error)) {
+          return jsonError(res, 503, 'DB_NOT_READY', 'Attendance group tables missing')
+        }
+        // Values-free seam: never leak raw DB / driver messages to the client.
+        return jsonError(res, 500, 'EFFECTIVE_POLICY_FAILED', 'Failed to load group effective policy')
+      }
+    },
+  )
 
   return r
 }

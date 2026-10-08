@@ -1,5 +1,14 @@
 import { createHash } from 'crypto'
+import { Logger } from '../core/logger'
+import {
+  resolveEnsureFieldsOverwriteMode,
+  diffFieldOverwriteKinds,
+  MultitableEnsureFieldsRefusedError,
+  type EnsureFieldsOverwriteMode,
+} from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
+import { fenceWriterEntry } from './canonical-sheet-fence'
+import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
   MultitableProvisioningFieldType,
@@ -63,6 +72,14 @@ export type EnsureFieldsInput = {
   query: MultitableProvisioningQueryFn
   sheetId: string
   fields: MultitableProvisioningFieldDescriptor[]
+  /**
+   * P0-S S3 per-call override of the destructive-reconcile mode. Omitted (the normal case)
+   * => the fail-closed env resolution, whose default is 'refuse'. A caller that genuinely
+   * OWNS the columns it re-ensures (a plugin re-deriving its own layout) may pass
+   * 'overwrite' HERE, in code, instead of forcing an operator to set the process-global env
+   * — which would disarm the guard for every other plugin on the server.
+   */
+  overwriteMode?: EnsureFieldsOverwriteMode
 }
 
 export type EnsureObjectInput = {
@@ -70,6 +87,8 @@ export type EnsureObjectInput = {
   projectId: string
   baseId?: string | null
   descriptor: MultitableProvisioningObjectDescriptor
+  /** See EnsureFieldsInput.overwriteMode — forwarded verbatim to ensureFields. */
+  overwriteMode?: EnsureFieldsOverwriteMode
 }
 
 export type EnsureViewInput = {
@@ -98,14 +117,57 @@ export type CreateViewInput = {
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>
+  // S1 (adversarial review of #6091, 2026-09-26): optional created_at offset, in MICROSECONDS, added
+  // to the DATABASE clock: created_at = now() + offset. Omitted by every caller except
+  // installMultitableTemplate — COALESCE(offset, 0) below means every other call site still gets
+  // exactly `now()`, the column's own default. template-library.ts passes 0, 1, 2, ... per view so
+  // a later `ORDER BY created_at, id` reproduces install order; without it every view created
+  // inside one transaction shares now()'s transaction-start timestamp and the tie-break (a sha1
+  // view id, unrelated to template order) would win instead.
+  // N-4 (second adversarial review): an offset, NOT an app-computed timestamp. The earlier
+  // `Date.now()`-based value came from the app server's clock while every other view's created_at
+  // comes from the DB server's now(); under clock skew a view a user creates right after an install
+  // could sort BEFORE the template's views. Deriving from now() keeps one clock for all rows.
+  createdAtOffsetMicros?: number | null
 }
 
 export type CreateViewResult =
   | { created: true; view: MultitableProvisioningView }
   | { created: false; view: null }
 
+export type EnsureObjectDefaultViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  name: string
+  type?: string
+}
+
+export type EnsureObjectDefaultViewResult = {
+  created: boolean
+  viewId: string | null
+  existingViewCount: number
+}
+
+// B3 (stock-prep own base): a plugin-owned SYSTEM base — owner_id and workspace_id both NULL, like
+// `base_legacy`, but with an id the plugin derives and the plugin-scope wrapper prefix-checks.
+export type EnsureSystemBaseInput = {
+  query: MultitableProvisioningQueryFn
+  baseId: string
+  name: string
+}
+
+export type EnsureSystemBaseResult = { baseId: string; created: boolean }
+
+export type MultitableBaseAdoptionReason = 'owned' | 'workspace_scoped' | 'deleted' | 'missing'
+
 export const DEFAULT_BASE_ID = 'base_legacy'
 export const DEFAULT_BASE_NAME = 'Migrated Base'
+// The id shape `ensureSystemBase` accepts. Pure string rule, validated BEFORE any query.
+export const SYSTEM_BASE_ID_PATTERN = /^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$/
+export const SYSTEM_BASE_NAME_MAX_LENGTH = 100
+// The shared default base is never re-adopted through this API: it belongs to everyone.
+export const RESERVED_SYSTEM_BASE_IDS: ReadonlySet<string> = new Set([DEFAULT_BASE_ID])
 
 function normalizeJson(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
@@ -165,9 +227,25 @@ function buildFieldProperty(
   if ((field.type !== 'select' && field.type !== 'multiSelect') || !Array.isArray(field.options) || field.options.length === 0) {
     return base
   }
+  // options(string[])是可选值的**权威清单**;property.options 里若带着 {value,color},
+  // 只按 value 对号入座地把颜色带过来(模板保色用的就是这条)。清单本身不受影响:
+  // property 里多出来的 value 不会被装进去,少的也不会被补上;没有颜色时输出与从前逐字相同。
+  const colorByValue = new Map<string, string>()
+  const carried = Array.isArray(base.options) ? base.options : []
+  for (const option of carried) {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) continue
+    const value = (option as { value?: unknown }).value
+    const color = (option as { color?: unknown }).color
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    if (typeof color !== 'string' || color.trim().length === 0) continue
+    colorByValue.set(String(value), color)
+  }
   return {
     ...base,
-    options: field.options.map((value) => ({ value })),
+    options: field.options.map((value) => {
+      const color = colorByValue.get(value)
+      return color ? { value, color } : { value }
+    }),
   }
 }
 
@@ -206,6 +284,95 @@ export async function ensureLegacyBase(
     [DEFAULT_BASE_ID, DEFAULT_BASE_NAME, 'table', '#1677ff', null, null],
   )
   return DEFAULT_BASE_ID
+}
+
+/**
+ * B3: a plugin asked for a system base with an id or name the rule refuses. This is a plugin
+ * PROGRAMMING fault, not a request fault, so it carries no HTTP status; `reason` states the RULE
+ * that was broken and never echoes the offending value.
+ */
+export class MultitableSystemBaseInputError extends Error {
+  code = 'MULTITABLE_SYSTEM_BASE_INPUT_INVALID'
+
+  constructor(public readonly field: 'baseId' | 'name', reason: string) {
+    super(`ensureSystemBase refused ${field}: ${reason}`)
+    this.name = 'MultitableSystemBaseInputError'
+  }
+}
+
+/**
+ * B3 fail-closed adoption refusal: the row already exists and is NOT a system base — it has an
+ * owner, sits in a workspace, or was soft-deleted. A plugin must never "adopt" a user's or a
+ * workspace's base, so the ensure throws instead of returning it. `status = 409` is what the
+ * plugin route wrapper's `sendError` prefers, so the refusal reaches the client typed (409 +
+ * code) rather than as an untyped 500. The message names the base id and the reason token
+ * only — never the owner_id or workspace_id it collided with.
+ */
+export class MultitableBaseAdoptionError extends Error {
+  code = 'MULTITABLE_BASE_ADOPTION_REFUSED'
+  status = 409
+
+  constructor(public readonly baseId: string, public readonly reason: MultitableBaseAdoptionReason) {
+    super(`Refusing to adopt multitable base ${baseId} as a system base (${reason})`)
+    this.name = 'MultitableBaseAdoptionError'
+  }
+}
+
+/**
+ * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL).
+ *
+ * Order, deliberately: (1) id and name are validated with ZERO queries; (2) an idempotent
+ * `INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id` — `created` is whether that returned a
+ * row; (3) the row is re-read and the ensure FAILS CLOSED unless owner_id, workspace_id and
+ * deleted_at are all NULL. `base_legacy` is refused up front: the shared default base is not a
+ * plugin's to adopt. The three `input.baseId ?? ensureLegacyBase(query)` call sites are untouched
+ * — a caller that passes no baseId still lands in the shared base exactly as before.
+ */
+export async function ensureSystemBase(
+  input: EnsureSystemBaseInput,
+): Promise<EnsureSystemBaseResult> {
+  const baseId = input.baseId
+  if (typeof baseId !== 'string' || !SYSTEM_BASE_ID_PATTERN.test(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'must match ^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$')
+  }
+  if (RESERVED_SYSTEM_BASE_IDS.has(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'the shared default base cannot be adopted as a system base')
+  }
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new MultitableSystemBaseInputError('name', 'must not be blank')
+  }
+  if (name.length > SYSTEM_BASE_NAME_MAX_LENGTH) {
+    throw new MultitableSystemBaseInputError('name', `must be at most ${SYSTEM_BASE_NAME_MAX_LENGTH} characters`)
+  }
+
+  const insert = await input.query(
+    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING id`,
+    [baseId, name, 'table', '#1677ff', null, null],
+  )
+  const created = Array.isArray(insert.rows) && insert.rows.length === 1
+
+  const existing = await input.query(
+    `SELECT owner_id, workspace_id, deleted_at
+     FROM meta_bases
+     WHERE id = $1`,
+    [baseId],
+  )
+  const row = (existing.rows as any[])[0]
+  if (!row) throw new MultitableBaseAdoptionError(baseId, 'missing')
+  if (row.owner_id !== null && row.owner_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'owned')
+  }
+  if (row.workspace_id !== null && row.workspace_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'workspace_scoped')
+  }
+  if (row.deleted_at !== null && row.deleted_at !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'deleted')
+  }
+  return { baseId, created }
 }
 
 async function loadActiveSheet(
@@ -261,11 +428,38 @@ async function loadActiveView(
   }
 }
 
+export type FindObjectViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  viewId: string
+}
+
+/**
+ * READ-ONLY existence/content read for ONE of a provisioned object's views — the read sibling of
+ * `ensureView`, exactly as `getObjectField` is the read sibling of `patchObjectFieldProperty`.
+ *
+ * It exists because `getObjectViewId` is pure id derivation and deliberately says nothing about
+ * whether the view is there, so a caller that wants to DEEP-LINK to a provisioned view had no way
+ * to tell "provisioned" from "composed" and would hand out a link to a view id that resolves to
+ * nothing. Returns null when the view does not exist — the caller decides what to do about it.
+ *
+ * No write, no create, no merge: one SELECT by the deterministic id derived from (projectId,
+ * objectId, viewId), so it can only ever answer about a view whose id the caller could already
+ * compute for itself.
+ */
+export async function findObjectView(
+  input: FindObjectViewInput,
+): Promise<MultitableProvisioningView | null> {
+  return loadActiveView(input.query, getObjectViewId(input.projectId, input.objectId, input.viewId))
+}
+
 export async function createSheet(
   input: EnsureSheetInput,
 ): Promise<CreateSheetResult> {
   const query = input.query
   const baseId = input.baseId ?? await ensureLegacyBase(query)
+  await fenceWriterEntry(query, input.sheetId)
   const insert = await query(
     `INSERT INTO meta_sheets (id, base_id, name, description)
      VALUES ($1, $2, $3, $4)
@@ -290,6 +484,7 @@ export async function ensureSheet(
   const query = input.query
   const baseId = input.baseId ?? await ensureLegacyBase(query)
 
+  await fenceWriterEntry(query, input.sheetId)
   await query(
     `INSERT INTO meta_sheets (id, base_id, name, description)
      VALUES ($1, $2, $3, $4)
@@ -304,26 +499,83 @@ export async function ensureSheet(
   return sheet
 }
 
+const ensureFieldsLogger = new Logger('MultitableProvisioning')
+
 export async function ensureFields(
   input: EnsureFieldsInput,
 ): Promise<MultitableProvisioningField[]> {
   const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, input.sheetId)
+  // P0-S S3 — destructive-reconcile guard, FAIL-CLOSED by default (Codex round 2).
+  // Default 'refuse': an EXISTING field the descriptor would mutate aborts the whole
+  // ensureFields/ensureObject call with a typed, values-free error. Additive evolution
+  // (a field id that does not exist yet) and first installs are untouched. Only the exact
+  // literal MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE=overwrite restores the pre-P0-S SQL
+  // (and is then the ONLY mode that skips the per-field pre-read).
+  const overwriteMode = input.overwriteMode ?? resolveEnsureFieldsOverwriteMode()
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index
-    await input.query(
-      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-       ON CONFLICT (id) DO UPDATE SET
+    const nextProperty = JSON.stringify(buildFieldProperty(field))
+
+    let conflictClause =
+      `ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          property = EXCLUDED.property,
-         "order" = EXCLUDED."order"`,
+         "order" = EXCLUDED."order"`
+
+    if (overwriteMode !== 'overwrite') {
+      const existing = await input.query(
+        `SELECT name, type, property, "order" FROM meta_fields WHERE id = $1 AND sheet_id = $2`,
+        [field.id, input.sheetId],
+      )
+      const row = (existing.rows as any[])[0]
+      const stored = row
+        ? { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }
+        : null
+      const incoming = {
+        name: field.name.trim(),
+        type: field.type,
+        property: JSON.parse(nextProperty),
+        order,
+      }
+      const diffKinds = diffFieldOverwriteKinds(stored, incoming)
+      if (diffKinds.length > 0) {
+        // values-free: field id + sheet id + diff KINDS only, never names/values.
+        ensureFieldsLogger.warn(
+          `ensureFields destructive-reconcile: field ${field.id} on sheet ${input.sheetId} would be overwritten in [${diffKinds.join(', ')}] (mode=${overwriteMode})`,
+        )
+        // 'refuse' (default) aborts the whole call — an existing object is never silently
+        // reconciled. 'preserve' keeps the tenant's row untouched (add-only). 'observe'
+        // still overwrites but has now surfaced the event for audit/metrics.
+        //
+        // Partial-application note: fields EARLIER in this loop may already be written when
+        // the throw fires. Every one of them was classified 'create' or 'unchanged' (a diff
+        // would have thrown at that field instead), so whatever landed is additive-only —
+        // no tenant row was overwritten. The shipped plugin path (`ensureObjectInScope`,
+        // index.ts) additionally runs the whole ensureObject inside one transaction, so the
+        // refusal rolls those creates back too.
+        if (overwriteMode === 'refuse') {
+          throw new MultitableEnsureFieldsRefusedError({
+            fieldId: field.id,
+            sheetId: input.sheetId,
+            diffKinds,
+          })
+        }
+        if (overwriteMode === 'preserve') conflictClause = 'ON CONFLICT (id) DO NOTHING'
+      }
+    }
+
+    await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ${conflictClause}`,
       [
         field.id,
         input.sheetId,
         field.name.trim(),
         field.type,
-        JSON.stringify(buildFieldProperty(field)),
+        nextProperty,
         order,
       ],
     )
@@ -355,6 +607,7 @@ export async function patchObjectFieldProperty(
 ): Promise<MultitableProvisioningField> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
+  await fenceWriterEntry(input.query, sheetId)
   const existing = await input.query(
     `SELECT id, sheet_id, name, type, property, "order"
      FROM meta_fields
@@ -444,6 +697,7 @@ export async function ensureView(
 ): Promise<MultitableProvisioningView> {
   const descriptor = input.descriptor
   const viewId = getObjectViewId(input.projectId, descriptor.objectId, descriptor.id)
+  await fenceWriterEntry(input.query, input.sheetId)
   await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -478,9 +732,10 @@ export async function ensureView(
 export async function createView(
   input: CreateViewInput,
 ): Promise<CreateViewResult> {
+  await fenceWriterEntry(input.query, input.sheetId)
   const insert = await input.query(
-    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now() + (COALESCE($10::int, 0) * interval '1 microsecond'))
      ON CONFLICT (id) DO NOTHING`,
     [
       input.viewId,
@@ -492,6 +747,7 @@ export async function createView(
       JSON.stringify(normalizeJson(input.groupInfo)),
       JSON.stringify(Array.isArray(input.hiddenFieldIds) ? input.hiddenFieldIds : []),
       JSON.stringify(normalizeJson(input.config)),
+      input.createdAtOffsetMicros ?? null,
     ],
   )
 
@@ -504,6 +760,230 @@ export async function createView(
     throw new Error(`Failed to create view: ${input.viewId}`)
   }
   return { created: true, view }
+}
+
+// DEFAULT-VIEW primitive. A multitable base renders each sheet's default view, so a
+// sheet with ZERO views cannot be opened — and one unopenable sheet blocks the whole
+// base. Provisioning creates a sheet and its fields; nothing created a view, which is
+// why the first real deployment had to have three grid views inserted by hand.
+//
+// The guarantee this primitive is shaped around: a sheet that already has ANY view is
+// left COMPLETELY alone. Not merged, not renamed, not reordered, not added to — a pack
+// that created role views owns that sheet's view list, and this must never append a
+// fourth. That is why this is NOT `ensureView` (INSERT ... ON CONFLICT DO UPDATE by a
+// deterministic id, which WOULD append next to pack-created views): the decision is
+// taken on the sheet's view COUNT, and the write happens only from zero. Existing view
+// rows are CONSTRUCTIVELY untouchable — there is no UPDATE and no DELETE statement in
+// this function body, and the single INSERT is ON CONFLICT DO NOTHING (via createView),
+// so two concurrent ensures cannot produce two views either.
+//
+// Additive and idempotent: a re-ensure on a sheet this created a view for sees count 1
+// and writes nothing. Returns values-free evidence (an id and counts only).
+export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = 'default'
+
+export async function ensureObjectDefaultView(
+  input: EnsureObjectDefaultViewInput,
+): Promise<EnsureObjectDefaultViewResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new Error('ensureObjectDefaultView requires a non-empty view name')
+  }
+  const counted = await input.query(
+    `SELECT count(*)::int AS view_count
+     FROM meta_views
+     WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const countRow = (counted.rows as any[])[0]
+  const existingViewCount = Number(countRow?.view_count ?? 0)
+  if (existingViewCount > 0) {
+    return { created: false, viewId: null, existingViewCount }
+  }
+
+  const sheet = await loadActiveSheet(input.query, sheetId)
+  if (!sheet) {
+    throw new Error(`Cannot ensure a default view for a missing sheet: ${sheetId}`)
+  }
+
+  const viewId = getObjectViewId(input.projectId, input.objectId, DEFAULT_OBJECT_VIEW_LOGICAL_ID)
+  const result = await createView({
+    query: input.query,
+    viewId,
+    sheetId,
+    name,
+    type: input.type || 'grid',
+  })
+  return {
+    created: result.created,
+    viewId: result.created ? viewId : null,
+    existingViewCount: 0,
+  }
+}
+
+export type EnsureMissingObjectFieldsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fields: MultitableProvisioningFieldDescriptor[]
+}
+
+export type EnsureMissingObjectFieldsResult = {
+  addedFieldIds: string[]
+  skippedExistingFieldIds: string[]
+}
+
+// ADDITIVE-ONLY field primitive (general-prep W2 template-evolution rung). Unlike
+// `ensureFields` (INSERT ... ON CONFLICT DO UPDATE — it overwrites name/type/property/
+// order, which would destroy option-sync-written options and tenant renames on an
+// already-provisioned table), this uses ON CONFLICT (id) DO NOTHING — the createView
+// precedent. Existing field rows are CONSTRUCTIVELY untouchable: there is no UPDATE and
+// no DELETE statement in this function body, so "add-only, never mutate, never drop" is
+// guaranteed by the statement set itself, not by convention. Returns values-free evidence
+// (field ids + counts only). Physical ids are computed exactly as ensureObject does, so a
+// later template field lands on the same stable id an `ensure` would have used.
+export async function ensureMissingObjectFields(
+  input: EnsureMissingObjectFieldsInput,
+): Promise<EnsureMissingObjectFieldsResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const addedFieldIds: string[] = []
+  const skippedExistingFieldIds: string[] = []
+  const fields = input.fields ?? []
+  if (fields.length > 0) await fenceWriterEntry(input.query, sheetId)
+  for (const [index, field] of fields.entries()) {
+    const physicalId = stableMetaId('fld', input.projectId, input.objectId, field.id)
+    const order = typeof field.order === 'number' ? field.order : index
+    const res = await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        physicalId,
+        sheetId,
+        field.name.trim(),
+        field.type,
+        JSON.stringify(buildFieldProperty(field)),
+        order,
+      ],
+    )
+    if ((res.rowCount ?? 0) > 0) addedFieldIds.push(physicalId)
+    else skippedExistingFieldIds.push(physicalId)
+  }
+  return { addedFieldIds, skippedExistingFieldIds }
+}
+
+export type ResolveExistingObjectFieldIdsInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-BACKED field existence (general-prep W2). `resolveObjectFieldIds` only COMPUTES
+// stable ids (it maps every requested logical id, whether or not the row exists), so
+// it can never tell a repair which fields are genuinely missing. This one queries
+// meta_fields and returns {logicalId: physicalId} ONLY for fields that physically
+// exist — so `missingLogicalFields(template, resolved)` returns the truly-missing set.
+export async function resolveExistingObjectFieldIds(
+  input: ResolveExistingObjectFieldIdsInput,
+): Promise<Record<string, string>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, string> = {}
+  if (pairs.length === 0) return out
+  const res = await input.query(
+    `SELECT id FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const present = new Set((res.rows as { id: unknown }[]).map((row) => String(row.id)))
+  for (const pair of pairs) {
+    if (present.has(pair.physical)) out[pair.logical] = pair.physical
+  }
+  return out
+}
+
+export type ReadObjectFieldsContentInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldIds: string[]
+}
+
+// DB-backed field CONTENT (general-prep W2 REPAIR_MUTATED_EXISTING_FIELD snapshot):
+// {logicalId: {name, type, property}} for fields that physically exist. Repair reads
+// this before and after the additive write and asserts existing fields are byte-for-byte
+// unchanged — a runtime positive control on top of the DO-NOTHING primitive.
+export async function readObjectFieldsContent(
+  input: ReadObjectFieldsContentInput,
+): Promise<Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }>> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const pairs = (input.fieldIds ?? []).map((logical) => ({
+    logical,
+    physical: stableMetaId('fld', input.projectId, input.objectId, logical),
+  }))
+  const out: Record<string, { name: string; type: string; property: Record<string, unknown>; order: number }> = {}
+  if (pairs.length === 0) return out
+  // Snapshot the full column IDENTITY of an existing field: name/type/property AND
+  // `order` (the only other mutable, schema-affecting column). This is the before/after
+  // positive control behind assertNoExistingFieldMutated — it must cover every column a
+  // renumbering write could touch, so the "never touch a pre-existing column" contract is
+  // literally true even if the wired write primitive later stops being append-only.
+  // `updated_at` is intentionally excluded: it is a housekeeping timestamp, not column
+  // identity, and would false-positive on any legitimate re-touch.
+  const res = await input.query(
+    `SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])`,
+    [sheetId, pairs.map((pair) => pair.physical)],
+  )
+  const byPhysical = new Map(
+    (res.rows as { id: unknown; name: unknown; type: unknown; property: unknown; order: unknown }[]).map((row) => [
+      String(row.id),
+      { name: String(row.name), type: String(row.type), property: normalizeJson(row.property), order: Number(row.order) },
+    ]),
+  )
+  for (const pair of pairs) {
+    const content = byPhysical.get(pair.physical)
+    if (content) out[pair.logical] = content
+  }
+  return out
+}
+
+// W2/P2-3: build the atomic-repair tx surface — binds ALL FOUR provisioning methods a repair
+// needs to the SAME `query`. This is the SINGLE place that wiring lives, so index.ts's
+// runObjectFieldsRepairTransaction and the real-DB test both use it: a divergence (one method
+// escaping to a different connection, breaking atomicity) is impossible to introduce per-method,
+// and the shipped binding is exercised by the real-DB rollback test — closing the runner-vs-prod
+// gap (a hand-mirrored test runner would have left the shipped surface unverified).
+export function buildObjectFieldsRepairSurface(
+  query: MultitableProvisioningQueryFn,
+): MultitableRepairTransactionSurface {
+  return {
+    findObjectSheet: ({ projectId, objectId }) => findObjectSheet(query, projectId, objectId),
+    resolveExistingObjectFieldIds: ({ projectId, objectId, fieldIds }) =>
+      resolveExistingObjectFieldIds({ query, projectId, objectId, fieldIds }),
+    readObjectFieldsContent: ({ projectId, objectId, fieldIds }) =>
+      readObjectFieldsContent({ query, projectId, objectId, fieldIds }),
+    ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
+      ensureMissingObjectFields({ query, projectId, objectId, fields }),
+  }
+}
+
+// W2/P2-3: the atomic-repair GLUE, extracted so it is unit-testable independently of the
+// MetaSheetServer/poolManager bootstrap. `withTxQuery` is the caller's transaction runner —
+// it must invoke `run` exactly once with a SINGLE tx-bound query and roll back if `run`
+// throws. This function builds the repair surface from that one query and hands it to `fn`;
+// a throw from `fn` (a verify failure) propagates straight out so the caller's transaction
+// rolls back. index.ts wires `withTxQuery` to poolManager.get().transaction, so the shipped
+// runner IS this tested function over the (independently-correct) transaction primitive —
+// closing the runner-vs-prod gap the review flagged (P3): a rework that split the write and
+// verify into two transactions, or swallowed the throw, is caught by this function's tests.
+export async function runObjectFieldsRepairTransactionWith<T>(
+  withTxQuery: <R>(run: (query: MultitableProvisioningQueryFn) => Promise<R>) => Promise<R>,
+  fn: (surface: MultitableRepairTransactionSurface) => Promise<T>,
+): Promise<T> {
+  return withTxQuery((txQuery) => fn(buildObjectFieldsRepairSurface(txQuery)))
 }
 
 export async function ensureObject(
@@ -526,6 +1006,7 @@ export async function ensureObject(
   const fields = await ensureFields({
     query: input.query,
     sheetId,
+    overwriteMode: input.overwriteMode,
     fields: (input.descriptor.fields ?? []).map((field) => ({
       ...field,
       id: stableMetaId('fld', input.projectId, input.descriptor.id, field.id),

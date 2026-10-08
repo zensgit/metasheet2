@@ -14,6 +14,13 @@
 // This mirrors the fail-closed / enum-strict / coarse-reason idiom of normalizeReadSmokeContract.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
+// isValidProfileId is IMPORTED from the certification module's PUBLIC surface — never __internals,
+// never a second copy of the regex — so actionProfileVersion here and the GIP certification module's
+// profileId vocabulary cannot drift apart (ledger §4 step 1.1; review B1a-1 P2: a live save path must
+// not depend on another module's private/test surface). isValidProfileId carries the same <=128-char
+// bound this field needs and is untrimmed, matching this module's own untrimmed validate-then-trim
+// shape (see normalizeReadSourceConfig below) — see its definition for the exact semantics.
+const { isValidProfileId } = require('./gip-profile-certification-contracts.cjs')
 
 // The four proven read modes (standard names from #3416); nothing else is accepted.
 const READ_SOURCE_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'])
@@ -25,6 +32,13 @@ const READ_SOURCE_KEY_ENCODINGS = Object.freeze(['structured_json_field', 'filte
 // old/pre-R0 resolver config that never declared it is fail-closed invalid (never silently reinterpreted).
 const RESOLVER_RULES = Object.freeze(['exactly_one', 'first_when_sorted', 'field_equals'])
 const RESOLVER_SORT_DIRECTIONS = Object.freeze(['asc', 'desc'])
+
+// B1a §4 step 1.1 (⟲R6) — orderingKeySpec.direction. Deliberately UPPERCASE and deliberately NOT unified
+// with RESOLVER_SORT_DIRECTIONS above (owner-ratified decision, ledger §4 step 1.1): a read-time normalizer
+// that reconciled the two vocabularies would let two textually different approved bodies — different
+// configContentKey, different qualification digest — behave identically, silently un-pinning behaviour the
+// content key exists to pin. Keep both vocabularies exactly as they are.
+const ORDERING_KEY_DIRECTIONS = Object.freeze(['ASC', 'DESC'])
 
 // Per-mode REQUIRED fields — hardcoded for the four modes (NOT a generic schema engine; per the design-lock,
 // "the four read modes" means "knows each mode's shape"). resolver_lookup: multiplicityRuleField is no longer
@@ -55,6 +69,11 @@ const ALLOWED_CONFIG_KEYS = Object.freeze(new Set([
   'multiplicityRuleField', 'fieldMap',
   // R0: resolver_lookup contract keys (rule-gated below; rejected on non-resolver modes).
   'resolverRule', 'resolverSortDirection', 'resolverDiscriminatorValue',
+  // B1a §4 step 1.1 — config v2 (additive; OPTIONAL on every mode; omitted ⇒ no behaviour change). Adding a
+  // key HERE alone is NOT sufficient — normalizeReadSourceConfig below is the second, independent
+  // enforcement point (persistence + content-key participation); both must carry the key or the field is
+  // accepted and then silently dropped before storage.
+  'orderingKeySpec', 'actionProfileVersion',
 ]))
 
 function isNonEmptyString(value) {
@@ -210,6 +229,66 @@ function validateReadSourceConfig(config) {
     }
   }
 
+  // orderingKeySpec — B1a §4 step 1.1 (⟲R6 closed schema). OPTIONAL; omitted ⇒ no behaviour change. The
+  // certificate holds only the capability-level orderingKeyRequirement (never customer columns, §3.1); this
+  // is the CONCRETE customer field list + directions, and belongs at the config layer.
+  if (config.orderingKeySpec !== undefined) {
+    if (!Array.isArray(config.orderingKeySpec) || config.orderingKeySpec.length === 0) {
+      push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'must_be_non_empty_array')
+    } else {
+      // The ONLY place a target identifier is declared is fieldMap — every orderingKeySpec fieldId must
+      // resolve through THIS SAME config version's fieldMap targets. No fieldMap ⇒ nothing resolves ⇒ every
+      // fieldId is unresolvable (deliberate: no "skip when fieldMap is absent" escape hatch). This Set
+      // dedupes a fieldMap that itself carries a duplicate target — harmless in practice only because the
+      // fieldMap block above independently fail-closes that same body (duplicate_target, above), so a
+      // resolution against a duplicate-target fieldMap is never observable through the public valid:true path.
+      const fieldMapTargets = new Set(
+        Array.isArray(config.fieldMap)
+          ? config.fieldMap
+            .filter((entry) => entry && typeof entry.target === 'string')
+            .map((entry) => entry.target.trim())
+          : [],
+      )
+      const seenFieldIds = new Set()
+      for (const entry of config.orderingKeySpec) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Object.keys(entry).every((k) => k === 'fieldId' || k === 'direction')) {
+          // Also the gate that keeps orderingKeySpec schema-only: NULLability (or any other per-entry flag,
+          // e.g. a hypothetical "nullable") is deliberately NOT a schema key here — it stays fail-closed at
+          // the qualification probe, where it is observable against the live source (§3.1⟲R6).
+          push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'invalid_entry_shape')
+          continue
+        }
+        // Canonical fieldIds only — never raw SQL, expressions, or aliases. Same bounded-identifier shape as
+        // fieldMap's `target` (the thing a fieldId must resolve to).
+        if (!isBoundedIdentifier(entry.fieldId)) {
+          push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'field_id_invalid')
+        } else {
+          const fieldId = entry.fieldId.trim()
+          if (seenFieldIds.has(fieldId)) {
+            push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'duplicate_field_id')
+          }
+          seenFieldIds.add(fieldId)
+          if (!fieldMapTargets.has(fieldId)) {
+            push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'field_id_unresolved')
+          }
+        }
+        // direction ∈ {ASC, DESC} ONLY, UPPERCASE-strict (deliberately NOT resolverSortDirection's lowercase
+        // vocabulary — see ORDERING_KEY_DIRECTIONS above).
+        if (!ORDERING_KEY_DIRECTIONS.includes(entry.direction)) {
+          push('READ_SOURCE_ORDERING_KEY_SPEC_INVALID', 'orderingKeySpec', 'direction_invalid')
+        }
+      }
+    }
+  }
+
+  // actionProfileVersion — B1a §4 step 1.1. OPTIONAL; omitted ⇒ no behaviour change. Validated against the
+  // SAME profileId vocabulary as GIP certification via its PUBLIC isValidProfileId (imported above, never
+  // duplicated, never reaching into __internals) so the two cannot drift; this field must not move
+  // systemContentKey (GIP-D0 §6) — it is a config-plane value only.
+  if (config.actionProfileVersion !== undefined && !isValidProfileId(config.actionProfileVersion)) {
+    push('READ_SOURCE_ACTION_PROFILE_VERSION_INVALID', 'actionProfileVersion', 'not_allowlisted')
+  }
+
   // R0 resolver_lookup contract (rule-gated multiplicity; #1709 / resolver design-lock). The resolver keys
   // are rejected on any other mode; for resolver_lookup, resolverRule selects which rule-specific fields are
   // required vs forbidden. Values-free: reasons are coarse enums, no config value is echoed.
@@ -292,6 +371,16 @@ function normalizeReadSourceConfig(config) {
   if (config.resolverRule !== undefined) out.resolverRule = config.resolverRule
   if (config.resolverSortDirection !== undefined) out.resolverSortDirection = config.resolverSortDirection
   if (config.resolverDiscriminatorValue !== undefined) out.resolverDiscriminatorValue = config.resolverDiscriminatorValue.trim()
+  // B1a §4 step 1.1 — THE SECOND enforcement point. ALLOWED_CONFIG_KEYS above decides acceptance only; this
+  // key-by-key projection decides PERSISTENCE, and the store hashes exactly this output (`contentKeyFor`).
+  // A key merely allowlisted and not copied here is accepted, then silently discarded before storage — add
+  // both in lockstep with the allowlist, never here alone.
+  if (config.orderingKeySpec !== undefined) {
+    out.orderingKeySpec = Object.freeze(
+      config.orderingKeySpec.map((entry) => Object.freeze({ fieldId: entry.fieldId.trim(), direction: entry.direction })),
+    )
+  }
+  if (config.actionProfileVersion !== undefined) out.actionProfileVersion = config.actionProfileVersion.trim()
   const trimList = (field) => {
     if (Array.isArray(config[field])) out[field] = Object.freeze(config[field].map((p) => p.trim()))
   }
@@ -310,6 +399,7 @@ module.exports = {
   READ_SOURCE_KEY_ENCODINGS,
   RESOLVER_RULES,
   RESOLVER_SORT_DIRECTIONS,
+  ORDERING_KEY_DIRECTIONS,
   isSafeRelativeReadPath,
   validateReadSourceConfig,
   normalizeReadSourceConfig,

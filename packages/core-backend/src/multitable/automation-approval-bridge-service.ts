@@ -7,8 +7,10 @@
  */
 
 import { randomUUID } from 'crypto'
+import { sql } from 'kysely'
 import { db } from '../db/db'
 import { query } from '../db/pg'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { toJsonValue } from '../db/type-helpers'
 import { ServiceError } from '../services/ApprovalBridgeService'
 import { ApprovalProductService } from '../services/ApprovalProductService'
@@ -18,6 +20,7 @@ import { isAdmin } from '../rbac/service'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
+import type { ExecutionLedgerKind } from './automation-execution-ledger'
 import { computeActionFingerprint, type ActionFingerprint } from './automation-suspension-service'
 import {
   lookupTemplateValue,
@@ -28,12 +31,20 @@ import {
 } from './automation-executor'
 import type { AutomationAction, StartApprovalConfig } from './automation-actions'
 
-type BridgeStatus = 'creating' | 'pending' | 'resumed' | 'failed'
+// P2 durable-delivery P1#1: `in_progress` (completion claimed, continuation running — holds a lease + fence)
+// and `dead_letter` (continuation crashed past the attempt ceiling — terminal) are the reclaimable-lease
+// additions. They exist ONLY on the flag-ON path; flag OFF still flips pending→resumed terminally.
+type BridgeStatus = 'creating' | 'pending' | 'in_progress' | 'resumed' | 'failed' | 'dead_letter'
+
+/** Reclaimable-lease knobs for the flag-ON completion claim (mirror S6 EVENT_DELIVERY_LEASE_MS + dispatcher). */
+const BRIDGE_COMPLETION_LEASE_MS = 60_000
+export const BRIDGE_COMPLETION_MAX_ATTEMPTS = 8
 
 export interface AutomationApprovalBridgeRow {
   id: string
   executionId: string
   rootExecutionId: string
+  ledgerKind: ExecutionLedgerKind
   ruleId: string
   sheetId: string | null
   recordId: string | null
@@ -45,9 +56,24 @@ export interface AutomationApprovalBridgeRow {
   idempotencyKey: string
   status: BridgeStatus
   outcome: string | null
+  /** P1#1 lease token (bigint as string; '0' on the flag-OFF path). The completion handler passes it to
+   *  `markBridgeResumed` for the fence-CAS terminal write so a reclaimed zombie can never overwrite it. */
+  fence: string
   actionFingerprint: ActionFingerprint
   triggerEvent: unknown
 }
+
+/**
+ * Discriminated completion-claim result (done/busy split — sink-recoverability audit 2026-07-17).
+ * `claimed` = THIS caller owns the bridge (fresh or reclaimed; legacy terminal-early also maps here);
+ * `none` = nothing to do (no bridge for the approval / already terminal / just poisoned) — skip is correct;
+ * `busy` = ANOTHER worker holds a LIVE lease — the caller must fail retryably, NEVER resolve `done` (a
+ * crashed holder's continuation would be dropped forever) and NEVER run (a live holder would double-drive).
+ */
+export type ApprovalBridgeClaimResult =
+  | { kind: 'claimed'; row: AutomationApprovalBridgeRow }
+  | { kind: 'none' }
+  | { kind: 'busy' }
 
 export interface StartApprovalBridgeResult {
   suspended: boolean
@@ -120,6 +146,11 @@ function rootIdFor(execution: Pick<AutomationExecution, 'id' | 'rerunOfExecution
   return execution.rootExecutionId || execution.rerunOfExecutionId || execution.id
 }
 
+function readLedgerKind(value: unknown): ExecutionLedgerKind {
+  if (value === 'execution' || value === 'test_run') return value
+  throw new Error('automation approval bridge has an invalid ledger_kind')
+}
+
 function buildTemplateData(context: ExecutionContext): Record<string, unknown> {
   return {
     ...context.recordData,
@@ -170,6 +201,90 @@ function stepResultForApproval(approval: Pick<UnifiedApprovalDTO, 'id' | 'reques
   }
 }
 
+/** The requester identity `createApproval` is called with (structurally `CreateApprovalActor`). */
+export interface AuthorizedApprovalActor {
+  userId: string
+  userName?: string
+  email?: string
+  department?: string
+  departmentIds?: string[]
+  roles?: string[]
+  permissions?: string[]
+}
+
+async function loadApprovalActorRoles(userId: string, legacyRole: string | null): Promise<string[]> {
+  const roles = new Set<string>()
+  if (legacyRole && legacyRole.trim()) roles.add(legacyRole.trim())
+  try {
+    const result = await query<{ role_id: string }>(
+      `SELECT role_id FROM user_roles WHERE user_id = $1`,
+      [userId],
+    )
+    for (const row of result.rows) {
+      if (row.role_id && row.role_id.trim()) roles.add(row.role_id.trim())
+    }
+  } catch {
+    // Older/degraded deployments may not have user_roles; legacy users.role still applies.
+  }
+  return Array.from(roles)
+}
+
+/**
+ * Load + AUTHORIZE the approval requester from the DATABASE (never from the JWT): the users row must
+ * exist and be active, and the identity must hold `approvals:write` (or be a DB admin).
+ *
+ * Extracted verbatim from `AutomationApprovalBridgeService.loadAuthorizedActor` (which now delegates
+ * here) so the record-level submit route reuses the SAME loader instead of minting a second one. The
+ * `START_APPROVAL_*` error codes are preserved byte-for-byte for the automation path; the record route
+ * maps them onto its own values-free vocabulary.
+ *
+ * This is a PRECHECK, not the authority: `ApprovalProductService.createApproval` re-checks
+ * `approvals:write` on its own transaction client before it writes.
+ */
+export async function loadAuthorizedApprovalActor(
+  requesterId: string | null | undefined,
+): Promise<AuthorizedApprovalActor> {
+  const userId = normalizeString(requesterId)
+  if (!userId) {
+    throw new ServiceError('start_approval requester could not be resolved', 400, 'START_APPROVAL_REQUESTER_REQUIRED')
+  }
+
+  const userResult = await query<{
+    id: string
+    email: string | null
+    username: string | null
+    name: string | null
+    role: string | null
+    is_active: boolean | null
+  }>(
+    `SELECT id, email, username, name, role, is_active
+       FROM users
+      WHERE id = $1
+      LIMIT 1`,
+    [userId],
+  )
+  const user = userResult.rows[0]
+  if (!user || user.is_active === false) {
+    throw new ServiceError('start_approval requester user not found or inactive', 404, 'START_APPROVAL_REQUESTER_NOT_FOUND')
+  }
+
+  const permissions = await listRbacPermissionCodes(userId)
+  const roles = await loadApprovalActorRoles(userId, user.role)
+  const allowed = await isAdmin(userId)
+    || hasPermissionCode(permissions, 'approvals:write')
+  if (!allowed) {
+    throw new ServiceError('start_approval requester lacks approvals:write', 403, 'START_APPROVAL_PERMISSION_DENIED')
+  }
+
+  return {
+    userId,
+    userName: user.name ?? user.username ?? user.email ?? userId,
+    email: user.email ?? undefined,
+    roles,
+    permissions,
+  }
+}
+
 export class AutomationApprovalBridgeService {
   constructor(
     private readonly jobService: AutomationJobService,
@@ -192,7 +307,10 @@ export class AutomationApprovalBridgeService {
   }
 
   async startApproval(input: {
-    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & { rootExecutionId?: string }
+    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & {
+      rootExecutionId?: string
+      ledgerKind?: ExecutionLedgerKind
+    }
     rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction>; createdBy?: string }
     context: ExecutionContext
     stepIndex: number
@@ -226,6 +344,7 @@ export class AutomationApprovalBridgeService {
         id: bridgeId,
         execution_id: input.execution.id,
         root_execution_id: rootExecutionId,
+        ledger_kind: input.execution.ledgerKind ?? 'execution',
         rule_id: input.rule.id,
         sheet_id: input.rule.sheetId ?? null,
         record_id: input.context.recordId || null,
@@ -309,21 +428,107 @@ export class AutomationApprovalBridgeService {
     }
   }
 
-  async claimCompletion(event: ApprovalCompletionEventV1): Promise<AutomationApprovalBridgeRow | null> {
+  /**
+   * Claim the completion of a suspended bridge so exactly one worker resumes it.
+   *
+   * Flag OFF (legacy, byte-identical): atomically flip `pending → resumed` (TERMINAL) and return the row. The
+   * caller runs the continuation AFTER this terminal write — the window the P1 finding is about.
+   *
+   * Flag ON (P1#1 recoverable lease): flip `pending → in_progress` with a lease + `fence`+1 (a FRESH claim), or
+   * RECLAIM an EXPIRED `in_progress` lease left by a crashed worker (`fence`+1, `attempts`+1). A row still under
+   * a LIVE lease, or already terminal, returns null (skip — another worker owns it / it is done). A crashed
+   * worker whose reclaim would exceed `BRIDGE_COMPLETION_MAX_ATTEMPTS` is DEAD-LETTERED at claim (bounded — no
+   * infinite reclaim of a continuation that always crashes) and returns null. The caller runs the continuation
+   * and then calls `markBridgeResumed(id, fence)` (fence-CAS) — NO terminal-early write.
+   */
+  async claimCompletion(
+    event: ApprovalCompletionEventV1,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<ApprovalBridgeClaimResult> {
     const approvalId = event.approval.instanceId
-    const claimed = await db
-      .updateTable('multitable_automation_approval_bridges')
-      .set({
-        status: 'resumed',
-        outcome: event.transition.toStatus,
-        completed_at: event.occurredAt,
-        resumed_at: new Date().toISOString(),
-      } as never)
-      .where('approval_instance_id', '=', approvalId)
-      .where('status', '=', 'pending')
-      .returningAll()
-      .executeTakeFirst()
-    return claimed ? this.mapRow(claimed as Record<string, unknown>) : null
+
+    if (!isDurableDeliveryEnabled(env)) {
+      // LEGACY terminal-early path — byte-identical to the pre-P1#1 behavior (never 'busy').
+      const claimed = await db
+        .updateTable('multitable_automation_approval_bridges')
+        .set({
+          status: 'resumed',
+          outcome: event.transition.toStatus,
+          completed_at: event.occurredAt,
+          resumed_at: new Date().toISOString(),
+        } as never)
+        .where('approval_instance_id', '=', approvalId)
+        .where('status', '=', 'pending')
+        .returningAll()
+        .executeTakeFirst()
+      return claimed ? { kind: 'claimed', row: this.mapRow(claimed as Record<string, unknown>) } : { kind: 'none' }
+    }
+
+    // FLAG-ON reclaimable-lease path. Raw SQL for the fence-CAS + lease arithmetic (mirrors S6 event_fires).
+    const leaseMs = BRIDGE_COMPLETION_LEASE_MS
+    // 1) FRESH claim: pending → in_progress, lease + fence 1 + attempts 1. Records outcome/completed_at now
+    //    (idempotent — the same completion event carries the same outcome on any redelivery).
+    const fresh = await sql<Record<string, unknown>>`
+      UPDATE multitable_automation_approval_bridges
+      SET status = 'in_progress', lease_expires_at = now() + ${leaseMs} * interval '1 millisecond',
+          fence = fence + 1, attempts = attempts + 1,
+          outcome = ${event.transition.toStatus}, completed_at = ${event.occurredAt}
+      WHERE approval_instance_id = ${approvalId} AND status = 'pending'
+      RETURNING *
+    `.execute(db)
+    if (fresh.rows.length > 0) return { kind: 'claimed', row: this.mapRow(fresh.rows[0]) }
+
+    // 2) POISON at reclaim: an EXPIRED in_progress that has already exhausted its attempts → dead_letter
+    //    (terminal, lease cleared). Returns null (skip) — the work will not be retried again.
+    const poisoned = await sql<{ id: string }>`
+      UPDATE multitable_automation_approval_bridges
+      SET status = 'dead_letter', lease_expires_at = NULL
+      WHERE approval_instance_id = ${approvalId} AND status = 'in_progress'
+        AND lease_expires_at < now() AND attempts >= ${BRIDGE_COMPLETION_MAX_ATTEMPTS}
+      RETURNING id
+    `.execute(db)
+    if (poisoned.rows.length > 0) return { kind: 'none' }
+
+    // 3) RECLAIM an EXPIRED in_progress lease (crashed worker): fence+1, attempts+1, new lease. Concurrent
+    //    reclaimers race — exactly one matches (the winner's new future lease makes the loser's `< now()`
+    //    predicate false → 0 rows). A LIVE lease or an already-terminal row matches nothing → null (skip).
+    const reclaim = await sql<Record<string, unknown>>`
+      UPDATE multitable_automation_approval_bridges
+      SET fence = fence + 1, attempts = attempts + 1, lease_expires_at = now() + ${leaseMs} * interval '1 millisecond'
+      WHERE approval_instance_id = ${approvalId} AND status = 'in_progress'
+        AND lease_expires_at < now() AND attempts < ${BRIDGE_COMPLETION_MAX_ATTEMPTS}
+      RETURNING *
+    `.execute(db)
+    if (reclaim.rows.length > 0) return { kind: 'claimed', row: this.mapRow(reclaim.rows[0]) }
+    // Neither claimed, poisoned, nor reclaimed: classify (done/busy split — sink audit 2026-07-17). NO row
+    // for this approval (the dominant case — most approvals have no automation bridge) or a TERMINAL row
+    // (resumed / failed / dead_letter — the completion is consumed) → 'none' (skip is correct). A LIVE
+    // in_progress lease → 'busy' (the caller fails retryably rather than resolving the delivery `done` and
+    // dropping a crashed holder's continuation). A racing `pending` (appeared between the fresh UPDATE and
+    // this SELECT) is also 'busy' — fail-closed toward retry; the redelivery claims it.
+    const row = await sql<{ status: string }>`
+      SELECT status FROM multitable_automation_approval_bridges WHERE approval_instance_id = ${approvalId}
+    `.execute(db)
+    const status = row.rows[0]?.status
+    if (status === undefined || status === 'resumed' || status === 'failed' || status === 'dead_letter') {
+      return { kind: 'none' }
+    }
+    return { kind: 'busy' }
+  }
+
+  /**
+   * P1#1: the TERMINAL write, done AFTER the continuation completes (success OR a deterministic failure —
+   * both "consumed the completion", mirroring the legacy `resumed` meaning). fence-CAS: a reclaimed zombie
+   * whose fence is stale matches 0 rows, so it can never overwrite the live owner's terminal state
+   * (single-writer). Returns true when THIS caller (holding `fence`) won the terminal write.
+   */
+  async markBridgeResumed(id: string, fence: string): Promise<boolean> {
+    const res = await sql`
+      UPDATE multitable_automation_approval_bridges
+      SET status = 'resumed', lease_expires_at = NULL, resumed_at = now()
+      WHERE id = ${id} AND fence = ${fence}::bigint AND status = 'in_progress'
+    `.execute(db)
+    return Number(res.numAffectedRows ?? 0) === 1
   }
 
   private async markBridgeFailed(id: string): Promise<void> {
@@ -338,74 +543,11 @@ export class AutomationApprovalBridgeService {
     config: StartApprovalConfig,
     context: ExecutionContext,
     ruleCreatedBy: string,
-  ): Promise<{
-    userId: string
-    userName?: string
-    email?: string
-    department?: string
-    departmentIds?: string[]
-    roles?: string[]
-    permissions?: string[]
-  }> {
+  ): Promise<AuthorizedApprovalActor> {
     const preferred = config.requester?.mode === 'rule_creator'
       ? ruleCreatedBy
       : (context.actorId || ruleCreatedBy)
-    const userId = normalizeString(preferred)
-    if (!userId) {
-      throw new ServiceError('start_approval requester could not be resolved', 400, 'START_APPROVAL_REQUESTER_REQUIRED')
-    }
-
-    const userResult = await query<{
-      id: string
-      email: string | null
-      username: string | null
-      name: string | null
-      role: string | null
-      is_active: boolean | null
-    }>(
-      `SELECT id, email, username, name, role, is_active
-         FROM users
-        WHERE id = $1
-        LIMIT 1`,
-      [userId],
-    )
-    const user = userResult.rows[0]
-    if (!user || user.is_active === false) {
-      throw new ServiceError('start_approval requester user not found or inactive', 404, 'START_APPROVAL_REQUESTER_NOT_FOUND')
-    }
-
-    const permissions = await listRbacPermissionCodes(userId)
-    const roles = await this.loadUserRoles(userId, user.role)
-    const allowed = await isAdmin(userId)
-      || hasPermissionCode(permissions, 'approvals:write')
-    if (!allowed) {
-      throw new ServiceError('start_approval requester lacks approvals:write', 403, 'START_APPROVAL_PERMISSION_DENIED')
-    }
-
-    return {
-      userId,
-      userName: user.name ?? user.username ?? user.email ?? userId,
-      email: user.email ?? undefined,
-      roles,
-      permissions,
-    }
-  }
-
-  private async loadUserRoles(userId: string, legacyRole: string | null): Promise<string[]> {
-    const roles = new Set<string>()
-    if (legacyRole && legacyRole.trim()) roles.add(legacyRole.trim())
-    try {
-      const result = await query<{ role_id: string }>(
-        `SELECT role_id FROM user_roles WHERE user_id = $1`,
-        [userId],
-      )
-      for (const row of result.rows) {
-        if (row.role_id && row.role_id.trim()) roles.add(row.role_id.trim())
-      }
-    } catch {
-      // Older/degraded deployments may not have user_roles; legacy users.role still applies.
-    }
-    return Array.from(roles)
+    return loadAuthorizedApprovalActor(preferred)
   }
 
   private mapRow(row: Record<string, unknown>): AutomationApprovalBridgeRow {
@@ -417,6 +559,7 @@ export class AutomationApprovalBridgeService {
       id: row.id as string,
       executionId: row.execution_id as string,
       rootExecutionId: row.root_execution_id as string,
+      ledgerKind: readLedgerKind(row.ledger_kind),
       ruleId: row.rule_id as string,
       sheetId: (row.sheet_id as string) ?? null,
       recordId: (row.record_id as string) ?? null,
@@ -428,6 +571,7 @@ export class AutomationApprovalBridgeService {
       idempotencyKey: row.idempotency_key as string,
       status: row.status as BridgeStatus,
       outcome: (row.outcome as string) ?? null,
+      fence: String(row.fence ?? '0'),
       actionFingerprint: { count: Number(fp.count ?? 0), hash: String(fp.hash ?? '') },
       triggerEvent: typeof row.trigger_event === 'string' ? JSON.parse(row.trigger_event) : (row.trigger_event ?? null),
     }

@@ -12,6 +12,10 @@ list_file=""
 pkg_name=""
 pkg_root=""
 archive_type="unknown"
+# Derived (not hardcoded) — set by verify_no_loopback_frontend_config() itself on a
+# successful run; stays "SKIPPED" if that function's call site is ever removed from
+# the main flow below, so write_optional_report cannot report a check that never ran.
+loopback_status="SKIPPED"
 
 function die() {
   echo "[multitable-onprem-package-verify] ERROR: $*" >&2
@@ -32,6 +36,18 @@ function search_fixed_string() {
   fi
 
   grep -rIF -- "$needle" "$@" >/dev/null 2>&1
+}
+
+function search_extended_regex() {
+  local pattern="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -- "$pattern" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -rIE -- "$pattern" "$@" >/dev/null 2>&1
 }
 
 function verify_windows_entrypoints() {
@@ -356,11 +372,16 @@ function verify_migration_bridge_contract() {
 function verify_stock_preparation_mvp_contract() {
   local root="$1"
   local migration="${root}/packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
+  local sealed_runtime_migration="${root}/packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql"
   local smoke="${root}/scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   local acceptance="${root}/scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  local sealed_acceptance="${root}/scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
+  local sealed_runbook="${root}/docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   local pm2_sample="${root}/scripts/ops/stock-preparation-pm2-sample.mjs"
 
   search_fixed_string 'integration_stock_prep_audit' "$migration" || die "migration 066 must create the stock-preparation audit surface"
+  search_fixed_string 'integration_sealed_export_stock_prep_bindings' "$sealed_runtime_migration" || die "migration 073 must create the sealed-export stock-preparation binding authority"
+  search_fixed_string 'integration_sealed_export_stock_prep_runs' "$sealed_runtime_migration" || die "migration 073 must create the resumable sealed-export stock-preparation run store"
   search_fixed_string 'auditActionsCovered' "$smoke" || die "stock-preparation MVP postdeploy smoke must report audit action coverage"
   search_fixed_string 'selfScanClean' "$smoke" || die "stock-preparation MVP postdeploy smoke must report its values-free self scan"
   search_fixed_string 'S.pass =' "$smoke" || die "stock-preparation MVP postdeploy smoke must emit the final pass flag"
@@ -370,7 +391,62 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'selfScanClean' "$acceptance" || die "stock-preparation one-click acceptance must require its values-free self scan"
   search_fixed_string 'externalPlmK3ErpWrite' "$acceptance" || die "stock-preparation one-click acceptance must report the external-write invariant"
   search_fixed_string 'stock-preparation-pm2-sample.mjs' "$acceptance" || die "stock-preparation one-click acceptance must use the PM2 safe projection helper"
+  search_fixed_string 'stock-preparation/sqlserver-sealed-snapshot/acceptance/v2' "$sealed_acceptance" || die "S6-A acceptance must emit the frozen values-free evidence schema"
+  search_fixed_string 'internal/stock-preparation/sqlserver-sealed-snapshot/run' "$sealed_acceptance" || die "S6-A acceptance must call only the controlled runtime route"
+  search_fixed_string 'internal_noop' "$sealed_acceptance" || die "S6-A acceptance must prove idempotent replay"
+  search_fixed_string '24999' "$sealed_acceptance" || die "S6-A acceptance must require the server-reported line count to remain within the certified cap"
+  search_fixed_string 'machineBindingDigest' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the executing machine"
+  search_fixed_string 'operationBindingDigest' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the controlled operation"
+  search_fixed_string 'ExpectedServiceRuntimeSha' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the service runtime SHA"
+  search_fixed_string 'ExpectedPackageSha256' "$sealed_acceptance" || die "S6-A acceptance must bind evidence to the package SHA256"
+  search_fixed_string 'BUILD_PROVENANCE.json' "$sealed_acceptance" || die "S6-A acceptance must verify in-package build provenance"
+  search_fixed_string 'Get-S6FileSha256' "$sealed_acceptance" || die "S6-A acceptance must hash the original package archive"
+  # CLOSED SET OF TWO exact headings, each bound to a known package generation — NOT a loosened
+  # match. The frozen S6-A package ships the pre-R12 runbook ('... Before Migration 073'); any
+  # package built from main >= R12/#4742 ships the corrected heading ('... Before Migrations
+  # 073, 074 And 075' — 074/075 need the same roles). The first main-built verification run
+  # (stock-prep-main-package-verify shakedown, run 30972892447) caught the single-string pin
+  # failing every main-built package while the frozen lane stayed green — verifier-vs-runbook
+  # drift, two record points. A third heading variant is still a hard failure.
+  if ! search_fixed_string 'Create PostgreSQL Roles Before Migrations 073, 074 And 075' "$sealed_runbook"; then
+    search_fixed_string 'Create PostgreSQL Roles Before Migration 073' "$sealed_runbook" || die "S6-A runbook must require role creation before migration 073 (074/075 wording for main-built packages)"
+  fi
+  search_fixed_string 'Unconditional Flag-Off Restoration' "$sealed_runbook" || die "S6-A runbook must require flag-off restoration"
+  search_fixed_string 'nextTestMachineAction=STOP_AND_WAIT' "$sealed_runbook" || die "S6-A runbook must retain the separate S6-B execution gate"
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
+}
+
+function verify_sealed_export_package_provenance() {
+  local root="$1"
+
+  if ! node - "$root" <<'NODE'
+const path = require('node:path')
+
+const root = process.argv[2]
+try {
+  const verifier = require(path.join(
+    root,
+    'plugins/plugin-integration-core/lib/sealed-export/' +
+      'sealed-export-package-provenance.cjs',
+  ))
+  const result = verifier.verifySealedExportRuntimePackageProvenance({
+    repoRoot: root,
+  })
+  if (
+    result?.verified !== true
+    || result?.runtimePackageVerified !== true
+    || result?.repositoryEvidenceRequired !== true
+    || result?.externalPackagePinRequired !== true
+  ) {
+    process.exit(1)
+  }
+} catch {
+  process.exit(1)
+}
+NODE
+  then
+    die "S6-A sealed-export package provenance pins did not verify"
+  fi
 }
 
 function verify_generic_integration_workbench_contract() {
@@ -648,6 +724,10 @@ function write_optional_report() {
       '    {' \
       '      "name": "no-github-links",' \
       "      \"status\": \"${link_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "loopback",' \
+      "      \"status\": \"${loopback_status}\"" \
       '    }' \
       '  ],' \
       "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
@@ -677,6 +757,11 @@ function write_optional_report() {
       echo "- Required content: \`PASS\` (${#required[@]} paths)"
       echo "- Deployability contract: \`PASS\` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)"
       echo "- No GitHub links in delivery docs: \`${link_status}\`"
+      if [[ "$loopback_status" == "PASS" ]]; then
+        echo "- Loopback frontend config: \`PASS\` (no loopback VITE_API_URL/BASE embedded in apps/web/dist)"
+      else
+        echo "- Loopback frontend config: \`${loopback_status}\`"
+      fi
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
   fi
@@ -710,6 +795,34 @@ function verify_no_github_links() {
     fi
     rm -f /tmp/multitable_onprem_link_hits.txt || true
   fi
+}
+
+# Ported from scripts/ops/attendance-onprem-package-verify.sh's loopback rule (same
+# pattern, same target: apps/web/dist). A frontend bundle that embeds a loopback
+# VITE_API_URL/BASE (baked in at web-build time, pointing at 127.0.0.1/localhost) would
+# be wired to the CI runner's own loopback instead of the operator's configured API host
+# once deployed on-prem — the multitable on-prem path never had this check; attendance's
+# did. `search_extended_regex` returns non-zero (no match, not "checked and clean") for a
+# target directory that does not exist at all — verified: `grep -rIE ... /nonexistent` and
+# ripgrep's `rg` both return non-zero on a missing path. In this script's own full run, an
+# earlier required-content check already fails closed on a missing apps/web/dist (its
+# `apps/web/dist/index.html` entry), so the full pipeline is not exposed today; the explicit
+# `[[ -d ... ]] || die` below guards the function itself so calling it standalone (as the
+# focused test does, and as any future reordering might) cannot silently report PASS on a
+# package missing its frontend bundle. Attendance's script has the identical required-content
+# entry for apps/web/dist/index.html ahead of its own loopback check, for the same reason —
+# this is not a claim that attendance's script has a live, unguarded exposure.
+function verify_no_loopback_frontend_config() {
+  local root="$1"
+  local web_dist="${root}/apps/web/dist"
+
+  [[ -d "$web_dist" ]] || die "apps/web/dist missing; cannot verify frontend bundle is loopback-free"
+
+  if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "$web_dist"; then
+    die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
+  fi
+
+  loopback_status="PASS"
 }
 
 function verify_sha() {
@@ -877,6 +990,7 @@ required=(
   "packages/core-backend/migrations/058_integration_runs_running_unique.sql"
   "packages/core-backend/migrations/059_integration_runs_history_index.sql"
   "packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
+  "packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql"
   "bootstrap-admin.bat"
   "deploy.bat"
   "deploy-remote.bat"
@@ -885,11 +999,16 @@ required=(
   "plugins/plugin-integration-core/plugin.json"
   "plugins/plugin-integration-core/index.cjs"
   "plugins/plugin-integration-core/lib/http-routes.cjs"
+  "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-executor.cjs"
   "plugins/plugin-integration-core/scripts/smoke-k3-sqlserver-executor.cjs"
+  "plugins/plugin-elearning/plugin.json"
+  "plugins/plugin-elearning/app.manifest.json"
+  "plugins/plugin-elearning/index.cjs"
+  "plugins/plugin-elearning/lib/feature-flags.cjs"
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
@@ -900,6 +1019,7 @@ required=(
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
@@ -933,6 +1053,7 @@ required=(
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
+  "docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   "docs/development/data-factory-workbench-todo-20260514.md"
   "docs/development/data-factory-workbench-development-20260514.md"
   "docs/development/data-factory-workbench-verification-20260514.md"
@@ -1004,8 +1125,10 @@ verify_build_provenance "$pkg_root"
 verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_stock_preparation_mvp_contract "$pkg_root"
+verify_sealed_export_package_provenance "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
+verify_no_loopback_frontend_config "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"

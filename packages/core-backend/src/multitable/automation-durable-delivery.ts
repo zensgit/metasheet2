@@ -22,6 +22,21 @@ export function isDurableDeliveryEnabled(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
+ * Thrown by a durable sink when ANOTHER worker holds a LIVE lease on the work this delivery names (the
+ * outbox-lease-vs-sink-lease composed-timing hole, sink-recoverability audit 2026-07-17): the delivery must
+ * NOT resolve `done` (that would permanently drop the crashed holder's work) and must NOT run (that would
+ * double-run a live holder). The consumer adapter maps any handler throw to a retryable `adapter_error`, so
+ * the dispatch loop redelivers with backoff — by which time the sink lease has expired (reclaim) or been
+ * resolved (`done`). Values-free by construction: carries key identities only.
+ */
+export class DurableSinkBusyError extends Error {
+  constructor(sink: string, key: string) {
+    super(`durable sink busy (live lease held elsewhere): ${sink} ${key}`)
+    this.name = 'DurableSinkBusyError'
+  }
+}
+
+/**
  * States of a `meta_automation_outbox_consumer` row (the per-consumer lease). There is deliberately NO
  * persistent `failed` state: a transient failure only bumps `attempts` and leaves the row reclaimable (its
  * lease expires and the next claimer reclaims it); bounded-attempts-exhausted goes straight to the terminal

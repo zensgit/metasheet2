@@ -205,7 +205,11 @@ describe('DingTalk group destination routes', () => {
       .expect(200)
 
     expect(query).toHaveBeenCalledWith(
-      'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+      `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+     LIMIT 1`,
       ['user_1', 'org_1'],
     )
     expect(service.listDestinations).toHaveBeenCalledWith('user_1', undefined, 'org_1')
@@ -325,7 +329,11 @@ describe('DingTalk group destination routes', () => {
       .expect(200)
 
     expect(query).toHaveBeenCalledWith(
-      'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+      `SELECT 1
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1 AND uo.org_id = $2 AND uo.is_active = true AND u.is_active = true
+     LIMIT 1`,
       ['user_1', 'org_1'],
     )
     expect(service.listDeliveries).toHaveBeenCalledWith(DESTINATION_ID, 20)

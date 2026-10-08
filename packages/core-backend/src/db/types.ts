@@ -1,4 +1,5 @@
 import type { ColumnType, Generated, JSONColumnType } from 'kysely'
+import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'
 
 /**
  * Timestamp type aliases for Kysely columns
@@ -84,11 +85,14 @@ export interface Database {
   // Attendance tables
   attendance_events: AttendanceEventsTable
   attendance_records: AttendanceRecordsTable
+  attendance_record_calculations: AttendanceRecordCalculationsTable
+  attendance_report_projection_anchors: AttendanceReportProjectionAnchorsTable
   attendance_requests: AttendanceRequestsTable
   attendance_shift_swap_requests: AttendanceShiftSwapRequestsTable
   attendance_schedule_dispatch_requests: AttendanceScheduleDispatchRequestsTable
   attendance_rules: AttendanceRulesTable
   attendance_shifts: AttendanceShiftsTable
+  attendance_shift_segments: AttendanceShiftSegmentsTable
   attendance_shift_assignments: AttendanceShiftAssignmentsTable
   attendance_holidays: AttendanceHolidaysTable
   attendance_leave_types: AttendanceLeaveTypesTable
@@ -746,6 +750,10 @@ export interface UsersTable {
   mobile: string | null
   password_hash: string
   must_change_password: boolean
+  /** T1: pending_activation | activated */
+  activation_status: string
+  /** T1: whether password_hash is a usable local login secret */
+  local_password_set: boolean
   role: string
   permissions: JSONColumnType<string[]>
   avatar_url: string | null
@@ -950,6 +958,7 @@ export interface ApprovalTemplateVersionsTable {
   status: 'draft' | 'published' | 'archived'
   form_schema: JsonObjectColumn
   approval_graph: JsonObjectColumn
+  restored_from_version_id: ColumnType<string | null, string | null | undefined, string | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1063,6 +1072,33 @@ export interface AttendanceRecordsTable {
   status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted' | 'off'
   is_workday: boolean
   meta: JSONColumnType<Record<string, unknown> | null>
+  current_calculation_id: ColumnType<string | null, string | null | undefined, string | null>
+  projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>
+  visibility_state: ColumnType<'active' | 'retired', 'active' | 'retired' | undefined, 'active' | 'retired'>
+  visibility_reason: ColumnType<string, string | undefined, string>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRecordCalculationsTable {
+  id: string
+  org_id: string
+  attendance_record_id: string
+  version: number
+  mode: 'shadow' | 'authoritative'
+  outcome: 'baseline' | 'completed' | 'reversed' | 'review_required'
+  created_at: CreatedAt
+}
+
+export interface AttendanceReportProjectionAnchorsTable {
+  projection_record_id: string
+  org_id: string
+  canonical_record_id: string
+  source_selector: 'current_calculation' | 'latest_completed_calculation'
+  source_calculation_id: string
+  source_calculation_version: number
+  canonical_source_digest: string
+  source_fingerprint: string
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1126,7 +1162,7 @@ export interface AttendanceScheduleDispatchRequestsTable {
   target_schedule_group_id: string
   target_attendance_group_id: string | null
   target_department_ref: string | null
-  target_shift_id: string
+  target_shift_id: string | null
   slot_index: number
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string, string | undefined, string>
@@ -1166,6 +1202,27 @@ export interface AttendanceShiftsTable {
   early_grace_minutes: number
   rounding_minutes: number
   working_days: JSONColumnType<number[] | null>
+  is_overnight: Generated<boolean>
+  /** W5: strict (default) | flex_required_duration. Discriminated flex columns below. */
+  flex_mode: Generated<'strict' | 'flex_required_duration'>
+  flex_required_minutes: number | null
+  flex_arrival_window_before_minutes: number | null
+  flex_arrival_window_after_minutes: number | null
+  flex_core_start_time: string | null
+  flex_core_end_time: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceShiftSegmentsTable {
+  id: Generated<string>
+  org_id: string
+  shift_id: string
+  segment_index: number
+  start_time: string
+  start_day_offset: Generated<number>
+  end_time: string
+  end_day_offset: Generated<number>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1367,6 +1424,9 @@ export interface MultitableAutomationJobsTable {
 export interface MultitableAutomationSuspensionsTable {
   id: string
   execution_id: string
+  // #4196 §6.1 continuation identity. NULL only for rows created before the migration.
+  root_execution_id: ColumnType<string | null, string | null | undefined, string | null>
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
@@ -1387,6 +1447,7 @@ export interface MultitableAutomationApprovalBridgesTable {
   id: string
   execution_id: string
   root_execution_id: string
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
@@ -1403,6 +1464,11 @@ export interface MultitableAutomationApprovalBridgesTable {
   created_at: CreatedAt
   completed_at: Date | string | null
   resumed_at: Date | string | null
+  // P2 durable-delivery P1#1 — reclaimable lease (zzzz20260717120000_approval_bridge_lease). NULL/0 for every
+  // row written before the upgrade and on the flag-OFF legacy path.
+  lease_expires_at: Date | string | null
+  attempts: number
+  fence: string | number
 }
 
 export interface MultitableAutomationExecutionsTable {
@@ -1426,6 +1492,8 @@ export interface MultitableAutomationExecutionsTable {
   // A5 retry provenance columns (nullable; set only on a retry-created execution).
   rerun_of_execution_id: string | null
   initiated_by: string | null
+  // #4196 V5: lineage-root compare-and-set marker that distinguishes a genuine first retry.
+  first_retry_attempted_at: Date | string | null
   created_at: CreatedAt
 }
 
@@ -1502,6 +1570,9 @@ export interface MultitableWebhookDeliveriesTable {
   created_at: CreatedAt
   delivered_at: NullableTimestamp
   next_retry_at: NullableTimestamp
+  /** Outbox event identity for the DURABLE delivery leg's per-(webhook, event) idempotent claim
+   *  (partial-unique `uq_webhook_delivery_event_claim`). NULL on every legacy path. */
+  event_id: string | null
 }
 
 export interface DingTalkGroupDestinationsTable {

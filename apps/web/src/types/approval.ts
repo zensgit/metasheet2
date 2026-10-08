@@ -13,12 +13,92 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by the preset publish test).
 export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
+// Lock-3 R-1 (FE mirror site 2 of 3): `handler` (办理节点) — mirrors backend
+// packages/core-backend/src/types/approval-product.ts. Keep in sync with that union and the runtime
+// `APPROVAL_NODE_TYPES` admission set.
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
-export type ApprovalMode = 'single' | 'all' | 'any'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
+// P1-C + Lock-1 K6: threshold (N-of-M / 门槛会签) and sequential (依次审批) are the fourth and
+// fifth shipped engine modes. This union byte-mirrors backend
+// packages/core-backend/src/types/approval-product.ts `ApprovalMode`. Both are linear-only in v1:
+// the backend rejects either mode inside a parallel region; `collectParallelRegionNodeKeys` in
+// templateAuthoring.ts mirrors that exact region definition for authoring feedback.
+export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 export type ParallelJoinMode = 'all' | 'any'
-export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+// Fix-round P1-1 (gate P3A-F4B-20260819): widened to add 'designated', byte-mirroring backend
+// packages/core-backend/src/types/approval-product.ts `EmptyAssigneePolicy`
+// (docs/development/approval-lock4-flow-policies-20260817.md §3 F4-B). See `EmptyAssigneeFallback`
+// below for the ONE new carrier key `'designated'` targets.
+export type EmptyAssigneePolicy = 'error' | 'auto-approve' | 'designated'
+/**
+ * Lock-4 §3 F4-B — byte-mirrors backend `EmptyAssigneeFallback`. The ONLY carrier for
+ * `emptyAssigneePolicy: 'designated'` targets (one key, not two). Filled through typed pickers
+ * only (D0 §10.2) — no picker ships in this fix round, so this type exists purely so the FE
+ * hydrate/rebuild paths preserve a persisted value verbatim instead of silently dropping it
+ * (gate X-2: the template must stay EDITABLE, not merely round-trip-safe).
+ */
+export interface EmptyAssigneeFallback {
+  userIds?: string[]
+  roleIds?: string[]
+}
+
+// P1-C: byte-mirrors backend packages/core-backend/src/types/approval-product.ts `NodeTimeoutEffect`
+// — the FULL declared enum, so a persisted/loaded graph round-trips any value without narrowing. Only
+// a SUBSET is actually wired end-to-end (`NODE_TIMEOUT_SUPPORTED_EFFECTS` below) — `auto_approve` /
+// `auto_reject` are reserved (ApprovalProductService.ts `NODE_TIMEOUT_SUPPORTED_EFFECTS`,
+// `APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED` at publish) and must NOT be offered by any picker.
+export type NodeTimeoutEffect = 'remind' | 'transfer' | 'jump' | 'auto_approve' | 'auto_reject'
+
+// P1-C: the effects `ApprovalSlaScheduler.fireNodeTimeouts` actually acts on AND publish accepts
+// (ApprovalProductService.ts `NODE_TIMEOUT_SUPPORTED_EFFECTS`). The ONLY set any authoring picker may
+// offer — do not widen without a corresponding backend scheduler + publish-validator change.
+export const NODE_TIMEOUT_SUPPORTED_EFFECTS = ['remind', 'transfer', 'jump'] as const
+export type SupportedNodeTimeoutEffect = typeof NODE_TIMEOUT_SUPPORTED_EFFECTS[number]
+
+// P1-C: byte-mirrors backend `NODE_TIMEOUT_MAX_AFTER_MINUTES` (ApprovalProductService.ts :550) — the
+// inclusive upper bound `validateNodeTimeoutConfigs` enforces on `timeout.afterMinutes`.
+export const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
+
+/**
+ * P1-C: byte-mirrors the SHAPE backend `normalizeNodeTimeout` re-emits (ApprovalProductService.ts
+ * :1468-1493) — the exact carrier a save round-trips. `unit` is OMITTED for the 'wall_clock' default
+ * (normalize only ever emits `unit: 'business'`, never `unit: 'wall_clock'` — a byte-identical
+ * round-trip must mirror that omission, not merely accept both). `transferToUserId`/`jumpToNodeKey`
+ * are per-effect target fields (`validateNodeTimeoutConfigs` §T1-1 slice-2): required+exclusive to
+ * their matching effect, never present together, never present on 'remind'.
+ */
+export interface NodeTimeoutConfig {
+  afterMinutes: number
+  effect: NodeTimeoutEffect
+  transferToUserId?: string
+  jumpToNodeKey?: string
+  unit?: 'business'
+}
+
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
+// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
+// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
+// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
+  'static_user',
+  'static_role',
+  'requester',
+  'form_field_user',
+  'direct_manager',
+  'dept_head',
+  'manager_at_level',
+  // Lock-2 §2.4 (RATIFIED 2026-08-17): the two contact-derived rows are ratified for node types
+  // `approval` AND `handler` (corpus C-6; Lock-2 resolves the between-locks gap Lock-3 §1.5 left —
+  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grows the
+  // exact set 7→9 in the SAME slice as the kinds, with the G-13 exact-set tests updated together.
+  'form_field_user_manager',
+  'form_field_user_dept_head',
+] as const
+export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
+// Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
+export type HandlerMode = 'all' | 'any'
+
 export type ApprovalActionType =
   | 'approve'
   | 'reject'
@@ -28,6 +108,8 @@ export type ApprovalActionType =
   | 'return'
   | 'add_sign'
   | 'reduce_sign'
+  // Lock-3 §2.1 — handler-node submit verb.
+  | 'handle'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
@@ -41,8 +123,30 @@ export type FormFieldType =
   | 'select'
   | 'multi-select'
   | 'user'
+  | 'department'
   | 'attachment'
   | 'detail'
+  /** FWB-0 Layer 2: single linked multitable record (server-pinned baseId/sheetId in props). */
+  | 'record-link'
+  /**
+   * Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2, OD-L8-4/OD-L8-5/OD-L8-8): a
+   * start+end date pair. Value is `{ start: string; end: string }`; props carry a REQUIRED
+   * `dateType` granularity (no absent-default) plus `startLabel`/`endLabel` and an optional
+   * `durationLabel`. Excluded from detail columns (OD-L8-4) and never selectable as a whole-value
+   * visibility/condition dependency (OD-L8-5) — only its `${fieldId}.start`/`${fieldId}.end`
+   * endpoints are.
+   */
+  | 'date_range'
+  /**
+   * Lock-8 L8-A (approval-lock8-field-vocabulary-20260817.md §1.1, OD-L8-2/OD-L8-3): a
+   * DISPLAY-ONLY field (说明) — renders authored `props.text` to the requester/approver. No
+   * submitted value: `required`/`defaultValue`/`options`/`placeholder` are all refused at
+   * publish (A-1), the field never enters `formSnapshot` or FWB source candidates, is excluded
+   * from detail columns (MS-4/MS-5), and is never a whole-value visibility/condition dependency
+   * (MS-8/MS-9/MS-10) — it has no value to compare. `label` stays authoring-list-only (BE
+   * requires a non-blank label for every field, `:786`); the rendered body is `props.text`.
+   */
+  | 'explanation'
 
 export interface ApprovalNode {
   key: string
@@ -53,15 +157,42 @@ export interface ApprovalNode {
     | ConditionNodeConfig
     | CcNodeConfig
     | ParallelNodeConfig
+    | HandlerNodeConfig
     | Record<string, never>
 }
 
-// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:51-56 (P1-C node-level
-// field permissions). `editable` (the absent default) === current behavior. Only `hidden` is
-// enforced at runtime (server-side echo-redaction — already shipped in #2799); `readonly`/`editable`
-// are contract-stable but runtime-inert (readonly enforcement is deferred to T1-4b). The authoring
-// editor may set `hidden`/`readonly`; both round-trip, `readonly` carries a "not-yet-enforced" hint.
-export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
+// Lock-3 §1.1 — handler / 办理节点 config (mirrors backend HandlerNodeConfig). `assigneeSources` is the
+// ONLY assignee carrier; NO empty/fallback key exists (§1.2). `fieldPermissions` ENFORCEMENT is Lock-7.
+export interface HandlerNodeConfig {
+  assigneeSources: ApprovalAssigneeSource[]
+  handlerMode?: HandlerMode
+  opinionRequired?: boolean
+  fieldPermissions?: NodeFieldPermission[]
+  // Lock-5 §1.6 L5-F / OD-L5-11(a) — a handler admits `allowTransfer` + `commentRequired` only.
+  nodeOperationPolicy?: Pick<NodeOperationPolicy, 'allowTransfer' | 'commentRequired'>
+}
+
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts NodeFieldAccess (P1-C
+// node-level field permissions, widened by Lock-7B docs/development/approval-lock7b-required-at-node-
+// 20260820.md OD-L7B-1). `editable` (the absent default) === current behavior. `hidden` and `readonly`
+// are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a write;
+// `readonly` refuses a write at that node. `required` is `editable` PLUS a submit-time obligation
+// (Lock-7B): writable, enforced at handler submit — NOT more restrictive than `editable` for read/mask
+// purposes. The canvas authoring editor offers `required` on handler nodes only (OD-L7B-7); the linear
+// editor (approval steps) never offers it. All four round-trip.
+//
+// MECHANISM FIX v5 (census C-5 conversion, symmetric with the backend's C-1/C-2 collapse in
+// approval-product.ts): `NodeFieldAccess` and `NODE_FIELD_ACCESS_VALUES` used to be two independent
+// hand-written literal lists on this side too. Both are now derived from the ONE tuple below, so the
+// "byte-mirrors backend" claim above stays meaningful on a SINGLE source per side, not two per side.
+const NODE_FIELD_ACCESS_MEMBERS = ['editable', 'readonly', 'hidden', 'required'] as const
+export type NodeFieldAccess = (typeof NODE_FIELD_ACCESS_MEMBERS)[number]
+// The ONE canonical FE enumeration of `NodeFieldAccess` members (mirrors backend
+// `NODE_FIELD_ACCESS_VALUES`, packages/core-backend/src/types/approval-product.ts). Authoring
+// surfaces that need to render the option set should import THIS array rather than hand-writing the
+// four literals a second time (see `ApprovalGraphNodeConfigEditor.vue`'s field-access `<el-select>`).
+// DERIVED from `NODE_FIELD_ACCESS_MEMBERS` above (MECHANISM FIX v5), not an independent literal.
+export const NODE_FIELD_ACCESS_VALUES: readonly NodeFieldAccess[] = NODE_FIELD_ACCESS_MEMBERS
 export interface NodeFieldPermission {
   fieldId: string
   access: NodeFieldAccess
@@ -72,11 +203,72 @@ export interface ApprovalNodeConfig {
   assigneeIds?: string[]
   assigneeSources?: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
+  // P1-C (T2-4 N-of-M / 门槛会签): the number of DISTINCT approver identities required. Present
+  // ONLY when `approvalMode === 'threshold'` — backend `normalizeApprovalGraph` assigns it exclusively
+  // inside that branch (ApprovalProductService.ts :2281-2305) and never emits it otherwise, so a
+  // node carrying it under a different mode is a backend-drop shape, never a valid persisted state.
+  approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
+  // other policy value (byte-mirrors backend types/approval-product.ts's own comment).
+  emptyAssigneeFallback?: EmptyAssigneeFallback
   autoApprovalPolicy?: AutoApprovalPolicy
-  // P1-C node-level field permissions. Default-absent === editable === current behavior. `hidden`
-  // entries are enforced server-side (echo-redaction); `readonly`/`editable` are runtime-inert.
+  // Node-level field permissions. Default-absent === editable === current behavior. `hidden`/
+  // `readonly` are enforced server-side (Lock-7 P4-B); `required` is `editable` plus a submit-time
+  // obligation, enforced at handler submit (Lock-7B).
   fieldPermissions?: NodeFieldPermission[]
+  // P1-C (T1-1): node-level SLA timeout. Byte-mirrors what backend `normalizeNodeTimeout` re-emits;
+  // see `NodeTimeoutConfig`. Never present on a `handler` node config (§1.2 forbidden-key list,
+  // ApprovalProductService.ts :2449) — timeout is `approval`-node-only.
+  timeout?: NodeTimeoutConfig
+  // Lock-5 §1.1 L5-A (OD-L5-1(a)) — per-node 操作权限. Byte-mirrors the backend
+  // `NodeOperationPolicy`. Absent ≡ today's behavior for every field.
+  nodeOperationPolicy?: NodeOperationPolicy
+}
+
+/**
+ * Lock-5 §1.1 L5-A — byte-mirrors backend
+ * `packages/core-backend/src/types/approval-product.ts` `NodeOperationPolicy`.
+ *
+ * Only the four boolean switches have LANDED server enforcement (the §2.1 dispatch choke, 409
+ * `APPROVAL_NODE_OPERATION_DISABLED`) and therefore only they may render a control (master M7/M8,
+ * Lock-5 gate E-2). `returnReviewMode` (OD-L5-6(a) ships `'resume_forward'` only; §1.2: "no
+ * `returnReviewMode` control renders") and `commentRequired` (§1.3, its own slice) are carried for
+ * round-trip preservation and publish-time validation ONLY — do not add controls for them here.
+ */
+export interface NodeOperationPolicy {
+  allowTransfer?: boolean
+  allowAddSign?: boolean
+  allowReduceSign?: boolean
+  allowReturn?: boolean
+  returnReviewMode?: 'resume_forward' | 'jump_back_to_current'
+  commentRequired?: 'never' | 'reject_only' | 'always'
+}
+
+/** The `NodeOperationPolicy` keys whose enforcement has landed and which therefore render. */
+export const RENDERED_NODE_OPERATION_POLICY_KEYS = [
+  'allowTransfer',
+  'allowAddSign',
+  'allowReduceSign',
+  'allowReturn',
+] as const
+export type RenderedNodeOperationPolicyKey = typeof RENDERED_NODE_OPERATION_POLICY_KEYS[number]
+
+/**
+ * Lock-5 §2.3 / gate A-2 — the ACTOR-SCOPED effective policy the SERVER resolved for this viewer at
+ * their claimed seat(s), shipped on the DETAIL read only. Byte-mirrors the backend
+ * `EffectiveNodeOperations`.
+ *
+ * Every field is a DECIDED value. The client renders it and MUST NOT re-derive: §2.3 requires the
+ * FE mirror to come from the SAME config the server enforces, with no second predicate. Absent
+ * (a seatless viewer, a bridged instance with no graph) ⇒ no member-action gating to apply.
+ */
+export interface EffectiveNodeOperations {
+  allowTransfer: boolean
+  allowAddSign: boolean
+  allowReduceSign: boolean
+  allowReturn: boolean
+  commentRequired: 'never' | 'reject_only' | 'always'
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
@@ -100,6 +292,77 @@ export type ApprovalAssigneeSource =
   | { kind: 'dept_head' }
   | { kind: 'continuous_managers'; levels: number }
   | { kind: 'manager_at_level'; level: number }
+  /**
+   * Lock-1 §K2 — 提交人自选. Byte-mirrors the backend union member: the requester picks the
+   * approver(s) at SUBMIT time (chooser in ApprovalNewView); choices travel in the create
+   * payload keyed by node key, are scope-validated server-side, and freeze at create.
+   */
+  | {
+      kind: 'requester_choice'
+      mode: 'single' | 'multi'
+      scope:
+        | { type: 'company' }
+        | { type: 'members'; userIds: string[] }
+        | { type: 'role'; roleIds: string[] }
+    }
+  /**
+   * Lock-1 §K4 — 连续多级部门负责人. Byte-mirrors the backend union member: levels 1..`levels`
+   * (level 1 = the requester's own department head), resolved from the baked `deptHeadChainIds`
+   * snapshot — a DIFFERENT pointer from `continuous_managers` (leader_in_dept vs the department
+   * parent tree). No authoring shape beyond `levels`; the picker is a plain level-count input,
+   * same as `continuous_managers`.
+   */
+  | { kind: 'continuous_dept_heads'; levels: number }
+  /**
+   * Lock-1 §K5-b — 指定层级部门负责人. Byte-mirrors the backend union member: `deptHeadChainIds[level-1]`,
+   * positionally identical to `manager_at_level` but over the K4 department-head chain instead of
+   * `managerChainIds`. Level 1 = the requester's own department head. No authoring shape beyond
+   * `level`; the picker is the SAME plain level input as `manager_at_level` (single level, not a
+   * level count).
+   */
+  | { kind: 'dept_head_at_level'; level: number }
+  /**
+   * Lock-1 §K3 — 节点审批人 (prior-node approver). Byte-mirrors the backend union member:
+   * `nodeKey` references an `approval` node strictly upstream on EVERY runtime-reachable path
+   * (a publish-time dominance check — dangling / downstream / self / branch-only references fail
+   * publish). Resolution happens at dispatch from the INSTANCE's own audit rows (the referenced
+   * node's actual deciders, latest round, system sentinels dropped) — never a directory read.
+   * The authoring picker is a TYPED node select restricted to the legal upstream set
+   * (`legalPriorApproverNodeKeys`), never a free-text key input.
+   */
+  | { kind: 'prior_node_approver'; nodeKey: string }
+  /**
+   * Lock-1 §K1 — 用户组 (user group). Byte-mirrors the backend union member: `groupIds` is a
+   * non-empty array of `platform_member_groups` ids, EAGER_EXPANSION-frozen into the requester
+   * snapshot at create (membership changes after create do NOT reach an in-flight instance). The
+   * authoring picker is a TYPED multi-select restricted to groups bound to the template's org
+   * (`/api/approval-templates/directory/member-groups?orgId=`) — never a free-text/raw-id input; a
+   * group outside the binding fails publish (values-free 400), never at dispatch. Cc-as-recipient
+   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
+   */
+  | { kind: 'user_group'; groupIds: string[] }
+  /**
+   * Lock-2 §L2-C — 表单内联系人上级 (C-3 联系人上级). Byte-mirrors the backend union member: the
+   * person chosen in the referenced TOP-LEVEL `user` field is the ANCHOR, and the source resolves
+   * that person's manager at chain position `level` (level 1 = the anchor's own direct manager)
+   * via the `leader_in_dept` LEADER pointer, resolved AND FROZEN at create (submit IS create) into
+   * the instance snapshot — never re-read at dispatch. Publish pins: the field must exist
+   * top-level, be `type: 'user'`, `required: true`, carry NO `visibilityRule`, and not declare
+   * `selection: 'multi'`. Authoring shape = field picker + a single level input (upward only in
+   * v1; downward stays blocked on Lock-1 OD-L1-6).
+   */
+  | { kind: 'form_field_user_manager'; fieldId: string; level: number }
+  /**
+   * Lock-2 §L2-C — 表单内联系人部门负责人 (C-3 联系人部门负责人). Same anchor and freeze semantics
+   * as `form_field_user_manager` above, but a DIFFERENT pointer: the chosen contact's PRIMARY
+   * department, then the department PARENT tree reading `dept_manager_userid_list` per level
+   * (K4's walker re-anchored; the ratified continue-past-empty-level posture binds it — the chain
+   * is DENSE, so `level` addresses the level-th *resolved* head walking up). Same publish pins,
+   * same field-picker + level-input authoring shape.
+   */
+  | { kind: 'form_field_user_dept_head'; fieldId: string; level: number }
+
+export type RequesterChoiceAssigneeSource = Extract<ApprovalAssigneeSource, { kind: 'requester_choice' }>
 
 export interface ConditionNodeConfig {
   branches: ConditionBranch[]
@@ -148,6 +411,17 @@ export interface ApprovalGraph {
 export interface RuntimePolicy {
   allowRevoke: boolean
   revokeBeforeNodeKeys?: string[]
+  /**
+   * L6-P1 carrier fix landed this as an opaque pass-through (`unknown`) — the authoring editor did
+   * not yet render a template-level control. P3-B / Lock-6 L6-A (docs/development/approval-lock6-
+   * requester-global-policy-20260817.md §1) is that slice: the template-level dedup tier projects
+   * onto the SAME `AutoApprovalPolicy` shape node-level `autoApprovalPolicy` already uses (byte-
+   * mirrors backend `RuntimePolicy.autoApproval?: AutoApprovalPolicy`), so it is typed here rather
+   * than left opaque. Any FIELD this editor does not author (e.g. a future `actorMode`) still
+   * survives round-trip verbatim — `buildTemplateAutoApprovalPolicy` (templateAuthoring.ts) merges
+   * onto the hydrated object rather than reconstructing it from scratch.
+   */
+  autoApproval?: AutoApprovalPolicy
 }
 
 export interface RuntimeGraph extends ApprovalGraph {
@@ -249,10 +523,49 @@ export interface UnifiedApprovalDTO {
   formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
+   * Lock-3 §2.2 — the current node's TYPE (mirrors backend). The member 待办 center reads this to
+   * withhold the approve/reject action surface on a 办理 (handler) task (it is not an approval task;
+   * the member 办理 UI is P5). Absent ≡ not-a-handler (safe default keeps ordinary tasks actionable).
+   */
+  currentNodeType?: ApprovalNodeType | null
+  /**
    * Parallel gateway (并行分支) — surfaced only when the instance is inside
    * a parallel region (length ≥ 2). Absent on linear state.
    */
   currentNodeKeys?: string[] | null
+  /** Lock-5 §2.3 / A-2 — server-resolved effective operations for THIS viewer. Detail read only. */
+  nodeOperations?: EffectiveNodeOperations | null
+  /**
+   * Would the server's decision endpoint let THIS viewer decide the node the instance is currently
+   * stopped on? Resolved server-side by the dispatch door's OWN seat predicate — so it covers role
+   * seats and delegated seats, which the client-side `isMyTurn` mirror does not.
+   *
+   * `undefined` means the backend does not compute it (an older server). Read it as
+   * `!== false`, never as a truthiness test: absence must fall back to the pre-existing behaviour,
+   * not deny.
+   */
+  canDecideCurrentNode?: boolean
+  /**
+   * May THIS viewer stage process evidence (过程附件) on this instance's 评论 action right now?
+   * Resolved server-side: the decision door's own seat answer (user, role and delegated seats, and
+   * the pending branch frontier of a parallel region), restricted to instances whose decisions go
+   * through the seat-gated door — so it is `false` on a legacy / `plm:` instance even where
+   * `canDecideCurrentNode` is `true`, because nothing binds process evidence there.
+   *
+   * It does not read the attachments flag; the view conjoins `approvalAttachments` itself. Read it
+   * as `=== true`: `undefined` (an older server) means no uploader, unlike `canDecideCurrentNode`
+   * above — hiding an optional uploader is the safe side, and the server's seat checks stay the
+   * authority either way.
+   */
+  canAttachProcessEvidence?: boolean
+  /**
+   * Cancel round (`workflowKey === 'approval.cancel-round'`) only — mirrors the backend DTO field.
+   * The bounded close-reason token of a round the SYSTEM closed (`round_expired` or
+   * `business_blocked:<code>`), whitelist-projected by the DETAIL read (`getApproval`) only; list rows
+   * never carry it. On a detail DTO its absence means 「not a system closure」; on a list row it means
+   * nothing — see approvals/useCancelRoundCloseReasons.ts.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`
@@ -279,6 +592,12 @@ export interface UnifiedApprovalHistoryDTO {
 export interface CreateApprovalRequest {
   templateId: string
   formData: Record<string, unknown>
+  /**
+   * Lock-1 §K2 — submit-time approver choices, keyed by the published requester_choice
+   * node's key. Required per node when the route carries a requester_choice source (the
+   * server 422s values-free on a missing entry); validated + frozen server-side at create.
+   */
+  requesterChoices?: Record<string, string[]>
 }
 
 export interface ApprovalActionRequest {
@@ -288,10 +607,22 @@ export interface ApprovalActionRequest {
   targetNodeKey?: string
   /** P1-B add_sign — approver user IDs to pull into the current node as co-signers. */
   targetUserIds?: string[]
-  /** P1-B add_sign — `parallel` (default) or `before`. */
-  addSignMode?: 'before' | 'parallel'
+  /**
+   * P1-B add_sign — `parallel` (default) or `before`; Lock-5 L5-B (F4-S1) adds `after` (后加签):
+   * the actor's seat is consumed as an approval and the addees open a fresh round at the SAME node.
+   */
+  addSignMode?: 'before' | 'parallel' | 'after'
+  /** Lock-5 OD-L5-5(a) — required with `after` and two or more `targetUserIds`; governs their round. */
+  addSignAggregation?: 'all' | 'any'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
+  /**
+   * Lock-9 OD-L9-10(a) FE slice — staged process-attachment ids to bind at this action's commit.
+   * v1 ships the `comment` rider only; the backend forwards this key by PRESENCE (never flag-gated
+   * on this type), so it must be OMITTED (not sent as `[]`) when there are no staged uploads —
+   * mirrors `ApprovalProductService.ts`'s own key-presence discipline for `fieldWrites` above.
+   */
+  attachmentIds?: string[]
 }
 
 export interface ApprovalTemplateListItemDTO {
@@ -316,9 +647,48 @@ export interface ApprovalTemplateListItemDTO {
   updatedAt: string
 }
 
+/**
+ * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4) FE read
+ * surface. Mirrors the backend's `ApprovalTemplateGroupRow` (`ApprovalTemplateGroupService.ts`)
+ * byte-for-byte — same camelCase field set, no re-derivation on this side.
+ */
+export interface ApprovalTemplateGroupDTO {
+  id: string
+  orgId: string
+  name: string
+  sortOrder: number | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+}
+
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — the reorder
+ * endpoint's ACTUAL response shape. Mirrors the backend's `ApprovalTemplateGroupReorderResult`
+ * (`ApprovalTemplateGroupReorderService.ts`) byte-for-byte: `{id, sortOrder}` only — the reorder
+ * transaction never re-reads `name`/`createdBy`/`archivedAt` after its per-row `UPDATE`s, so those
+ * fields are NOT part of this response. Deliberately its own type, not `ApprovalTemplateGroupDTO`
+ * (which this endpoint's response was previously, incorrectly, typed as — a caller trusting the
+ * wider type for any field beyond `id`/`sortOrder` would read `undefined` at runtime despite the
+ * compiler believing otherwise).
+ */
+export interface ApprovalTemplateGroupReorderResultDTO {
+  id: string
+  sortOrder: number
+}
+
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+  /**
+   * L6-P1 carrier fix — the active published definition's runtime policy, or `null`/absent
+   * pre-publish. Optional here (unlike the backend DTO, where it's required) so existing test
+   * fixtures that predate this field keep compiling; the backend always sends the key. Hydrated
+   * into the draft verbatim by `draftFromTemplate` / `originalPolicy` and merged back onto the
+   * publish payload by `buildPublishPolicy` — never read directly for rendering.
+   */
+  policy?: RuntimePolicy | null
 }
 
 export interface ApprovalTemplateVisibilityScope {
@@ -337,6 +707,7 @@ export interface ApprovalTemplateVersionDetailDTO {
   publishedDefinitionId: string | null
   /** B3-09 — optional note captured at publish time; null for drafts, note-less publishes, and pre-column versions. */
   publishNote: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -353,6 +724,7 @@ export interface ApprovalTemplateVersionSummaryDTO {
   status: ApprovalTemplateStatus
   publishNote: string | null
   publishedDefinitionId: string | null
+  restoredFromVersionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -387,6 +759,10 @@ export interface PublishApprovalTemplateRequest {
    * PublishApprovalTemplateRequest.note. Never required.
    */
   note?: string | null
+}
+
+export interface RestoreApprovalTemplateVersionRequest {
+  expectedLatestVersionId: string
 }
 
 /**

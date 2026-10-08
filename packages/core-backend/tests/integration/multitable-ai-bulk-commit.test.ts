@@ -58,11 +58,17 @@ const FLD_TARGET = `fld_b2_target_${TS}`
 const ACTOR = `u_b2_actor_${TS}`
 const OTHER = `u_b2_other_${TS}` // creator/locker of the not-writable / locked row
 
+import { armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
+
 const AI_ENV_KEYS = [
   'MULTITABLE_AI_ENABLED',
   'MULTITABLE_AI_PROVIDER',
   'MULTITABLE_AI_API_KEY',
   'MULTITABLE_AI_BASE_URL',
+
+  // data-class routing gate: simulate a COMPLIANT (local) deployment
+
+  'MULTITABLE_AI_ROUTING_POLICY',
   'MULTITABLE_AI_MODEL',
   'MULTITABLE_AI_REQUEST_TIMEOUT_MS',
   'MULTITABLE_AI_MAX_OUTPUT_TOKENS',
@@ -164,6 +170,8 @@ describeIfDatabase('B-2 AI bulk-commit (real DB)', () => {
     process.env.MULTITABLE_AI_API_KEY = 'sk-b2commit-test-key'
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+
+    armLocalAiRoutingPolicy()
 
     app = express()
     app.use(express.json())

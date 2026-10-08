@@ -8,6 +8,26 @@ import { createMockSqlServerExecutor } from './mock-sqlserver-executor.mjs'
 
 const require = createRequire(import.meta.url)
 const { createK3WiseSqlServerChannel } = require('../../../../plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs')
+// Source of truth for the permanent-fence token/message/status — asserted against directly rather
+// than duplicated as literals, so this fixture cannot silently drift from the fence it exercises.
+const {
+  K3_WISE_EXTERNAL_WRITE_DISABLED,
+  K3_EXTERNAL_WRITE_REFUSAL_MESSAGE,
+  K3_EXTERNAL_WRITE_REFUSAL_STATUS,
+} = require('../../../../plugins/plugin-integration-core/lib/k3-external-write-permanent-fence.cjs')
+
+// Both E4S-era rejection tests below share this shape check: the permanent fence's fixed refusal
+// (same code/status/message at every layer, §10.1), AND — the part that makes this a STRONGER
+// guarantee than "the promise rejected" — the mock executor's own call log/write ledger are
+// untouched, proving the channel never handed the mock SQL server so much as one statement.
+function assertPermanentlyRefusedBeforeExecutor(error, executor) {
+  assert.equal(error.code, K3_WISE_EXTERNAL_WRITE_DISABLED)
+  assert.equal(error.status, K3_EXTERNAL_WRITE_REFUSAL_STATUS)
+  assert.equal(error.message, K3_EXTERNAL_WRITE_REFUSAL_MESSAGE)
+  assert.deepEqual(executor.queryLog, [])
+  assert.equal(executor.writes.size, 0)
+  return true
+}
 
 function createExecutor() {
   return createMockSqlServerExecutor({
@@ -53,26 +73,28 @@ test('mock SQL executor satisfies real channel read contract', async () => {
   assert.equal(executor.queryLog[0].table, 't_icitem')
 })
 
-test('mock SQL executor satisfies real channel middle-table upsert contract', async () => {
+test('real channel refuses middle-table upsert under the permanent fence; executor receives nothing', async () => {
+  // Pre-E4 this object was the LEGITIMATE case: writeMode 'middle-table' was the configuration
+  // that made a K3 SQL Server channel upsert succeed. The permanent fence (E4 layer 3, HG v1.2
+  // §10.2.3) now refuses unconditionally, ahead of the executor shape check, the request
+  // normalisation, the table allowlist and the old middle-table rule — middle-table config
+  // included. The assertion below is deliberately stronger than "the write mode still works":
+  // it proves the mock SQL server's call log stays EMPTY, i.e. no statement ever reached the
+  // wire, not merely that the channel's return value changed.
   const executor = createExecutor()
   const channel = createChannel(executor)
-  const result = await channel.upsert({
-    object: 'material_stage',
-    records: [{ FNumber: 'MAT-MOCK-001', FName: 'Mock material' }],
-    keyFields: ['FNumber'],
-  })
 
-  assert.equal(result.written, 1)
-  assert.equal(result.failed, 0)
-  assert.equal(result.metadata.table, 'dbo.integration_material_stage')
-  assert.equal(executor.writes.get('integration_material_stage').length, 1)
-  assert.deepEqual(executor.writes.get('integration_material_stage')[0].record, {
-    FNumber: 'MAT-MOCK-001',
-    FName: 'Mock material',
-  })
+  await assert.rejects(
+    channel.upsert({
+      object: 'material_stage',
+      records: [{ FNumber: 'MAT-MOCK-001', FName: 'Mock material' }],
+      keyFields: ['FNumber'],
+    }),
+    (error) => assertPermanentlyRefusedBeforeExecutor(error, executor),
+  )
 })
 
-test('real channel still rejects direct K3 core table upsert before executor write', async () => {
+test('real channel refuses direct K3 core table upsert under the permanent fence; executor receives nothing', async () => {
   const executor = createExecutor()
   const channel = createK3WiseSqlServerChannel({
     system: {
@@ -100,9 +122,8 @@ test('real channel still rejects direct K3 core table upsert before executor wri
       records: [{ FNumber: 'MAT-FORBIDDEN' }],
       keyFields: ['FNumber'],
     }),
-    /only writes to configured middle tables/,
+    (error) => assertPermanentlyRefusedBeforeExecutor(error, executor),
   )
-  assert.equal(executor.writes.size, 0)
 })
 
 test('mock SQL executor resolves bracketed schema-qualified K3 core table reads', async () => {

@@ -1685,7 +1685,7 @@ describe('UserManagementView', () => {
     expect(nextStepLinks).toEqual([
       {
         text: '考勤组成员',
-        href: '/attendance?tab=admin&section=attendance-admin-group-members&userId=user-created&q=E-2026-010',
+        href: '/attendance?tab=admin&section=attendance-admin-groups&userId=user-created&q=E-2026-010',
       },
       {
         text: '班次分配',
@@ -1822,5 +1822,168 @@ describe('UserManagementView', () => {
     await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
 
     expect(container?.textContent).toContain('Delta')
+  })
+
+  describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
+    // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
+    const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'
+    const DINGTALK_NOTICE = '钉钉扫码登录信息暂时无法加载，请刷新页面后重试。'
+    const ADMISSION_NOTICE = '成员准入信息暂时无法加载，请刷新页面后重试。'
+    const NAMESPACE_NOTICE = '插件使用准入信息暂时无法加载，请刷新页面后重试。'
+
+    type SidePanelFailure = 'none' | 'server-500' | 'server-500-no-id' | 'server-500-bad-id' | 'network'
+
+    function installSidePanelFailures(failures: { dingtalk: SidePanelFailure; admission: SidePanelFailure }) {
+      const base = createApiImplementation(callLog)
+      const respond = (kind: SidePanelFailure, code: string, correlationId: string) => {
+        if (kind === 'network') throw new TypeError('Failed to fetch')
+        const error: Record<string, unknown> = { code, message: SERVER_TEXT }
+        if (kind === 'server-500') error.correlationId = correlationId
+        if (kind === 'server-500-bad-id') error.correlationId = `${SERVER_TEXT} id`
+        return createJsonResponse({ ok: false, error }, 500)
+      }
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (failures.dingtalk !== 'none' && /^\/api\/admin\/users\/[^/]+\/dingtalk-access$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.dingtalk, 'DINGTALK_ACCESS_FAILED', 'probe-corr-6163-dingtalk')
+        }
+        if (failures.admission !== 'none' && /^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.admission, 'MEMBER_ADMISSION_FAILED', 'probe-corr-6163-admission')
+        }
+        return base(input, init)
+      })
+      return failures
+    }
+
+    function topBanner(): HTMLElement | null {
+      return container!.querySelector('section.user-admin > p.user-admin__status')
+    }
+
+    function blockNotice(testId: string): HTMLElement | null {
+      return container!.querySelector(`[data-testid="${testId}"]`)
+    }
+
+    function sectionTitleOf(element: HTMLElement): string {
+      return element.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim() ?? ''
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/dingtalk-access'))
+        && callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('shows each failure in its own block with the page sentence and the reference number; the top banner is not written and the server text appears nowhere', async () => {
+      installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      const dingtalkNotice = blockNotice('dingtalk-access-load-failure')!
+      expect(sectionTitleOf(dingtalkNotice)).toBe('钉钉扫码登录')
+      expect(dingtalkNotice.textContent).toContain(DINGTALK_NOTICE)
+      expect(dingtalkNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-dingtalk')
+
+      const admissionNotice = blockNotice('member-admission-load-failure')!
+      expect(sectionTitleOf(admissionNotice)).toBe('成员准入')
+      expect(admissionNotice.textContent).toContain(ADMISSION_NOTICE)
+      expect(admissionNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-admission')
+
+      // The plugin-usage block does not claim that there is no data.
+      const namespaceNotice = blockNotice('namespace-admission-load-failure')!
+      expect(sectionTitleOf(namespaceNotice)).toBe('插件使用')
+      expect(namespaceNotice.textContent).toContain(NAMESPACE_NOTICE)
+      expect(container!.textContent).not.toContain('暂无插件使用准入信息')
+
+      // A load failure, not a configuration state: no "not configured" wording in the notices.
+      for (const notice of [dingtalkNotice, admissionNotice, namespaceNotice]) {
+        expect(notice.textContent).not.toMatch(/未配置|未开通|不可用/)
+      }
+
+      expect(topBanner()).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('Unsupported state')
+      expect(container!.textContent).not.toContain('DINGTALK_ACCESS_FAILED')
+      expect(container!.textContent).not.toContain('MEMBER_ADMISSION_FAILED')
+    })
+
+    it('leaves the top banner exactly as it was when a refresh of either block fails', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'none', admission: 'none' })
+      await mountPage()
+
+      // Put a known message in the banner first (a successful plugin-usage change).
+      const namespaceCard = container!.querySelector('.user-admin__role-card--namespace')
+      const openButton = Array.from(namespaceCard?.querySelectorAll('button') ?? []).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
+      if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
+      openButton.click()
+      await waitForCondition(() => topBanner()?.textContent?.includes('已开通 crm 插件使用') ?? false)
+      const bannerBefore = { text: topBanner()!.textContent, className: topBanner()!.className }
+
+      failures.dingtalk = 'server-500'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+
+      failures.admission = 'server-500'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') !== null)
+      await flushUi(8)
+
+      expect({ text: topBanner()!.textContent, className: topBanner()!.className }).toEqual(bannerBefore)
+      expect(container!.textContent).not.toContain('MK6163')
+    })
+
+    it('a successful reload after a failure clears the block notice and shows the data again', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+      expect(container!.textContent).toContain('服务端已启用钉钉登录')
+      expect(container!.textContent).not.toContain(DINGTALK_NOTICE)
+      // The other block's failure is its own: still shown.
+      expect(blockNotice('member-admission-load-failure')).not.toBeNull()
+
+      failures.admission = 'none'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') === null)
+      expect(blockNotice('namespace-admission-load-failure')).toBeNull()
+      expect(container!.textContent).toContain('平台账号已启用')
+      expect(container!.textContent).toContain('插件使用未开通')
+      expect(container!.textContent).not.toContain(ADMISSION_NOTICE)
+      expect(container!.textContent).not.toContain(NAMESPACE_NOTICE)
+      expect(topBanner()).toBeNull()
+    })
+
+    it('shows no reference number when the body has none or a malformed one, and a network failure gets the same sentence', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500-no-id', admission: 'server-500-bad-id' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(blockNotice('member-admission-load-failure')!.textContent).toContain(ADMISSION_NOTICE)
+      expect(blockNotice('member-admission-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('排查编号')
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+
+      failures.dingtalk = 'network'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('Failed to fetch')
+      expect(topBanner()).toBeNull()
+    })
   })
 })

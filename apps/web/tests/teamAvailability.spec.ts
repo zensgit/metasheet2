@@ -12,6 +12,7 @@ import {
   type TeamAvailabilityResponse,
 } from '../src/services/attendance/teamAvailability'
 import { useTeamAvailability } from '../src/views/attendance/useTeamAvailability'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { createApp, nextTick } from 'vue'
 import AttendanceTeamAvailabilitySection from '../src/views/attendance/AttendanceTeamAvailabilitySection.vue'
 
@@ -134,6 +135,7 @@ describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3
     document.body.appendChild(container)
     // ZH locale so the rendered tooltip is the §3c "待审批，未生效".
     const app = createApp(AttendanceTeamAvailabilitySection, { tr: (_en: string, zh: string) => zh })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch'))
     app.mount(container)
     const fillForm = () => {
       for (const [sel, value] of [['#attendance-ta-group', 'grp_1'], ['#attendance-ta-from', '2026-09-21'], ['#attendance-ta-to', '2026-09-21']] as const) {

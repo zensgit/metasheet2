@@ -545,3 +545,77 @@ describeIfDatabase('DT-OPS-02 preview/apply parity — intra-batch identity dupl
     )
   })
 })
+
+describeIfDatabase('Phase A preview corp-scoped identity sentinel wiring (real DB)', () => {
+  let integrationId = ''
+
+  const IDENTITY_CORP = `dtphaseaidentitycorp${TS}`
+  const IDENTITY_DEPT = `dtphaseaidentitydept${TS}`
+  const DT_IDENTITY_A = `dtphaseaidentityA${TS}`
+  const DT_IDENTITY_B = `dtphaseaidentityB${TS}`
+  const DT_IDENTITY_SOLO = `dtphaseaidentitySolo${TS}`
+  const SHARED_UNION_ID = `dtphaseasharedunion${TS}`
+  const SOLO_UNION_ID = `dtphaseasolounion${TS}`
+
+  beforeAll(async () => {
+    const integration = await createDirectoryIntegration({
+      name: `dt-phase-a-preview-identity-${TS}`,
+      corpId: IDENTITY_CORP,
+      appKey: `appkey-phase-a-preview-${TS}`,
+      appSecret: 'appsecret-value',
+      admissionMode: 'auto_for_scoped_departments',
+      admissionDepartmentIds: [IDENTITY_DEPT],
+      excludeDepartmentIds: [],
+    })
+    integrationId = integration.id
+
+    clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('app-token')
+    clientMocks.getDingTalkDepartmentDetail.mockResolvedValue({ deptManagerUserIdList: [] })
+    clientMocks.listDingTalkDepartments.mockImplementation(async (_token: string, parentId: string) => {
+      if (parentId === '1') {
+        return [{ id: IDENTITY_DEPT, parentId: '1', name: 'Identity In-Scope', order: 0, source: {} }]
+      }
+      return []
+    })
+    clientMocks.listDingTalkDepartmentUsers.mockImplementation(async (_token: string, deptId: string) => {
+      if (deptId === IDENTITY_DEPT) {
+        return {
+          users: [
+            deptUserSummary(DT_IDENTITY_A, 'Identity A', IDENTITY_DEPT),
+            deptUserSummary(DT_IDENTITY_B, 'Identity B', IDENTITY_DEPT),
+            deptUserSummary(DT_IDENTITY_SOLO, 'Identity Solo', IDENTITY_DEPT),
+          ],
+          nextCursor: null,
+          hasMore: false,
+        }
+      }
+      return { users: [], nextCursor: null, hasMore: false }
+    })
+    clientMocks.getDingTalkUserDetail.mockImplementation(async (_token: string, userId: string) => {
+      if (userId === DT_IDENTITY_A || userId === DT_IDENTITY_B) {
+        return userDetail(userId, userId === DT_IDENTITY_A ? 'Identity A' : 'Identity B', SHARED_UNION_ID)
+      }
+      if (userId === DT_IDENTITY_SOLO) {
+        return userDetail(DT_IDENTITY_SOLO, 'Identity Solo', SOLO_UNION_ID)
+      }
+      throw new Error(`unexpected userId ${userId}`)
+    })
+  })
+
+  afterAll(async () => {
+    if (integrationId) {
+      await query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
+    }
+  })
+
+  it('collapses a same-corp union/open/external identity pair while preserving a distinct account', async () => {
+    const preview = await previewDirectorySyncIntegration(integrationId)
+
+    expect(preview.accountsSeen).toBe(3)
+    expect(preview.wouldCreateAccounts).toBe(3)
+    // The shared pair has no email/mobile, so only the corp-scoped identity sentinel maps
+    // can make the second account resolve as an existing identity. The solo account is the
+    // positive control that prevents an implementation from collapsing every account.
+    expect(preview.autoAdmissionCandidateCount).toBe(2)
+  })
+})

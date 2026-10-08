@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { ElMessage } from 'element-plus'
 
 // ---------------------------------------------------------------------------
 // B3-13 (batch-3 approval FE polish) — ApprovalDetailView behavior contracts:
@@ -197,6 +199,12 @@ function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
 }
 
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
+
 describe('ApprovalDetailView — B3-13 curated FE polish', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -216,7 +224,17 @@ describe('ApprovalDetailView — B3-13 curated FE polish', () => {
     document.body.appendChild(container)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // This file keeps the REAL ElMessage: three tests read the toast text out of document.body. A
+    // toast lives outside `app` and closes itself after ~3 s; if that timer fires after this file's
+    // jsdom environment is torn down, its leave transition calls the missing requestAnimationFrame
+    // and vitest fails the lane with an unhandled ReferenceError although every test passed. So each
+    // test closes its toasts here and lets the leave transition run to the end (two frames + one
+    // macrotask) while the environment is still alive. This also keeps one test's toast text from
+    // leaking into the next test's document.body assertions.
+    ElMessage.closeAll()
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))))
     if (app) app.unmount()
     if (container) container.remove()
     app = null
@@ -283,6 +301,38 @@ describe('ApprovalDetailView — B3-13 curated FE polish', () => {
       await mountView()
 
       expect(q(container!, 'approval-revoke-button')).toBeNull()
+    })
+
+    // P5-C-1 (member-action dialog grammar unification, item 3): `handleRevoke`'s bare
+    // `catch { ElMessage.error('撤回失败，请重试') }` used to discard the server's OWN message —
+    // every failure rendered the same fixed copy no matter what the server actually said. It now
+    // reuses `dialogErrorMessage` (the same helper `submitAction`/`submitComment` already use),
+    // which prefers the thrown error's real message. Mutation: revert `handleRevoke`'s catch to
+    // the bare fixed string and this test reds (the fixed copy is a SUBSTRING of the real message
+    // below, so a broken fallback would make this assertion fail on the exact server text).
+    it('撤回 failure surfaces the SERVER\'s own message, not a fixed generic copy', async () => {
+      mockCurrentUserId.value = 'user_99'
+      mockActiveApproval.value = baseInstance({ policy: { allowRevoke: true } })
+      executeActionSpy.mockRejectedValueOnce(new Error('该审批已被他人处理，无法撤回'))
+      await mountView()
+
+      q(container!, 'popconfirm-confirm-trigger')!.click()
+      await flushUi()
+
+      expect(document.body.textContent).toContain('该审批已被他人处理，无法撤回')
+      expect(document.body.textContent).not.toContain('撤回失败，请重试')
+    })
+
+    it('撤回 failure with a message-less throw still falls back to the fixed copy (never a blank toast)', async () => {
+      mockCurrentUserId.value = 'user_99'
+      mockActiveApproval.value = baseInstance({ policy: { allowRevoke: true } })
+      executeActionSpy.mockRejectedValueOnce({})
+      await mountView()
+
+      q(container!, 'popconfirm-confirm-trigger')!.click()
+      await flushUi()
+
+      expect(document.body.textContent).toContain('撤回失败，请重试')
     })
   })
 

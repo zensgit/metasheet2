@@ -136,6 +136,103 @@ describe('multitable query-service', () => {
     expect(recordQuery?.params).toEqual(['sheet_1', 'status', 'open', '%alpha%', 'title', 10, 5])
   })
 
+  // W9: an array filter value is the SET form of the single-value equality above — same `->>`
+  // projection, same `String(value)` coercion per element, one statement instead of N.
+  it('builds an = ANY(...) predicate for a multi-element filter value list', async () => {
+    const { query, calls } = createQuery([
+      { id: 'rec_1', sheet_id: 'sheet_1', version: 1, data: { title: 'A', status: 'open' } },
+    ])
+
+    await queryRecords({
+      query,
+      sheetId: 'sheet_1',
+      filters: { status: ['open', 'closed', 'held'] },
+      limit: 7,
+      offset: 0,
+    })
+
+    const recordQuery = calls.at(-1)
+    expect(recordQuery?.sql).toContain('WHERE sheet_id = $1 AND data ->> $2 = ANY($3::text[])')
+    expect(recordQuery?.sql).toContain('ORDER BY id ASC')
+    expect(recordQuery?.sql).toContain('LIMIT $4')
+    expect(recordQuery?.sql).toContain('OFFSET $5')
+    expect(recordQuery?.params).toEqual(['sheet_1', 'status', ['open', 'closed', 'held'], 7, 0])
+  })
+
+  // W9 CONTRACT, pinned here because the plugin depends on it for CORRECTNESS, not just for paging:
+  // the batch idempotency-key lookup asks for `keys.length * 2 + 1` rows and treats "the host filled
+  // that bound" as "rows may have been cut off, fall back to the per-row path". That detector only
+  // works while `limit` is applied exactly as given. If this service ever CLAMPED `limit` to a
+  // ceiling of its own, a larger chunk would come back short, the bound test would not fire, and
+  // keys whose rows were cut off would be treated as new and inserted a second time. A cap here
+  // must therefore REJECT the request, never quietly shrink it — and the assertion is written with
+  // a value past every plausible ceiling so that adding one is what turns this red.
+  it('applies the requested limit verbatim, never clamped to a ceiling of its own', async () => {
+    const { query, calls } = createQuery([])
+
+    await queryRecords({ query, sheetId: 'sheet_1', filters: { status: ['open'] }, limit: 2001, offset: 0 })
+
+    const recordQuery = calls.at(-1)
+    expect(recordQuery?.sql).toContain('LIMIT $4')
+    expect(recordQuery?.params).toEqual(['sheet_1', 'status', ['open'], 2001, 0])
+  })
+
+  it('keeps a single-element list on the same predicate shape, and coerces like the scalar path', async () => {
+    const { query, calls } = createQuery([])
+
+    await queryRecords({ query, sheetId: 'sheet_1', filters: { status: [42, true] } })
+
+    const recordQuery = calls.at(-1)
+    expect(recordQuery?.sql).toContain('data ->> $2 = ANY($3::text[])')
+    // `String(value)` per element — exactly what the single-value branch does to its one value.
+    expect(recordQuery?.params).toEqual(['sheet_1', 'status', ['42', 'true']])
+
+    const single = createQuery([])
+    await queryRecords({ query: single.query, sheetId: 'sheet_1', filters: { status: ['open'] } })
+    expect(single.calls.at(-1)?.sql).toContain('data ->> $2 = ANY($3::text[])')
+    expect(single.calls.at(-1)?.params).toEqual(['sheet_1', 'status', ['open']])
+  })
+
+  it('answers an empty filter value list with no rows and no records query', async () => {
+    const { query, calls } = createQuery([
+      { id: 'rec_1', sheet_id: 'sheet_1', version: 1, data: { title: 'A', status: 'open' } },
+    ])
+
+    await expect(queryRecords({ query, sheetId: 'sheet_1', filters: { status: [] } })).resolves.toEqual([])
+    // The sheet row and the field list were still read — an unknown sheet still raises — but no
+    // statement against meta_records was ever sent, because the answer is knowable without one.
+    expect(calls.some((call) => call.sql.includes('FROM meta_records'))).toBe(false)
+  })
+
+  it('refuses a null element inside a filter value list instead of silently dropping it', async () => {
+    const { query, calls } = createQuery([])
+
+    await expect(queryRecords({
+      query,
+      sheetId: 'sheet_1',
+      filters: { status: ['open', null as unknown as string] },
+    })).rejects.toThrow(/Filter value list for status/)
+    expect(calls.some((call) => call.sql.includes('FROM meta_records'))).toBe(false)
+
+    // An unknown fieldId still loses to the pre-existing check, list or not.
+    await expect(queryRecords({
+      query,
+      sheetId: 'sheet_1',
+      filters: { nope: ['open'] },
+    })).rejects.toThrow(/Unknown fieldId: nope/)
+  })
+
+  it('still refuses a filter value list on the cursor path, which builds its own keyset SQL', async () => {
+    const { query, calls } = createQuery([])
+
+    await expect(queryRecordsWithCursor({
+      query,
+      sheetId: 'sheet_1',
+      filter: { status: ['open', 'closed'] as unknown as string },
+    })).rejects.toThrow(/Unsupported filter value for status/)
+    expect(calls.some((call) => call.sql.includes('FROM meta_records'))).toBe(false)
+  })
+
   it('returns cursor pagination metadata from the query seam', async () => {
     const { query } = createQuery([
       { id: 'rec_1', sheet_id: 'sheet_1', version: 1, data: { title: 'A' } },

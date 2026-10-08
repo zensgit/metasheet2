@@ -1,0 +1,32 @@
+{
+  "__fixtureKind": "invalid-reject",
+  "__violates": "W6-R8 closed navigation: editorRef must stay inside the #4711 closed tables and the group-stage union; caller-supplied admin section IDs are forbidden",
+  "payload": {
+    "ok": true,
+    "data": {
+      "groupId": "a4556006-0009-4000-8000-000000000001",
+      "groupType": "fixed_shift",
+      "timezone": "Asia/Shanghai",
+      "activeMemberCount": 4,
+      "managerPosture": { "ownerCount": 1, "subOwnerCount": 0 },
+      "calculationPosture": "legacy",
+      "domains": {
+        "membership": {
+          "label": "effective",
+          "reasonCodes": [],
+          "editorRef": { "kind": "admin_section", "section": "attendance-admin-payroll" }
+        },
+        "schedule": {
+          "label": "effective",
+          "strategy": "fixed_shift",
+          "reasonCodes": [],
+          "sourceRefs": [],
+          "fixedSchedule": null,
+          "editorRef": { "kind": "group_context_route", "step": "schedule", "surface": "rule-sets" }
+        }
+      },
+      "conflicts": [],
+      "evaluatedAt": "2026-08-05T00:00:00.000Z"
+    }
+  }
+}

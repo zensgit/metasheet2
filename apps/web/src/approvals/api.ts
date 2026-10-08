@@ -6,8 +6,11 @@
  * Includes mock fallback for development when backend is not available.
  */
 import { apiFetch, apiGet, apiPost } from '../utils/api'
+import { useLocale } from '../composables/useLocale'
 import type {
   ApprovalTemplateListItemDTO,
+  ApprovalTemplateGroupDTO,
+  ApprovalTemplateGroupReorderResultDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
   ApprovalTemplateVersionSummaryDTO,
@@ -23,13 +26,19 @@ import type {
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
   ApprovalTemplateUsageDTO,
+  RestoreApprovalTemplateVersionRequest,
   FormSchema,
 } from '../types/approval'
 
 // ---------------------------------------------------------------------------
 // Mock-mode flag
 // ---------------------------------------------------------------------------
-const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ === true
+const APPROVAL_MOCK_OVERRIDE = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+// DEV keeps its existing mock-by-default behavior. A mounted browser harness may explicitly set
+// the override to false before dynamically importing the approval surface so Playwright can drive
+// the real fetch path; production has no override and remains network-backed as before.
+const USE_MOCK = APPROVAL_MOCK_OVERRIDE === true
+  || (import.meta.env.DEV && APPROVAL_MOCK_OVERRIDE !== false)
 
 // ---------------------------------------------------------------------------
 // Mock data factories
@@ -82,6 +91,8 @@ function mockTemplateDetail(id: string): ApprovalTemplateDetailDTO {
     category: '请假',
     status: 'published',
     activeVersionId: 'ver_1_1',
+    // L6-P1 carrier fix — dev-mode fixture now mirrors the real DTO shape (previously omitted).
+    policy: { allowRevoke: true },
     formSchema: { fields: mockFormFields() },
     approvalGraph: {
       nodes: [
@@ -114,6 +125,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
     },
     publishedDefinitionId: 'def_1',
     publishNote: null,
+    restoredFromVersionId: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -214,7 +226,7 @@ function mockApproval(index: number): UnifiedApprovalDTO {
   }
 }
 
-function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
+function mockHistory(_approvalId: string): UnifiedApprovalHistoryDTO[] {
   // Dev-mode fixture: preserve the existing workflow story then append an any-mode (或签)
   // completion event so the timeline exercises the first-wins aggregateCancelled path.
   return [
@@ -388,6 +400,88 @@ export async function listTemplateCategories(): Promise<string[]> {
   }
   const payload = await apiGet<{ data?: string[] }>('/api/approval-templates/categories')
   return Array.isArray(payload?.data) ? payload.data : []
+}
+
+// ---------------------------------------------------------------------------
+// A-2 × A-4 merge convergence (this branch, 2026-09-20) — `listApprovalTemplateGroups`,
+// `linkApprovalTemplateToGroup` and `unlinkApprovalTemplateFromGroup` were each implemented TWICE
+// in this file after the two lanes were stacked: once here (A-4, `apiGet`/`apiPost`/`apiFetch`,
+// bare `Error`, `USE_MOCK` short-circuit) and once in the §6 phase 1 group block further down
+// (A-2, `getApprovalJson`/`postApprovalJson`/`deleteApprovalJson`, `ApprovalApiError` with
+// `.code`). git's three-way merge never flagged it — the two blocks sit in different regions of
+// the file — but `vue-tsc` (TS2323/TS2393) and esbuild ("Multiple exports with the same name")
+// both hard-fail, which is what took the combined tree's build down.
+//
+// The three duplicates are now defined ONCE, in the phase 1 block below, on A-2's typed path:
+// acceptance J (multi-org member → 403 `SESSION_ORG_REQUIRED` → shared session-org selector →
+// retry) branches on `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'` in
+// `ApprovalTemplateGroupsPanel.vue`'s `loadGroups` / `onCreate` catch sites (symbol anchors, not
+// line numbers: the line numbers this comment originally carried were copied over from a report
+// written against the MERGE tree and were already wrong for this REBASE tree), and A-4's wrapper
+// threw a bare `Error('API error: …')` with no `code` at all, so keeping A-4's version would have
+// turned that whole retry flow into dead code with no test able to see it.
+//
+// `TemplateGroupSections.vue` then took the SAME branch for its own mount-time `loadAll()`
+// (gate D3-1, 2026-09-20 — page-level acceptance J), so the A-2 contract is now load-bearing on
+// both surfaces. Its remaining catch sites (`loadMore` / `moveGroupSection` / `onMoveItem`) still
+// read only `message` — deliberately, see that file's own D3-1 scope note.
+//
+// Only `listTemplatesBySection` and `reorderApprovalTemplateGroups` below are A-4-only (no A-2
+// counterpart) and therefore keep their original bodies, `USE_MOCK` branch included. See the
+// phase-3 design MD's "A-2 × A-4 合流" section for the full disposition, including why the
+// three converged functions deliberately do NOT get a `USE_MOCK` branch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Approval form grouping lock v2.13 §4 acceptance row C — one of the three `section=` token
+ * shapes (`group:<id>` / `ungrouped` / `category:<name>`), built by the caller via
+ * `template-group-sections.ts`-style token composition. Paging is `page`/`pageSize` (1-based),
+ * same shape as `listTemplates` above — the route converts it to `limit`/`offset` server-side and
+ * the response's own `total` is THIS BUCKET's count (§4 row C: "每个 section 独立 page/pageSize"),
+ * not the union of every section, so the caller never has to reconstruct a per-section count.
+ *
+ * MUST NOT be combined with a `category` filter on the same request — the route 400s
+ * (`APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT`) on that combination (§4 row C / row J) — so this
+ * function deliberately takes no `category` parameter at all.
+ */
+export async function listTemplatesBySection(params: {
+  section: string
+  status?: ApprovalTemplateStatus
+  search?: string
+  page?: number
+  pageSize?: number
+}): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
+  if (USE_MOCK) return { data: [], total: 0 }
+  const qs = new URLSearchParams()
+  qs.set('section', params.section)
+  if (params.status) qs.set('status', params.status)
+  if (params.search) qs.set('search', params.search)
+  if (params.page) qs.set('page', String(params.page))
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+  return apiGet(`/api/approval-templates?${qs.toString()}`)
+}
+
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — `groupIds` is the
+ * org's FULL permutation of its currently-active group ids (a full re-rank, not a delta); the
+ * server re-derives `sortOrder` from array position (1..n) inside its own L0 critical section.
+ *
+ * Return type fixed to `ApprovalTemplateGroupReorderResultDTO[]` (`{id, sortOrder}` only) — this
+ * previously claimed `ApprovalTemplateGroupDTO[]`, but the route's underlying service
+ * (`ApprovalTemplateGroupReorderService.ts`'s `ApprovalTemplateGroupReorderResult`) never returns
+ * `name`/`createdBy`/`archivedAt`; a caller trusting those fields on the wider type would have read
+ * `undefined` at runtime. This function was previously unused by any UI (see
+ * `TemplateGroupSections.vue`), so the type is corrected here with zero call-site fallout.
+ */
+export async function reorderApprovalTemplateGroups(
+  groupIds: string[],
+): Promise<ApprovalTemplateGroupReorderResultDTO[]> {
+  if (USE_MOCK) return []
+  const payload = await apiPost<{ groups?: ApprovalTemplateGroupReorderResultDTO[] }>(
+    '/api/approval-template-groups/reorder',
+    { groupIds },
+  )
+  return Array.isArray(payload?.groups) ? payload.groups : []
 }
 
 /**
@@ -863,7 +957,8 @@ export async function listTemplateVersions(
   templateId: string,
 ): Promise<ApprovalTemplateVersionSummaryDTO[]> {
   if (USE_MOCK) {
-    const detail = mockVersionDetail(templateId, `ver_${templateId}_1`)
+    const template = mockTemplateDetail(templateId)
+    const detail = mockVersionDetail(templateId, template.latestVersionId ?? `ver_${templateId}_1`)
     return [
       {
         id: detail.id,
@@ -872,6 +967,7 @@ export async function listTemplateVersions(
         status: detail.status,
         publishNote: detail.publishNote,
         publishedDefinitionId: detail.publishedDefinitionId,
+        restoredFromVersionId: detail.restoredFromVersionId,
         createdAt: detail.createdAt,
         updatedAt: detail.updatedAt,
       },
@@ -881,6 +977,28 @@ export async function listTemplateVersions(
     `/api/approval-templates/${encodeURIComponent(templateId)}/versions`,
   )
   return response.versions
+}
+
+export async function restoreTemplateVersion(
+  templateId: string,
+  versionId: string,
+  request: RestoreApprovalTemplateVersionRequest,
+): Promise<ApprovalTemplateVersionDetailDTO> {
+  if (USE_MOCK) {
+    const restored = mockVersionDetail(templateId, `ver_${templateId}_${Date.now()}`)
+    return {
+      ...restored,
+      version: restored.version + 1,
+      status: 'draft',
+      runtimeGraph: null,
+      publishedDefinitionId: null,
+      restoredFromVersionId: versionId,
+    }
+  }
+  return apiPost(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}/restore`,
+    request,
+  )
 }
 
 export async function listApprovals(
@@ -910,18 +1028,128 @@ export async function listApprovals(
     const start = (page - 1) * pageSize
     return { data: items.slice(start, start + pageSize), total: items.length }
   }
+  const qs = approvalListSearchParams(query, true).toString()
+  return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * The ONE mapping from an `ApprovalListQuery` to `GET /api/approvals` query-string keys, shared by
+ * the JSON list (`listApprovals`) and the CSV export (`exportApprovalsCsv`) so the two can never
+ * drift: a filter added to the list here reaches the export in the same edit. `includePaging` is
+ * the only difference between the two callers — `page`/`pageSize` select a PAGE of the feed, they
+ * are not filters, and the export is "up to N matching rows from the start of the scope".
+ */
+function approvalListSearchParams(query: ApprovalListQuery | undefined, includePaging: boolean): URLSearchParams {
   const params = new URLSearchParams()
   if (query?.tab) params.set('tab', query.tab)
   if (query?.status) params.set('status', query.status)
   if (query?.search) params.set('search', query.search)
-  if (query?.page) params.set('page', String(query.page))
-  if (query?.pageSize) params.set('pageSize', String(query.pageSize))
+  if (includePaging && query?.page) params.set('page', String(query.page))
+  if (includePaging && query?.pageSize) params.set('pageSize', String(query.pageSize))
   if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
   if (query?.templateId) params.set('templateId', query.templateId)
   if (query?.createdFrom) params.set('createdFrom', query.createdFrom)
   if (query?.createdTo) params.set('createdTo', query.createdTo)
-  const qs = params.toString()
-  return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
+  return params
+}
+
+// ---------------------------------------------------------------------------
+// CSV export of the approval list — `GET /api/approvals?format=csv`
+// ---------------------------------------------------------------------------
+/** The filters the list is showing. Paging is deliberately not part of an export request. */
+export type ApprovalExportQuery = Omit<ApprovalListQuery, 'page' | 'pageSize'>
+
+/** Used when the response's `Content-Disposition` is absent, unreadable, or not a plain CSV name. */
+export const APPROVAL_EXPORT_DEFAULT_FILE_NAME = 'approvals-export.csv'
+
+/**
+ * CLIENT-side code carried on the `ApprovalApiError` thrown when the server answers 2xx with a body
+ * that is not CSV. Distinct from every server code so a caller can word it as "this server did not
+ * produce an export" rather than as a server-reported failure.
+ */
+export const APPROVAL_EXPORT_UNEXPECTED_RESPONSE = 'APPROVAL_EXPORT_UNEXPECTED_RESPONSE'
+
+export interface ApprovalCsvExportResult {
+  /** The response body, exactly as the server sent it. Never rebuilt, re-encoded or filtered here. */
+  blob: Blob
+  fileName: string
+  /**
+   * The four `X-Approval-Export-*` response headers. `null` means "not readable / not a valid
+   * value", which is NOT the same as zero or `false`: a browser only exposes a cross-origin
+   * response header the server lists as exposed, so a caller must treat `null` as "unknown" and
+   * say so, never as a complete, un-truncated export.
+   */
+  rowCount: number | null
+  rowLimit: number | null
+  rowCap: number | null
+  capped: boolean | null
+}
+
+function readExportCountHeader(response: Response, name: string): number | null {
+  const raw = response.headers.get(name)?.trim()
+  if (!raw || !/^\d+$/.test(raw)) return null
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function readExportFlagHeader(response: Response, name: string): boolean | null {
+  const raw = response.headers.get(name)?.trim()
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  return null
+}
+
+function readExportFileName(response: Response): string {
+  const disposition = response.headers.get('content-disposition') ?? ''
+  // Only a plain `name.csv` token is honoured; anything else falls back to the fixed default, so
+  // no response-supplied path fragment or odd character ever reaches the download attribute.
+  const match = /filename="([A-Za-z0-9][A-Za-z0-9._-]*\.csv)"/i.exec(disposition)
+  return match?.[1] ?? APPROVAL_EXPORT_DEFAULT_FILE_NAME
+}
+
+/**
+ * Downloads the approval list as CSV from the SAME route the list reads (`GET /api/approvals`,
+ * same guard, same filters), with the auth headers `apiFetch` applies to every request.
+ *
+ * There is NO `USE_MOCK` branch and no client-side CSV assembly anywhere on this path, on purpose:
+ * the export's row set, columns and cell encoding are all defined by the server, so a CSV put
+ * together in the browser from the rows the list holds would be a different file under the same
+ * name. With no backend reachable this simply fails, which is the honest outcome.
+ *
+ * What the server decides and this function only reports back: the row ceiling, whether the scoped
+ * query was cut short by it (`capped`), and how many rows were written (`rowCount`, which may be
+ * fewer than the list's total — the export keeps only rows the caller may open).
+ *
+ * A 2xx whose body is not `text/csv` is rejected rather than saved: a server that does not
+ * implement the CSV branch answers the same URL with the JSON list, and handing that to the user
+ * as `approvals-export.csv` would look like a successful export.
+ */
+export async function exportApprovalsCsv(query?: ApprovalExportQuery): Promise<ApprovalCsvExportResult> {
+  const params = approvalListSearchParams(query, false)
+  params.set('format', 'csv')
+  const response = await apiFetch(`/api/approvals?${params.toString()}`, {
+    method: 'GET',
+    headers: { Accept: 'text/csv' },
+  })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  const contentType = (response.headers.get('content-type') ?? '').trim().toLowerCase()
+  if (!contentType.startsWith('text/csv')) {
+    throw new ApprovalApiError(
+      'The server did not return a CSV export',
+      response.status,
+      APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+    )
+  }
+  return {
+    blob: await response.blob(),
+    fileName: readExportFileName(response),
+    rowCount: readExportCountHeader(response, 'X-Approval-Export-Row-Count'),
+    rowLimit: readExportCountHeader(response, 'X-Approval-Export-Row-Limit'),
+    rowCap: readExportCountHeader(response, 'X-Approval-Export-Row-Cap'),
+    capped: readExportFlagHeader(response, 'X-Approval-Export-Capped'),
+  }
 }
 
 export async function getApproval(id: string): Promise<UnifiedApprovalDTO> {
@@ -929,9 +1157,55 @@ export async function getApproval(id: string): Promise<UnifiedApprovalDTO> {
   return apiGet(`/api/approvals/${id}`)
 }
 
+/**
+ * Lock-9 FE fix round (2026-08-22, gate P1-2) — `GET /api/approvals/:id/history` wraps its rows in
+ * `{ok, data:{items, page, pageSize, total}}` on BOTH the platform and PLM branches (verified by
+ * reading both `res.json(...)` call sites in `routes/approval-history.ts`); it has never returned a
+ * bare array. `getApprovalHistory` returning `apiGet(...)` unparsed — a raw fetch typed as
+ * `UnifiedApprovalHistoryDTO[]` without ever being one — meant `store.history` held the envelope
+ * object against the real wire, and `for (const item of history ?? [])` (this Lock-9 slice's own
+ * `collectHistoryAttachmentRefIds`, plus a PRE-EXISTING eager watcher in `ApprovalDetailView.vue`)
+ * threw `TypeError: ... is not iterable` on every real request — 0 calls, not empty results.
+ * `normalizeApprovalHistoryEnvelope` is the fix: unwrap `data.items` when present, pass an already-
+ * array response through unchanged (covers the mock branch and guards a future shape change), and
+ * fail closed to `[]` for anything else — same "render nothing rather than throw/fabricate"
+ * discipline `loadAttachmentMetadata`'s own catch already uses. See `approvalApiErrorSurfacing.spec.ts`
+ * for the pinned real-envelope regression test (drives this function directly — no env/module-reset
+ * dance needed, since it takes no dependency on `USE_MOCK`).
+ *
+ * This does NOT fix the deeper drift the fix round found and disclosed rather than solved here: the
+ * platform branch's rows are snake_case (`actor_id`/`occurred_at`/`from_status`/`to_status`) with
+ * no `metadata` column at all (unwrapping the envelope stops the throw and restores the shipped
+ * form-field attachment read path against the real wire; it does NOT make platform-instance
+ * timeline rows render real actor names/timestamps), while `UnifiedApprovalHistoryDTO` (and the PLM
+ * branch, which already returns the correct shape via `ApprovalBridgeService.loadLocalHistory`)
+ * expects camelCase + `metadata`.
+ *
+ * STALE-COMMENT UPDATE (#5104): the platform branch now DOES project a `metadata` key, additively —
+ * `metadata: { attachmentIds }`, ONLY the one key, ONLY when a row's rider ids are non-empty — so
+ * process-attachment refs now DO render for a platform instance's rider row
+ * (`ApprovalDetailView.vue`'s `processAttachmentRefsForHistoryItem`). #5104 is scoped to exactly
+ * that one field: it does not add `actor_name`/`occurred_at` camelCase siblings, does not add
+ * `nodeKey` (so parallel-branch grouping stays PLM-only), and does not rename any existing
+ * snake_case field. The broader snake_case-row-vs-camelCase-DTO reconciliation this comment
+ * originally flagged is still open past that one field.
+ */
+export function normalizeApprovalHistoryEnvelope(payload: unknown): UnifiedApprovalHistoryDTO[] {
+  if (Array.isArray(payload)) return payload as UnifiedApprovalHistoryDTO[]
+  if (payload && typeof payload === 'object') {
+    const data = (payload as Record<string, unknown>).data
+    if (data && typeof data === 'object') {
+      const items = (data as Record<string, unknown>).items
+      if (Array.isArray(items)) return items as UnifiedApprovalHistoryDTO[]
+    }
+  }
+  return []
+}
+
 export async function getApprovalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
   if (USE_MOCK) return mockHistory(id)
-  return apiGet(`/api/approvals/${id}/history`)
+  const payload = await apiGet<unknown>(`/api/approvals/${id}/history`)
+  return normalizeApprovalHistoryEnvelope(payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -964,13 +1238,16 @@ export class ApprovalApiError extends Error {
  * carrying the server's message verbatim (falling back to a generic status-coded message for a
  * non-JSON or shape-less body). Exported standalone (rather than folded into a fetch wrapper) so
  * it is unit-testable against a fabricated `Response` independent of `USE_MOCK`.
+ *
+ * O-8 / F8-1: only that generic fallback follows the shell locale (read when the error is built);
+ * a server-supplied message is still shown verbatim.
  */
 export async function approvalRequestError(response: Response): Promise<never> {
   const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
   const rawMessage = payload?.error?.message
   const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
     ? rawMessage
-    : `请求失败（${response.status}）`
+    : (useLocale().isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`)
   throw new ApprovalApiError(message, response.status, payload?.error?.code)
 }
 
@@ -988,6 +1265,256 @@ async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
     await approvalRequestError(response)
   }
   return response.json()
+}
+
+/**
+ * GET/PATCH/DELETE siblings of `postApprovalJson` above, surfacing a failed response the same
+ * way. Backs the approval form grouping endpoints below (design lock v2.13 §6 phase 1) — every
+ * one of the lock's seven endpoints needs the server's `error.code` to survive to the caller
+ * (acceptance J's session-org retry flow branches on `SESSION_ORG_REQUIRED`), which the generic
+ * `apiGet`/`apiPost` (utils/api.ts) do not preserve.
+ */
+async function getApprovalJson<T>(path: string): Promise<T> {
+  const response = await apiFetch(path)
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  return response.json()
+}
+
+async function patchApprovalJson<T>(path: string, payload: unknown): Promise<T> {
+  const response = await apiFetch(path, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  return response.json()
+}
+
+async function deleteApprovalJson(path: string): Promise<void> {
+  const response = await apiFetch(path, { method: 'DELETE' })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 client. Seven
+// endpoints; org is ALWAYS derived server-side from `req.authenticatedTenantId` (A‴) — none of
+// these functions accepts an orgId parameter, matching `routes/approvals.ts`'s
+// `resolveApprovalTemplateGroupOrgId` (an orgId in the body/query is rejected there with 400
+// `ORG_ID_NOT_ACCEPTED`, so the client must never send one). Field names mirror
+// `ApprovalTemplateGroupService.ts`'s `mapGroupRow`/`mapLinkRow` exactly (camelCase over the DB's
+// snake_case columns) — this file does not re-derive the shape.
+// ---------------------------------------------------------------------------
+
+// A-2 × A-4 merge convergence: `ApprovalTemplateGroupDTO` had TWO homes — A-4's
+// `src/types/approval.ts:629` (imported at the top of this file) and A-2's byte-identical local
+// `export interface` right here, which is TS2440 ("Import declaration conflicts with local
+// declaration"). Single home is `src/types/approval.ts`, next to every other approval DTO; the
+// local copy is deleted and the name re-exported from here so A-2's consumer
+// (`ApprovalTemplateGroupsPanel.vue:88`, `import { …, type ApprovalTemplateGroupDTO } from
+// '../../approvals/api'`) keeps resolving without changing its import path. The two declarations
+// were field-for-field identical (id/orgId/name/sortOrder/createdBy/createdAt/updatedAt/
+// archivedAt), so this is a pure de-duplication, not a shape change.
+export type { ApprovalTemplateGroupDTO }
+
+export interface ApprovalTemplateGroupLinkDTO {
+  orgId: string
+  templateId: string
+  groupId: string | null
+  linkedBy: string
+  linkedAt: string
+  unlinkedAt: string | null
+}
+
+/**
+ * The lock's ratified machine codes for the seven group endpoints (§2/§4), for callers that
+ * branch on `ApprovalApiError.code` — most importantly acceptance J's session-org retry flow,
+ * which must recognize `SESSION_ORG_REQUIRED` to show the session-org selector rather than a
+ * generic error toast. The `*_FAILED` members are each endpoint's `handleApprovalsError` fallback
+ * (`routes/approvals.ts` §6 phase 1 block) for an unexpected server-side failure.
+ */
+export type ApprovalTemplateGroupErrorCode =
+  | 'SESSION_ORG_REQUIRED'
+  | 'ORG_ID_NOT_ACCEPTED'
+  | 'APPROVAL_ACTOR_REQUIRED'
+  | 'APPROVAL_GROUP_ID_REQUIRED'
+  | 'APPROVAL_TEMPLATE_NOT_FOUND'
+  // P3-1 (daily-ops fix round, 2026-09-20) — link/unlink's shape-validation 400 for a malformed
+  // `:id` (see routes/approvals.ts's `isWellFormedUuid`). Not the 19th ratified code — same
+  // implementer's-choice footing as the other request-shape codes in this union.
+  | 'APPROVAL_TEMPLATE_ID_INVALID'
+  | 'GROUP_NOT_FOUND'
+  | 'GROUP_ARCHIVED'
+  | 'GROUP_NAME_TAKEN'
+  | 'GROUP_NOT_ARCHIVED'
+  | 'GROUP_NAME_REQUIRED'
+  // P2-2 fix (daily-ops fix round, 2026-09-20) — pre-existing gap, not introduced here: the
+  // backend's `mapGroupConstraintError` (`ApprovalTemplateGroupService.ts`) has raised this 400
+  // code since "design-gate-A3 回流修复" (2026-09-18, per that file's own doc comment) — the SAME
+  // round that put the CHECK-violation message on the wire in the first place — but it was never
+  // added to this union, so `vue-tsc` never caught a missing case here. Adding it is what let the
+  // compiler catch `describeApprovalTemplateGroupError`'s copy-table key below in the first place.
+  | 'GROUP_NAME_UNSUPPORTED'
+  | 'GROUP_SORT_CONFLICT'
+  | 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_RENAME_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_ARCHIVE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED'
+  | 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED'
+
+/**
+ * P2-2 fix (groups-daily-ops-real-browser-acceptance-20260920.md): product-language copy for the
+ * subset of `ApprovalTemplateGroupErrorCode`s a group-management surface can put in front of a
+ * user (bilingual `[en, zh]`, same `tr(en, zh)` convention this file's callers already use). Keyed
+ * off the real union (`Partial<Record<ApprovalTemplateGroupErrorCode, …>>`) so a code renamed or
+ * removed on the union is a compile error here, not a silent stale key — this is the mechanical
+ * sync the finding asked for, not a copy sitting next to the union hoping to stay in step with it.
+ *
+ * Deliberately NOT exhaustive over the whole union — the B1-04 contract (`approvalRequestError`'s
+ * header comment) is that the server's message is threaded through verbatim so real reasons are
+ * visible instead of collapsed; that is kept as-is for every code NOT listed here (the `*_FAILED`
+ * fallbacks, `APPROVAL_ACTOR_REQUIRED`, `APPROVAL_TEMPLATE_NOT_FOUND`, `APPROVAL_TEMPLATE_ID_INVALID`,
+ * `ORG_ID_NOT_ACCEPTED` — none of these are reachable through today's UI, and the finding never
+ * complained about them). `SESSION_ORG_REQUIRED` is likewise excluded on purpose: every consumer of
+ * this code branches on it to show the shared `SessionOrgSwitcher` (acceptance J) rather than any
+ * text, so a copy entry here would be dead.
+ *
+ * `describeApprovalTemplateGroupError` is the one function callers use: pass the caught error and
+ * a `tr` function, get back display text — falls back to `err.message` (the existing B1-04
+ * behaviour) for any code not in the table below, or when `err` is not an `ApprovalApiError` at all.
+ */
+const APPROVAL_TEMPLATE_GROUP_ERROR_COPY: Partial<Record<ApprovalTemplateGroupErrorCode, [string, string]>> = {
+  // The finding's exact repro (a-02/a-03*.png): a pure-CJK name like "请假"/"采购" — the product's
+  // OWN placeholder text — used to render "当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误"
+  // straight into the page. Replaced with plain, non-jargon product copy.
+  //
+  // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md): round 1 removed the jargon but said nothing
+  // about the rule, so the copy read identically for a zero-width-junk name and for a normal
+  // Chinese one and an admin could not tell that "请假Leave" WOULD be accepted. It now states the
+  // rule the server actually enforces (`ApprovalTemplateGroupService.mapGroupConstraintError`:
+  // "must include at least one ASCII letter, digit, or symbol character") and carries a worked
+  // example of a name that passes, in product language — no constraint name, no "lock"/"owner".
+  // This describes today's behaviour; if the name rule itself is ever widened (#5907, owner's
+  // call) this sentence is one of the things that has to move with it.
+  //
+  // NIT-A (impl-gate-A5-daily-ops-round2-20260920.md): round 2 said "Latin letter", which is
+  // WIDER than the CHECK this describes (`atg_name_nonblank CHECK (name ~ '[!-~]')`, ASCII 33-126
+  // only) — a name made entirely of non-ASCII Latin letters ('Ñ', 'é') reads as covered by this
+  // sentence but is still rejected (`'Ñ' ~ '[!-~]'` is false in the gate's own real-DB probe).
+  // NIT-C (round-2b gate): round 2 wrote "letter (A–Z)" / "英文字母（A–Z）", which narrows the
+  // sentence in the OTHER direction — `[!-~]` accepts `a-z` just as it accepts `A-Z`, but a
+  // capitalised range is ordinarily read as a case restriction, so an admin naming a group
+  // "请假leave" could believe it would be rejected. "English letter" / "英文字母" names the same
+  // ASCII subset the CHECK accepts without implying a case, and the worked example is kept.
+  GROUP_NAME_UNSUPPORTED: [
+    'Group names must contain at least one English letter, digit or symbol — for example, 请假Leave. Add one and try again.',
+    '分组名称需至少包含一个英文字母、数字或符号，例如「请假Leave」。请补充后重试。',
+  ],
+  GROUP_NAME_REQUIRED: ['Enter a group name.', '请填写分组名称。'],
+  GROUP_NAME_TAKEN: [
+    'An active group with this name already exists.',
+    '已存在同名的活跃分组。',
+  ],
+  GROUP_NOT_FOUND: ['This group could not be found. It may have been removed.', '未找到该分组，可能已被删除。'],
+  GROUP_ARCHIVED: ['This group has been archived.', '该分组已归档。'],
+  GROUP_NOT_ARCHIVED: ['This group is not archived.', '该分组未归档。'],
+  GROUP_SORT_CONFLICT: [
+    'The group order changed elsewhere. Please try again.',
+    '分组顺序已被他处更改，请重试。',
+  ],
+  APPROVAL_GROUP_ID_REQUIRED: ['Choose a group.', '请选择分组。'],
+}
+
+export function describeApprovalTemplateGroupError(
+  err: unknown,
+  tr: (en: string, zh: string) => string,
+): string {
+  if (err instanceof ApprovalApiError && err.code) {
+    const copy = APPROVAL_TEMPLATE_GROUP_ERROR_COPY[err.code as ApprovalTemplateGroupErrorCode]
+    if (copy) return tr(...copy)
+  }
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Lists this org's template groups (`GET /api/approval-template-groups`; org resolved server-side
+ * from `authenticatedTenantId` per §2 "org 从哪来" — nothing to pass here). Read-gated on
+ * `approvals:read` only (I7) — every reader sees the group list, not just template managers
+ * (A-4's docstring for the implementation this one absorbed).
+ *
+ * Callers: `ApprovalTemplateGroupsPanel.vue` (A-2, management entry) and
+ * `TemplateGroupSections.vue` (A-4, grouped view). Failure throws `ApprovalApiError` — the panel
+ * branches on `.code === 'SESSION_ORG_REQUIRED'` (acceptance J); the sections view reads only
+ * `.message`, so both callers are served by this one implementation.
+ */
+export async function listApprovalTemplateGroups(): Promise<ApprovalTemplateGroupDTO[]> {
+  const data = await getApprovalJson<{ groups: ApprovalTemplateGroupDTO[] }>('/api/approval-template-groups')
+  return data.groups
+}
+
+export async function createApprovalTemplateGroup(name: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    '/api/approval-template-groups',
+    { name },
+  )
+  return data.group
+}
+
+export async function renameApprovalTemplateGroup(
+  groupId: string,
+  name: string,
+): Promise<ApprovalTemplateGroupDTO> {
+  const data = await patchApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}`,
+    { name },
+  )
+  return data.group
+}
+
+export async function archiveApprovalTemplateGroup(groupId: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}/archive`,
+    {},
+  )
+  return data.group
+}
+
+export async function unarchiveApprovalTemplateGroup(groupId: string): Promise<ApprovalTemplateGroupDTO> {
+  const data = await postApprovalJson<{ group: ApprovalTemplateGroupDTO }>(
+    `/api/approval-template-groups/${encodeURIComponent(groupId)}/unarchive`,
+    {},
+  )
+  return data.group
+}
+
+// Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success; 404
+// `GROUP_NOT_FOUND` / 409 `GROUP_ARCHIVED` on the stale-target races `TemplateGroupSections.vue`'s
+// move-to-group control surfaces inline (A-4's note for the implementation this one absorbed).
+// The `ApprovalTemplateGroupLinkDTO` return is WIDER than A-4's `Promise<void>`: assignable, and
+// `TemplateGroupSections.vue` ignores the value, so absorbing A-4's call sites costs nothing.
+export async function linkApprovalTemplateToGroup(
+  templateId: string,
+  groupId: string,
+): Promise<ApprovalTemplateGroupLinkDTO> {
+  const data = await postApprovalJson<{ link: ApprovalTemplateGroupLinkDTO }>(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/group`,
+    { groupId },
+  )
+  return data.link
+}
+
+// Unlink is idempotent 204 (acceptance H) whether the template was linked, already unlinked, or
+// never linked at all — no body to return. `deleteApprovalJson` never parses the empty 204 body
+// and surfaces a failure through `approvalRequestError` (A-4's absorbed implementation called
+// `apiFetch` directly and threw a bare `Error`).
+export async function unlinkApprovalTemplateFromGroup(templateId: string): Promise<void> {
+  await deleteApprovalJson(`/api/approval-templates/${encodeURIComponent(templateId)}/group`)
 }
 
 /**
@@ -1019,10 +1546,10 @@ export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<
  * allows an org-structure probe on — guarded server-side by `canManageTemplates`). Same output
  * shape as `previewApprovalRoute` (shared substrate, no parallel impl).
  *
- * `templateRoutePreviewPath` is split out purely so the templateId URL-encoding is independently
- * unit-testable: `USE_MOCK` is `import.meta.env.DEV || ...` and DEV is always `true` under this
- * project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`), so calling
- * `previewTemplateRoute` itself in a test can only ever exercise the mock branch below.
+ * `templateRoutePreviewPath` is split out so the templateId URL-encoding remains independently
+ * unit-testable. Normal Vitest DEV runs retain the mock-by-default path; the mounted browser
+ * harness may explicitly disable that mock before module initialization to exercise the real
+ * network branch.
  */
 export function templateRoutePreviewPath(templateId: string): string {
   return `/api/approval-templates/${encodeURIComponent(templateId)}/route-preview`
@@ -1237,15 +1764,29 @@ export interface ApprovalDirectoryUser {
   email: string
 }
 
+/**
+ * Lock-1 §K2 — optional scope narrowing for the submit-time requester-choice chooser. Both
+ * filters AND onto the base active-user search server-side (`userIds` = the members scope's
+ * configured list; `roleIds` = plain user_roles membership for the role scope). Candidate
+ * convenience only — createApproval re-validates the actual submitted choice fail-closed.
+ */
+export interface ApprovalDirectoryUserSearchScope {
+  userIds?: string[]
+  roleIds?: string[]
+}
+
 export async function searchApprovalDirectoryUsers(
   q: string,
   limit = 20,
+  scope: ApprovalDirectoryUserSearchScope = {},
 ): Promise<ApprovalDirectoryUser[]> {
   try {
     const params = new URLSearchParams()
     const normalized = q.trim()
     if (normalized) params.set('q', normalized)
     params.set('limit', String(limit))
+    if (scope.userIds && scope.userIds.length > 0) params.set('userIds', scope.userIds.join(','))
+    if (scope.roleIds && scope.roleIds.length > 0) params.set('roleIds', scope.roleIds.join(','))
     const response = await apiFetch(`/api/approvals/directory/users?${params.toString()}`)
     if (!response.ok) return []
     const payload = await response.json().catch(() => null) as { users?: unknown } | null
@@ -1266,4 +1807,361 @@ export async function searchApprovalDirectoryUsers(
   } catch {
     return []
   }
+}
+
+export interface ApprovalDirectoryDepartment {
+  id: string
+  name: string
+  fullPath: string
+  parentId?: string
+  hasChildren: boolean
+}
+
+export interface ApprovalDepartmentDirectoryResult {
+  departments: ApprovalDirectoryDepartment[]
+  requesterDepartmentId?: string
+}
+
+export async function searchApprovalDirectoryDepartments(
+  q: string,
+  limit = 20,
+  treeParentId?: string | null,
+): Promise<ApprovalDepartmentDirectoryResult> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    if (treeParentId !== undefined) {
+      params.set('mode', 'tree')
+      if (treeParentId) params.set('parentId', treeParentId)
+    }
+    const response = await apiFetch(`/api/approvals/directory/departments?${params.toString()}`)
+    if (!response.ok) return { departments: [] }
+    const payload = await response.json().catch(() => null) as {
+      departments?: unknown
+      requesterDepartmentId?: unknown
+    } | null
+    if (!payload || !Array.isArray(payload.departments)) return { departments: [] }
+    const departments: ApprovalDirectoryDepartment[] = []
+    for (const entry of payload.departments) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      if (
+        typeof record.id !== 'string'
+        || !record.id.trim()
+        || typeof record.name !== 'string'
+        || !record.name.trim()
+        || typeof record.fullPath !== 'string'
+        || !record.fullPath.trim()
+        || typeof record.hasChildren !== 'boolean'
+      ) continue
+      departments.push({
+        id: record.id,
+        name: record.name.trim(),
+        fullPath: record.fullPath.trim(),
+        ...(typeof record.parentId === 'string' && record.parentId.trim()
+          ? { parentId: record.parentId }
+          : {}),
+        hasChildren: record.hasChildren,
+      })
+    }
+    return {
+      departments,
+      ...(typeof payload.requesterDepartmentId === 'string' && payload.requesterDepartmentId.trim()
+        ? { requesterDepartmentId: payload.requesterDepartmentId }
+        : {}),
+    }
+  } catch {
+    return { departments: [] }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+// stays admin-only) — authorized-scope EXACT batch id->name resolver, wrapping GET
+// /api/approvals/directory/resolve. USERS ONLY: this module's earlier role-id wrapper function has
+// been DELETED, not merely left unused — the backend route no longer resolves `roleIds` at all
+// (see approval-directory.ts / approvals.ts). An id absent from the response is the SERVER's own
+// unresolved signal (inactive user / blank name / nonexistent id) — this wrapper does not invent a
+// fallback name, it just omits what the server omitted.
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by `resolveApprovalDirectoryUsers` when a request fails, carrying the HTTP `status` when
+ * one exists (absent for a network-level failure, e.g. `fetch` rejecting before any response).
+ * `directoryResolve.ts`'s `flushUsers` reads `status` to tell a TERMINAL failure (401/403 — the
+ * caller structurally lacks `approvals:read|write|act`, or the session is gone; retrying will not
+ * help) apart from a TRANSIENT one (network drop, 5xx, anything else) — see the P3-3 fix note in
+ * directoryResolve.ts. Only 401/403 are cached as a confirmed miss; every other failure is left
+ * unresolved so the next resolve trigger retries it instead of sticking it as "no name" forever.
+ */
+export class ApprovalDirectoryResolveError extends Error {
+  readonly status: number | undefined
+  constructor(message: string, status: number | undefined) {
+    super(message)
+    this.name = 'ApprovalDirectoryResolveError'
+    this.status = status
+  }
+}
+
+function parseIdNameArray(value: unknown): Array<{ id: string; name: string }> {
+  if (!Array.isArray(value)) return []
+  const out: Array<{ id: string; name: string }> = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id : ''
+    const name = typeof record.name === 'string' ? record.name : ''
+    if (!id || !name) continue
+    out.push({ id, name })
+  }
+  return out
+}
+
+/**
+ * Resolves a batch of user ids to `{id,name}` — never a raw id, never blank-name padding.
+ * UNLIKE `searchApprovalDirectoryUsers` above, this THROWS (`ApprovalDirectoryResolveError`) on a
+ * non-OK response or a network/fetch failure instead of swallowing to `[]` — the caller
+ * (`directoryResolve.ts`'s `flushUsers`) needs to distinguish a transient failure from a
+ * confirmed-empty result to avoid caching a false "this id has no name" negative for the rest of
+ * the session (P3-3). A malformed/unparseable JSON body on an OK response still degrades to `[]`
+ * — the server did answer, there is nothing meaningful to retry there.
+ */
+export async function resolveApprovalDirectoryUsers(ids: readonly string[]): Promise<Array<{ id: string; name: string }>> {
+  const cleanIds = ids.map((id) => id.trim()).filter((id) => id.length > 0)
+  if (cleanIds.length === 0) return []
+  const params = new URLSearchParams()
+  params.set('userIds', cleanIds.join(','))
+  const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
+  if (!response.ok) {
+    throw new ApprovalDirectoryResolveError(`resolveApprovalDirectoryUsers: request failed (${response.status})`, response.status)
+  }
+  const payload = await response.json().catch(() => null) as { users?: unknown } | null
+  return parseIdNameArray(payload?.users)
+}
+
+// ---------------------------------------------------------------------------
+// FWB-0 Layer 2 — dedicated record-link candidate picker (pinned baseId+sheetId).
+// Does NOT call multitable /fields/:fieldId/link-options.
+// ---------------------------------------------------------------------------
+export interface ApprovalRecordLinkOption {
+  id: string
+  /** Human label — server never falls back to raw record id. */
+  display: string
+}
+
+export interface ApprovalRecordLinkOptionsPage {
+  records: ApprovalRecordLinkOption[]
+  page: { limit: number; offset: number; total: number; hasMore: boolean }
+}
+
+export type ApprovalRecordLinkOptionsResult =
+  | { ok: true; data: ApprovalRecordLinkOptionsPage }
+  | { ok: false; status: number; code?: string; message?: string }
+
+/**
+ * List readable record-link candidates for a server-pinned base/sheet.
+ * Failures (403/404/empty network) return ok:false so the UI can fail closed without
+ * inventing free-text / raw-id fallbacks.
+ */
+export async function listApprovalRecordLinkOptions(params: {
+  baseId: string
+  sheetId: string
+  search?: string
+  limit?: number
+  offset?: number
+}): Promise<ApprovalRecordLinkOptionsResult> {
+  const baseId = params.baseId.trim()
+  const sheetId = params.sheetId.trim()
+  if (!baseId || !sheetId) {
+    return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'baseId and sheetId are required' }
+  }
+  try {
+    const qs = new URLSearchParams()
+    qs.set('baseId', baseId)
+    qs.set('sheetId', sheetId)
+    if (params.search?.trim()) qs.set('search', params.search.trim())
+    if (typeof params.limit === 'number') qs.set('limit', String(params.limit))
+    if (typeof params.offset === 'number') qs.set('offset', String(params.offset))
+    const response = await apiFetch(`/api/approvals/record-link-options?${qs.toString()}`)
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null) as {
+        error?: { code?: string; message?: string }
+        code?: string
+        message?: string
+      } | null
+      return {
+        ok: false,
+        status: response.status,
+        code: payload?.error?.code ?? payload?.code,
+        message: payload?.error?.message ?? payload?.message,
+      }
+    }
+    const payload = await response.json().catch(() => null) as {
+      records?: unknown
+      page?: { limit?: unknown; offset?: unknown; total?: unknown; hasMore?: unknown }
+    } | null
+    if (!payload || !Array.isArray(payload.records)) {
+      return { ok: false, status: 502, code: 'INVALID_RESPONSE', message: 'Invalid response' }
+    }
+    const records: ApprovalRecordLinkOption[] = []
+    let dropped = 0
+    for (const entry of payload.records) {
+      if (!entry || typeof entry !== 'object') continue
+      const row = entry as Record<string, unknown>
+      const id = typeof row.id === 'string' ? row.id.trim() : ''
+      const display = typeof row.display === 'string' ? row.display.trim() : ''
+      // Client belt: drop any option that would surface a raw id as the label.
+      if (!id || !display || display === id) {
+        dropped += 1
+        continue
+      }
+      records.push({ id, display })
+    }
+    const page = payload.page ?? {}
+    const limit = typeof page.limit === 'number' ? page.limit : records.length
+    const offset = typeof page.offset === 'number' ? page.offset : 0
+    const total = typeof page.total === 'number' ? page.total : records.length
+    // If sanitization emptied a non-empty server page, stop paging (no hasMore loop).
+    const serverHasMore = page.hasMore === true
+    const hasMore = serverHasMore && records.length > 0 && dropped < limit
+    return {
+      ok: true,
+      data: {
+        records,
+        page: {
+          limit,
+          offset,
+          total,
+          hasMore,
+        },
+      },
+    }
+  } catch {
+    return { ok: false, status: 0, code: 'NETWORK_ERROR', message: 'Network error' }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin 批量转交 (P1b slice 3) — the web caller for the ALREADY-SHIPPED bulk
+// reassign endpoint. No backend behaviour is added or changed here.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approver-scoped pending read the 批量转交 page lists before it acts.
+ *
+ * WIRE SHAPE, pinned deliberately (see approvalBatchTransferView.spec.ts):
+ *   - `assignee` is the existing GET /api/approvals filter (an active
+ *     approval_assignments row for that id) — no new parameter.
+ *   - `status=pending` is sent WITHOUT `tab`. That combination is what the
+ *     route serves on the server-determined scope plus the status filter
+ *     alone; sending `tab=pending` instead would conjoin the tab's own
+ *     ACTIVE-SEAT subquery, which binds the CALLING actor's seats — the page
+ *     would then list the admin's own queue while claiming to show the picked
+ *     approver's.
+ *   - `sourceSystem=platform` matches the domain `bulkReassignApprovals` acts
+ *     on (`COALESCE(source_system,'platform') = 'platform'`), so a PLM mirror
+ *     can never be listed as transferable and then skipped as `not-found`.
+ *   - `limit=200` is the endpoint's own MAX_APPROVAL_PAGE_SIZE and the same
+ *     cap the service applies to an explicit `instanceIds` array.
+ *
+ * PERMISSIONS ARE NOT RELAXED by this call. It reads through the same
+ * projection every approvals:read caller uses; an admin sees another
+ * approver's rows only because the list scope already admits every row for an
+ * admin principal. A non-admin calling this simply gets their own scope.
+ */
+export const APPROVAL_BATCH_TRANSFER_PAGE_LIMIT = 200
+
+export async function listPendingApprovalsForApprover(
+  approverUserId: string,
+): Promise<{ data: UnifiedApprovalDTO[]; total: number }> {
+  const params = new URLSearchParams()
+  params.set('sourceSystem', 'platform')
+  params.set('status', 'pending')
+  params.set('assignee', approverUserId)
+  params.set('limit', String(APPROVAL_BATCH_TRANSFER_PAGE_LIMIT))
+  params.set('offset', '0')
+  return apiGet(`/api/approvals?${params.toString()}`)
+}
+
+/**
+ * Mirrors the backend's `ApprovalBulkReassignSkipReason` union verbatim. A
+ * value outside this set is rendered through the unknown-code fallback rather
+ * than being dropped, so a future server-side addition surfaces instead of
+ * silently disappearing from the per-row report.
+ *
+ * `cancel_round` (design lock §14.3 #12,
+ * approval-change-request-design-lock-draft-20260915.md v5.9): the backend's
+ * `rejectIfCancelRound` guard on `bulkReassignApprovals` (`APS:8916`) reports a
+ * skipped seat for an instance that is mid cancel-round via this literal.
+ * `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` now
+ * declares it too (both landed on this branch), so the readFileSync sync-pin
+ * in `apps/web/tests/approvalBatchTransferView.spec.ts` compares this literal
+ * against the backend union byte-for-byte — the pin is bidirectional, and an
+ * FE label with no server literal reds it exactly as an unmapped server
+ * literal would.
+ */
+export type ApprovalBulkReassignSkipReason =
+  | 'not-found'
+  | 'not-pending'
+  | 'not-assigned'
+  | 'target-is-requester'
+  | 'target-already-assignee'
+  | 'target-user-invalid'
+  | 'error'
+  | 'cancel_round'
+
+export interface ApprovalBulkReassignPayload {
+  fromUserId: string
+  toUserId: string
+  reason: string
+  instanceIds: string[]
+}
+
+export interface ApprovalBulkReassignResultDTO {
+  succeeded: string[]
+  skipped: Array<{ id: string; reason: ApprovalBulkReassignSkipReason | string }>
+  affectedRequesterIds: string[]
+}
+
+/**
+ * POST /api/approvals/admin/reassign — the existing endpoint, guarded by
+ * `rbacGuard('approvals:admin')` server-side.
+ *
+ * The response is ENVELOPED (`{ ok: true, data: <result> }`), so the envelope
+ * is unwrapped here rather than in the view — returning the raw fetch typed as
+ * the result is the defect `normalizeApprovalHistoryEnvelope` above exists to
+ * document.
+ *
+ * NO MOCK BRANCH, unlike most of this module: a `USE_MOCK` short-circuit is
+ * true under vitest (`import.meta.env.DEV`), which would make every payload
+ * assertion in the spec vacuously green — the request would never be built.
+ */
+export async function bulkReassignApprovals(
+  payload: ApprovalBulkReassignPayload,
+): Promise<ApprovalBulkReassignResultDTO> {
+  const response = await apiPost<unknown>('/api/approvals/admin/reassign', payload)
+  return normalizeBulkReassignEnvelope(response)
+}
+
+export function normalizeBulkReassignEnvelope(payload: unknown): ApprovalBulkReassignResultDTO {
+  const root = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+  const data = root.data && typeof root.data === 'object' ? root.data as Record<string, unknown> : root
+  const succeeded = Array.isArray(data.succeeded)
+    ? data.succeeded.filter((id): id is string => typeof id === 'string')
+    : []
+  const skipped = Array.isArray(data.skipped)
+    ? data.skipped
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+        .map((entry) => ({
+          id: typeof entry.id === 'string' ? entry.id : '',
+          reason: typeof entry.reason === 'string' ? entry.reason : 'error',
+        }))
+        .filter((entry) => entry.id.length > 0)
+    : []
+  const affectedRequesterIds = Array.isArray(data.affectedRequesterIds)
+    ? data.affectedRequesterIds.filter((id): id is string => typeof id === 'string')
+    : []
+  return { succeeded, skipped, affectedRequesterIds }
 }

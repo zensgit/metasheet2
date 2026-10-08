@@ -1,0 +1,288 @@
+'use strict'
+
+// REHEARSAL customer config pack — tests / install rehearsal ONLY.
+//
+// factory-a.sample.cjs is a ten-column SHAPE EXEMPLAR: enough to exercise the
+// normalizer and the installer, not enough to answer the question the customer
+// pack was built to answer — "does ONE config object regenerate the WHOLE
+// landing sheet a factory actually works in, and does a PLM refresh over that
+// regenerated sheet still leave human work alone?".
+//
+// This pack is the FULL-SHAPE input to that rehearsal. It is structurally real
+// (19 extension columns, the same ownership split, the same two select
+// dictionaries a real 备料 sheet carries) and synthetically valued: the column
+// set is derived from the real customer sheet's SHAPE, but nothing tenant-
+// identifying is committed here. A real deployment still loads its pack as
+// deploy-time data from an uncommitted local file.
+//
+// "SHAPE, NOT CONTENT" IS LOAD-BEARING, AND IT HAS BEEN BROKEN ONCE.
+// This file shipped (#5074) carrying the 领料节点 and 交接工段 option sets as
+// they stand in the customer's live `config_info` table — their internal
+// primary keys paired with their own process names. That is a copy of the
+// customer's data, and the fact that it was pasted into a file whose own header
+// forbids it is why the rule is now MECHANISED rather than merely written down:
+//
+//   __tests__/customer-dictionary-leak-guard.test.cjs
+//
+// It refuses any committed run of `'<id> - <name>'` literals whose ids are not
+// a regular ladder — the fingerprint that separates a fixture someone authored
+// from a catalogue someone exported. Keep every dictionary below on a constant
+// step, and keep every NAME an obvious 示例* placeholder. A real vocabulary
+// belongs ONLY in the uncommitted deploy-time pack file.
+//
+// TOTAL SHAPE the rehearsal proves out:
+//   33 frozen canonical columns (stock-preparation-templates.cjs, untouched)
+// + 19 pack extension columns (below; 21 until 2026-09-15, when the owner retired
+//      the pack's 父组件图号 / 父组件名称 copy in favour of the template pair)
+// = 52 logical columns on plm_stock_preparation_main.
+//
+// Ownership follows the frozen template's own rule and nothing else:
+//   plm_system      — re-derived by every PLM refresh; a refresh OVERWRITES
+//                     these, so a human must never own one (11 columns here)
+//   human_preserved — filled by a person on the sheet; survives every PLM
+//                     refresh, because `preserveOnRefresh` is DERIVED from
+//                     ownership, never authored (8 columns here)
+//
+// Every id carries the reserved `ext_` prefix and is validated against the
+// frozen template catalog at normalize time, so none of these can collide with
+// a canonical column — today's or a future one's.
+
+// The system-id plumbing. Present on the sheet because a refresh needs it to
+// find the row again; noise to every human role, so all three role views below
+// band it out by name. Kept in ONE list so the three views cannot drift from
+// each other, and so "what counts as id noise" is a single reviewable edit.
+const ID_NOISE_FIELD_IDS = Object.freeze([
+  // canonical plumbing
+  'idempotencyKey',
+  'componentSourceId',
+  'parentSourceId',
+  'path',
+  'lastPlmRefreshRunId',
+  'lastPlmConflictSummary',
+  // legacy-system plumbing carried by the pack
+  'ext_legacyRowId',
+  'ext_parentLegacyId',
+  'ext_supplementId',
+])
+
+const FACTORY_A_REHEARSAL_PACK = {
+  packId: 'factory-a-rehearsal',
+  packVersion: 1,
+  label: 'Factory A stock preparation pack (full-shape rehearsal)',
+
+  extensionFields: [
+    // --- PLM-derived attributes: a refresh re-writes every one of these ------
+    // 父组件图号 / 父组件名称 are NOT declared here (owner ruling 2026-09-15): the frozen
+    // template's `parentComponentCode` / `parentComponentName` is the one holder of that
+    // pair, and the planner no longer derives a pack copy. A deployment whose OWN
+    // (uncommitted, deploy-time) pack still declares `ext_parentDrawingNo` /
+    // `ext_parentName` keeps those columns and their values untouched — nothing writes
+    // them any more, nothing reads them, nothing deletes them.
+    { id: 'ext_spec', label: '规格', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_nameAndSpec', label: '名称及规格', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_standard', label: '标准', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_designer', label: '设计者', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_createdSource', label: '创建来源', type: 'string', ownership: 'plm_system' },
+
+    // --- legacy-system identity: re-derived, never hand-edited ---------------
+    { id: 'ext_legacyRowId', label: '旧系统ID', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_parentLegacyId', label: '父级旧ID', type: 'string', ownership: 'plm_system' },
+    { id: 'ext_supplementId', label: '补充信息ID', type: 'string', ownership: 'plm_system' },
+
+    // --- BOM ordering: numeric, PLM-owned; the sheet's natural sort ----------
+    { id: 'ext_parentSortNo', label: '父组件排序号', type: 'number', ownership: 'plm_system' },
+    { id: 'ext_componentSortNo', label: '当前组件排序号', type: 'number', ownership: 'plm_system' },
+
+    // 物料ID. STRING for v1, deliberately NOT `select`.
+    //
+    // The real dictionary behind this column is 203 entries, and the option-set
+    // normalizer caps a select at 200 (MAX_OPTIONS_PER_FIELD,
+    // stock-preparation-option-sync.cjs) — so this column CANNOT be carried as
+    // an inline dictionary at all, at any pack version. The cap is not the
+    // problem to work around; it is the signal that a 203-entry vocabulary is
+    // reference data, not field metadata.
+    //
+    // CARRIER DECISION (open, tracked separately — see the rehearsal report):
+    // a dedicated material dictionary SHEET plus a link field, so the
+    // vocabulary is a table a customer can maintain, diff and search, instead
+    // of 203 option literals re-patched onto a field property on every install.
+    // v1 ships the string so the rehearsal is honest about today's shape; the
+    // link migration is additive over it.
+    { id: 'ext_materialCode', label: '物料ID', type: 'string', ownership: 'plm_system' },
+
+    // --- filled on the sheet by 备料/生产: must survive a PLM refresh --------
+    { id: 'ext_stockPrepDate', label: '备料日期', type: 'date', ownership: 'human_preserved' },
+    // Options are NOT authored on the field — they arrive through optionSets.
+    { id: 'ext_pickingNode', label: '领料节点', type: 'select', ownership: 'human_preserved' },
+    { id: 'ext_handoverSection', label: '交接工段', type: 'select', ownership: 'human_preserved' },
+    { id: 'ext_blankLength', label: '毛胚长度', type: 'number', ownership: 'human_preserved' },
+    { id: 'ext_blankWidth', label: '毛胚宽度', type: 'number', ownership: 'human_preserved' },
+    { id: 'ext_blankThickness', label: '毛胚厚度', type: 'number', ownership: 'human_preserved' },
+    { id: 'ext_blankQuantity', label: '毛胚数量', type: 'number', ownership: 'human_preserved' },
+    { id: 'ext_blankMass', label: '毛胚质量', type: 'number', ownership: 'human_preserved' },
+  ],
+
+  // Dictionary literals for every select on the sheet — the pack's own two AND
+  // the three frozen canonical selects.
+  //
+  // The canonical three are here because `normalizeCustomerPack` resolves an
+  // optionSet against the FULL catalog (template fields + pack fields) and only
+  // requires `type === 'select'`, and the installer keeps the TEMPLATE's own
+  // declared `optionSource` for them (resolveOptionSource) rather than
+  // re-labelling the column's dictionary origin. Leaving them out would have
+  // regenerated a landing sheet whose 材质 / 毛胚类型 / 备料状态 dropdowns are
+  // empty — which is not the full shape.
+  optionSets: [
+    {
+      // 领料节点 — the production node that draws the material. SIX SYNTHETIC
+      // entries in the "编号 - 名称" form the shop floor reads. The COUNT and
+      // the SHAPE are the properties the rehearsal exercises; the names are
+      // deliberately 示例* placeholders and the ids a regular 10-step ladder,
+      // so nothing here can be mistaken for — or reconstructed into — a real
+      // factory's process vocabulary. See customer-dictionary-leak-guard.
+      fieldId: 'ext_pickingNode',
+      options: [
+        { value: '10 - 示例节点一' },
+        { value: '20 - 示例节点二' },
+        { value: '30 - 示例节点三' },
+        { value: '40 - 示例节点四' },
+        { value: '50 - 示例节点五' },
+        { value: '60 - 示例节点六' },
+      ],
+    },
+    {
+      // 交接工段 — the section the part is handed over to. FIFTEEN synthetic
+      // entries, same construction as above.
+      //
+      // The LAST element is the structural edge case this fixture exists to
+      // carry: a legacy bucket whose id sits INSIDE the live range (140, between
+      // 130 and 150) while its POSITION is the tail of the array. A real 备料
+      // sheet grows exactly that shape — the migration bucket is appended after
+      // the live vocabulary, so the array is not sorted by id — and the pack
+      // pipeline must not quietly reorder it: `normalizeOptionSet` sorts by the
+      // optional `order` key, no option here declares one, and V8's stable sort
+      // therefore has to preserve authored order. Renumber this into a sorted
+      // ladder and that guarantee stops being tested.
+      fieldId: 'ext_handoverSection',
+      options: [
+        { value: '10 - 示例工段一' },
+        { value: '20 - 示例工段二' },
+        { value: '30 - 示例工段三' },
+        { value: '40 - 示例工段四' },
+        { value: '50 - 示例工段五' },
+        { value: '60 - 示例工段六' },
+        { value: '70 - 示例工段七' },
+        { value: '80 - 示例工段八' },
+        { value: '90 - 示例工段九' },
+        { value: '100 - 示例工段十' },
+        { value: '110 - 示例工段十一' },
+        { value: '120 - 示例工段十二' },
+        { value: '130 - 示例工段十三' },
+        { value: '150 - 示例工段十五' },
+        { value: '140 - 示例历史桶' },
+      ],
+    },
+    {
+      // Canonical select — ordinary published pressure-vessel grades.
+      fieldId: 'materialType',
+      options: [
+        { value: '10 - Q235B' },
+        { value: '20 - Q245R' },
+        { value: '30 - Q345R' },
+        { value: '40 - S30408' },
+        { value: '50 - S31603' },
+        { value: '60 - 16MnDR' },
+      ],
+    },
+    {
+      // Canonical select — the blank forms a 备料 sheet actually orders in.
+      fieldId: 'blankType',
+      options: [
+        { value: '10 - 板材' },
+        { value: '20 - 管材' },
+        { value: '30 - 棒材' },
+        { value: '40 - 锻件' },
+        { value: '50 - 型材' },
+        { value: '60 - 外购件' },
+      ],
+    },
+    {
+      // Canonical select — the status band 生产/采购/仓库 all read.
+      fieldId: 'stockPreparationStatus',
+      options: [
+        { value: '10 - 待备料' },
+        { value: '20 - 已下单' },
+        { value: '30 - 已到货' },
+        { value: '40 - 已领用' },
+        { value: '50 - 暂缓' },
+      ],
+    },
+  ],
+
+  // Role bands. Column hiding ONLY — a view never filters rows out of anyone's
+  // reach and never changes what anyone is allowed to write.
+  //
+  // All three use `hideOwnerships: []` and hide by NAME. Banding a whole
+  // ownership out would be the wrong tool on this sheet: every role here both
+  // reads PLM columns and writes human ones, so an ownership band would always
+  // hide either the row's identity or the role's own work surface. Ownership is
+  // the REFRESH boundary; it is not the visibility boundary.
+  roleViews: [
+    {
+      viewId: 'production',
+      label: '生产备料视图',
+      // Production FILLS 备料日期 / 领料节点 / 交接工段 / 毛胚*, so the human
+      // band must stay visible. Only the id plumbing is noise here.
+      hideOwnerships: [],
+      hideFieldIds: [...ID_NOISE_FIELD_IDS],
+    },
+    {
+      viewId: 'procurement',
+      label: '采购跟进视图',
+      // Procurement works the demand/lead-time/reply columns and needs the
+      // material identity to place an order. Shop-floor geometry (毛胚 sizing,
+      // 领料节点, 交接工段) and BOM ordering are somebody else's columns —
+      // hidden so the follow-up view stays narrow enough to scan.
+      hideOwnerships: [],
+      hideFieldIds: [
+        ...ID_NOISE_FIELD_IDS,
+        'depth',
+        'rawQuantity',
+        'warehouseConfirmation',
+        'ext_parentSortNo',
+        'ext_componentSortNo',
+        'ext_pickingNode',
+        'ext_handoverSection',
+        'ext_blankLength',
+        'ext_blankWidth',
+        'ext_blankThickness',
+        'ext_blankMass',
+      ],
+    },
+    {
+      viewId: 'warehouse',
+      label: '仓库跟进视图',
+      // The warehouse confirms receipt and issues material: it needs identity,
+      // quantity, status, dates and the handover/picking nodes. Design metadata
+      // and the procurement conversation are not its columns.
+      hideOwnerships: [],
+      hideFieldIds: [
+        ...ID_NOISE_FIELD_IDS,
+        'depth',
+        'rawQuantity',
+        'leadTimeDays',
+        'procurementReply',
+        'ext_designer',
+        'ext_createdSource',
+        'ext_standard',
+        'ext_parentSortNo',
+        'ext_componentSortNo',
+      ],
+    },
+  ],
+}
+
+module.exports = {
+  ID_NOISE_FIELD_IDS,
+  FACTORY_A_REHEARSAL_PACK,
+}

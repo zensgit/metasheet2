@@ -46,6 +46,10 @@ describe('attendance report field catalog multitable foundation', () => {
     const fieldIds = Object.fromEntries(
       Object.values(helpers.ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS).map((fieldId) => [fieldId, `fld_${fieldId}`]),
     )
+    const selectFields = helpers.getAttendanceReportFieldCatalogDescriptor().fields.filter(
+      (field: { type: string }) => field.type === 'select',
+    )
+    const logger = { warn: vi.fn() }
     const context = {
       api: {
         multitable: {
@@ -75,18 +79,31 @@ describe('attendance report field catalog multitable foundation', () => {
           },
           records: {
             queryRecords: vi.fn().mockResolvedValue([]),
-            createRecord: vi.fn().mockImplementation(async (input) => ({
-              id: 'rec-1',
-              sheetId: input.sheetId,
-              version: 1,
-              data: input.data,
-            })),
+            createRecord: vi.fn().mockImplementation(async (input) => {
+              for (const field of selectFields) {
+                const value = input.data[fieldIds[field.id]]
+                if (value != null && value !== '' && !field.options.includes(value)) {
+                  throw new Error('Invalid select option')
+                }
+              }
+              return { id: 'rec-1', sheetId: input.sheetId, version: 1, data: input.data }
+            }),
           },
         },
       },
     }
 
-    const result = await helpers.ensureAttendanceReportFieldCatalog(context, 'org-a', { warn: vi.fn() })
+    const result = await helpers.ensureAttendanceReportFieldCatalog(context, 'org-a', logger)
+
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(result.seeded).toBe(helpers.cloneAttendanceReportFieldDefinitions().length)
+    const hireDate = context.api.multitable.records.createRecord.mock.calls
+      .map(([input]) => input.data)
+      .find(data => data.fld_field_code === 'hire_date')
+    expect(hireDate).toMatchObject({ fld_unit: 'text', fld_internal_key: 'user.hireDate' })
+    const hireDateDefinition = helpers.cloneAttendanceReportFieldDefinitions()
+      .find((field: { code: string }) => field.code === 'hire_date')
+    expect(helpers.mapReportFieldToMultitableType(hireDateDefinition)).toBe('date')
 
     expect(result.projectId).toBe('org-a:attendance')
     expect(result.sheetId).toBe('sheet-1')
@@ -673,6 +690,33 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_result_out_3')).toBe('')
   })
 
+  it('maps time-only overnight multi-punch fields onto D and D+1', () => {
+    const sourceValues: Record<string, unknown> = {
+      clockIn2: '23:00',
+      clockOut2: '05:30',
+      clockIn3: '23:30',
+      clockOut3: '06:00',
+    }
+    const punchMeta = helpers.buildAttendanceImportMultiPunchMeta({
+      valueFor: (key: string) => sourceValues[key],
+      workDate: '2026-07-24',
+      rule: {
+        timezone: 'UTC',
+        workStartTime: '22:00',
+        workEndTime: '06:00',
+        isOvernight: true,
+      },
+      clearMissing: true,
+    })
+
+    expect(punchMeta).toMatchObject({
+      clockIn2: '2026-07-24T23:00:00.000Z',
+      clockOut2: '2026-07-25T05:30:00.000Z',
+      clockIn3: '2026-07-24T23:30:00.000Z',
+      clockOut3: '2026-07-25T06:00:00.000Z',
+    })
+  })
+
   it('generates dynamic leave/overtime subtype fields with collision-safe stable codes', () => {
     const used = new Set(['leave_type_annual_duration'])
     const leave = helpers.buildAttendanceLeaveSubtypeReportFieldDefinitions([
@@ -835,6 +879,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(ids).toEqual([
       'row_key', 'org_id', 'user_id', 'employee_name', 'department',
       'attendance_group', 'work_date', 'field_fingerprint', 'source_fingerprint', 'synced_at',
+      'cleaning_requested', 'cleaning_reason',
     ])
     // provisioning field-type contract: string/date/dateTime only (no "text")
     const typeByCode = Object.fromEntries(d1.fields.map((f: { id: string, type: string }) => [f.id, f.type]))
@@ -1100,8 +1145,9 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(() => helpers.buildAttendanceRecordReportExportItem(exportRow, exportFields)).not.toThrow()
 
     // store-backed records mock (Map by physical row_key value) for upsert/skip/duplicate
-    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    const store: Array<{ id: string; version: number; data: Record<string, unknown> }> = []
     let seq = 0
+    let forceVersionConflict = false
     const rowKeyFid = 'fld_row_key'
     const records = {
       queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
@@ -1109,13 +1155,24 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(r => r.data[rowKeyFid] === want)
       },
       createRecord: async ({ data }: { data: Record<string, unknown> }) => {
-        const rec = { id: `rec-${++seq}`, data: { ...data } }
+        const rec = { id: `rec-${++seq}`, version: 1, data: { ...data } }
         store.push(rec)
         return rec
       },
-      patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const rec = store.find(r => r.id === recordId)
-        if (rec) rec.data = { ...rec.data, ...changes }
+        if (rec && rec.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec && forceVersionConflict) {
+          forceVersionConflict = false
+          rec.version += 1
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec) {
+          rec.data = { ...rec.data, ...changes }
+          rec.version += 1
+        }
         return rec
       },
     }
@@ -1130,16 +1187,21 @@ describe('attendance report field catalog multitable foundation', () => {
       // NO findObjectSheet → catalog falls back to deterministic built-in field set
     }
     const attendanceRows = [
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
+      { canonical_record_id: 'attendance-1', user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
+      { canonical_record_id: 'attendance-2', user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
     ]
     const db = {
       query: async (sql: string) => {
-        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        if (/FROM attendance_current_records ar/.test(sql)) return attendanceRows
         return [] // system_configs / leave_types / overtime_rules / approved → empty (tolerated)
       },
     }
-    const context = { api: { multitable: { provisioning, records }, database: db } }
+    const refreshAnchor = vi.fn().mockResolvedValue(undefined)
+    const withholdAnchors = vi.fn().mockResolvedValue(undefined)
+    const context = {
+      api: { multitable: { provisioning, records }, database: db },
+      services: { attendanceMultitableCleaningAuthority: { refresh: refreshAnchor, withhold: withholdAnchors } },
+    }
 
     // sync #1 → all created
     const r1 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
@@ -1150,6 +1212,11 @@ describe('attendance report field catalog multitable foundation', () => {
       sheetId: 'sheet_rr',
     })
     expect(store.length).toBe(2)
+    expect(refreshAnchor).toHaveBeenCalledTimes(2)
+    expect(refreshAnchor).toHaveBeenCalledWith(expect.objectContaining({
+      projectionRecordId: 'rec-1',
+      canonicalRecordId: 'attendance-1',
+    }))
     // Fix-1 integration: the descriptor handed to ensureObject (value-columns ensure) must
     // carry work_date exactly once and still as type 'date' (no string overwrite collision)
     const valueEnsure = ensureObjectDescriptors[ensureObjectDescriptors.length - 1]
@@ -1166,25 +1233,53 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_hire_date).toBe('2026-05-29')
     expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
     expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')
+    expect(store[0].data).not.toHaveProperty('fld_cleaning_requested')
+    expect(store[0].data).not.toHaveProperty('fld_cleaning_reason')
     expect(Object.keys(store[0].data).some(key => key.includes('__source'))).toBe(false)
 
     // sync #2 same data → all skipped (source+field fingerprint 双等)
     const r2 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r2).toMatchObject({ synced: 2, created: 0, skipped: 2, patched: 0 })
+    expect(refreshAnchor).toHaveBeenCalledTimes(4)
     expect(store.length).toBe(2)
+
+    // Same fingerprints are not proof of content integrity: repair only the managed projection map.
+    store[0].data.fld_department = 'tampered-report-value'
+    store[0].data.fld_custom_note = { exact: 'preserve-me' }
+    const r3 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r3).toMatchObject({ synced: 2, created: 0, repaired: 1, patched: 1, skipped: 1 })
+    expect(store[0].data.fld_department).toBe('Assembly')
+    expect(store[0].data.fld_custom_note).toEqual({ exact: 'preserve-me' })
+    expect(store[0].version).toBe(2)
+
+    store[0].data.fld_department = 'concurrent-drift-remains-retryable'
+    forceVersionConflict = true
+    const conflictLogger = { warn: vi.fn() }
+    const conflict = await helpers.syncAttendanceReportRecords(context, db, 'org-1', conflictLogger, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(conflict).toMatchObject({ patched: 0, repaired: 0, conflicts: 1, failed: 1, skipped: 1 })
+    expect(store[0].data.fld_department).toBe('concurrent-drift-remains-retryable')
+    expect(conflictLogger.warn).toHaveBeenCalledWith(
+      'attendance report record sync version conflict',
+      { code: 'VERSION_CONFLICT' },
+    )
 
     // skip-boundary: source unchanged but field_fingerprint stale → must patch, not skip
     store[0].data['fld_field_fingerprint'] = 'STALE-FIELD-FP'
-    const r3 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
-    expect(r3.patched).toBe(1)
-    expect(r3.skipped).toBe(1)
+    const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r4.patched).toBe(1)
+    expect(r4.repaired).toBe(0)
+    expect(r4.skipped).toBe(1)
     expect(store[0].data['fld_field_fingerprint']).not.toBe('STALE-FIELD-FP') // rewritten
 
-    // duplicate row_key fuse: inject a 2nd record same row_key → patch first, count duplicate
-    store.push({ id: 'rec-dup', data: { ...store[0].data } })
-    const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
-    expect(r4.duplicateRowKeys).toBeGreaterThanOrEqual(1)
+    // Duplicate rows with drift must all retain their content and lose authority.
+    store.push({ id: 'rec-dup', version: 1, data: { ...store[0].data } })
+    store[0].data['fld_field_fingerprint'] = 'DUPLICATE-DRIFT'
+    const duplicateBefore = JSON.stringify([store[0], store[2]])
+    const r5 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r5.duplicateRowKeys).toBeGreaterThanOrEqual(1)
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
+    expect(withholdAnchors).toHaveBeenCalledWith(expect.arrayContaining(['rec-1', 'rec-dup']))
+    expect(JSON.stringify([store[0], store[2]])).toBe(duplicateBefore)
   })
 
   it('report-records sync: bulk explicit users dedupe and aggregate per-user results', async () => {
@@ -1193,7 +1288,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.normalizeAttendanceReportRecordsSyncPage('2', '500'))
       .toMatchObject({ page: 2, pageSize: 100, offset: 100 })
 
-    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    const store: Array<{ id: string; version: number; data: Record<string, unknown> }> = []
     let seq = 0
     const rowKeyFid = 'fld_row_key'
     const records = {
@@ -1229,7 +1324,7 @@ describe('attendance report field catalog multitable foundation', () => {
     }
     const db = {
       query: async (sql: string, params?: unknown[]) => {
-        if (/FROM attendance_records ar/.test(sql)) return rowsByUser[String(params?.[0])] ?? []
+        if (/FROM attendance_current_records ar/.test(sql)) return rowsByUser[String(params?.[0])] ?? []
         return []
       },
     }
@@ -1351,6 +1446,7 @@ describe('attendance report field catalog multitable foundation', () => {
 
     const store = [{
       id: 'rec-existing',
+      version: 1,
       data: {
         fld_row_key: 'org-1:u-1:2026-05-13',
         fld_field_fingerprint: 'STALE-FIELD',
@@ -1365,9 +1461,15 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(r => r.data.fld_row_key === want)
       },
       createRecord: vi.fn(),
-      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: vi.fn(async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const rec = store.find(r => r.id === recordId)
-        if (rec) rec.data = { ...rec.data, ...changes }
+        if (rec && rec.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (rec) {
+          rec.data = { ...rec.data, ...changes }
+          rec.version += 1
+        }
         return rec
       }),
     }
@@ -1390,7 +1492,7 @@ describe('attendance report field catalog multitable foundation', () => {
     ]
     const db = {
       query: async (sql: string) => {
-        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        if (/FROM attendance_current_records ar/.test(sql)) return attendanceRows
         return []
       },
     }
@@ -1593,13 +1695,19 @@ describe('attendance report field catalog multitable foundation', () => {
         return store.filter(record => record.data.fld_row_key === want)
       }),
       createRecord: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        const record = { id: `rec-${++seq}`, data: { ...data } }
+        const record = { id: `rec-${++seq}`, version: 1, data: { ...data } }
         store.push(record)
         return record
       }),
-      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+      patchRecord: vi.fn(async ({ recordId, changes, expectedVersion }: { recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
         const record = store.find(item => item.id === recordId)
-        if (record) record.data = { ...record.data, ...changes }
+        if (record && record.version !== expectedVersion) {
+          throw Object.assign(new Error('Record version conflict'), { code: 'VERSION_CONFLICT' })
+        }
+        if (record) {
+          record.data = { ...record.data, ...changes }
+          record.version += 1
+        }
         return record
       }),
     }
@@ -1627,7 +1735,7 @@ describe('attendance report field catalog multitable foundation', () => {
           return [{ id: 'leave-annual', code: 'annual', name: '年假', is_active: true }]
         }
         if (/FROM attendance_overtime_rules/.test(sql)) return []
-        if (/FROM attendance_records/.test(sql) && /AS total_minutes/.test(sql)) {
+        if (/FROM attendance_current_records/.test(sql) && /AS total_minutes/.test(sql)) {
           return [{
             total_days: 2,
             total_minutes: 960,
@@ -1708,6 +1816,21 @@ describe('attendance report field catalog multitable foundation', () => {
     )
     expect(second).toMatchObject({ synced: 1, created: 0, patched: 0, skipped: 1 })
 
+    store[0].data.fld_total_minutes = 999
+    store[0].data.fld_custom_note = ['preserve', 1]
+    const repaired = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(repaired).toMatchObject({ patched: 1, repaired: 1, skipped: 0, conflicts: 0 })
+    expect(records.patchRecord.mock.calls.at(-1)?.[0].expectedVersion).toBe(1)
+    expect(store[0].data.fld_total_minutes).toBe(960)
+    expect(store[0].data.fld_custom_note).toEqual(['preserve', 1])
+    expect(store[0].version).toBe(2)
+
     store[0].data.fld_field_fingerprint = 'STALE-FIELD'
     store[0].data.fld_period_score = 99
     const third = await helpers.syncAttendanceReportPeriodSummary(
@@ -1723,7 +1846,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_period_score).toBeNull()
     expect(store[0].data.fld_field_fingerprint).not.toBe('STALE-FIELD')
 
-    store.push({ id: 'rec-duplicate', data: { ...store[0].data } })
+    store.push({ id: 'rec-duplicate', version: 1, data: { ...store[0].data } })
     const fourth = await helpers.syncAttendanceReportPeriodSummary(
       context,
       db,
@@ -1763,7 +1886,7 @@ describe('attendance report field catalog multitable foundation', () => {
     const db = {
       query: async (sql: string) => {
         if (/FROM attendance_leave_types/.test(sql) || /FROM attendance_overtime_rules/.test(sql)) return []
-        if (/FROM attendance_records/.test(sql) && /AS total_minutes/.test(sql)) {
+        if (/FROM attendance_current_records/.test(sql) && /AS total_minutes/.test(sql)) {
           return [{
             total_days: 1,
             total_minutes: 480,

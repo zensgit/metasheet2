@@ -6,7 +6,11 @@
  * Leak policy under test: invalid E-2/E-5/E-4 values echo only `<invalid>`;
  * E-3 is presence-only; no env VALUE ever appears in the serialized report.
  */
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { afterAll, describe, expect, it } from 'vitest'
 import {
   AI_ACCOUNT_DAILY_USD_CAP_ENV,
   AI_API_KEY_ENV,
@@ -14,6 +18,7 @@ import {
   AI_CONFIRM_LIVE_REQUESTS_ENV,
   AI_DEFAULT_MODELS,
   AI_ENABLED_ENV,
+  AI_LOCAL_PROVIDER,
   AI_MAX_OUTPUT_TOKENS_ENV,
   AI_MODEL_ENV,
   AI_PROVIDER_ENV,
@@ -28,6 +33,7 @@ import {
   resolveAiProviderReadiness,
   type AiProviderReadinessStatus,
 } from '../../src/services/ai-provider-readiness'
+import { AI_ROUTING_POLICY_PATH_ENV } from '../../src/services/ai-routing-policy'
 
 const READY_ENV = {
   [AI_ENABLED_ENV]: '1',
@@ -252,5 +258,201 @@ describe('resolveAiProviderReadiness (A1)', () => {
       const report = resolveAiProviderReadiness(env)
       expect(AI_EMITTED_STATUSES).toContain(report.status)
     }
+  })
+})
+
+/**
+ * LOCAL LANE (local-openai-compat) — the readiness contract can finally EXPRESS
+ * the deployment the #5419 boundary header promises (self-hosted vLLM/Ollama):
+ *   - MULTITABLE_AI_BASE_URL becomes REQUIRED and its host must pass the routing
+ *     policy's OWN positive local proof (isProvablyLocalHost — one source of
+ *     truth, no readiness-side approximation);
+ *   - MULTITABLE_AI_API_KEY becomes OPTIONAL (many local servers are keyless);
+ *   - MULTITABLE_AI_MODEL is operator-named (no cloud allowlist) but must be
+ *     non-empty and not secret-shaped (it rides into the report).
+ * Cloud posture is UNCHANGED — witnessed below by the cloud-regression cases.
+ */
+describe('local provider readiness (local-openai-compat)', () => {
+  const policyScratch = mkdtempSync(join(tmpdir(), 'ai-readiness-policy-'))
+  afterAll(() => rmSync(policyScratch, { recursive: true, force: true }))
+  let policyCounter = 0
+  function policyFile(json: unknown): string {
+    const path = join(policyScratch, `policy-${policyCounter++}.json`)
+    writeFileSync(path, typeof json === 'string' ? json : JSON.stringify(json), 'utf8')
+    return path
+  }
+
+  const LOCAL_BASE = {
+    [AI_ENABLED_ENV]: '1',
+    [AI_PROVIDER_ENV]: AI_LOCAL_PROVIDER,
+  }
+
+  it('RED (a): provably-local base URL + NO api key + operator-named model → ready', () => {
+    for (const [url, model] of [
+      ['http://127.0.0.1:11434', 'qwen2.5:14b-instruct'], // ollama loopback
+      ['http://vllm.internal:8000', 'Qwen/Qwen2.5-72B-Instruct'], // .internal suffix
+      ['http://10.20.30.40:8000/v1-compat', 'deepseek-r1:32b'], // RFC1918
+      ['http://localhost:8000', 'llama3.1:70b-instruct-q4_K_M'],
+    ] as const) {
+      const report = resolveAiProviderReadiness({
+        ...LOCAL_BASE,
+        [AI_BASE_URL_ENV]: url,
+        [AI_MODEL_ENV]: model,
+      })
+      expect(report.status, `${url} ${model}`).toBe('ready')
+      expect(report.ok).toBe(true)
+      expect(report.provider).toBe(AI_LOCAL_PROVIDER)
+      expect(report.model).toBe(model)
+    }
+  })
+
+  it('RED (a2): the api key is OPTIONAL, not forbidden — setting one stays ready', () => {
+    const report = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+      [AI_API_KEY_ENV]: 'local-server-token',
+    })
+    expect(report.status).toBe('ready')
+  })
+
+  it('RED (b): a PUBLIC host is blocked with the locality reason — aliasing a cloud endpoint as local is unexpressible', () => {
+    for (const url of [
+      'https://api.example.com/v1',
+      'https://api.deepseek.com',
+      'https://dashscope.aliyuncs.com',
+      'http://8.8.8.8:8000', // public IP literal
+    ]) {
+      const report = resolveAiProviderReadiness({
+        ...LOCAL_BASE,
+        [AI_BASE_URL_ENV]: url,
+        [AI_MODEL_ENV]: 'qwen2.5:14b',
+      })
+      expect(report.status, url).toBe('blocked')
+      const joined = report.messages.join('\n')
+      expect(joined).toContain('provably local')
+      expect(joined).toContain(AI_LOCAL_PROVIDER)
+      // Values-free: the host/URL is deployment topology and is never echoed.
+      expect(JSON.stringify(report)).not.toContain('api.example.com')
+      expect(JSON.stringify(report)).not.toContain('deepseek')
+      expect(JSON.stringify(report)).not.toContain('8.8.8.8')
+    }
+  })
+
+  it('REFUTATION: qwen.internal.corp LOOKS internal but is NOT per the suffix rules (.internal.corp ≠ .internal) → blocked', () => {
+    // Mirrors the real mistake the positive-proof correction caught: "internal"
+    // appearing INSIDE a public DNS name proves nothing — only the exact
+    // definitionally-private suffixes (or the policy's localHosts) count.
+    const report = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_BASE_URL_ENV]: 'https://qwen.internal.corp:8443',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(report.status).toBe('blocked')
+    expect(report.messages.join('\n')).toContain('provably local')
+    expect(JSON.stringify(report)).not.toContain('qwen.internal.corp')
+  })
+
+  it('RED (c): missing base URL → blocked naming the env (the local lane has no default endpoint)', () => {
+    const report = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(report.status).toBe('blocked')
+    expect(report.messages.join('\n')).toContain(AI_BASE_URL_ENV)
+  })
+
+  it('RED (c2): missing / blank model → blocked (free-form does NOT mean optional; no local default exists)', () => {
+    for (const env of [
+      { ...LOCAL_BASE, [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434' },
+      { ...LOCAL_BASE, [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434', [AI_MODEL_ENV]: '   ' },
+    ]) {
+      const report = resolveAiProviderReadiness(env)
+      expect(report.status).toBe('blocked')
+      expect(report.messages.join('\n')).toContain(AI_MODEL_ENV)
+      expect(report.model).toBeUndefined()
+    }
+  })
+
+  it('a secret-shaped or malformed local model value is blocked and never echoed (it would ride into the report)', () => {
+    const skShaped = `sk-${'localleak'.repeat(3)}`
+    for (const bad of [skShaped, 'has spaces in it', 'user:p@ss-model', 'x'.repeat(201)]) {
+      const report = resolveAiProviderReadiness({
+        ...LOCAL_BASE,
+        [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434',
+        [AI_MODEL_ENV]: bad,
+      })
+      expect(report.status, bad.slice(0, 24)).toBe('blocked')
+      expect(JSON.stringify(report)).not.toContain(skShaped)
+      expect(report.messages.join('\n')).toContain(`${AI_MODEL_ENV}=<invalid>`)
+    }
+  })
+
+  it('the routing policy localHosts escape hatch works at readiness too (one locality truth, both layers agree)', () => {
+    const path = policyFile({
+      policyId: 'onprem',
+      policyVersion: 1,
+      activeProvider: { tier: 'local' },
+      localHosts: ['llm.corp.example.com'],
+    })
+    const ready = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_ROUTING_POLICY_PATH_ENV]: path,
+      [AI_BASE_URL_ENV]: 'https://llm.corp.example.com/v1',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(ready.status).toBe('ready')
+    // A DIFFERENT public host is still blocked — the allowlist is exact-match.
+    const blocked = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_ROUTING_POLICY_PATH_ENV]: path,
+      [AI_BASE_URL_ENV]: 'https://api.deepseek.com/v1',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(blocked.status).toBe('blocked')
+  })
+
+  it('a BROKEN routing-policy file fails CLOSED at readiness (never silently degrades to empty localHosts)', () => {
+    const report = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_ROUTING_POLICY_PATH_ENV]: join(policyScratch, 'does-not-exist.json'),
+      [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(report.status).toBe('blocked')
+    expect(report.messages.join('\n')).toContain(AI_ROUTING_POLICY_PATH_ENV)
+  })
+
+  it('the local report states ITS env contract: BASE_URL required, API_KEY optional', () => {
+    const report = resolveAiProviderReadiness({
+      ...LOCAL_BASE,
+      [AI_BASE_URL_ENV]: 'http://127.0.0.1:11434',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(report.requiredEnv).toContain(AI_BASE_URL_ENV)
+    expect(report.requiredEnv).not.toContain(AI_API_KEY_ENV)
+    expect(report.optionalEnv).toContain(AI_API_KEY_ENV)
+  })
+
+  it('RED (d): CLOUD posture unchanged — key still required, unlisted model still blocked, no locality demand', () => {
+    // openai without a key: still blocked on key presence.
+    const keyless = resolveAiProviderReadiness({
+      [AI_ENABLED_ENV]: '1',
+      [AI_PROVIDER_ENV]: 'openai',
+      [AI_MODEL_ENV]: 'gpt-4o-mini',
+    })
+    expect(keyless.status).toBe('blocked')
+    expect(keyless.messages.join('\n')).toContain(AI_API_KEY_ENV)
+    // openai with a free-form (local-style) model: still blocked by the allowlist.
+    const freeform = resolveAiProviderReadiness({
+      [AI_ENABLED_ENV]: '1',
+      [AI_PROVIDER_ENV]: 'openai',
+      [AI_API_KEY_ENV]: 'test-key-placeholder',
+      [AI_MODEL_ENV]: 'qwen2.5:14b',
+    })
+    expect(freeform.status).toBe('blocked')
+    expect(freeform.messages.join('\n')).toContain(`${AI_MODEL_ENV}=<invalid>`)
+    // and the ready cloud shape from READY_ENV still resolves ready (pinned above in A1-T4).
+    expect(resolveAiProviderReadiness(READY_ENV).status).toBe('ready')
   })
 })

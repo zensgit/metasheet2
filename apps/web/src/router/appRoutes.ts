@@ -1,5 +1,6 @@
 import type { RouteRecordRaw } from 'vue-router'
 import { AppRouteNames, ROUTE_PATHS } from './types'
+import { ATTENDANCE_RECORDS_PATH, ATTENDANCE_RECORDS_REDIRECT_TARGET } from './attendanceRecordsRedirect'
 import { buildMultitableRoute, buildPublicMultitableFormRoute } from './multitableRoute'
 import KanbanView from '../views/KanbanView.vue'
 import CalendarView from '../views/CalendarView.vue'
@@ -14,10 +15,17 @@ import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
 import PlatformAppLauncherView from '../views/PlatformAppLauncherView.vue'
 import PlatformAppShellView from '../views/PlatformAppShellView.vue'
-import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
 import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
+import MyAppsLandingView from '../views/MyAppsLandingView.vue'
 import LoginView from '../views/LoginView.vue'
+
+// Route-level code split: AttendanceExperienceView chains in the attendance
+// monolith (~29k lines of view + per-tab data loading). A static import pulled
+// it into the entry chunk, so every surface — including multitable sheet
+// opens — downloaded and parsed it. Lazy-load it like the other heavy routes;
+// attendance users pay one chunk fetch on first navigation instead.
+const AttendanceExperienceView = () => import('../views/attendance/AttendanceExperienceView.vue')
 
 export const appRoutes: RouteRecordRaw[] = [
   {
@@ -25,6 +33,17 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'home',
     component: HomeRedirect,
     meta: { title: 'Home', hideNavbar: true, requiresAuth: true }
+  },
+  {
+    // #5392: the post-login / unknown-deep-link default landing page (see
+    // featureFlags.ts#resolveHomePath and the '/:pathMatch(.*)*' catch-all below, which both
+    // route here now instead of '/attendance'). App cards from the platform apps catalog +
+    // 最近打开的 Base — deliberately NOT a nav-IA change: no top-nav entry points here, it is
+    // reached only as the default/fallback destination.
+    path: '/home',
+    name: 'my-apps-landing',
+    component: MyAppsLandingView,
+    meta: { title: 'My Apps', titleZh: '我的应用', requiresAuth: true }
   },
   {
     path: ROUTE_PATHS.LOGIN,
@@ -85,6 +104,43 @@ export const appRoutes: RouteRecordRaw[] = [
     component: AttendanceExperienceView,
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' }
   },
+  // #4711 R0 (design lock docs/development/attendance-4711-group-context-routes-design-lock-20260801.md,
+  // OD-4711-1/-2): canonical group-context routes. Permission-neutral: requiresAuth plus the
+  // attendanceAdmin feature gate (design lock §3.2 — v1 audience is attendance administrators),
+  // with NO permissions/roles/requiresAdmin additions. R0 mounts NO group-scoped content and
+  // loads NO group data: the attendance shell hosts the URL until the R1 route-context host
+  // lands. The step union is closed by these three literal paths — unknown steps fall through
+  // to the not-found catch-all. Closed step/surface/returnTo parsing lives in
+  // src/router/attendanceGroupContextRoute.ts; attendance-focus reachability in
+  // src/router/guardPolicy.ts (isAttendanceFocusAllowedPath).
+  {
+    path: '/attendance/admin/groups/:groupId/schedule',
+    name: 'attendance-admin-group-schedule',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Schedule', titleZh: '班组排班', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
+  {
+    path: '/attendance/admin/groups/:groupId/calendar',
+    name: 'attendance-admin-group-calendar',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Calendar', titleZh: '班组日历', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
+  {
+    path: '/attendance/admin/groups/:groupId/rules',
+    name: 'attendance-admin-group-rules',
+    component: AttendanceExperienceView,
+    meta: { title: 'Group Rules', titleZh: '班组规则', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+  },
+  {
+    // Self-service tail UX fix: /attendance/records had no route (fell through to the
+    // catch-all -> '/'). The Reports tab inside AttendanceExperienceView.vue is reached
+    // via `tab=reports` (see normalizeTab / availableTabs there) — redirect there instead
+    // of dropping the deep link on the floor. Target lives in attendanceRecordsRedirect.ts
+    // (single source of truth shared with the behavior spec — GATE-5047 P3-1).
+    path: ATTENDANCE_RECORDS_PATH,
+    name: 'attendance-records-redirect',
+    redirect: ATTENDANCE_RECORDS_REDIRECT_TARGET
+  },
   {
     path: ROUTE_PATHS.MULTITABLE_COMMENT_INBOX,
     name: AppRouteNames.MULTITABLE_COMMENT_INBOX,
@@ -128,9 +184,30 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Template Details', titleZh: '模板详情', requiresAuth: true },
   },
   {
+    // 整合切片 (2026-09-09): the standalone 外接数据源 page was folded into 数据工厂's 连接管理
+    // section, so this path is now a REDIRECT that keeps every existing bookmark, doc link and
+    // in-app hint working. The hash is the workbench's own section anchor — the view resolves it
+    // via resolveWorkbenchLandingGroupId() and scrolls there (views/integrationWorkbenchLanding.ts).
+    //
+    // The target carries the workbench's `integration:write` gate, which the old page did not.
+    // That is a TIGHTENING and deliberate. Scoped to what is actually true: no principal loses a
+    // NAVIGATION entry point — the shell's 外接数据源 nav link was itself gated on
+    // integration:write (App.vue's `canUseIntegration`), so everyone who could SEE that link can
+    // still open the target. The other entry points do change for a principal without
+    // integration:write, and this comment names them rather than claiming they do not exist:
+    //   * a bookmark / printed runbook on '/data-sources' now meets the workbench guard and is
+    //     bounced to the home path instead of rendering the page;
+    //   * 备料向导①'s link is exactly that case — 交付指南 lists 「开始使用」 as a surface a
+    //     `stock-prep:admin` holder sees (customer-delivery-guide-20260904.md 的可见项表格; the
+    //     harness's `stockadmin` actor holds stock-prep:admin and nothing else), and that holder
+    //     has no integration:write. StockPreparationGettingStarted.vue therefore renders that
+    //     link ONLY when the host says the principal can open 数据工厂, and a plain-text
+    //     「联系实施」 sentence otherwise — a bounce is not an entry point.
+    // The target path also sits under the '/integrations' prefix that PLM_WORKBENCH_ALLOWED_PREFIXES
+    // already allows (router/guardPolicy.ts), so PLM-focused orgs are not bounced by the fold.
     path: '/data-sources',
     name: 'data-sources',
-    component: () => import('../views/DataSourcesView.vue'),
+    redirect: { path: '/integrations/workbench', hash: '#int-sec-connection' },
     meta: { title: 'Data Sources', titleZh: '外接数据源', requiresAuth: true },
   },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
@@ -253,14 +330,25 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
-    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
-    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
-    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
-    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    // Stock Preparation (#3751; narrowed by the O1' ruling of 2026-08-29 to THE CONFIRMATION-QUEUE
+    // WORKBENCH). Deliberately a SEPARATE routed shell (not crammed into the admin
+    // IntegrationWorkbenchView).
+    //
+    // O2 / R-11 — the gate is the workbench's own code, not integration:write.
+    //
+    // It used to reuse the Data Factory's integration:write gate, and that was the live
+    // front/back misalignment this route change closes: every endpoint the page reads is gated
+    // server-side ABOVE integration:write, so an integration:write holder could reach the page and
+    // then 403 on everything in it — "visible but not actionable", exactly what R-11 forbids.
+    //
+    // stock-prep:read is STRICTLY NARROWER than what stood here: R-11's mapping is zero-automatic, so
+    // integration:write does not become a stock-prep code and no one gains reachability from this
+    // edit. Platform admin keeps it (useAuth's admin short-circuit), and a customer operator gets it
+    // by being granted the code explicitly. See services/integration/stockPreparation/workbenchAccess.ts.
     path: '/stock-prep',
     name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
     component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
-    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['stock-prep:read'] }
   },
   {
     path: '/workflows',
@@ -279,6 +367,16 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'approval-list',
     component: () => import('../views/approval/ApprovalCenterView.vue'),
     meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true, permissions: ['approvals:read'] }
+  },
+  {
+    // B-2 (todo-center-design-lock v2.14 §4) — the cross-source aggregation page. Gated exactly
+    // like `GET /api/todo/items`/`GET /api/todo/count` (`rbacGuard('approvals','read')`, see
+    // `routes/todo.ts`'s docblock on why that is coextensive with today's ONE registered source
+    // and must widen alongside the backend gate once a second source is registered).
+    path: '/todo',
+    name: 'todo-center',
+    component: () => import('../todo/views/TodoCenterView.vue'),
+    meta: { title: 'Todo Center', titleZh: '待办中心', requiresAuth: true, permissions: ['approvals:read'] }
   },
   {
     path: '/approvals/new/:templateId',
@@ -308,7 +406,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates',
     name: 'approval-template-list',
     component: () => import('../views/approval/TemplateCenterView.vue'),
-    meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
+    meta: { title: 'Approval Templates', titleZh: '审批表单', requiresAuth: true }
   },
   {
     path: '/approval-delegations',
@@ -328,19 +426,19 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates/new',
     name: 'approval-template-create',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'New Approval Template', titleZh: '新建审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'New Approval Template', titleZh: '新建审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id/edit',
     name: 'approval-template-edit',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'Edit Approval Template', titleZh: '编辑审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'Edit Approval Template', titleZh: '编辑审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id',
     name: 'approval-template-detail',
     component: () => import('../views/approval/TemplateDetailView.vue'),
-    meta: { title: 'Template Detail', titleZh: '模板详情', requiresAuth: true }
+    meta: { title: 'Template Detail', titleZh: '表单详情', requiresAuth: true }
   },
   {
     path: '/approvals/metrics',
@@ -349,10 +447,66 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Metrics', titleZh: '审批耗时与 SLA', requiresAuth: true, requiresAdmin: true }
   },
   {
+    // P1b slice 3: the web surface for the existing POST /api/approvals/admin/reassign endpoint.
+    // Gated exactly like its sibling admin approval route above (`requiresAdmin`, resolved by
+    // `resolveAdminRouteRedirect` → `resolveHomePath()`), whose backend counterpart is likewise
+    // `rbacGuard('approvals:admin')`. No extra `permissions` conjunct: adding one would make this
+    // route stricter than that sibling and could lock out an admin principal whose permission set
+    // does not carry the literal code.
+    path: '/approvals/batch-transfer',
+    name: 'approval-batch-transfer',
+    component: () => import('../views/approval/ApprovalBatchTransferView.vue'),
+    meta: { title: 'Batch Transfer', titleZh: '批量转交', requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
     meta: { title: 'Plugins', requiresAuth: true, requiresAdmin: true, requiredFeature: 'attendanceAdmin' }
+  },
+  // E-learning V0.1 named pilot. Learner is elearning:read (never admin-only).
+  // Admin is elearning:admin only — do not infer requiresAdmin from /admin/.
+  {
+    path: '/learn',
+    name: 'elearning-learner',
+    component: () => import('../views/ElearningLearnerView.vue'),
+    meta: { title: 'Learning Center', titleZh: '学习中心', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:read'] }
+  },
+  {
+    path: '/admin/elearning',
+    name: 'elearning-admin',
+    component: () => import('../views/ElearningAdminView.vue'),
+    meta: { title: 'Cloud Classroom Admin', titleZh: '云课堂管理', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:admin'] }
+  },
+  // L3 initial manual-grading queue/detail/submit UI over the already-present
+  // manual-grading endpoints. Standalone surface gated ONLY by elearning:grade —
+  // deliberately NOT nested under /admin/elearning and NOT permissions:
+  // ['elearning:admin'], so a grader without admin access can still reach it
+  // (backend gradeGuard accepts elearning:grade OR elearning:admin).
+  {
+    path: '/elearning/grading',
+    name: 'elearning-manual-grading',
+    component: () => import('../views/ElearningManualGradingView.vue'),
+    meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
+  },
+  // Task feature line M2 skeleton (design lock §5.2), gated on the tasks feature AND tasks:read.
+  // The M2 skeleton had tasks:read only and relied on §13-38 缺省乙 (TasksView renders "not enabled"
+  // off a 404 from GET /api/tasks/context). After R61 that left an administrator on a server with
+  // TASKS_ENABLED unset looking at a nav entry that led nowhere; the session now carries `tasks`
+  // (true only when TASKS_ENABLED is exactly 'true'), so with it off /tasks redirects home like the
+  // other feature-gated routes. The 缺省乙 rendering still covers a feature-on session whose
+  // backend nevertheless answers 404.
+  {
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
+  },
+  {
+    path: '/tasks/:id',
+    name: 'task-detail',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
   {
     path: '/:pathMatch(.*)*',

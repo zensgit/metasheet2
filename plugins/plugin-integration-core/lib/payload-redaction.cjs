@@ -105,6 +105,33 @@ function scrubSecretStringValue(value) {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// SINGLE SOURCE for "does this string contain a marker THIS module's own
+// redaction/truncation left behind". Any caller elsewhere (e.g. a
+// losslessness guard that must refuse a sanitized projection) MUST derive its
+// detection from here, never hand-list the marker tokens itself — a
+// hand-copied list silently rots the next time a pattern above changes or a
+// new one is added (see SYSTEM_IDENTITY_MATERIAL_NOT_LOSSLESS's history).
+//
+// Every bracketed token this file's functions can leave behind, ANYWHERE
+// inside a string (not just as the string's entire value — several of the
+// SECRET_VALUE_PATTERNS replacements above splice the marker into the middle
+// of a larger string, e.g. a DSN's userinfo or a `key=value` pair):
+//   [redacted]              - sensitive-KEY redaction (whole value), and the
+//                              userinfo/key=value/Bearer/Basic value-scrub
+//                              replacements above (embedded substring)
+//   [redacted-jwt]           - standalone JWT value-scrub
+//   [redacted-secret-id]     - opaque SEC-prefixed id value-scrub
+//   ...[truncated]           - string-length truncation suffix
+//   [max-depth]              - depth-cap marker
+//   [circular]               - circular-reference marker
+//   [N more items truncated] - array-length truncation sentinel element
+// The top-level `{ payloadTruncated: true, ... }` envelope shape
+// (truncateSanitizedPayload) is a structural, not textual, marker — callers
+// must check `value.payloadTruncated === true` themselves; it is not a string
+// and so cannot live in this regex.
+const SANITIZATION_MARKER_PATTERN = Object.freeze(/\[redacted(?:-jwt|-secret-id)?\]|\[max-depth\]|\[circular\]|\.\.\.\[truncated\]|\[\d+ more items truncated\]/)
+
 function jsonByteLength(value) {
   try {
     return Buffer.byteLength(JSON.stringify(value), 'utf8')
@@ -190,6 +217,7 @@ module.exports = {
   SENSITIVE_PAYLOAD_KEYS,
   UNSAFE_PAYLOAD_KEYS,
   SECRET_VALUE_PATTERNS,
+  SANITIZATION_MARKER_PATTERN,
   jsonByteLength,
   isSensitivePayloadKey,
   scrubSecretStringValue,

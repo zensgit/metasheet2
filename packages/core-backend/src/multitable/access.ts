@@ -1,5 +1,7 @@
 import type { Request } from 'express'
 
+import { deriveCanManageFields } from './manage-schema-permission'
+import { deriveCanSubmitApproval } from './submit-approval-permission'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 
 export type MultitableCapabilities = {
@@ -16,6 +18,11 @@ export type MultitableCapabilities = {
   // Sheet-level "send notification" capability (B1-S1 button send_notification gate).
   // Full sheet write/admin only — NOT write-own (notify is member fan-out, not record-scoped).
   canSendNotification: boolean
+  // Record-level "submit for approval" capability (multitable x approval phase 2). Its OWN permission
+  // code (`multitable:submit-approval`) — NOT implied by `multitable:write`: starting an approval is a
+  // cross-product action, and the approval product independently re-checks `approvals:write` on its own
+  // side (ApprovalProductService.createApproval), so this is the MULTITABLE-side door only.
+  canSubmitApproval: boolean
 }
 
 export type MultitableFieldPermission = {
@@ -46,6 +53,7 @@ export type ResolvedRequestAccess = {
   userId: string
   permissions: string[]
   isAdminRole: boolean
+  authenticatedTenantId?: string
 }
 
 export async function resolveRequestAccess(
@@ -64,22 +72,27 @@ export async function resolveRequestAccess(
   const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
   const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
   const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
+  const authenticatedTenantId = typeof req.authenticatedTenantId === 'string'
+    ? req.authenticatedTenantId.trim()
+    : ''
+  const tenant = authenticatedTenantId ? { authenticatedTenantId } : {}
   if (!userId) {
-    return { userId, permissions: directPermissions, isAdminRole }
+    return { userId, permissions: directPermissions, isAdminRole, ...tenant }
   }
 
   if (isAdminRole) {
-    return { userId, permissions: directPermissions, isAdminRole: true }
+    return { userId, permissions: directPermissions, isAdminRole: true, ...tenant }
   }
 
   if (directPermissions.length > 0) {
-    return { userId, permissions: directPermissions, isAdminRole: false }
+    return { userId, permissions: directPermissions, isAdminRole: false, ...tenant }
   }
 
   return {
     userId,
     permissions: await listUserPermissions(userId),
     isAdminRole: await isAdmin(userId),
+    ...tenant,
   }
 }
 
@@ -98,6 +111,12 @@ export function deriveCapabilities(
     hasPermission(permissions, 'multitable:read') ||
     hasPermission(permissions, 'multitable:write')
   const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  // SCHEMA MANAGEMENT IS NOT RECORD WRITING. `canManageFields` no longer rides on `canWrite`: it needs
+  // its own `multitable:manage-schema` code (zero automatic holders; admin satisfies it via isAdminRole).
+  // See multitable/manage-schema-permission.ts for the live-deployment defect, the transition switch
+  // MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA (owner-gated, default OFF, a REGRESSION while on),
+  // and why the sibling capabilities below are deliberately left alone.
+  const canManageFields = deriveCanManageFields(permissions, isAdminRole, hasPermission)
   const canManageSheetAccess =
     isAdminRole || hasPermission(permissions, 'multitable:share')
   const canComment =
@@ -110,19 +129,23 @@ export function deriveCapabilities(
     hasPermission(permissions, 'workflow:write') ||
     hasPermission(permissions, 'workflow:create') ||
     hasPermission(permissions, 'workflow:execute')
+  // Record-level submit-for-approval: its OWN code, never implied by write/automation. Shared helper so
+  // this file and its sheet-capabilities.ts clone cannot drift apart.
+  const canSubmitApproval = deriveCanSubmitApproval(permissions, isAdminRole, hasPermission)
 
   return {
     canRead,
     canCreateRecord: canWrite,
     canEditRecord: canWrite,
     canDeleteRecord: canWrite,
-    canManageFields: canWrite,
+    canManageFields,
     canManageSheetAccess,
     canManageViews: canWrite,
     canComment,
     canManageAutomation,
     canExport: canRead,
     canSendNotification: canWrite,
+    canSubmitApproval,
   }
 }
 

@@ -19,6 +19,8 @@ export interface BatchAnomalyRowSnapshot {
   sourceStatus: string
   request: unknown | null
   warnings: string[]
+  expectedCalculationId: string | null
+  expectedCalculationVersion: number | null
   idempotencyKey: string
 }
 

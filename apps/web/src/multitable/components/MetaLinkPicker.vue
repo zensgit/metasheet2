@@ -22,7 +22,7 @@
       </div>
       <div class="meta-link-picker__body">
         <div v-if="loading" class="meta-link-picker__loading">{{ lp('linkPicker.loading') }}</div>
-        <div v-else-if="errorMessage" class="meta-link-picker__error">{{ errorMessage }}</div>
+        <div v-else-if="errorMessage" class="meta-link-picker__error" data-test="link-picker-error">{{ errorMessage }}</div>
         <label v-for="rec in records" :key="rec.id" class="meta-link-picker__item">
           <input type="checkbox" :checked="selected.has(rec.id)" @change="toggleSelect(rec.id)" />
           <span>{{ rec.display || rec.id }}</span>
@@ -51,6 +51,7 @@ import type { LinkedRecordSummary, MetaField } from '../types'
 import { multitableClient } from '../api/client'
 import { linkPickerSearchPlaceholder, linkPickerTitle } from '../utils/link-fields'
 import {
+  linkPickerErrorMessage,
   linkPickerLabel,
   selectedCount,
   type MetaLinkPickerLabelKey,
@@ -61,6 +62,13 @@ const props = defineProps<{
   field?: MetaField | null
   currentValue?: unknown
   initialSearch?: string
+  /**
+   * Overrides the field's own cap when set. Omitted (every cell / import caller) = the field decides:
+   * single-select for `limitSingleRecord` or a legacy person (`refKind: 'user'`). The automation condition
+   * editor passes it because an `in` / `not_in` condition picks a LIST whatever the field's cap is.
+   * (A string union, not a boolean: an absent boolean prop would be cast to `false`, not "unset".)
+   */
+  selectionMode?: 'single' | 'multiple'
 }>()
 
 const emit = defineEmits<{
@@ -77,7 +85,11 @@ const selected = reactive(new Set<string>())
 const summaryById = reactive<Record<string, LinkedRecordSummary>>({})
 const { isZh } = useLocale()
 const lp = (key: MetaLinkPickerLabelKey) => linkPickerLabel(key, isZh.value)
-const singleSelect = computed(() => props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user')
+const singleSelect = computed(() => {
+  if (props.selectionMode === 'multiple') return false
+  if (props.selectionMode === 'single') return true
+  return props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user'
+})
 const titleText = computed(() => linkPickerTitle(props.field, isZh.value))
 const searchPlaceholder = computed(() => linkPickerSearchPlaceholder(props.field, isZh.value))
 const hasMore = computed(() => page.value.hasMore)
@@ -121,7 +133,9 @@ async function loadRecords(reset = false) {
     for (const record of data.records ?? []) summaryById[record.id] = record
   } catch (error: any) {
     if (reset) records.value = []
-    errorMessage.value = error?.message ?? lp('linkPicker.errorLoad')
+    // 按后端稳定错误码翻人话（LINK_FIELD_FOREIGN_SHEET_MISSING = 这个关联字段没设目标表）；
+    // 其余错误仍走 message → 通用文案的原有兜底。
+    errorMessage.value = linkPickerErrorMessage(error, isZh.value)
   } finally {
     loading.value = false
   }

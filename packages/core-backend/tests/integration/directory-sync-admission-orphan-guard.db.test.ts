@@ -38,16 +38,19 @@ describeIfDatabase('DT-HARDEN-02 auto-admission orphan guard (real DB)', () => {
   async function seedAccount(opts: { openId: string | null; unionId: string | null; tag: string }) {
     const external = `oa-${opts.tag}-${TS}`
     const externalKey = opts.unionId || opts.openId || external
-    const id = (await query<{ id: string }>(
+    const row = (await query<{ id: string; corp_id: string }>(
       `INSERT INTO directory_accounts (integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, is_active)
-       VALUES ($1, 'dingtalk', 'corpA', $2, $3, $4, $5, 'Fixture', true) RETURNING id::text AS id`,
+       SELECT $1::uuid, 'dingtalk', corp_id, $2, $3, $4, $5, 'Fixture', true
+       FROM directory_integrations
+       WHERE id = $1::uuid
+       RETURNING id::text AS id, corp_id`,
       [integrationId, external, opts.unionId, opts.openId, externalKey],
-    )).rows[0].id
+    )).rows[0]
     return {
-      id,
+      id: row.id,
       integration_id: integrationId,
       provider: 'dingtalk',
-      corp_id: 'corpA',
+      corp_id: row.corp_id,
       external_user_id: external,
       union_id: opts.unionId,
       open_id: opts.openId,
@@ -70,6 +73,20 @@ describeIfDatabase('DT-HARDEN-02 auto-admission orphan guard (real DB)', () => {
 
   const userCountByUsername = async (username: string) =>
     (await query<{ n: number }>(`SELECT count(*)::int AS n FROM users WHERE username = $1`, [username])).rows[0].n
+
+  const bindingArtifactCounts = async (accountId: string, username: string) => {
+    const result = await query<{ users: number; links: number; identities: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM users WHERE username = $2) AS users,
+         (SELECT count(*)::int FROM directory_account_links WHERE directory_account_id = $1::uuid) AS links,
+         (SELECT count(*)::int
+            FROM user_external_identities identity
+            JOIN users admitted ON admitted.id = identity.local_user_id
+           WHERE admitted.username = $2) AS identities`,
+      [accountId, username],
+    )
+    return result.rows[0]
+  }
 
   beforeAll(async () => {
     integrationId = (await query<{ id: string }>(
@@ -110,6 +127,28 @@ describeIfDatabase('DT-HARDEN-02 auto-admission orphan guard (real DB)', () => {
     await expect(userCountByUsername(username)).resolves.toBe(0)
   })
 
+  it('commits no user, link, or identity when the authoritative account corp is NULL', async () => {
+    const account = await seedAccount({ openId: `open-null-corp-${TS}`, unionId: null, tag: 'null-corp' })
+    await query(`UPDATE directory_accounts SET corp_id = NULL WHERE id = $1::uuid`, [account.id])
+    const username = `ogd-null-corp-${TS}`
+    let message = ''
+
+    await transaction(async (client) => {
+      try {
+        await createDirectoryAdmittedUserInTransaction(client, admitOptions(account, username, false))
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+    })
+
+    expect(message).toBe('Directory account tenant scope is inconsistent; synchronize or repair it before binding')
+    await expect(bindingArtifactCounts(account.id, username)).resolves.toEqual({
+      users: 0,
+      links: 0,
+      identities: 0,
+    })
+  })
+
   // The savepoint must also leave the transaction usable, so the loop can admit the next account
   // after one fails — otherwise a single bad account would poison the whole run.
   it('keeps the transaction usable: a valid account admits after a failed one in the same tx', async () => {
@@ -146,8 +185,8 @@ describeIfDatabase('DT-HARDEN-02 auto-admission orphan guard (real DB)', () => {
     await query(`INSERT INTO users (id, username, name, password_hash, is_active) VALUES ($1, $1, 'Owner', 'x', true)`, [otherUser])
     await query(
       `INSERT INTO user_external_identities (provider, external_key, provider_open_id, corp_id, local_user_id, profile)
-       VALUES ('dingtalk', $1, $2, 'corpA', $3, '{}'::jsonb)`,
-      [openId, openId, otherUser],
+       VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+      [openId, openId, account.corp_id, otherUser],
     )
 
     const username = `ogd-conflict-${TS}`
@@ -180,8 +219,8 @@ describeIfDatabase('DT-HARDEN-02 auto-admission orphan guard (real DB)', () => {
     const identity = await query<{ n: number }>(
       `SELECT count(*)::int AS n FROM user_external_identities i
          JOIN users u ON u.id = i.local_user_id
-        WHERE u.username = $1 AND i.corp_id = 'corpA'`,
-      [username],
+        WHERE u.username = $1 AND i.corp_id = $2`,
+      [username, account.corp_id],
     )
     expect(identity.rows[0].n).toBe(1) // login identity pre-seeded at bind
   })

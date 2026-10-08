@@ -33,6 +33,7 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationMappingConfirmView from '../src/components/integration/stockPreparation/StockPreparationMappingConfirmView.vue'
+import { STOCK_PREPARATION_VERSION_POLICIES } from '../src/services/integration/stockPreparation/materialMapping'
 
 // Planted business values — the view must render NONE of them (fixed-whitelist rendering).
 const PLANTED_DRAWING_NO = 'DWG-88472-A'
@@ -380,6 +381,22 @@ describe('StockPreparationMappingConfirmView (view 3: confirm reads + human conf
     await waitForCondition(() => urlsMatching('/material-mappings/summary').length === 2)
   })
 
+  it('offers ONLY the three implemented version policies (OD2 round-1: category_rule removed fail-closed)', async () => {
+    // Whitelist pin: the reserved-but-unimplemented category_rule is no longer selectable anywhere —
+    // the server refuses it 422 STOCK_PREPARATION_VERSION_POLICY_UNSUPPORTED, so the FE must not
+    // offer it (both the sync policy select and the create-form policy select feed this list).
+    expect(STOCK_PREPARATION_VERSION_POLICIES).toEqual(['drawing_and_version', 'drawing_only', 'manual'])
+    mockRoutes()
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-overview"]')
+    for (const testid of ['stock-prep-mapping-sync-policy', 'stock-prep-mapping-form-policy']) {
+      const select = root.querySelector(`[data-testid="${testid}"]`) as HTMLSelectElement
+      const values = [...select.querySelectorAll('option')].map((option) => option.value)
+      expect(values.filter((value) => value !== '')).toEqual(['drawing_and_version', 'drawing_only', 'manual'])
+      expect(values).not.toContain('category_rule')
+    }
+  })
+
   it('mirrors the server create-mode rules client-side ({field} errors, NO premature POST)', async () => {
     mockRoutes()
     const root = mountView()
@@ -485,6 +502,66 @@ describe('StockPreparationMappingConfirmView (view 3: confirm reads + human conf
     await waitForSelector(root, '[data-testid="stock-prep-mapping-error"]')
     expect(root.querySelector('[data-testid="stock-prep-mapping-overview"]')).toBeNull()
     expect(root.textContent || '').not.toContain('secret-42007')
+  })
+
+  // H4-3 (responsive + long-table usability): the error state offers a Retry that re-runs loadAll()
+  // and recovers — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the error state offers a Retry that re-runs loadAll() and recovers', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-mapping-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取物料映射确认')
+
+    mockRoutes() // the retry succeeds
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry!.click()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-overview"]')
+    expect(h.apiFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-mapping-error"]')).toBeNull()
+  })
+
+  it('H4-3: the retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-mapping-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading the material-mapping confirmation queue')
+  })
+
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): the error branch unmounts
+  // the retry button while the load is in flight, so the browser drops focus to <body>. A keyboard
+  // operator who pressed Retry must not be stranded there when the failed state re-renders.
+  it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-mapping-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry.click() // still failing → button unmounts during the load, then re-renders; drops focus to <body>
+    await waitForCondition(() => h.apiFetch.mock.calls.length > callsBefore)
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-error"]')
+    await waitForCondition(() => document.activeElement === root.querySelector('[data-testid="stock-prep-mapping-retry"]'))
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-mapping-retry"]'))
+  })
+
+  // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
+  // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
+  // jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the table wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    mockRoutes()
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-queue"]')
+    const wrap = root.querySelector('.sp-map__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
   })
 
   it('renders the English copy when locale is not zh-CN', async () => {

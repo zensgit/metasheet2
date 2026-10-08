@@ -83,6 +83,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
     expect(update).toEqual({
       outTrackId: DELIVERY_ID,
       statusText: `已由 张审批 同意 · ${ACTED_AT_TEXT}`,
+      actionsVisible: false,
     })
   })
 
@@ -103,7 +104,11 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
     const approved = buildDingTalkApprovalCardTerminalUpdate({
       outcome: 'stale', deliveryId: DELIVERY_ID, summary: canarySummary(),
     })
-    expect(approved).toEqual({ outTrackId: DELIVERY_ID, statusText: `已同意 · ${ACTED_AT_TEXT}` })
+    expect(approved).toEqual({
+      outTrackId: DELIVERY_ID,
+      statusText: `已同意 · ${ACTED_AT_TEXT}`,
+      actionsVisible: false,
+    })
 
     const rejected = buildDingTalkApprovalCardTerminalUpdate({
       outcome: 'stale',
@@ -111,6 +116,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       summary: canarySummary({ actedAction: 'reject' }, { status: 'rejected' }),
     })
     expect(rejected?.statusText).toBe(`已驳回 · ${ACTED_AT_TEXT}`)
+    expect(rejected?.actionsVisible).toBe(false)
   })
 
   it('stale on a non-acted card falls through to the instance terminal status', () => {
@@ -125,6 +131,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
         summary: canarySummary({ cardState: 'superseded', actedAction: null, actedAt: null }, { status }),
       })
       expect(update?.statusText).toBe(text)
+      expect(update?.actionsVisible).toBe(false)
     }
   })
 
@@ -149,6 +156,9 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       summary: canarySummary({ cardState: 'sent', sendStatus: 'pending', actedAction: null, actedAt: null }, { status: 'pending' }),
     })
     expect(undelivered?.statusText).toBe('卡片已失效，请在网页端查看')
+    expect(expired?.actionsVisible).toBe(false)
+    expect(superseded?.actionsVisible).toBe(false)
+    expect(undelivered?.actionsVisible).toBe(false)
   })
 
   it('P3-H: delivery_not_found and EVERY operator_unresolved reason render BYTE-EQUAL neutral copy (no existence oracle)', () => {
@@ -156,6 +166,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       outcome: 'delivery_not_found', outTrackId: DELIVERY_ID,
     })
     expect(notFound).toEqual({ outTrackId: DELIVERY_ID, statusText: DINGTALK_APPROVAL_CARD_NEUTRAL_UNPROCESSABLE_TEXT })
+    expect(notFound?.actionsVisible).toBeUndefined()
 
     for (const reason of ['unlinked', 'inactive', 'ambiguous', 'integration_unpinned'] as const) {
       const unresolved = buildDingTalkApprovalCardTerminalUpdate({
@@ -163,6 +174,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       })
       // toBe on the exact same string: byte-equal, not merely similar.
       expect(unresolved?.statusText).toBe(notFound?.statusText)
+      expect(unresolved?.actionsVisible).toBeUndefined()
     }
     // …and the shared copy is the ratified unmapped-user row (lock §B-4).
     expect(DINGTALK_APPROVAL_CARD_NEUTRAL_UNPROCESSABLE_TEXT).toBe('请先在网页端绑定钉钉后再处理')
@@ -177,6 +189,8 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
     })
     expect(secret?.statusText).toBe(DINGTALK_APPROVAL_CARD_SYSTEM_UNAVAILABLE_TEXT)
     expect(wrapper?.statusText).toBe(secret?.statusText)
+    expect(secret?.actionsVisible).toBeUndefined()
+    expect(wrapper?.actionsVisible).toBeUndefined()
   })
 
   it('non-recipient / permission denied → 当前账号无权处理该审批', () => {
@@ -184,6 +198,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       outcome: 'engine_rejected', deliveryId: DELIVERY_ID, code: 'APPROVAL_ASSIGNMENT_REQUIRED', httpStatus: 403, summary: canarySummary({}, { status: 'pending' }),
     })
     expect(forbidden?.statusText).toBe(DINGTALK_APPROVAL_CARD_NO_PERMISSION_TEXT)
+    expect(forbidden?.actionsVisible).toBeUndefined()
 
     // The engine's assignee gate code maps to the same copy even if the HTTP class drifts.
     const codeOnly = buildDingTalkApprovalCardTerminalUpdate({
@@ -197,6 +212,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
       outcome: 'engine_rejected', deliveryId: DELIVERY_ID, code: 'VALIDATION_ERROR', httpStatus: 400, summary: canarySummary({}, { status: 'pending' }),
     })
     expect(update?.statusText).toBe('无法处理该审批（VALIDATION_ERROR）')
+    expect(update?.actionsVisible).toBeUndefined()
   })
 
   it('parse-level rejections and unsupported actions are a NO-OP (no card update built)', () => {
@@ -236,7 +252,11 @@ describe('applyDingTalkApprovalCardTerminalUpdate (presentation follow-up, never
       async (update) => { sends.push(update) },
     )
     expect(outcome).toEqual({ status: 'updated', outTrackId: DELIVERY_ID })
-    expect(sends).toEqual([{ outTrackId: DELIVERY_ID, statusText: `已由 张审批 同意 · ${ACTED_AT_TEXT}` }])
+    expect(sends).toEqual([{
+      outTrackId: DELIVERY_ID,
+      statusText: `已由 张审批 同意 · ${ACTED_AT_TEXT}`,
+      actionsVisible: false,
+    }])
   })
 
   it('NO ROLLBACK: a failing card update resolves to a typed failure — it never throws back into the action path', async () => {
@@ -294,7 +314,12 @@ describe('applyDingTalkApprovalCardTerminalUpdate (presentation follow-up, never
     expect((updateInit.headers as Record<string, string>)['x-acs-dingtalk-access-token']).toBe('app-tok')
     expect(JSON.parse(String(updateInit.body))).toMatchObject({
       outTrackId: DELIVERY_ID,
-      cardData: { cardParamMap: { statusText: `已由 张审批 同意 · ${ACTED_AT_TEXT}` } },
+      cardData: {
+        cardParamMap: {
+          statusText: `已由 张审批 同意 · ${ACTED_AT_TEXT}`,
+          actionsVisible: 'false',
+        },
+      },
     })
     __resetDingTalkAppAccessTokenCacheForTests()
   })

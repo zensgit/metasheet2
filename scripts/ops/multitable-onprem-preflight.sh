@@ -23,6 +23,8 @@ IMPORT_UPLOAD_DIR=""
 ATTACHMENT_PATH=""
 ATTACHMENT_STORAGE_BASE_URL=""
 ENABLE_PLM=""
+ENCRYPTION_KEY=""
+ENCRYPTION_SALT=""
 
 function die() {
   write_report "FAIL" "$*"
@@ -185,8 +187,30 @@ function build_suggested_actions() {
     REQUIRE_STORAGE_DIRS\ must\ be\ 0\ or\ 1*)
       actions+=("Set REQUIRE_STORAGE_DIRS to 0 or 1 before rerunning multitable-onprem-preflight.sh.")
       ;;
+    ENV_FILE\ is\ not\ readable:*)
+      actions+=("Run the preflight as an account that can read app.env (for example the service account), or fix the file's ownership/permissions. Do not paste the file's contents anywhere to work around this.")
+      ;;
+    ENV_FILE\ is\ not\ UTF-8\ text:*)
+      actions+=("Re-save app.env as UTF-8 without a byte-order mark and without NUL bytes. Windows PowerShell 5.1 Out-File and > redirection write UTF-16; on Linux, iconv -f UTF-16 -t UTF-8 converts it. If the file is already UTF-8, remove the stray NUL bytes instead: no valid app.env line contains one.")
+      ;;
+    DUPLICATE_ENV_KEY:*)
+      actions+=("Each key named in the error is declared more than once, and start paths disagree on which declaration wins: pm2 on ecosystem.config.cjs uses the first, while the bootstrap (set -a; source) and the Windows Import-AppEnvFile helpers let a later one override it. Keep exactly one declaration of each key.")
+      actions+=("An EMPTY declaration next to a non-empty one is safe to delete. For ENCRYPTION_KEY / ENCRYPTION_SALT this holds on a host whose backend runs with NODE_ENV=production: the backend refuses to encrypt with empty material there, so no stored secret depends on the empty line. Outside production an empty value falls back to the built-in default material and a whitespace-only one can be used as it is; if such a host has stored secrets, confirm which material encrypted them before deleting anything.")
+      actions+=("If ENCRYPTION_KEY or ENCRYPTION_SALT has two DIFFERENT non-empty values, do NOT delete either line until you have confirmed which value encrypted the existing stored secrets (the start path this host actually uses decides which one was loaded). Deleting the one in use orphans the stored ciphertext.")
+      actions+=("Declarations count as identical only when the bytes after the first '=' are the same. Values that differ only in quotes, surrounding whitespace (a no-break space, U+3000 or U+FEFF included) or a trailing CR are reported as DIFFER, because the start paths do not strip the same characters (set -a; source keeps a no-break space, U+3000, U+FEFF and a CR that the pm2 loader drops) and the backend derives the key from the raw value it is given.")
+      if [[ "$error_message" == *"$ENV_KEY_WITHHELD"* ]]; then
+        actions+=("A key shown as ${ENV_KEY_WITHHELD} is not printed because its text could be part of a value: only keys from the shipped template and upper-case names with at least one underscore (at most 64 characters) are printed. Open the listed line numbers to see it.")
+      fi
+      actions+=("List the declaring line numbers of a key without printing its value: grep -n -E '^[[:space:]]*KEY[[:space:]]*=' app.env | cut -d: -f1")
+      ;;
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       actions+=("Set a real JWT_SECRET in app.env and remove placeholder values such as change-me.")
+      ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      actions+=("Set a real ENCRYPTION_KEY in app.env. Generate one with: openssl rand -hex 32.")
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      actions+=("Set a real ENCRYPTION_SALT in app.env. Generate one with: openssl rand -hex 32.")
       ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       actions+=("Set a real POSTGRES_PASSWORD in app.env and remove placeholder values such as change-me.")
@@ -269,6 +293,12 @@ EOF
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       printf '%s\0' "$(build_generated_secret_snippet "JWT_SECRET" "openssl rand -hex 32" "Generate and persist a strong JWT secret")"
       ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\0' "$(build_generated_secret_snippet "ENCRYPTION_KEY" "openssl rand -hex 32" "Generate and persist a strong encryption-at-rest master key")"
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\0' "$(build_generated_secret_snippet "ENCRYPTION_SALT" "openssl rand -hex 32" "Generate and persist a strong encryption-at-rest salt")"
+      ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       printf '%s\0' "$(build_env_set_snippet "POSTGRES_PASSWORD" "replace-with-real-db-password" "Write the real PostgreSQL password into app.env")"
       ;;
@@ -336,6 +366,12 @@ function build_suggested_quick_fix_commands() {
       ;;
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       printf '%s\n' "$(build_generate_secret_quick_command "JWT_SECRET")"
+      ;;
+    ENCRYPTION_KEY\ is\ missing*|ENCRYPTION_KEY\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\n' "$(build_generate_secret_quick_command "ENCRYPTION_KEY")"
+      ;;
+    ENCRYPTION_SALT\ is\ missing*|ENCRYPTION_SALT\ uses\ the\ insecure\ built-in\ default\ value*)
+      printf '%s\n' "$(build_generate_secret_quick_command "ENCRYPTION_SALT")"
       ;;
     POSTGRES_PASSWORD\ is\ missing*|POSTGRES_PASSWORD\ is\ still\ \'change-me\'*)
       printf '%s\n' "$(build_set_env_quick_command "POSTGRES_PASSWORD" "replace-with-real-db-password")"
@@ -506,29 +542,292 @@ EOF
   fi
 }
 
-function get_env_value() {
+# --- app.env reader: the backend's own rules ------------------------------------------------------
+# The backend process reads this file through loadOnPremEnvFile() in ecosystem.config.cjs, so the
+# preflight judges each key by exactly the rules that loader applies:
+#   content.split(/\r?\n/)             one declaration per line; a CR before the LF is dropped
+#   line = rawLine.trim()              JS whitespace is dropped at both ends (js_trim below)
+#   skip '' and lines starting '#'     full-line comments only; an inline ' # ...' stays in the value
+#   eq = line.indexOf('='), eq <= 0    the FIRST '=' splits; '=' inside the value is kept
+#   key/value = both sides, trimmed    'export KEY=v' is NOT special: its key is 'export KEY'
+#   one matching '...' / "..." layer   is stripped from the value; no ${var} expansion
+#   if (!(key in process.env)) set     the FIRST declaration of a key wins; later ones are ignored
+# parse_env_line sets ENV_DECL_KEY / ENV_DECL_VALUE for one raw line and returns 1 when the line
+# declares nothing. Values stay in these variables and are never echoed (values-free output).
+# js_trim, parse_env_line and the two loops that read the file (get_env_value,
+# require_unique_env_keys) run with `local LC_ALL=C` (byte semantics), so the result does not depend
+# on the operator's locale. That matters for more than [[:space:]]: under a UTF-8 locale bash's
+# `read` takes a line that ends in an incomplete multibyte sequence (typically a comment saved in
+# GBK) as unfinished and swallows the next line into it, so a declaration vanishes and every later
+# line number drifts. In C every LF ends a line, and a reported line number is the physical one.
+ENV_DECL_KEY=""
+ENV_DECL_VALUE=""
+ENV_KEY_LABEL=""
+JS_TRIMMED=""
+
+# JS String.prototype.trim() removes WhiteSpace and LineTerminator code points: the ASCII set below
+# plus U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF (which is
+# also how a UTF-8 BOM disappears). The backend loader trims with it, and so does the backend's own
+# material check (normalizeEnvString in encrypted-secrets.ts), so the preflight trims the same set.
+JS_TRIM_MULTIBYTE=(
+  $'\xc2\xa0'
+  $'\xe1\x9a\x80'
+  $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84' $'\xe2\x80\x85'
+  $'\xe2\x80\x86' $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89' $'\xe2\x80\x8a'
+  $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f'
+  $'\xe3\x80\x80'
+  $'\xef\xbb\xbf'
+)
+
+function js_trim() {
+  local LC_ALL=C
+  local text="$1"
+  local ascii=$' \t\n\v\f\r'
+  local seq
+  while :; do
+    case "$text" in
+      [$ascii]*)
+        text="${text:1}"
+        continue
+        ;;
+      *[$ascii])
+        text="${text:0:${#text}-1}"
+        continue
+        ;;
+    esac
+    for seq in "${JS_TRIM_MULTIBYTE[@]}"; do
+      if [[ "$text" == "$seq"* ]]; then
+        text="${text:${#seq}}"
+        continue 2
+      fi
+      if [[ "$text" == *"$seq" ]]; then
+        text="${text:0:${#text}-${#seq}}"
+        continue 2
+      fi
+    done
+    break
+  done
+  JS_TRIMMED="$text"
+}
+
+# The keys docker/app.env.multitable-onprem.template declares. Embedded rather than read at run
+# time, because an installed host may have renamed or removed the template; a test fails when this
+# list and the template drift apart.
+ENV_TEMPLATE_KEYS=(
+  NODE_ENV PRODUCT_MODE ENABLE_PLM DEPLOYMENT_MODEL HOST PORT JWT_SECRET ENCRYPTION_KEY
+  ENCRYPTION_SALT POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL DB_SSL REDIS_HOST
+  REDIS_PORT REDIS_PASSWORD ATTENDANCE_IMPORT_REQUIRE_TOKEN ATTENDANCE_IMPORT_UPLOAD_DIR
+  ATTENDANCE_IMPORT_CSV_MAX_ROWS ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS ATTACHMENT_PATH
+  ATTACHMENT_STORAGE_BASE_URL ATTACHMENT_MAX_SIZE
+)
+ENV_KEY_WITHHELD="<key withheld>"
+
+# A key is printed only when its text cannot be a value: a key the shipped template declares, or an
+# upper-case snake-case name with at least one underscore and at most 64 characters
+# (^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$). Anything else may carry a value through the key position:
+#   `DATABASE_URL: postgres://user:secret@host/db?a=b`  no '=' until the query string;
+#   a base64 secret pasted alone on a line             its '=' padding makes it a "declaration";
+#   a hex secret followed by '=value', `JWT_SECRETsecret=` with the '=' forgotten, and so on.
+# The cost: a real key outside the template that has no underscore (TZ, VERSION) or is lower case
+# prints as the placeholder too; its line numbers still say where it is. Explicit character lists,
+# not ranges, so the check does not depend on the locale either.
+function env_key_label() {
   local key="$1"
+  local known
+  for known in "${ENV_TEMPLATE_KEYS[@]}"; do
+    if [[ "$key" == "$known" ]]; then
+      ENV_KEY_LABEL="$key"
+      return 0
+    fi
+  done
+  if (( ${#key} <= 64 )) \
+    && [[ "${key:0:1}" == [ABCDEFGHIJKLMNOPQRSTUVWXYZ] \
+      && "$key" != *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]* \
+      && "$key" == *_* \
+      && "$key" != *__* \
+      && "$key" != *_ ]]; then
+    ENV_KEY_LABEL="$key"
+  else
+    ENV_KEY_LABEL="$ENV_KEY_WITHHELD"
+  fi
+}
+
+function parse_env_line() {
+  local LC_ALL=C
+  local line="$1"
+  local key
+  local value
+  ENV_DECL_KEY=""
+  ENV_DECL_VALUE=""
+  js_trim "$line"
+  line="$JS_TRIMMED"
+  [[ -n "$line" && "${line:0:1}" != "#" && "$line" == *=* ]] || return 1
+  key="${line%%=*}"
+  value="${line#*=}"
+  js_trim "$key"
+  key="$JS_TRIMMED"
+  [[ -n "$key" ]] || return 1
+  js_trim "$value"
+  value="$JS_TRIMMED"
+  if [[ ( "$value" == \"* && "$value" == *\" ) || ( "$value" == \'* && "$value" == *\' ) ]]; then
+    if (( ${#value} >= 2 )); then
+      value="${value:1:${#value}-2}"
+    else
+      value=""
+    fi
+  fi
+  ENV_DECL_KEY="$key"
+  ENV_DECL_VALUE="$value"
+  return 0
+}
+
+# The value ecosystem.config.cjs's loader assigns for $1: the FIRST declaration of that key, or
+# empty when the key is not declared at all. (Duplicated keys are rejected before any value check,
+# so no verdict below depends on which declaration a start path picks.)
+function get_env_value() {
+  local LC_ALL=C
+  local key="$1"
+  local raw
   if [[ ! -f "$ENV_FILE" ]]; then
     echo ""
     return 0
   fi
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
-  echo "${line#${key}=}"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    parse_env_line "$raw" || continue
+    if [[ "$ENV_DECL_KEY" == "$key" ]]; then
+      printf '%s\n' "$ENV_DECL_VALUE"
+      return 0
+    fi
+  done < "$ENV_FILE"
+  echo ""
 }
 
-function strip_quotes() {
-  local value="$1"
-  value="${value%$'\r'}"
-  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-    echo "${value:1:${#value}-2}"
-    return 0
+# A key declared more than once has no single effective value, because the start paths disagree:
+#   - pm2 start / pm2-runtime on ecosystem.config.cjs: the loader keeps the FIRST declaration;
+#   - attendance-onprem-bootstrap.sh (`set -a; source`, used by multitable-onprem-deploy-easy.sh)
+#     and the Windows Import-AppEnvFile helpers (attendance-onprem-start-pm2.ps1, and the in-place
+#     upgrade before `pm2 restart --update-env`) load the file into the environment first, where a
+#     later declaration overrides an earlier one -- and the loader never overrides a variable that
+#     is already set.
+# The template ships live empty ENCRYPTION_KEY= / ENCRYPTION_SALT= lines, so material appended at
+# the end of the file instead of set in place is exactly this case: an ecosystem start reads the
+# empty line and fail-closes, a sourcing start reads the appended value. The preflight cannot know
+# which path a host uses, so it never says which declaration "the backend" reads. It fails on every
+# duplicated key, names keys (env_key_label) and PHYSICAL line numbers, and tells the operator which
+# deletion is safe: an EMPTY declaration can go (for ENCRYPTION_* only where the backend runs with
+# NODE_ENV=production); two DIFFERENT non-empty ENCRYPTION_KEY / ENCRYPTION_SALT values must not be
+# touched until it is known which one encrypted stored secrets.
+# "Identical" means the same BYTES after the first '=': quotes, whitespace and a CR included. The
+# backend validates the trimmed value but derives the key from the RAW one (resolveEncryptionMaterial
+# in encrypted-secrets.ts), and `set -a; source` keeps a no-break space, U+3000 or U+FEFF that the
+# loader's trim drops, so two values that match only after trimming can derive different keys.
+function require_unique_env_keys() {
+  local LC_ALL=C
+  local -a keys=()
+  local -a lines=()
+  local -a counts=()
+  local -a blank_lines=()
+  local -a nonblank_counts=()
+  local -a first_raw_values=()
+  local -a differ=()
+  local raw
+  local raw_value
+  local line_no=0
+  local index
+  local found
+  local blank
+  local withheld=0
+  local message=""
+  local clause
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    line_no=$((line_no + 1))
+    parse_env_line "$raw" || continue
+    js_trim "$ENV_DECL_VALUE"
+    blank=0
+    [[ -n "$JS_TRIMMED" ]] || blank=1
+    found=-1
+    for ((index = 0; index < ${#keys[@]}; index++)); do
+      if [[ "${keys[$index]}" == "$ENV_DECL_KEY" ]]; then
+        found=$index
+        break
+      fi
+    done
+    if (( found < 0 )); then
+      keys+=("$ENV_DECL_KEY")
+      lines+=("$line_no")
+      counts+=(1)
+      blank_lines+=("")
+      nonblank_counts+=(0)
+      first_raw_values+=("")
+      differ+=(0)
+      found=$((${#keys[@]} - 1))
+    else
+      lines[found]="${lines[found]}, ${line_no}"
+      counts[found]=$((counts[found] + 1))
+    fi
+    if (( blank == 1 )); then
+      blank_lines[found]="${blank_lines[found]:+${blank_lines[found]}, }${line_no}"
+    else
+      raw_value="${raw#*=}"
+      if (( nonblank_counts[found] == 0 )); then
+        first_raw_values[found]="$raw_value"
+      elif [[ "${first_raw_values[found]}" != "$raw_value" ]]; then
+        differ[found]=1
+      fi
+      nonblank_counts[found]=$((nonblank_counts[found] + 1))
+    fi
+  done < "$ENV_FILE"
+
+  for ((index = 0; index < ${#keys[@]}; index++)); do
+    (( counts[index] > 1 )) || continue
+    env_key_label "${keys[$index]}"
+    [[ "$ENV_KEY_LABEL" != "$ENV_KEY_WITHHELD" ]] || withheld=1
+    clause="${ENV_KEY_LABEL} appears ${counts[$index]} times (lines ${lines[$index]})"
+    if (( nonblank_counts[index] == 0 )); then
+      clause+=": every declaration is EMPTY"
+    elif (( differ[index] == 1 )); then
+      if [[ "${keys[$index]}" == "ENCRYPTION_KEY" || "${keys[$index]}" == "ENCRYPTION_SALT" ]]; then
+        clause+=": the non-empty values DIFFER -- do NOT delete either line until you have confirmed which value encrypted the existing stored secrets; deleting the one in use orphans that ciphertext"
+      else
+        clause+=": the non-empty values DIFFER -- confirm which value is intended before deleting a line"
+      fi
+    elif [[ -n "${blank_lines[$index]}" ]]; then
+      if [[ "${keys[$index]}" == "ENCRYPTION_KEY" || "${keys[$index]}" == "ENCRYPTION_SALT" ]]; then
+        clause+=": EMPTY on line(s) ${blank_lines[$index]} -- safe to delete only if this host's backend runs with NODE_ENV=production (it refuses empty material there, so no stored secret depends on an empty line); outside production an empty line can be the material in use (an empty value falls back to the built-in default material, a whitespace-only one can be used as it is), so confirm which material encrypted the stored secrets before deleting; keep one non-empty declaration"
+      else
+        clause+=": EMPTY on line(s) ${blank_lines[$index]} -- safe to delete; keep one non-empty declaration"
+      fi
+    else
+      clause+=": the declarations are identical -- delete all but one"
+    fi
+    if [[ -n "$message" ]]; then
+      message+="; ${clause}"
+    else
+      message="$clause"
+    fi
+  done
+
+  if [[ -n "$message" ]]; then
+    if (( withheld == 1 )); then
+      message+=". A key shown as ${ENV_KEY_WITHHELD} is not printed because its text could be part of a value; look at the listed lines"
+    fi
+    die "DUPLICATE_ENV_KEY: ${message}. Start paths disagree on a duplicated key: pm2 on ecosystem.config.cjs uses the FIRST declaration, while a start that loads the file into the environment first (bootstrap set -a; source, or the Windows Import-AppEnvFile helpers before pm2 restart --update-env) lets a later one override it. Keep exactly one declaration of each key in ${ENV_FILE}."
   fi
-  if [[ "$value" == \'*\' && "$value" == *\' ]]; then
-    echo "${value:1:${#value}-2}"
-    return 0
+}
+
+# The backend reads app.env as UTF-8 (fs.readFileSync(..., 'utf8')). A UTF-16 file -- what Windows
+# PowerShell 5.1 `Out-File` and `>` write by default -- loads NOTHING there (every key is
+# interleaved with NUL bytes), while bash `read` silently drops the NULs and would judge the text as
+# if it were fine. A stray NUL in an otherwise UTF-8 file is dropped the same way. Fail on a UTF-16
+# byte-order mark or any NUL byte, and name both possible causes.
+function require_utf8_env_file() {
+  local head_hex
+  local nul_bytes
+  head_hex="$(LC_ALL=C od -An -tx1 -N2 "$ENV_FILE" | tr -d ' \n')"
+  nul_bytes="$(LC_ALL=C tr -cd '\000' < "$ENV_FILE" | wc -c | tr -d ' ')"
+  if [[ "$head_hex" == "fffe" || "$head_hex" == "feff" || "$nul_bytes" != "0" ]]; then
+    die "ENV_FILE is not UTF-8 text: ${ENV_FILE} starts with a UTF-16 byte-order mark or contains NUL bytes. Either it was saved as UTF-16 (Windows PowerShell 5.1 Out-File and > do that), and the backend, which reads app.env as UTF-8, loads nothing from it; or it is UTF-8 with stray NUL bytes, which no valid app.env line contains. Either way this preflight's line reader would silently drop the NULs and judge text the backend does not see. Re-save it as UTF-8 without a byte-order mark and without NUL bytes."
   fi
-  echo "$value"
 }
 
 function require_nonempty_env() {
@@ -545,23 +844,62 @@ function require_absolute_path_env() {
   [[ "$value" == /* ]] || die "${key} must be an absolute path (got: '${value}')"
 }
 
+# Encryption-at-rest master key/salt for packages/core-backend/src/security/encrypted-secrets.ts.
+# These must be present and must not equal the built-in insecure default sentinels, otherwise
+# any secret encrypted with the fallback key is trivially decryptable. We deliberately never
+# echo the configured value back to the operator (values-free diagnostics).
+function require_encryption_material() {
+  local var_name="$1"
+  local value="$2"
+  local default_sentinel="$3"
+
+  # get_env_value already applies the ecosystem.config.cjs rules (JS trim, one quote layer).
+  # The backend then checks the TRIMMED value (normalizeEnvString in encrypted-secrets.ts, JS
+  # trim), so trim again here with the same JS whitespace set -- a quoted whitespace-only value
+  # (ENCRYPTION_KEY="   ", or a U+3000 inside quotes) is empty to the backend, and a sentinel
+  # padded with a no-break space is the sentinel to it. A sentinel wrapped in a second quote
+  # layer is also judged as the sentinel (stricter than the backend, deliberately).
+  js_trim "$value"
+  value="$JS_TRIMMED"
+  if (( ${#value} >= 2 )); then
+    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+  fi
+
+  [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  if [[ "$value" == "$default_sentinel" ]]; then
+    die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
+  fi
+}
+
 [[ -f "$ENV_FILE" ]] || die "ENV_FILE not found: ${ENV_FILE}"
 [[ "$REQUIRE_STORAGE_DIRS" == "0" || "$REQUIRE_STORAGE_DIRS" == "1" ]] || die "REQUIRE_STORAGE_DIRS must be 0 or 1"
+# Open it for real instead of trusting `-r` (MSYS reports a file with a deny-read ACL as readable);
+# without this, the first read below would abort under `set -e` with no report written.
+( : < "$ENV_FILE" ) 2>/dev/null || die "ENV_FILE is not readable: ${ENV_FILE}"
 
-JWT_SECRET="$(strip_quotes "$(get_env_value JWT_SECRET)")"
-POSTGRES_PASSWORD="$(strip_quotes "$(get_env_value POSTGRES_PASSWORD)")"
-DATABASE_URL="$(strip_quotes "$(get_env_value DATABASE_URL)")"
-PRODUCT_MODE="$(strip_quotes "$(get_env_value PRODUCT_MODE)")"
-DEPLOYMENT_MODEL="$(strip_quotes "$(get_env_value DEPLOYMENT_MODEL)")"
-IMPORT_REQUIRE_TOKEN="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)")"
-IMPORT_UPLOAD_DIR="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)")"
-ATTACHMENT_PATH="$(strip_quotes "$(get_env_value ATTACHMENT_PATH)")"
-ATTACHMENT_STORAGE_BASE_URL="$(strip_quotes "$(get_env_value ATTACHMENT_STORAGE_BASE_URL)")"
-ENABLE_PLM="$(strip_quotes "$(get_env_value ENABLE_PLM)")"
+require_utf8_env_file
+require_unique_env_keys
+
+JWT_SECRET="$(get_env_value JWT_SECRET)"
+POSTGRES_PASSWORD="$(get_env_value POSTGRES_PASSWORD)"
+DATABASE_URL="$(get_env_value DATABASE_URL)"
+PRODUCT_MODE="$(get_env_value PRODUCT_MODE)"
+DEPLOYMENT_MODEL="$(get_env_value DEPLOYMENT_MODEL)"
+IMPORT_REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
+IMPORT_UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
+ATTACHMENT_PATH="$(get_env_value ATTACHMENT_PATH)"
+ATTACHMENT_STORAGE_BASE_URL="$(get_env_value ATTACHMENT_STORAGE_BASE_URL)"
+ENABLE_PLM="$(get_env_value ENABLE_PLM)"
+ENCRYPTION_KEY="$(get_env_value ENCRYPTION_KEY)"
+ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
 
 require_nonempty_env "JWT_SECRET" "$JWT_SECRET"
 require_nonempty_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 require_nonempty_env "DATABASE_URL" "$DATABASE_URL"
+require_encryption_material "ENCRYPTION_KEY" "$ENCRYPTION_KEY" "default-key-change-in-production"
+require_encryption_material "ENCRYPTION_SALT" "$ENCRYPTION_SALT" "default-salt-change-in-production"
 
 if [[ "$DATABASE_URL" == *"change-me"* ]]; then
   die "DATABASE_URL still contains 'change-me' in ${ENV_FILE}"

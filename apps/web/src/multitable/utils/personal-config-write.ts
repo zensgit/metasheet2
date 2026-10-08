@@ -8,9 +8,19 @@ import type { PersonalViewConfigOverlay } from '../types'
  * other personal facets (filter/group/hidden/fieldOrder). This read-merge-write reads the current personal
  * config, merges the patch over it, and writes the whole thing back — a single-facet edit preserves the rest.
  *
- * Clearing still works: a patch facet set to `undefined` overrides the base value, and since `JSON.stringify`
- * drops `undefined`, the backend receives no such key and its `sanitizePersonalOverlayConfig` omits it — i.e.
- * the facet is cleared, while facets ABSENT from the patch (never mentioned) are preserved from `base`.
+ * Clearing a facet: this generic helper still accepts a patch facet set to `undefined` — since
+ * `JSON.stringify` drops `undefined`-valued keys, the backend never receives that key, and its
+ * `sanitizePersonalOverlayConfig` omits it from what gets stored, so the facet is REMOVED from the
+ * personal row (falling back to the shared view's value). Facets ABSENT from the patch (never
+ * mentioned) are separately preserved from `base`, same as always.
+ *
+ * BUT no current caller actually clears this way: the toolbar's clear actions for sort/filter (#6075)
+ * and grouping (#6110) all send an explicit EMPTY value instead (`{ rules: [] }`,
+ * `{ conjunction, conditions: [] }`, `{}` for groupInfo) — so a cleared facet PUTs as an explicit
+ * "no rule for me" personal override, not a removal that reverts to whatever the shared view has. The
+ * `undefined` shape above remains a real, tested capability of this merge helper (see
+ * multitable-grid-personal-additive-write.spec.ts's `{ filterInfo: undefined }` case) — it just is not
+ * how sort/filter/group are cleared today.
  *
  * Mirrors the read-merge-write already used by the column-reorder path (utils/reorder-view-fields.ts).
  */

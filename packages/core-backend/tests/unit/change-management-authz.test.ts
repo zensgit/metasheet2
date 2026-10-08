@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { isAdmin } from '../../src/rbac/service'
+import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
@@ -70,6 +71,8 @@ function expectNoServiceCalls(): void {
   expect(schemaSnapshotService.diffSchemas).toHaveBeenCalledTimes(0)
 }
 
+const pinned = usePinnedServer()
+
 describe('change-management router — platform-admin gate + identity + force rejection (GHSA-q7hj)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -79,53 +82,58 @@ describe('change-management router — platform-admin gate + identity + force re
   it('(a)+(b) non-admin principal -> 403 on every route, and NO service method is called', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const app = buildApp({ id: 'u-nonadmin' })
+    pinned.setApp(app)
 
-    await request(app).post('/api/changes').send({ title: 'x' }).expect(403)
-    await request(app).post('/api/changes/cr1/approve').send({}).expect(403)
-    await request(app).post('/api/changes/cr1/deploy').send({}).expect(403)
-    await request(app).post('/api/changes/cr1/rollback').send({}).expect(403)
-    await request(app).post('/api/schemas/v1/snapshot').send({}).expect(403)
-    await request(app).get('/api/schemas/diff?schema1=a&schema2=b').expect(403)
+    await request(pinned.url()).post('/api/changes').send({ title: 'x' }).expect(403)
+    await request(pinned.url()).post('/api/changes/cr1/approve').send({}).expect(403)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({}).expect(403)
+    await request(pinned.url()).post('/api/changes/cr1/rollback').send({}).expect(403)
+    await request(pinned.url()).post('/api/schemas/v1/snapshot').send({}).expect(403)
+    await request(pinned.url()).get('/api/schemas/diff?schema1=a&schema2=b').expect(403)
 
     expectNoServiceCalls()
   })
 
   it('unauthenticated (no req.user) -> 403, no service call', async () => {
     const app = buildApp(undefined)
-    await request(app).post('/api/changes/cr1/deploy').send({}).expect(403)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({}).expect(403)
     expectNoServiceCalls()
   })
 
   it('(c) RBAC check failure (isAdmin throws) -> 503 fail-closed, NO service call (zero side effects)', async () => {
     vi.mocked(isAdmin).mockRejectedValue(new Error('rbac db down'))
     const app = buildApp({ id: 'u-someone' })
-    await request(app).post('/api/changes/cr1/deploy').send({}).expect(503)
-    await request(app).post('/api/schemas/v1/snapshot').send({}).expect(503)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({}).expect(503)
+    await request(pinned.url()).post('/api/schemas/v1/snapshot').send({}).expect(503)
     expectNoServiceCalls()
   })
 
   it('(d) platform-admin normal path: create/approve/rollback/snapshot/diff succeed (no regression)', async () => {
     const app = buildApp({ id: 'u-admin' })
+    pinned.setApp(app)
 
-    await request(app).post('/api/changes').send({ title: 'x' }).expect(201)
+    await request(pinned.url()).post('/api/changes').send({ title: 'x' }).expect(201)
     expect(changeManagementService.createChangeRequest).toHaveBeenCalledTimes(1)
 
-    await request(app).post('/api/changes/cr1/approve').send({ comment: 'ok' }).expect(200)
+    await request(pinned.url()).post('/api/changes/cr1/approve').send({ comment: 'ok' }).expect(200)
     expect(changeManagementService.approveChangeRequest).toHaveBeenCalledTimes(1)
 
-    await request(app).post('/api/changes/cr1/rollback').send({ reason: 'r' }).expect(200)
+    await request(pinned.url()).post('/api/changes/cr1/rollback').send({ reason: 'r' }).expect(200)
     expect(changeManagementService.rollbackChange).toHaveBeenCalledTimes(1)
 
-    await request(app).post('/api/schemas/v1/snapshot').send({}).expect(201)
+    await request(pinned.url()).post('/api/schemas/v1/snapshot').send({}).expect(201)
     expect(schemaSnapshotService.createSchemaSnapshot).toHaveBeenCalledTimes(1)
 
-    await request(app).get('/api/schemas/diff?schema1=a&schema2=b').expect(200)
+    await request(pinned.url()).get('/api/schemas/diff?schema1=a&schema2=b').expect(200)
     expect(schemaSnapshotService.diffSchemas).toHaveBeenCalledTimes(1)
   })
 
   it('(d) platform-admin non-force deploy: succeeds and forwards force:false to the service', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/changes/cr1/deploy').send({ dry_run: false }).expect(200)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({ dry_run: false }).expect(200)
     expect(changeManagementService.deployChange).toHaveBeenCalledTimes(1)
     expect(changeManagementService.deployChange).toHaveBeenCalledWith('cr1', 'u-admin', {
       dryRun: false,
@@ -135,20 +143,23 @@ describe('change-management router — platform-admin gate + identity + force re
 
   it('(e) platform-admin deploy with force=true -> 400, deployChange NOT called', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/changes/cr1/deploy').send({ force: true }).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({ force: true }).expect(400)
     expect(changeManagementService.deployChange).toHaveBeenCalledTimes(0)
   })
 
   it('(e) truthy non-boolean force ("true", 1) is also rejected -> 400, deployChange NOT called (bypass prevention)', async () => {
     const app = buildApp({ id: 'u-admin' })
-    await request(app).post('/api/changes/cr1/deploy').send({ force: 'true' }).expect(400)
-    await request(app).post('/api/changes/cr1/deploy').send({ force: 1 }).expect(400)
+    pinned.setApp(app)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({ force: 'true' }).expect(400)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({ force: 1 }).expect(400)
     expect(changeManagementService.deployChange).toHaveBeenCalledTimes(0)
   })
 
   it('identity comes ONLY from req.user.id — a spoofed x-user-id header is ignored', async () => {
     const app = buildApp({ id: 'u-realadmin' })
-    await request(app)
+    pinned.setApp(app)
+    await request(pinned.url())
       .post('/api/changes')
       .set('x-user-id', 'u-spoofed')
       .send({ title: 'x' })
@@ -180,12 +191,13 @@ describe('change-management router — platform-admin gate + identity + force re
     app.get('/api/admin/safety/rules', (_req, res) => {
       res.status(200).json({ ok: true })
     })
+    pinned.setApp(app)
 
     // change-management surface stays gated for a non-admin...
-    await request(app).post('/api/changes/cr1/deploy').send({}).expect(403)
-    await request(app).get('/api/schemas/diff?schema1=a&schema2=b').expect(403)
+    await request(pinned.url()).post('/api/changes/cr1/deploy').send({}).expect(403)
+    await request(pinned.url()).get('/api/schemas/diff?schema1=a&schema2=b').expect(403)
     // ...but an unrelated /api endpoint mounted after it MUST remain reachable.
-    await request(app).get('/api/admin/safety/rules').expect(200)
+    await request(pinned.url()).get('/api/admin/safety/rules').expect(200)
     expectNoServiceCalls()
   })
 })

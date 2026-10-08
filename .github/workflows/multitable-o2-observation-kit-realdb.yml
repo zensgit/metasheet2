@@ -1,0 +1,197 @@
+name: Multitable O2 Observation Kit (real DB)
+
+# Execution layer of the O-2 observation kit: runs the ENTIRE observation SQL against a real,
+# freshly migrated Postgres inside a session pinned `default_transaction_read_only = on`, so a
+# write that the static census misses still aborts and reds. Split out of
+# multitable-o2-observation-kit.yml so that the fast hermetic contract job can run on EVERY pull
+# request (and thus be a required check) without paying for a postgres service + full migrations
+# on unrelated PRs. This lane keeps the original path filters; the drift-guard test that pins
+# runbook-cited paths to those filters now targets THIS file.
+#
+# It is ALSO the execution lane for the role-cascade witness's real-DB goldens
+# (scripts/ops/multitable-role-cascade-witness.test.mjs, opt-in behind
+# ROLE_CASCADE_WITNESS_DB_GOLDENS=1). Those goldens run in no other lane — the required hermetic
+# contract lane keeps them unarmed on purpose — so the armed step below is the only place the
+# catalog proof executes in CI, and the hermetic suite pins the step's existence, its env var and
+# its command so removing it reds the required lane rather than silently returning to skip-green.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multitable-o2-observation-kit.yml'
+      - 'scripts/ops/multitable-o2-observation.sql'
+      - 'scripts/ops/multitable-o2-observation.test.mjs'
+      - 'scripts/ops/multitable-o2-canary-drill.md'
+      # Drift-guard inputs: the test pins the observation queries' literals to
+      # these sources, so the PR that changes one of them re-runs this check
+      # instead of a later, unrelated PR going red.
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
+      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
+      # this check on the renaming PR — not go stale-red on a later, unrelated one.
+      # A guard test pins this list to the runbook's citations mechanically.
+      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
+      - 'packages/core-backend/src/db/recovery-conflict.ts'
+      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
+      - 'packages/core-backend/src/multitable/history-trust-checkpoint.ts'
+      - 'packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts'
+      - 'packages/core-backend/src/routes/univer-meta.ts'
+      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
+      - 'packages/core-backend/scripts/reset-acceptance.mjs'
+      - 'packages/core-backend/tests/unit/reset-acceptance-request-shape.test.ts'
+      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
+      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
+      # Role-cascade witness real-DB goldens (PR #5131). The 10 catalog goldens — the
+      # `user_roles`-only counterexample, the SET NULL / SET DEFAULT legs and the
+      # `view_permissions`-shape over-widen guard — are OPT-IN (ROLE_CASCADE_WITNESS_DB_GOLDENS=1)
+      # and therefore run in NO other lane: the required hermetic `observation-kit contract` lane
+      # deliberately does not arm them. Without these entries a change to the witness, to its
+      # goldens, or to the ONE query definition in the battery would never trigger the lane that
+      # actually executes them — the repo's named skip-green shape (被触发≠被验证).
+      - 'scripts/ops/multitable-role-cascade-witness.mjs'
+      - 'scripts/ops/multitable-role-cascade-witness.test.mjs'
+      - 'scripts/ops/multitable-l1-battery.mjs'
+      - '.github/workflows/multitable-o2-observation-kit-realdb.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multitable-o2-observation-kit.yml'
+      - 'scripts/ops/multitable-o2-observation.sql'
+      - 'scripts/ops/multitable-o2-observation.test.mjs'
+      - 'scripts/ops/multitable-o2-canary-drill.md'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
+      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
+      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
+      # this check on the renaming PR — not go stale-red on a later, unrelated one.
+      # A guard test pins this list to the runbook's citations mechanically.
+      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
+      - 'packages/core-backend/src/db/recovery-conflict.ts'
+      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
+      - 'packages/core-backend/src/multitable/history-trust-checkpoint.ts'
+      - 'packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts'
+      - 'packages/core-backend/src/routes/univer-meta.ts'
+      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
+      - 'packages/core-backend/scripts/reset-acceptance.mjs'
+      - 'packages/core-backend/tests/unit/reset-acceptance-request-shape.test.ts'
+      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
+      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
+      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
+      # Role-cascade witness real-DB goldens (PR #5131). The 10 catalog goldens — the
+      # `user_roles`-only counterexample, the SET NULL / SET DEFAULT legs and the
+      # `view_permissions`-shape over-widen guard — are OPT-IN (ROLE_CASCADE_WITNESS_DB_GOLDENS=1)
+      # and therefore run in NO other lane: the required hermetic `observation-kit contract` lane
+      # deliberately does not arm them. Without these entries a change to the witness, to its
+      # goldens, or to the ONE query definition in the battery would never trigger the lane that
+      # actually executes them — the repo's named skip-green shape (被触发≠被验证).
+      - 'scripts/ops/multitable-role-cascade-witness.mjs'
+      - 'scripts/ops/multitable-role-cascade-witness.test.mjs'
+      - 'scripts/ops/multitable-l1-battery.mjs'
+      - '.github/workflows/multitable-o2-observation-kit-realdb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  execution-proof:
+    name: observation-kit execution proof (SQL is read-only against a real DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_o2_obs_kit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_o2_obs_kit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_o2_obs_kit
+      # Arms the suite's execution-layer sentinel: in THIS lane a missing DATABASE_URL
+      # must FAIL, never silently skip the read-only proof.
+      METASHEET_REAL_DB_TEST_STEP: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      # Deliberately BEFORE `pnpm install` and the migrations: these goldens build their own
+      # throwaway databases from DDL and need nothing but node + psql + the postgres service, so
+      # running them first means a dependency or migration break cannot mask the strongest
+      # evidence this lane carries.
+      - name: Run the role-cascade witness real-DB goldens (ARMED)
+        env:
+          # ARMS the opt-in goldens. Unset (the hermetic contract lane) they skip LOUDLY; here the
+          # suite's own sentinel turns an armed-but-unrunnable lane into a hard FAILURE rather than
+          # a silent skipped-green. scripts/ops/multitable-role-cascade-witness.test.mjs pins this
+          # step — name, env var and command — so dropping it reds the required hermetic lane
+          # instead of quietly restoring skip-green.
+          ROLE_CASCADE_WITNESS_DB_GOLDENS: '1'
+          # Maintenance connection on the SAME postgres service the job's DATABASE_URL points at
+          # (the goldens CREATE/DROP their own `rcw_golden_*` databases, so they cannot use the
+          # migrated application database).
+          ROLE_CASCADE_WITNESS_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: node --test scripts/ops/multitable-role-cascade-witness.test.mjs
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — the observation SQL
+          # must run against the same schema shape the other real-DB lanes provision.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run observation-kit tests WITH the execution layer armed
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs

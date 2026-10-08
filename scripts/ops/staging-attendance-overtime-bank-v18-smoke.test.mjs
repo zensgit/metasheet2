@@ -168,7 +168,12 @@ test('v1-8 helper residue categories cover every table the smoke can dirty (incl
   ]) {
     assert.match(script, new RegExp(`to_regclass\\('public\\.${table}'\\)`), `${table} is preflighted`)
     assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted`)
-    assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
+    if (table === 'attendance_records') {
+      assert.match(script, /cleanupStagingAttendanceScope/)
+      assert.doesNotMatch(script, /DELETE FROM attendance_records/)
+    } else {
+      assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
+    }
   }
   // counted-only surfaces: balance events cascade from lots; deliveries must stay untouched (0).
   for (const table of ['attendance_leave_balance_events', 'attendance_notification_deliveries']) {

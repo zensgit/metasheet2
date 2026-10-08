@@ -1,0 +1,10 @@
+{
+  "_README": "CAPTURED AT THE PRE-W7-4 BASE (the frozen 1b head). Do not regenerate from a tree that already carries the W7-4 emitter — a golden generated from the post-change code proves only that the code equals itself.",
+  "capturedAtBaseSha": "8c4cf538955ff43269f72685feb810112b1d3914",
+  "harnessSha256": "1a4973e924ed9047fa6ca838c3bb1a3452baaf3439f8838c000cdb53269c525f",
+  "entries": {
+    "today_status": "{\"data\":{\"basis\":[{\"source\":{\"kind\":\"snapshot\",\"ref\":\"attendance_record_calculations:authoritative\"},\"version\":{\"asOf\":\"<instant>\",\"posture\":\"snapshot_frozen\",\"snapshotVersion\":\"1\"}}],\"category\":\"today_status\",\"conclusion\":{\"earlyLeaveMinutes\":0,\"isWorkday\":true,\"lateMinutes\":0,\"status\":\"partial\",\"workDate\":\"<date>\",\"workMinutes\":0},\"confidence\":\"grounded\",\"reasonCode\":\"partial\"},\"ok\":true}",
+    "late_early": "{\"data\":{\"basis\":[{\"source\":{\"kind\":\"snapshot\",\"ref\":\"attendance_record_calculations:authoritative\"},\"version\":{\"asOf\":\"<instant>\",\"posture\":\"snapshot_frozen\",\"snapshotVersion\":\"1\"}}],\"category\":\"late_early\",\"conclusion\":{\"absenceLateCount\":0,\"earlyLeaveMinutes\":0,\"lateMinutes\":0,\"severeLateCount\":0,\"severeLateMinutes\":0,\"status\":\"partial\"},\"confidence\":\"grounded\",\"reasonCode\":\"partial\"},\"ok\":true}",
+    "missing_punch": "{\"data\":{\"basis\":[{\"source\":{\"kind\":\"snapshot\",\"ref\":\"attendance_record_calculations:authoritative\"},\"version\":{\"asOf\":\"<instant>\",\"posture\":\"snapshot_frozen\",\"snapshotVersion\":\"1\"}}],\"category\":\"missing_punch\",\"conclusion\":{\"isWorkday\":true,\"missingSide\":\"check_out\",\"suggestedRequestType\":\"missed_check_out\"},\"confidence\":\"grounded\",\"reasonCode\":\"partial_missing_check_out\"},\"ok\":true}"
+  }
+}

@@ -5,9 +5,14 @@
 
 import { randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
+import { mintOperation, sealOperation } from './operation-ledger'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
-import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
+import {
+  claimExecutionAction,
+  isClassAExecutionClaimEnabled,
+  type ExecutionLedgerKind,
+} from './automation-execution-ledger'
 import { deriveActionKey } from './automation-action-idempotency'
 import {
   classifyFetchError,
@@ -23,11 +28,57 @@ import {
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
-import { redactString } from './automation-log-redact'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { produceAutomationEvent } from './automation-durable-activation'
+import {
+  extractExactLinkedRecordId,
+  hasUnavailableFwbNumberMapping,
+  isFwbWritebackEnabled,
+  normalizeFwbMappings,
+  normalizeFwbUpdateRecordLinkFieldId,
+  parseFwbWriteMode,
+  resolveRecordLinkTargetFromSchema,
+} from './approval-fwb-activation'
+import {
+  executeWriteApprovalFormValues,
+  resolveFwbRuntimeMappings,
+  type FwbRecordWriteSeam,
+} from './approval-fwb-write-action'
+import {
+  executeUpdateBoundRecord,
+  type FwbUpdateSeam,
+  type RecordLinkChecks,
+} from './approval-fwb-record-link'
+import type { FwbGateChecks } from './approval-fwb-permission-gates'
+import {
+  ensureRecordWriteAllowed,
+  loadRecordPermissionScopeMap,
+  loadSheetMemberUserIdSet,
+  loadSheetPermissionScopeMap,
+} from './permission-service'
+// F9b: the ONE durable notification-write seam (shared with routes/multitable-button.ts).
+import { insertRecordSubscriptionNotifications } from './record-subscription-service'
+import {
+  lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
+  resolveSheetCapabilitiesForUserOnQuery,
+} from '../services/approval-record-link-txn-auth'
+import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
+import { redactString, redactValue } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
+import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  loadFieldSchemaSnapshot,
+  validateAutomationOptionValues,
+} from './field-schema-fence-recheck'
+import {
+  assertRecordLinkDeleteFencePlanCurrent,
+  prepareRecordLinkDeleteFencePlan,
+} from './link-writer-fence'
 import {
   assertTransactionalQuery,
   captureSideDoorInboundTombstones,
@@ -80,13 +131,40 @@ import type {
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
-import type { ConditionGroup } from './automation-conditions'
-import { evaluateConditions } from './automation-conditions'
+import type {
+  AutomationConditionField,
+  ConditionEvaluationOptions,
+  ConditionGroup,
+  ConditionUnreadableValueInfo,
+} from './automation-conditions'
+import { evaluateConditions, normalizeConditionFields } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
+
+// 客户反馈 2026-09-24 #4b — ONE values-free warning per rule when a stored cell or a condition value cannot be
+// read as its field's type (a legacy free-text string in a date field, …). The condition then evaluates as
+// unmatched instead of throwing. Bounded so a long-lived process never grows the registry without limit.
+const UNREADABLE_CONDITION_VALUE_WARNED_RULES = new Set<string>()
+const UNREADABLE_CONDITION_VALUE_WARN_CAP = 5_000
+
+function warnUnreadableConditionValueOnce(ruleId: string, sheetId: string, info: ConditionUnreadableValueInfo): void {
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.has(ruleId)) return
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.size >= UNREADABLE_CONDITION_VALUE_WARN_CAP) {
+    UNREADABLE_CONDITION_VALUE_WARNED_RULES.clear()
+  }
+  UNREADABLE_CONDITION_VALUE_WARNED_RULES.add(ruleId)
+  logger.warn('Automation condition value could not be read as the field type; the condition evaluated as unmatched', {
+    ruleId,
+    sheetId,
+    fieldId: info.fieldId,
+    fieldType: info.fieldType,
+    operator: info.operator,
+    side: info.side,
+  })
+}
 
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000
 const DEFAULT_MAX_WEBHOOK_RETRIES = 2
@@ -739,6 +817,8 @@ export interface AutomationExecution {
   finishedAt?: string
   /** Forward-compat tag for the snapshot shape. */
   schemaVersion?: number
+  /** #4196 Q2/Q6 response marker: business dispatch was suppressed for this manual test run. */
+  dryRun?: boolean
   // ── A5 retry provenance (set by AutomationService.retryExecution; plain ids, not redacted) ──
   /** The original execution id this run re-ran (only on a retry-created execution). */
   rerunOfExecutionId?: string
@@ -749,6 +829,8 @@ export interface AutomationExecution {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: this step was planned but no business dispatch occurred. */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
@@ -761,6 +843,674 @@ export interface AutomationStepResult {
   alreadyApplied?: boolean
 }
 
+export type AutomationDispatchMode = 'live' | 'simulate'
+
+/**
+ * F9: a send_notification with no recipients FAILS EXPLICITLY — it is never defaulted to the rule
+ * creator (that would be a delivery decision made on the author's behalf, and it would fork from the
+ * button route's NO_RECIPIENTS hard line in routes/multitable-button.ts). The text is the operator's
+ * next action, not an engine term, because the manager renders step.error verbatim in the test-run
+ * banner. The NO_RECIPIENTS token keeps it greppable/machine-matchable across both surfaces.
+ */
+export const AUTOMATION_NO_RECIPIENTS_ERROR = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
+
+/**
+ * F9b: a rule-side send_notification whose recipients are not ALL inside the selectable-people roster
+ * fails the WHOLE step — the same hard line the button route draws with RECIPIENT_NOT_AUTHORIZED, so one
+ * recipient policy governs both surfaces. Never a partial delivery, never a durable row, never an emit.
+ * Values-free on purpose (a count, never the ids) because the manager renders step.error verbatim.
+ *
+ * WHAT THAT ROSTER ACTUALLY IS (stated exactly, no wider claim): `loadSheetMemberUserIdSet`
+ * (multitable/permission-service.ts:611) delegates to `listSheetPermissionCandidates` (:416), whose USER
+ * branch LEFT JOINs `spreadsheet_permissions` (:440) for the access-level LABEL only — the filter that
+ * survives (:594) keeps every ACTIVE user holding a GLOBAL `multitable:read`/`multitable:write` grant.
+ * So this control means “a selectable person on this platform”; it is NOT “granted on THIS sheet” and NOT
+ * a tenant boundary. That width is inherited ON PURPOSE from the button route (one resolver, zero drift);
+ * narrowing it to per-sheet grants is a both-surfaces change and is deliberately out of this slice.
+ */
+export const AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR =
+  '通知接收人不在可选人员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）'
+
+/**
+ * F9b fail-closed sink: every PRODUCTION AutomationExecutor construction injects `deps.queryFn`
+ * (multitable/automation-service.ts:1067 and both routes/multitable-button.ts constructions), so a
+ * missing sink is a wiring bug — the step fails instead of silently degrading back to the
+ * eventBus-only phantom notification this slice exists to close.
+ */
+export const AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR =
+  '通知无法落库：notification sink unavailable（NOTIFICATION_SINK_UNAVAILABLE）'
+
+/**
+ * F9b r2 (refutation A, minor «错误文案错标»): reading the roster and writing the rows are two stages.
+ * In r1 the roster read sat INSIDE the write try/catch, so an unreadable roster was reported as
+ * “send_notification durable write failed: <driver text>” — the wrong stage, and the only path that
+ * pushed a driver string into `step.error` for a READ. Both stages stay fail-closed (no roster ⇒ no
+ * delivery, ever); r2 only makes the reported stage true and keeps this one values-free.
+ */
+export const AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR =
+  '通知接收人名册暂时读不到，未发送通知，请稍后重试（ROSTER_UNAVAILABLE）'
+
+/**
+ * F9b r2: the ONE recipient shaping for this action — trim + dedupe, byte-for-byte the button route's
+ * shaping (routes/multitable-button.ts:224-228). Applied ONCE and reused by the membership gate, the
+ * durable write, the emitted payload AND the dry-run preflight, so all four speak about the SAME list
+ * (a duplicate id must never become two notification rows for one person).
+ *
+ * F9c: EXPORTED (was module-private) so the rule SAVE gate (automation-service.ts
+ * `assertNotificationRecipientsAtSave`) shapes recipients with THIS function instead of a second
+ * copy — save-time and run-time must never disagree about what ' u1 ' or a repeated id means.
+ * Nothing on the execution path changed.
+ */
+export function normalizeNotificationRecipients(userIds: unknown): string[] {
+  return Array.from(new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+}
+
+/**
+ * F9b r2: outcome of the recipient membership gate — shared by the live path and the dry-run preflight.
+ * A single shape (not a discriminated union) because this package compiles with `strict:false`, where a
+ * boolean discriminant does not narrow.
+ */
+interface NotificationRecipientGate {
+  /** TRUE only when EVERY recipient is inside the roster; both failure modes report false. */
+  ok: boolean
+  /** Values-free operator text; set only when `ok` is false. */
+  error?: string
+  /** Count of refused recipients (all of them when the roster itself was unreadable). */
+  rejected?: number
+}
+
+function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
+  switch (actionType) {
+    case 'condition_branch':
+    case 'parallel_branch':
+    case 'record_click':
+      return 'execute'
+    case 'update_record':
+    case 'create_record':
+    case 'delete_record':
+    case 'send_webhook':
+    case 'send_notification':
+    case 'send_email':
+    case 'send_dingtalk_group_message':
+    case 'send_dingtalk_person_message':
+    case 'send_dingtalk_approval_card':
+    case 'lock_record':
+    case 'wait_for_callback':
+    case 'start_approval':
+    case 'write_approval_form_values':
+      return 'simulate'
+  }
+
+  const unreachable: never = actionType
+  return unreachable
+}
+
+function nonBlankConfigString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function simulatedClassAPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  const targetBaseId = nonBlankConfigString(config.targetBaseId)
+  const configuredSheetId = nonBlankConfigString(config.targetSheetId)
+  const configuredRecordId = nonBlankConfigString(config.targetRecordId)
+  const crossBaseTarget = (): { baseId: string; sheetId: string; recordId: string } | AutomationStepResult => {
+    if (!configuredSheetId || !configuredRecordId) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `Cross-base ${action.type} requires targetBaseId + targetSheetId + targetRecordId`,
+        durationMs: 0,
+      }
+    }
+    return { baseId: targetBaseId as string, sheetId: configuredSheetId, recordId: configuredRecordId }
+  }
+
+  let target: { baseId?: string; sheetId: string; recordId?: string }
+  let payload: unknown
+  switch (action.type) {
+    case 'update_record': {
+      const fields = isPlainRecord(config.fields) ? config.fields : null
+      if (!fields || Object.keys(fields).length === 0) {
+        return { actionType: action.type, status: 'failed', error: 'No fields specified', durationMs: 0 }
+      }
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      payload = fields
+      break
+    }
+    case 'create_record':
+      target = {
+        ...(targetBaseId ? { baseId: targetBaseId } : {}),
+        sheetId: nonBlankConfigString(config.sheetId) ?? context.sheetId,
+      }
+      payload = isPlainRecord(config.data) ? config.data : {}
+      break
+    case 'delete_record':
+    case 'lock_record': {
+      if (targetBaseId) {
+        const resolved = crossBaseTarget()
+        if ('actionType' in resolved) return resolved
+        target = resolved
+      } else {
+        target = { sheetId: context.sheetId, recordId: context.recordId }
+      }
+      if (action.type === 'lock_record') payload = { locked: config.locked !== false }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        target,
+        ...(payload === undefined ? {} : { payload: redactValue(payload) }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedGenericClassBPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  const config = action.config
+  let target: Record<string, unknown>
+  let payload: unknown
+
+  switch (action.type) {
+    case 'send_webhook': {
+      const url = typeof config.url === 'string' ? config.url : ''
+      if (!url) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is required', durationMs: 0 }
+      }
+      let host: string
+      try {
+        host = new URL(url).host
+      } catch {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      if (!host) {
+        return { actionType: action.type, status: 'failed', error: 'Webhook URL is invalid', durationMs: 0 }
+      }
+      target = { host }
+      payload = {
+        method: typeof config.method === 'string' ? config.method : 'POST',
+        body: config.body ?? {
+          ruleId: context.sheetId,
+          recordId: context.recordId,
+          data: context.recordData,
+          triggeredAt: new Date().toISOString(),
+        },
+      }
+      break
+    }
+    case 'send_notification': {
+      const userIds = Array.isArray(config.userIds)
+        ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry))
+        : []
+      // F9b r3: simulate judges the SAME shaped message as the live path (executeSendNotification
+      // trims too) - a whitespace-only message must not test-run green and then fail on its first
+      // live fire.
+      const message = typeof config.message === 'string' ? config.message.trim() : ''
+      if (!userIds.length) {
+        return { actionType: action.type, status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR, durationMs: 0 }
+      }
+      if (!message) {
+        return { actionType: action.type, status: 'failed', error: 'Notification message is required', durationMs: 0 }
+      }
+      target = { userIds }
+      payload = { message }
+      break
+    }
+    case 'send_email': {
+      const recipients = Array.from(new Set(
+        (Array.isArray(config.recipients) ? config.recipients : [])
+          .filter((entry): entry is string => typeof entry === 'string')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      ))
+      const subjectTemplate = typeof config.subjectTemplate === 'string' ? config.subjectTemplate.trim() : ''
+      const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+      if (!recipients.length) {
+        return { actionType: action.type, status: 'failed', error: 'send_email requires at least one recipient', durationMs: 0 }
+      }
+      if (!subjectTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email subjectTemplate is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'send_email bodyTemplate is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { recipients }
+      payload = {
+        subject: renderAutomationTemplate(subjectTemplate, templateData).trim(),
+        content: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
+    case 'send_dingtalk_group_message': {
+      const groupConfig = config as unknown as SendDingTalkGroupMessageConfig
+      const staticDestinationIds = Array.from(new Set([
+        ...(Array.isArray(groupConfig.destinationIds)
+          ? groupConfig.destinationIds
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter(Boolean)
+          : []),
+        ...(typeof groupConfig.destinationId === 'string' && groupConfig.destinationId.trim()
+          ? [groupConfig.destinationId.trim()]
+          : []),
+      ]))
+      const destinationFieldPaths = normalizeRecipientFieldPaths(
+        groupConfig.destinationIdFieldPath,
+        groupConfig.destinationIdFieldPaths,
+      )
+      const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+      const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
+      const titleTemplate = typeof groupConfig.titleTemplate === 'string' ? groupConfig.titleTemplate.trim() : ''
+      const bodyTemplate = typeof groupConfig.bodyTemplate === 'string' ? groupConfig.bodyTemplate.trim() : ''
+      if (!destinationIds.length) {
+        if (destinationFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one DingTalk destination or record destination field path is required',
+          durationMs: 0,
+        }
+      }
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { destinationIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+      }
+      break
+    }
+    case 'send_dingtalk_person_message': {
+      const personConfig = config as unknown as SendDingTalkPersonMessageConfig
+      const recipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.userIdFieldPath,
+        personConfig.userIdFieldPaths,
+      )
+      const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(
+        personConfig.memberGroupIdFieldPath,
+        personConfig.memberGroupIdFieldPaths,
+      )
+      const userIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.userIds),
+        ...resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths),
+      ]))
+      const memberGroupIds = Array.from(new Set([
+        ...normalizeUserIds(personConfig.memberGroupIds),
+        ...resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths),
+      ]))
+      const titleTemplate = typeof personConfig.titleTemplate === 'string'
+        ? personConfig.titleTemplate.trim()
+        : ''
+      const bodyTemplate = typeof personConfig.bodyTemplate === 'string'
+        ? personConfig.bodyTemplate.trim()
+        : ''
+      if (!titleTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk title template is required', durationMs: 0 }
+      }
+      if (!bodyTemplate) {
+        return { actionType: action.type, status: 'failed', error: 'DingTalk body template is required', durationMs: 0 }
+      }
+      if (userIds.length === 0 && memberGroupIds.length === 0) {
+        if (recipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: action.type,
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+            durationMs: 0,
+          }
+        }
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+          durationMs: 0,
+        }
+      }
+      const templateData: Record<string, unknown> = {
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? '',
+        record: context.recordData,
+      }
+      target = { userIds, memberGroupIds }
+      payload = {
+        title: truncateDingTalkMessageText(
+          renderAutomationTemplate(titleTemplate, templateData).trim(),
+          DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+        ),
+        body: renderAutomationTemplate(bodyTemplate, templateData).trim(),
+        linkConfiguration: {
+          publicFormViewConfigured: Boolean(nonBlankConfigString(personConfig.publicFormViewId)),
+          internalViewConfigured: Boolean(nonBlankConfigString(personConfig.internalViewId)),
+        },
+      }
+      break
+    }
+    case 'send_dingtalk_approval_card': {
+      const event = context.triggerEvent as {
+        eventType?: unknown
+        approval?: { instanceId?: unknown }
+        task?: { nodeKey?: unknown; assigneeUserId?: unknown }
+      } | null
+      const approvalInstanceId = nonBlankConfigString(event?.approval?.instanceId)
+      const nodeKey = nonBlankConfigString(event?.task?.nodeKey)
+      const assigneeUserId = nonBlankConfigString(event?.task?.assigneeUserId)
+      if (event?.eventType !== 'approval.task_created' || !approvalInstanceId || !nodeKey || !assigneeUserId) {
+        return {
+          actionType: action.type,
+          status: 'failed',
+          error: 'send_dingtalk_approval_card requires an approval.task_created trigger event',
+          durationMs: 0,
+        }
+      }
+      target = { approvalInstanceId, nodeKey, assigneeUserId }
+      payload = { cardKind: 'approval_task' }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: { target, payload: redactValue(payload) },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedStartApprovalPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'start_approval') return null
+
+  const templateId = nonBlankConfigString(action.config.templateId)
+  if (!templateId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.templateId is required',
+      durationMs: 0,
+    }
+  }
+
+  const rawMapping = isPlainRecord(action.config.formDataMapping)
+    ? action.config.formDataMapping
+    : null
+  if (!rawMapping || Object.keys(rawMapping).length === 0) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.formDataMapping is required',
+      durationMs: 0,
+    }
+  }
+
+  const formDataMapping: Record<string, string> = {}
+  for (const [rawFieldId, rawExpression] of Object.entries(rawMapping)) {
+    const fieldId = rawFieldId.trim()
+    const expression = nonBlankConfigString(rawExpression)
+    if (!fieldId || !expression) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: 'start_approval.formDataMapping entries must be non-empty strings',
+        durationMs: 0,
+      }
+    }
+    formDataMapping[fieldId] = expression
+  }
+
+  if (action.config.requester !== undefined && !isPlainRecord(action.config.requester)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester must be an object',
+      durationMs: 0,
+    }
+  }
+  const requester = isPlainRecord(action.config.requester) ? action.config.requester : undefined
+  const requesterMode = requester?.mode ?? 'trigger_actor'
+  if (requesterMode !== 'trigger_actor' && requesterMode !== 'rule_creator') {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'start_approval.requester.mode must be trigger_actor or rule_creator',
+      durationMs: 0,
+    }
+  }
+
+  const templateData: Record<string, unknown> = {
+    ...context.recordData,
+    record: context.recordData,
+    trigger: context.triggerEvent,
+    sheetId: context.sheetId,
+    recordId: context.recordId,
+    actorId: context.actorId,
+    ruleId: context.ruleId,
+    executionId: context.executionId,
+  }
+  const formData = Object.fromEntries(
+    Object.entries(formDataMapping).map(([fieldId, expression]) => {
+      const value = expression.includes('{{')
+        ? renderAutomationTemplate(expression, templateData)
+        : lookupTemplateValue(expression, templateData)
+      return [fieldId, value === undefined ? '' : value]
+    }),
+  )
+
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldCreateApproval: true,
+        target: { templateId, requesterMode },
+        payload: redactValue({ formData }),
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedWriteApprovalFormValuesPlan(
+  action: AutomationAction,
+  context: ExecutionContext,
+): AutomationStepResult | null {
+  if (action.type !== 'write_approval_form_values') return null
+
+  const mode = parseFwbWriteMode(action.config.mode)
+  if (!mode.ok) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:mapping_config:unknown_mode',
+      durationMs: 0,
+    }
+  }
+  const mappings = normalizeFwbMappings(action.config.mappings)
+  if (mappings.ok === false) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: `fwb_rejected:mapping_config:${mappings.issue}`,
+      durationMs: 0,
+    }
+  }
+  if (hasUnavailableFwbNumberMapping(mappings.mappings)) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:exact_number_mapping_unavailable',
+      durationMs: 0,
+    }
+  }
+  const sourceTemplateVersionId = nonBlankConfigString(action.config.sourceTemplateVersionId)
+  if (!sourceTemplateVersionId) {
+    return {
+      actionType: action.type,
+      status: 'failed',
+      error: 'fwb_rejected:source_template_version',
+      durationMs: 0,
+    }
+  }
+
+  let target: Record<string, unknown>
+  if (mode.mode === 'update') {
+    const linkField = normalizeFwbUpdateRecordLinkFieldId(action.config.recordLinkFieldId)
+    if (linkField.ok === false) {
+      return {
+        actionType: action.type,
+        status: 'failed',
+        error: `fwb_rejected:mapping_config:${linkField.issue}`,
+        durationMs: 0,
+      }
+    }
+    target = {
+      mode: 'update',
+      sourceTemplateVersionId,
+      recordLinkFieldId: linkField.recordLinkFieldId,
+      derivedFrom: 'published_template_record_link',
+    }
+  } else {
+    target = {
+      mode: 'create',
+      sheetId: context.sheetId,
+      sourceTemplateVersionId,
+    }
+  }
+
+  const mappingPlan = mappings.mappings.map(({ formFieldId, targetFieldId, targetType }) => ({
+    formFieldId,
+    targetFieldId,
+    targetType,
+  }))
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: {
+      dryRun: true,
+      dispatched: false,
+      plan: {
+        wouldWriteApprovalFormValues: true,
+        target,
+        payload: {
+          valueSource: 'immutable_approved_form_snapshot',
+          mappings: mappingPlan,
+        },
+      },
+    },
+    durationMs: 0,
+  }
+}
+
+function simulatedStep(action: AutomationAction, context: ExecutionContext): AutomationStepResult {
+  if (action.type === 'wait_for_callback') {
+    return {
+      actionType: action.type,
+      status: 'success',
+      simulated: true,
+      output: {
+        dryRun: true,
+        dispatched: false,
+        plan: {
+          wouldSuspend: true,
+          reason: 'external_event',
+          resumeTokenIssued: false,
+        },
+      },
+      durationMs: 0,
+    }
+  }
+  const classAPlan = simulatedClassAPlan(action, context)
+  if (classAPlan) return classAPlan
+  const genericClassBPlan = simulatedGenericClassBPlan(action, context)
+  if (genericClassBPlan) return genericClassBPlan
+  const startApprovalPlan = simulatedStartApprovalPlan(action, context)
+  if (startApprovalPlan) return startApprovalPlan
+  const writeApprovalFormValuesPlan = simulatedWriteApprovalFormValuesPlan(action, context)
+  if (writeApprovalFormValuesPlan) return writeApprovalFormValuesPlan
+  return {
+    actionType: action.type,
+    status: 'success',
+    simulated: true,
+    output: { dryRun: true, dispatched: false },
+    durationMs: 0,
+  }
+}
+
 /**
  * #4196 Class-A action identity threaded to the four Class-A executors so each can claim its
  * (lineage-root, structural-path, action-type, config) tuple in the SAME transaction as its mutation.
@@ -771,6 +1521,7 @@ export interface AutomationStepResult {
 export interface ClassAActionIdentity {
   structuralPath: string
   rootExecutionId: string
+  kind?: ExecutionLedgerKind
 }
 
 export interface ExecutionContext {
@@ -789,6 +1540,16 @@ export interface ExecutionContext {
    * for back-compat: builders that omit it fall back to `executionId` at the claim call site.
    */
   rootExecutionId?: string
+  /** #4196 §6.1: real-fire test runs use a structurally disjoint applied/outbound ledger namespace. */
+  ledgerKind?: ExecutionLedgerKind
+  /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
+  dispatchMode?: AutomationDispatchMode
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields for TYPED condition evaluation, loaded lazily once per
+   * execution through `AutomationDeps.loadConditionFields` and cached here. `undefined` = not loaded yet;
+   * `null` = no loader / load failed ⇒ legacy untyped evaluation.
+   */
+  conditionFields?: ReadonlyMap<string, AutomationConditionField> | null
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -891,6 +1652,32 @@ export interface AutomationDeps {
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
   crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
+  /** FWB activation (§11 Q6): the four-gate set re-checked at execute time. OMITTED ⇒ DEFAULT-DENY —
+   *  a wiring that forgets to bind gates can never silently allow (fail-closed, kills default-allow). */
+  fwbGateChecks?: FwbGateChecks
+  /**
+   * Production FWB gate factory. The executor passes the CURRENT transaction query so every
+   * authorization read shares the write transaction; a fixed `fwbGateChecks` remains a test seam.
+   */
+  fwbGateChecksFactory?: (queryFn: AutomationDeps['queryFn']) => FwbGateChecks
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields (`id`, `type`, `property`) so rule and condition_branch
+   * conditions compare by FIELD TYPE (dates by calendar day in the business timezone, person/link/multiSelect
+   * as id sets, numbers numerically, …). OMITTED ⇒ the legacy untyped evaluation and NO field query — the
+   * zero-DB executor test seams stay zero-DB. Production (`AutomationService`) binds it to `meta_fields`.
+   */
+  loadConditionFields?: (sheetId: string) => Promise<ReadonlyArray<AutomationConditionField>>
+}
+
+/** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
+ *  construction; only a test seam should ever see this deny-all set actually reject. */
+const DEFAULT_DENY_FWB_GATES: FwbGateChecks = {
+  isAdmin: async () => false,
+  canManageSheetAccess: async () => false,
+  canReadTemplate: async () => false,
+  canWriteSheet: async () => false,
+  canWriteTargetFields: async () => false,
+  hasRecordedConfirmation: async () => false,
 }
 
 // ②b cross-base write-gate verdict. `crossBase: false` → same-base, no gate (zero regression).
@@ -899,6 +1686,40 @@ export type CrossBaseWriteGate =
   | { crossBase: false }
   | { crossBase: true; ok: true }
   | { crossBase: true; ok: false; error: string }
+
+/**
+ * The addressing verdict `AutomationExecutor.resolveCrossBaseWriteTarget` returns — the first half of
+ * {@link CrossBaseWriteGate}, before any authority / quota check. `crossBase: false` ⇒ update / delete / lock
+ * address the TRIGGER record (`context.sheetId` / `context.recordId`), whatever the config's target ids say.
+ */
+export type CrossBaseWriteTarget =
+  | { crossBase: false }
+  | { crossBase: true; resolved: false; error: string }
+  | { crossBase: true; resolved: true; targetBaseId: string | null; declaredBaseClaim: string | null }
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — a SAME-BASE record-mutating action whose target is the TRIGGER
+ * record, and that record is already gone (the canonical case: a `record.deleted` rule whose action is
+ * `delete_record` on the same table — the trigger record cannot exist any more by definition).
+ *
+ * Before this fix the 0-row DELETE was reported as `success` AND still emitted a fresh
+ * `multitable.record.deleted` (new `_eventId`, depth+1) — which re-triggered the same rule until the depth
+ * guard (MAX_AUTOMATION_DEPTH = 3) dropped it: ONE user delete ⇒ THREE execution logs, and up to four
+ * webhook deliveries (the webhook bridge has no depth guard). Deleting nothing must publish nothing.
+ *
+ * Thrown INSIDE the write transaction so everything taken so far rolls back — including the #4196 Class-A
+ * claim (a committed claim for a no-op would turn a legitimate retry into a false duplicate) — and caught
+ * by the action method, which converts it into a values-free `skipped` step. Control flow, never a failure.
+ */
+export class SameBaseTargetRecordMissingSignal extends Error {
+  constructor(readonly actionType: AutomationActionType) {
+    super(`${actionType}: same-base target (trigger) record no longer exists`)
+    this.name = 'SameBaseTargetRecordMissingSignal'
+  }
+}
+
+/** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
+export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
 
 // ── Executor class ────────────────────────────────────────────────────────
 
@@ -920,6 +1741,38 @@ export class AutomationExecutor {
   }
 
   /**
+   * 客户反馈 2026-09-24 #4b — the typed-evaluation options for `evaluateConditions`: the sheet's field types
+   * (loaded once per execution via `deps.loadConditionFields`, cached on the context so the top-level
+   * conditions and every condition_branch share ONE read) plus the once-per-rule values-free warning for
+   * values that cannot be read as their field's type. Never throws: no loader or a failing loader ⇒ `null`
+   * fields ⇒ the legacy untyped evaluation, so a field-table hiccup can never fail a run.
+   */
+  private async conditionEvaluationOptions(context: ExecutionContext): Promise<ConditionEvaluationOptions> {
+    if (context.conditionFields === undefined) {
+      context.conditionFields = await this.loadConditionFieldMap(context.sheetId, context.ruleId)
+    }
+    return {
+      fields: context.conditionFields,
+      onUnreadableValue: (info) => warnUnreadableConditionValueOnce(context.ruleId, context.sheetId, info),
+    }
+  }
+
+  private async loadConditionFieldMap(
+    sheetId: string,
+    ruleId: string,
+  ): Promise<ReadonlyMap<string, AutomationConditionField> | null> {
+    const loader = this.deps.loadConditionFields
+    if (!loader) return null
+    try {
+      return normalizeConditionFields(await loader(sheetId))
+    } catch {
+      // Values-free: the failure reason is not logged (it may echo connection details); ids only.
+      logger.warn('Automation condition field types unavailable; evaluating conditions untyped', { ruleId, sheetId })
+      return null
+    }
+  }
+
+  /**
    * Execute a rule against a trigger event.
    * Returns an execution record with step results.
    */
@@ -928,6 +1781,8 @@ export class AutomationExecutor {
     triggerEvent: unknown,
     jobLifecycleFactory?: ActionJobLifecycleFactory,
     rootExecutionId?: string,
+    dispatchMode: AutomationDispatchMode = 'live',
+    ledgerKind: ExecutionLedgerKind = 'execution',
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
@@ -949,6 +1804,7 @@ export class AutomationExecutor {
       // #4196 §4: the RAW-config §2.1 fingerprint (the Class-A claim identity) captured before any redaction.
       ruleActionFingerprint: deriveRuleActionSetFingerprint(rule.actions).hash,
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
+      ...(dispatchMode === 'simulate' ? { dryRun: true } : {}),
     }
 
     // A6-1: opt-in job persistence needs a visible parent execution before any
@@ -969,11 +1825,14 @@ export class AutomationExecutor {
       // #4196: the lineage root. A retry threads the original execution's root in; a first run has no
       // parent, so it defaults to its own id. Class-A claims key on this (retry of the same action → dup).
       rootExecutionId: rootExecutionId ?? executionId,
+      ledgerKind,
+      dispatchMode,
     }
 
-    // Evaluate conditions
+    // Evaluate conditions — typed by the sheet's field types when the wiring provides them (#4b).
     if (rule.conditions) {
-      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData)
+      const conditionOptions = await this.conditionEvaluationOptions(context)
+      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData, conditionOptions)
       if (!conditionsPassed) {
         execution.status = 'skipped'
         execution.duration = Date.now() - startTime
@@ -1177,6 +2036,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(cursor.parentStepIndex, branchAction, branchActionResult, meta)
         upstreamJobId = jobId
@@ -1281,6 +2141,21 @@ export class AutomationExecutor {
         ? { upstreamJobId: nextTopLevelUpstreamJobId }
         : undefined
       nextTopLevelUpstreamJobId = undefined
+
+      if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+        if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
+        const result = simulatedStep(action, context)
+        results.push(result)
+        if (jobLifecycle) await jobLifecycle.onSettled(index, action, result)
+        if (result.status === 'failed') {
+          for (let i = index + 1; i < actions.length; i++) {
+            if (jobLifecycle) await jobLifecycle.onSkipped(i, actions[i])
+            results.push({ actionType: actions[i].type, status: 'skipped', durationMs: 0 })
+          }
+          break
+        }
+        continue
+      }
 
       // A6-2 suspend point: a `wait_for_callback` in an opted-in rule suspends here.
       if (action.type === 'wait_for_callback') {
@@ -1420,6 +2295,7 @@ export class AutomationExecutor {
       const result = await this.executeSingleAction(action, context, {
         structuralPath: topLevelStepKey(index),
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
 
       results.push(result)
@@ -1497,6 +2373,7 @@ export class AutomationExecutor {
         const branchActionResult = await this.executeSingleAction(branchAction, context, {
           structuralPath: stepKey,
           rootExecutionId: context.rootExecutionId ?? context.executionId,
+          kind: context.ledgerKind,
         })
         await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
 
@@ -1585,8 +2462,10 @@ export class AutomationExecutor {
     let matched = false
 
     try {
+      // #4b: branch conditions compare by field type exactly like the rule's top-level conditions.
+      const conditionOptions = await this.conditionEvaluationOptions(context)
       for (const branch of branches) {
-        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData)) {
+        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData, conditionOptions)) {
           selected = branch
           matched = true
           break
@@ -1650,6 +2529,39 @@ export class AutomationExecutor {
       const jobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${actionIndex}`
       const meta = { stepKey, jobId, upstreamJobId }
 
+      if (context.dispatchMode === 'simulate' && simulationDisposition(branchAction.type) === 'simulate') {
+        await jobLifecycle.onStart(stepIndex, branchAction, meta)
+        const branchActionResult = simulatedStep(branchAction, context)
+        await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
+        lastJobId = jobId
+        upstreamJobId = jobId
+        if (branchActionResult.status === 'failed') {
+          for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
+            const skippedAction = branchActions[skippedIndex]
+            const skippedStepKey = `${stepIndex}.branch.${selectedBranchKey}.${skippedIndex}`
+            const skippedJobId = `${context.executionId}:job:${stepIndex}:branch:${selectedBranchKey}:${skippedIndex}`
+            await jobLifecycle.onSkipped(stepIndex, skippedAction, {
+              stepKey: skippedStepKey,
+              jobId: skippedJobId,
+              upstreamJobId,
+            })
+            upstreamJobId = skippedJobId
+            lastJobId = skippedJobId
+          }
+          return {
+            lastJobId,
+            result: {
+              actionType: 'condition_branch',
+              status: 'failed',
+              error: branchActionResult.error ?? `Branch action ${actionIndex} failed`,
+              output,
+              durationMs: Date.now() - startMs,
+            },
+          }
+        }
+        continue
+      }
+
       if (branchAction.type === 'wait_for_callback') {
         // A6-3-3 branch-local suspend. Fail closed if no resume capability (shouldn't happen:
         // condition_branch already requires workflow_job_v1, which supplies onSuspendBranch).
@@ -1697,6 +2609,7 @@ export class AutomationExecutor {
       const branchActionResult = await this.executeSingleAction(branchAction, context, {
         structuralPath: stepKey,
         rootExecutionId: context.rootExecutionId ?? context.executionId,
+        kind: context.ledgerKind,
       })
       await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
       lastJobId = jobId
@@ -1767,6 +2680,10 @@ export class AutomationExecutor {
     // claim-then-skip-on-duplicate; every other action ignores it.
     identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
+    if (context.dispatchMode === 'simulate' && simulationDisposition(action.type) === 'simulate') {
+      return simulatedStep(action, context)
+    }
+
     const startMs = Date.now()
     let result: AutomationStepResult
 
@@ -1798,10 +2715,18 @@ export class AutomationExecutor {
           result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context, identity)
           break
         case 'send_dingtalk_group_message':
-          result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+          result = await this.executeSendDingTalkGroupMessage(
+            action.config as unknown as SendDingTalkGroupMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_person_message':
-          result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
+          result = await this.executeSendDingTalkPersonMessage(
+            action.config as unknown as SendDingTalkPersonMessageConfig,
+            context,
+            identity,
+          )
           break
         case 'send_dingtalk_approval_card':
           // #4196 Class-B follow-up: thread the raw config + execution identity so the approval card can take
@@ -1817,6 +2742,12 @@ export class AutomationExecutor {
             status: 'failed',
             error: 'start_approval requires execution_mode workflow_job_v1',
           }
+          break
+        case 'write_approval_form_values':
+          // FWB activation (FWB0 lock): approval form-writeback into the rule's own sheet. Flag-gated
+          // (skip while OFF), durable-chain-required, identity-required (D11), transaction-seam-required
+          // (D9) — every precondition fails closed with zero writes.
+          result = await this.executeWriteApprovalFormValuesAction(action.config, context, identity)
           break
         case 'record_click':
           // B1 button field — executor-owned INERT action. Records an auditable
@@ -2031,19 +2962,21 @@ export class AutomationExecutor {
   }
 
   /**
-   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
-   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
-   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
-   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
-   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   * The ADDRESSING half of the ②b write gate, and the ONLY place that decides it: is a write addressed at
+   * `targetSheetId` (with the raw `declaredTargetBaseId` claim) a same-base write relative to
+   * `triggerSheetId`, a cross-base write, or unresolvable? Read-only (at most two `meta_sheets` lookups), no
+   * authority check, no quota slot. `evaluateCrossBaseWriteGate` consumes it first; the rule-save check
+   * for 客户反馈 2026-09-24 #3 (`validateDeletedTriggerSelfMutationTargets` in automation-service.ts) consumes
+   * it too, because a same-base verdict means update/delete/lock address `context.recordId` — the TRIGGER
+   * record — whatever `targetSheetId` / `targetRecordId` say (executeUpdateRecord / executeDeleteRecord /
+   * executeLockRecord only retarget when `gate.crossBase`).
    */
-  async evaluateCrossBaseWriteGate(
+  async resolveCrossBaseWriteTarget(
     queryFn: AutomationDeps['queryFn'],
-    actorId: string | null,
     triggerSheetId: string,
     targetSheetId: string,
     declaredTargetBaseId: string | undefined,
-  ): Promise<CrossBaseWriteGate> {
+  ): Promise<CrossBaseWriteTarget> {
     // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
     // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
     // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
@@ -2067,7 +3000,7 @@ export class AutomationExecutor {
     if (rawTargetBaseId === undefined) {
       return {
         crossBase: true,
-        ok: false,
+        resolved: false,
         error: `Cross-base write target sheet ${targetSheetId} is missing or soft-deleted (no resolvable base)`,
       }
     }
@@ -2079,11 +3012,36 @@ export class AutomationExecutor {
     // same-set are same-base; a null/legacy base vs a set base is cross-base.
     if (triggerBaseId === targetBaseId) return { crossBase: false }
 
+    return { crossBase: true, resolved: true, targetBaseId, declaredBaseClaim }
+  }
+
+  /**
+   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
+   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
+   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
+   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
+   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   */
+  async evaluateCrossBaseWriteGate(
+    queryFn: AutomationDeps['queryFn'],
+    actorId: string | null,
+    triggerSheetId: string,
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+  ): Promise<CrossBaseWriteGate> {
+    // Addressing half (same-base vs cross-base vs unresolvable) — shared, byte-for-byte, with the rule-save
+    // check `validateDeletedTriggerSelfMutationTargets` (see resolveCrossBaseWriteTarget). Same queries in the
+    // same order as before the extraction.
+    const target = await this.resolveCrossBaseWriteTarget(queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return { crossBase: false }
+    if (target.resolved === false) return { crossBase: true, ok: false, error: target.error }
+    const { targetBaseId, declaredBaseClaim } = target
+
     // Cross-base AUTHORITY decision — claim==truth then base-write — via the shared, context-agnostic primitive
     // (C1: `resolveCrossBaseWriteAuthority`, the SAME primitive the cross-base mirror write-through consumes; see
     // the design-lock §3/§10). The primitive returns a structured reason; this adapter maps it back to the EXACT,
     // unchanged `CrossBaseWriteGate` error strings (order preserved: claim before writable). (`declaredBaseClaim`
-    // computed at the top, reused here.)
+    // is the trimmed claim computed by resolveCrossBaseWriteTarget, reused here.)
     const claimed = declaredBaseClaim
     const authority = await resolveCrossBaseWriteAuthority({
       actorId,
@@ -2268,6 +3226,20 @@ export class AutomationExecutor {
       // read-only field-config lookup — never touches `meta_records` — so it stays OUTSIDE the
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
+      // Field retype slice 3a (ADR §3.11 row 6): this writer keeps no field-type snapshot of its own, so take one
+      // here, BEFORE the fence (gated: conversion flag or writer fence off ⇒ null, no query). The handler below re-reads the
+      // same fields after the fence and refuses if a conversion retyped one while this write was queued.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, effectiveSheetId, Object.keys(patch))
+
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
+        changes: fields,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
 
       // W0 slice ③ (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1..OD-3, §0/§7a site A3): the
       // lock-check, the UPDATE, and the revision INSERT now all run inside ONE transaction — mirrors
@@ -2276,13 +3248,24 @@ export class AutomationExecutor {
       // `poolManager.get().transaction(...)` — is re-verified for THIS slice by the atomicity golden,
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
-      const txResult = await this.withTransaction(async (query) => {
+      // 客户反馈 2026-09-24 #3: did the UPDATE touch a row? Decided INSIDE the transaction (RETURNING), read
+      // after it: a 0-row update publishes NO chain event and NO real-time invalidation (see below).
+      let recordUpdated = false
+      const txResult = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
         // and its revision entirely. The (no-op) transaction still commits cleanly.
         if (await this.claimClassAOrSkip(query, identity, 'update_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('update_record')
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read of the patched fields; a type / option
+        // change since `schemaSnapshot` throws (rolls back the claim too) ⇒ the step fails, zero writes.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
+        // ADR §3.12, gated (Decision Register R-22): select / multiSelect values are validated against the same
+        // read with the record write paths' rules; a value outside the options fails the step (values-free), zero
+        // writes. multiSelect values are written normalised, as the record write paths write them. Gate off ⇒
+        // `currentFields` is null ⇒ `{}` ⇒ the patch is untouched (today's behaviour).
+        Object.assign(patch, validateAutomationOptionValues(currentFields, patch))
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -2363,18 +3346,41 @@ export class AutomationExecutor {
             snapshot: normalizeJson(updatedRow.data),
           })
         }
+        recordUpdated = updatedRow !== undefined
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // UPDATE + revision (any throw above rolls it back; the duplicate-claim early-return above skips it,
+        // exactly as it skips the legacy emit). Flag OFF ⇒ no-op (legacy emit below fires).
+        // 客户反馈 2026-09-24 #3: GATED on `updatedRow` (was "unconditional … to mirror the legacy emit").
+        // A 0-row same-base UPDATE (trigger record already gone — e.g. a `record.deleted` rule) changed
+        // nothing, so it must not manufacture a `multitable.record.updated` for downstream rules/webhooks:
+        // that ghost event re-fires record.updated rules on a record that does not exist, depth by depth.
+        // The step's reported status is unchanged (same-base 0-row leniency, see the comment above) — the
+        // defect was the emit, and `output.noop` now says so in the execution log.
+        if (updatedRow) {
+          await enqueueRecordEventIfDurable(
+            { query, isTransaction: true } as unknown as TransactionalQueryable,
+            'multitable.record.updated',
+            chainEventPayload,
+          )
+        }
         return null
       })
       if (txResult) return txResult
 
-      // Emit event for chaining
-      this.deps.eventBus.emit('multitable.record.updated', withAutomationEventId({
-        sheetId: effectiveSheetId,
-        recordId: effectiveRecordId,
-        changes: fields,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      if (!recordUpdated) {
+        // 客户反馈 2026-09-24 #3: nothing changed ⇒ no legacy emit, no real-time invalidation. Same
+        // leniency on the reported status as before (pinned by the executor unit suites); the log carries a
+        // values-free marker instead of a bare success.
+        return {
+          actionType: 'update_record',
+          status: 'success',
+          output: { updatedFields: Object.keys(fields), noop: true, reason: TARGET_RECORD_MISSING_SKIP_REASON },
+        }
+      }
+
+      // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.updated', chainEventPayload)
 
       // C1 real-time fan-out: invalidate the EFFECTIVE sheet's room (target for cross-base, trigger for
       // same-base) so its gated subscribers see the change live — automation writes were previously
@@ -2402,11 +3408,12 @@ export class AutomationExecutor {
     // shared per-target-base quota bucket).
     const targetSheetId = (config.targetSheetId as string) || context.sheetId
     const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+    // Hoisted out of the try so the catch below can name the addressed record in the `skipped` result.
+    let effectiveSheetId = context.sheetId
+    let effectiveRecordId = context.recordId
 
     try {
       const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
-      let effectiveSheetId = context.sheetId
-      let effectiveRecordId = context.recordId
       if (gate.crossBase) {
         if (gate.ok === false) {
           return { actionType: 'delete_record', status: 'failed', error: gate.error }
@@ -2425,10 +3432,29 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
-      const step = await this.withTransaction(async (query) => {
-        // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
-        // duplicate (retry/replay) short-circuits: return the already-applied success and skip the DELETE,
-        // link cleanup, tombstones and revision entirely. The (no-op) transaction still commits cleanly.
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
+
+      const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+        this.deps.queryFn,
+        effectiveSheetId,
+        effectiveRecordId,
+      )
+      const linkDeleteFenceSheetIds = linkDeleteFencePlan?.participantSheetIds ?? effectiveSheetId
+      const step = await this.withTransaction(linkDeleteFenceSheetIds, async (query) => {
+        if (linkDeleteFencePlan) {
+          await assertRecordLinkDeleteFencePlanCurrent(query, linkDeleteFencePlan)
+        }
+        // #4196 Class-A claim — FIRST mutation/claim after the read-only fence-plan recheck, in the SAME
+        // transaction as the delete+revision below. A duplicate (retry/replay) short-circuits: return the
+        // already-applied success and skip the DELETE, link cleanup, tombstones and revision entirely. The
+        // (no-op) transaction still commits cleanly.
         if (await this.claimClassAOrSkip(query, identity, 'delete_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('delete_record')
         }
@@ -2461,21 +3487,28 @@ export class AutomationExecutor {
           | undefined
         // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
         // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-        // reported as success) to avoid any behavior regression vs the other same-base sinks.
-        if (gate.crossBase && !lockRow) {
-          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
-          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
-          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
-          // ledger exists to prevent). The method's outer catch reports the identical failed result.
-          // Consistent with the lock-conflict check just below, which already throws to roll back.
-          throw new Error(
-            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          )
+        // no-op success).
+        // 客户反馈 2026-09-24 #3 (裁定 PR #6074): a SAME-BASE delete of a missing trigger record used to keep a
+        // "0-row DELETE reported as success" leniency — and still emitted a fresh `multitable.record.deleted`
+        // (new `_eventId`, depth+1), so a `record.deleted → delete_record` rule re-triggered itself until the
+        // depth guard cut it: ONE user delete ⇒ THREE execution logs. Now: no row ⇒ nothing to delete ⇒ the
+        // step is `skipped` (values-free reason) and NOTHING is published — no outbox row, no legacy emit, no
+        // real-time invalidation, no revision. The signal THROWS for the same reason the cross-base branch
+        // does: the transaction, and the Class-A claim taken above, roll back (no claim for a no-op).
+        if (!lockRow) {
+          if (gate.crossBase) {
+            // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+            // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+            // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+            // ledger exists to prevent). The method's outer catch reports the identical failed result.
+            // Consistent with the lock-conflict check just below, which already throws to roll back.
+            throw new Error(
+              `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+            )
+          }
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
         }
-        if (lockRow) {
-          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-        }
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
 
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
@@ -2494,9 +3527,9 @@ export class AutomationExecutor {
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
         // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
         // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
-        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). Skipped when
-        // there is no row: a same-base delete of a missing record must not anchor tombstones to a delete
-        // revision that will never be written.
+        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). (`lockRow` is
+        // always present from here on — the no-row case threw above; the guard is kept so the D-2 block
+        // reads as written and audited.)
         if (lockRow) {
           await captureSideDoorInboundTombstones(query, {
             sheetId: effectiveSheetId,
@@ -2506,9 +3539,11 @@ export class AutomationExecutor {
         }
 
         // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
-        // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
-        // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
-        // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+        // `RecordService.deleteRecord`): the source-side FK cascades, while `meta_links.foreign_record_id`
+        // carries NO FK at all (closeout removed it; the containment guard enforces its absence), so inbound
+        // edges must be removed explicitly here — capture can never be bypassed by a silent database cascade.
+        // (This statement touches meta_links, NOT meta_records, so the cross-base write-guard regex
+        // does not match it.)
         await query(
           'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
           [effectiveRecordId],
@@ -2562,39 +3597,100 @@ export class AutomationExecutor {
         // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
         // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
         // revision-emitted: automation delete_record, D-1 — recordRecordRevision(action:'delete') @2365.
-        await query(
+        const deleteRes = await query(
           'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [effectiveRecordId, effectiveSheetId],
         )
+        // 客户反馈 2026-09-24 #3 belt-and-braces: the row was locked FOR UPDATE above, so inside a real
+        // transaction this DELETE always removes it. On the autocommit fallback (no `deps.transaction`) a
+        // concurrent delete can land between the SELECT and this statement — a driver-reported 0 rows then
+        // means nothing was deleted, and nothing may be published (the throw also drops the revision written
+        // above when a real transaction is present). A driver that reports no rowCount is trusted.
+        if (typeof deleteRes.rowCount === 'number' && deleteRes.rowCount === 0) {
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
+        }
 
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // link cleanup + revision + DELETE (any throw above rolls it back; the duplicate-claim early-return
+        // above skips it, exactly as it skips the legacy emit). Reached ONLY when a row was actually deleted
+        // (客户反馈 2026-09-24 #3 — the former "unconditional on lockRow" 0-row emit was the self-chain).
+        // Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(
+          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          'multitable.record.deleted',
+          chainEventPayload,
+        )
         return null
       })
       if (step) return step
 
-      // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
-      // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
-      // is OUT of this lock — this only emits the domain event; no cross-room publish is wired here.
-      this.deps.eventBus.emit('multitable.record.deleted', withAutomationEventId({
-        sheetId: effectiveSheetId,
-        recordId: effectiveRecordId,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      // P1#2c REPLACE (mirrors the updated/created sites + the same-base delete sink's event shape): flag
+      // OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn enqueue above is
+      // the delivery path). C1 real-time invalidation fan-out to the target base's room stays OUT of this
+      // lock — this only carries the domain event; no cross-room publish is wired here.
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.deleted', chainEventPayload)
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the effective sheet's room.
       this.publishRecordRealtime('record-deleted', effectiveSheetId, effectiveRecordId, gate.crossBase, context)
 
       return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
     } catch (err) {
+      // 客户反馈 2026-09-24 #3: the transaction rolled back with nothing deleted and nothing published —
+      // report `skipped`, not `failed` (a missing trigger record is the expected state under `record.deleted`).
+      if (err instanceof SameBaseTargetRecordMissingSignal) {
+        return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
+      }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }
 
+  /**
+   * 客户反馈 2026-09-24 #3: the step result for a same-base record action whose target — the trigger record —
+   * no longer exists. `skipped` (so the execution log says what happened and a whole-rule run of only such
+   * steps reads `skipped`, not `success`), with a values-free reason and the ids the success path already
+   * reports. NO mutation, NO revision, NO event/outbox row, NO real-time fan-out ran.
+   */
+  private targetRecordMissingSkippedResult(
+    actionType: AutomationActionType,
+    sheetId: string,
+    recordId: string,
+  ): AutomationStepResult {
+    return {
+      actionType,
+      status: 'skipped',
+      output: { recordId, sheetId, reason: TARGET_RECORD_MISSING_SKIP_REASON },
+    }
+  }
+
+  /**
+   * W0-1 L4-cov-services: every automation record write runs through here, so this is the single seam
+   * where the canonical per-sheet write fence (L4) covers the AUTOMATION writer class. Fence-FIRST inside
+   * the transaction (advisory xact lock ⇒ meaningful only txn-scoped), then the durable-block check —
+   * `fenceWriterEntry` is flag-gated (`MULTITABLE_ENABLE_WRITER_FENCE`), so with the flag OFF this is
+   * byte-identical to the pre-L4cov behaviour. A `SheetWriterBlockedError` thrown here propagates to each
+   * action's catch and fails the step honestly (surfaces in the execution log; automation retry semantics
+   * apply) — an automation write must never land inside a recovery's applying window.
+   *
+   * FAIL-CLOSED (mirrors the L6-a H3 precedent): with the fence flag ON but NO transaction seam available,
+   * an advisory xact lock taken on the bare autocommit `queryFn` would evaporate immediately — the fence
+   * guarantee cannot hold. That configuration throws instead of degrading silently. Production always has
+   * the seam (`AutomationService` hard-wires `deps.transaction` to a real `poolManager.get().transaction`).
+   */
   private async withTransaction<T>(
+    sheetIds: string | readonly string[],
     handler: (query: AutomationDeps['queryFn']) => Promise<T>,
   ): Promise<T> {
     if (this.deps.transaction) {
-      return this.deps.transaction(async ({ query }) => handler(query))
+      return this.deps.transaction(async ({ query }) => {
+        const ids = typeof sheetIds === 'string' ? [sheetIds] : sheetIds
+        await fenceWriterEntriesInOrder(query, ids) // L4 fence-first; no-op when the fence flag is OFF
+        return handler(query)
+      })
+    }
+    if (isWriterFenceEnabled()) {
+      throw new Error(
+        'MULTITABLE_ENABLE_WRITER_FENCE is on but this AutomationExecutor has no transaction seam — the canonical write fence cannot be honoured (fail-closed, no silent unfenced write)',
+      )
     }
     return handler(this.deps.queryFn)
   }
@@ -2630,7 +3726,7 @@ export class AutomationExecutor {
     const outcome = await claimExecutionAction(
       { query, isTransaction: true } as unknown as TransactionalQueryable,
       {
-        kind: 'execution',
+        kind: identity.kind ?? 'execution',
         rootExecutionId: identity.rootExecutionId,
         actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
         actionType,
@@ -2673,6 +3769,18 @@ export class AutomationExecutor {
       // validators, so sanitize any rich-longText value in `data` against the target sheet's
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
+      // Field retype slice 3a (ADR §3.11 row 6): pre-fence snapshot, same as executeUpdateRecord.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, targetSheetId, Object.keys(data))
+
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: targetSheetId,
+        recordId,
+        data,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
 
       // W0 slice ③ (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1..OD-3, §0/§7a site A4): the
       // INSERT and its birth revision now run inside ONE transaction — mirrors `executeUpdateRecord`
@@ -2688,13 +3796,18 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes. revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
-      const skipped = await this.withTransaction(async (query) => {
+      const skipped = await this.withTransaction(targetSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the INSERT+revision below. A duplicate
         // (retry/replay) short-circuits: skip the INSERT and its birth revision entirely. The (no-op)
         // transaction still commits cleanly; the caller returns the already-applied success below.
         if (await this.claimClassAOrSkip(query, identity, 'create_record', config) === 'duplicate') {
           return 'duplicate' as const
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read before the INSERT.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
+        // ADR §3.12, gated (R-22): same validation as update_record, on the same read. `data` is normalised in place,
+        // as sanitizeRichLongTextInWritePayload above already does; gate off ⇒ `{}` ⇒ untouched.
+        Object.assign(data, validateAutomationOptionValues(currentFields, data))
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
@@ -2717,19 +3830,23 @@ export class AutomationExecutor {
           patch: data,
           snapshot: data,
         })
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // INSERT + birth revision (a revision throw rolls it back; the duplicate-claim early-return above
+        // skips it, exactly as the caller below skips the legacy emit). Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(
+          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          'multitable.record.created',
+          chainEventPayload,
+        )
         return null
       })
       // #4196: a duplicate claim skipped the INSERT/revision — report the already-applied success and
       // emit NO create event and NO real-time fan-out (a replay must produce zero downstream effect).
       if (skipped === 'duplicate') return this.alreadyAppliedResult('create_record')
 
-      this.deps.eventBus.emit('multitable.record.created', withAutomationEventId({
-        sheetId: targetSheetId,
-        recordId,
-        data,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.created', chainEventPayload)
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the target sheet's room.
       this.publishRecordRealtime('record-created', targetSheetId, recordId, gate.crossBase, context)
@@ -2738,6 +3855,560 @@ export class AutomationExecutor {
     } catch (err) {
       return { actionType: 'create_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
+  }
+
+  /** Bind the production gate set to the current write transaction; fixed checks are tests only. */
+  private fwbGateChecksFor(queryFn: AutomationDeps['queryFn']): FwbGateChecks {
+    return this.deps.fwbGateChecksFactory?.(queryFn)
+      ?? this.deps.fwbGateChecks
+      ?? DEFAULT_DENY_FWB_GATES
+  }
+
+  /**
+   * Freeze every authority source consumed by the FWB execute-time gate before any record lock/write.
+   * Existing grant rows are protected by FOR SHARE through the shared record-link lock order. The
+   * field-permission table lock also closes the absent-row -> concurrent read-only INSERT phantom.
+   * Membership is re-read after locking so a sheet rehome cannot preserve a stale base claim.
+   */
+  private async lockFwbExecutionAuthority(
+    queryFn: AutomationDeps['queryFn'],
+    input: {
+      userId: string
+      ruleId: string
+      templateId: string
+      templateVersionId: string
+      targets: ReadonlyArray<{ baseId: string; sheetId: string }>
+    },
+  ): Promise<void> {
+    await lockRecordLinkMultiTargetAuthorityPhasedOnQuery(queryFn, {
+      userId: input.userId,
+      targets: input.targets,
+    })
+    await queryFn('LOCK TABLE field_permissions IN SHARE MODE')
+    const rule = await queryFn(
+      'SELECT id FROM automation_rules WHERE id = $1 AND enabled = TRUE FOR SHARE',
+      [input.ruleId],
+    )
+    const template = await queryFn(
+      'SELECT id FROM approval_templates WHERE id = $1 FOR SHARE',
+      [input.templateId],
+    )
+    const version = await queryFn(
+      'SELECT id FROM approval_template_versions WHERE id = $1 AND template_id = $2 FOR SHARE',
+      [input.templateVersionId, input.templateId],
+    )
+    if (rule.rows.length !== 1 || template.rows.length !== 1 || version.rows.length !== 1) {
+      throw new Error('fwb_rejected:authority_changed')
+    }
+    for (const target of input.targets) {
+      const membership = await queryFn(
+        'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+        [target.sheetId],
+      )
+      const liveBaseId = (membership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+      if (typeof liveBaseId !== 'string' || liveBaseId !== target.baseId) {
+        throw new Error('fwb_rejected:target_schema')
+      }
+    }
+  }
+
+  /**
+   * FWB activation — `write_approval_form_values` (FWB0 lock, RATIFIED).
+   *
+   * - mode absent/`create` (FWB-1): writes the approved instance's immutable `form_snapshot` (D4)
+   *   into the rule's OWN sheet as a NEW record (D2).
+   * - mode `'update'` (FWB-2): updates the existing record addressed by the form's record-link
+   *   field (D3); target base/sheet are derived from the pinned template-version schema, never from
+   *   client-supplied ids. Cross-base writes go through `evaluateCrossBaseWriteGate` with the rule
+   *   creator (not the event actor).
+   *
+   * Both modes commit claim + record write + revision + durable outbox in ONE transaction (D9).
+   * Preconditions fail closed with zero writes: flag OFF → skipped; durable chain OFF → failed
+   * (no half-durable path, D10); no rule-execution identity → failed (D11); no transaction seam →
+   * failed. Gates default to DENY when unbound.
+   */
+  private async executeWriteApprovalFormValuesAction(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity?: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    const actionType = 'write_approval_form_values'
+    try {
+      if (!isFwbWritebackEnabled()) {
+        return { actionType, status: 'skipped', output: { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' } }
+      }
+      if (!isDurableDeliveryEnabled()) {
+        return {
+          actionType,
+          status: 'failed',
+          error: 'write_approval_form_values requires AUTOMATION_DURABLE_DELIVERY_ENABLED=true — FWB rides the durable chain (FWB0 D9/D10); a half-durable write would silently drop its chained event',
+        }
+      }
+      if (!identity) {
+        return {
+          actionType,
+          status: 'failed',
+          error: 'write_approval_form_values requires the rule-execution identity (structural path + lineage root) — ad-hoc single-action dispatch is out of contract (FWB0 D11)',
+        }
+      }
+      if (!this.deps.transaction) {
+        return {
+          actionType,
+          status: 'failed',
+          error: 'write_approval_form_values requires the transaction seam — the autocommit fallback cannot honour claim+record+revision+outbox atomicity (FWB0 D9)',
+        }
+      }
+      const modeParsed = parseFwbWriteMode(config.mode)
+      if (!modeParsed.ok) {
+        return { actionType, status: 'failed', error: 'fwb_rejected:mapping_config:unknown_mode' }
+      }
+      if (modeParsed.mode === 'update') {
+        return await this.executeWriteApprovalFormValuesUpdateAction(config, context, identity)
+      }
+      return await this.executeWriteApprovalFormValuesCreateAction(config, context, identity)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.startsWith('fwb_rejected:') || message.startsWith('write_approval_form_values requires')) {
+        return { actionType, status: 'failed', error: message }
+      }
+      logger.warn('write_approval_form_values execution failed')
+      return { actionType, status: 'failed', error: 'fwb_execution_failed' }
+    }
+  }
+
+  /** Shared completion-event identity extraction for FWB create/update. */
+  private parseFwbCompletionContext(context: ExecutionContext): {
+    ok: true
+    instanceId: string
+    templateId: string
+    templateVersionId: string
+    baseEventId: string
+    automationDepth: number
+  } | { ok: false; error: string; skipped?: true; skipReason?: string } {
+    const trig = (context.triggerEvent && typeof context.triggerEvent === 'object' ? context.triggerEvent : {}) as Record<string, unknown>
+    const approval = (trig.approval && typeof trig.approval === 'object' ? trig.approval : {}) as Record<string, unknown>
+    const instanceId = typeof approval.instanceId === 'string' ? approval.instanceId.trim() : ''
+    const templateId = typeof approval.templateId === 'string' ? approval.templateId.trim() : ''
+    const templateVersionId = typeof approval.templateVersionId === 'string'
+      ? approval.templateVersionId.trim()
+      : ''
+    const baseEventId = typeof trig.eventId === 'string' && trig.eventId.trim()
+      ? trig.eventId.trim()
+      : (typeof trig._eventId === 'string' ? trig._eventId.trim() : '')
+    if (!instanceId || !templateId || !templateVersionId || !baseEventId) {
+      return {
+        ok: false,
+        error: 'write_approval_form_values requires an approval completion event carrying instanceId + templateId + templateVersionId + a stable eventId',
+      }
+    }
+    // D1 hard gate: writeback fires on APPROVED completions only — regardless of the rule's outcome filter.
+    const transition = (trig.transition && typeof trig.transition === 'object' ? trig.transition : {}) as Record<string, unknown>
+    const outcome = typeof transition.toStatus === 'string' && transition.toStatus
+      ? transition.toStatus
+      : (typeof trig.eventType === 'string' && trig.eventType.startsWith('approval.') ? trig.eventType.slice('approval.'.length) : '')
+    if (outcome !== 'approved') {
+      return { ok: false, error: '', skipped: true, skipReason: 'fwb_outcome_not_approved' }
+    }
+    const automationDepth = (typeof trig._automationDepth === 'number' ? trig._automationDepth : 0) + 1
+    return { ok: true, instanceId, templateId, templateVersionId, baseEventId, automationDepth }
+  }
+
+  /** FWB-1 create path — rule's own sheet (D2). Byte-compatible with pre-FWB-2 wiring. */
+  private async executeWriteApprovalFormValuesCreateAction(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    const actionType = 'write_approval_form_values'
+    const parsed = this.parseFwbCompletionContext(context)
+    if (parsed.ok === false) {
+      if (parsed.skipped) return { actionType, status: 'skipped', output: { reason: parsed.skipReason } }
+      return { actionType, status: 'failed', error: parsed.error }
+    }
+    const { instanceId, templateId, templateVersionId, baseEventId, automationDepth } = parsed
+    const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
+    if (!normalized.ok) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+    }
+    if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:exact_number_mapping_unavailable' }
+    }
+    const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+      ? config.sourceTemplateVersionId.trim()
+      : ''
+    if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
+    }
+    const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
+    const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
+
+    const result = await this.withTransaction(context.sheetId, async (query) => {
+      if (this.deps.fwbGateChecksFactory) {
+        const ruleMembership = await query(
+          'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+          [context.sheetId],
+        )
+        const ruleBaseId = (ruleMembership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof ruleBaseId !== 'string' || !ruleBaseId) throw new Error('fwb_rejected:target_schema')
+        await this.lockFwbExecutionAuthority(query, {
+          userId: context.ruleCreatedBy,
+          ruleId: context.ruleId,
+          templateId,
+          templateVersionId,
+          targets: [{ baseId: ruleBaseId, sheetId: context.sheetId }],
+        })
+      }
+      const gates = this.fwbGateChecksFor(query)
+      const runtime = await resolveFwbRuntimeMappings(query, context.sheetId, normalized.mappings)
+      if (!runtime.ok) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = runtime.mappings
+      // D4: the immutable form snapshot is the ONLY value source, read server-side inside the txn.
+      const snapRes = await query(
+        `SELECT form_snapshot FROM approval_instances
+          WHERE id = $1 AND template_id = $2 AND template_version_id = $3 AND status = 'approved'
+          FOR SHARE`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const snapRow = snapRes.rows[0] as { form_snapshot?: unknown } | undefined
+      if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
+      const rawSnap = snapRow.form_snapshot
+      const formValues = (rawSnap && typeof rawSnap === 'object' && !Array.isArray(rawSnap)
+        ? rawSnap
+        : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
+      const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
+      const seam: FwbRecordWriteSeam = {
+        createRecordWithRevision: async (t, targetSheetId, values) => {
+          const recordId = `rec_${randomUUID()}`
+          // xbase-write-exempt: FWB-1 writes ONLY the rule's OWN sheet (FWB0 D2).
+          // revision-emitted: recordRecordRevision(action:'create') immediately below, SAME transaction.
+          await t.query(
+            'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)',
+            [recordId, targetSheetId, JSON.stringify(values)],
+          )
+          await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
+            sheetId: targetSheetId,
+            recordId,
+            version: 1,
+            action: 'create',
+            source: 'automation',
+            actorId: context.ruleCreatedBy ?? null,
+            changedFieldIds: Object.keys(values),
+            patch: values,
+            snapshot: values,
+          })
+          return recordId
+        },
+        enqueueOutbox: async (t, event) => {
+          await produceAutomationEvent(
+            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+            { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
+          )
+        },
+      }
+      return executeWriteApprovalFormValues(trx, {
+        claimId: `fwb_${randomUUID()}`,
+        instanceId,
+        ruleId: context.ruleId,
+        actionKey,
+        gateSubject: {
+          configurerUserId: context.ruleCreatedBy,
+          ruleId: context.ruleId,
+          actionKey,
+          sourceTemplateId: templateId,
+          targetSheetId: context.sheetId,
+          mode: 'create',
+        },
+        mappings: runtimeMappings,
+        formValues,
+        eventId: fwbEventId,
+        automationDepth,
+      }, gates, seam)
+    })
+
+    if (result.status === 'applied') {
+      return { actionType, status: 'success', output: { recordId: result.recordId, sheetId: context.sheetId } }
+    }
+    if (result.status === 'already_applied') {
+      return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
+    }
+    if (result.reason === 'permission_gates') {
+      return { actionType, status: 'failed', error: `fwb_rejected:permission_gates:${(result.failedGates ?? []).join(',')}` }
+    }
+    return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
+  }
+
+  /**
+   * FWB-2 update path — form-anchored existing record (D3). Target base/sheet from the pinned
+   * template-version record-link field props; exact one `{recordId}` from form_snapshot; cross-base
+   * via evaluateCrossBaseWriteGate(ruleCreatedBy); reuses executeUpdateBoundRecord for the D9 four-way
+   * atomic claim + UPDATE + revision + outbox.
+   */
+  private async executeWriteApprovalFormValuesUpdateAction(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
+    const actionType = 'write_approval_form_values'
+    const parsed = this.parseFwbCompletionContext(context)
+    if (parsed.ok === false) {
+      if (parsed.skipped) return { actionType, status: 'skipped', output: { reason: parsed.skipReason } }
+      return { actionType, status: 'failed', error: parsed.error }
+    }
+    const { instanceId, templateId, templateVersionId, baseEventId, automationDepth } = parsed
+    const linkField = normalizeFwbUpdateRecordLinkFieldId(config.recordLinkFieldId)
+    if (linkField.ok === false) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${linkField.issue}` }
+    }
+    const normalized = normalizeFwbMappings((config as { mappings?: unknown }).mappings)
+    if (!normalized.ok) {
+      return { actionType, status: 'failed', error: `fwb_rejected:mapping_config:${(normalized as { issue: string }).issue}` }
+    }
+    if (hasUnavailableFwbNumberMapping(normalized.mappings)) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:exact_number_mapping_unavailable' }
+    }
+    const confirmedVersionId = typeof config.sourceTemplateVersionId === 'string'
+      ? config.sourceTemplateVersionId.trim()
+      : ''
+    if (!confirmedVersionId || confirmedVersionId !== templateVersionId) {
+      return { actionType, status: 'failed', error: 'fwb_rejected:source_template_version' }
+    }
+    const actionKey = deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config })
+    const fwbEventId = `${baseEventId}::fwb::${context.ruleId}::${actionKey}`
+    const ruleCreatorId = typeof context.ruleCreatedBy === 'string' ? context.ruleCreatedBy : ''
+
+    // With the writer fence enabled, discover the immutable pinned target before opening the writer
+    // transaction so its FIRST statements can acquire both canonical fences in sorted order. The same pin is
+    // re-read below while both fences are held; any drift fails closed before a mutation. Flag OFF performs no
+    // extra read and keeps the legacy single-sheet transaction behavior unchanged.
+    let expectedTarget: { baseId: string; sheetId: string } | null = null
+    if (isWriterFenceEnabled()) {
+      const targetRes = await this.deps.queryFn(
+        `SELECT v.form_schema
+           FROM approval_instances i
+           JOIN approval_template_versions v ON v.id = i.template_version_id
+          WHERE i.id = $1 AND i.template_id = $2 AND i.template_version_id = $3 AND i.status = 'approved'`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const targetRow = targetRes.rows[0] as { form_schema?: unknown } | undefined
+      if (!targetRow) throw new Error('fwb_rejected:instance_not_found')
+      const targetSchema = targetRow.form_schema && typeof targetRow.form_schema === 'object' && !Array.isArray(targetRow.form_schema)
+        ? targetRow.form_schema
+        : (() => {
+          try { return JSON.parse(String(targetRow.form_schema ?? 'null')) as unknown } catch { return null }
+        })()
+      expectedTarget = resolveRecordLinkTargetFromSchema(targetSchema, linkField.recordLinkFieldId)
+      if (!expectedTarget) throw new Error('fwb_rejected:record_link_field')
+    }
+
+    const transactionSheetIds = expectedTarget ? [context.sheetId, expectedTarget.sheetId] : context.sheetId
+    const result = await this.withTransaction(transactionSheetIds, async (query) => {
+      // D4: immutable form_snapshot + pinned template-version schema are the ONLY sources of truth.
+      const snapRes = await query(
+        `SELECT i.form_snapshot, v.form_schema
+           FROM approval_instances i
+           JOIN approval_template_versions v ON v.id = i.template_version_id
+          WHERE i.id = $1 AND i.template_id = $2 AND i.template_version_id = $3 AND i.status = 'approved'
+          FOR SHARE OF i, v`,
+        [instanceId, templateId, templateVersionId],
+      )
+      const snapRow = snapRes.rows[0] as { form_snapshot?: unknown; form_schema?: unknown } | undefined
+      if (!snapRow) throw new Error('fwb_rejected:instance_not_found')
+
+      const rawSchema = snapRow.form_schema && typeof snapRow.form_schema === 'object' && !Array.isArray(snapRow.form_schema)
+        ? snapRow.form_schema
+        : (() => {
+          try { return JSON.parse(String(snapRow.form_schema ?? 'null')) as unknown } catch { return null }
+        })()
+      const derived = resolveRecordLinkTargetFromSchema(rawSchema, linkField.recordLinkFieldId)
+      if (!derived) throw new Error('fwb_rejected:record_link_field')
+      if (
+        expectedTarget
+        && (derived.sheetId !== expectedTarget.sheetId || derived.baseId !== expectedTarget.baseId)
+      ) {
+        throw new Error('fwb_rejected:target_schema')
+      }
+
+      if (this.deps.fwbGateChecksFactory) {
+        const ruleMembership = await query(
+          'SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+          [context.sheetId],
+        )
+        const ruleBaseId = (ruleMembership.rows[0] as { base_id?: unknown } | undefined)?.base_id
+        if (typeof ruleBaseId !== 'string' || !ruleBaseId) throw new Error('fwb_rejected:target_schema')
+        await this.lockFwbExecutionAuthority(query, {
+          userId: ruleCreatorId,
+          ruleId: context.ruleId,
+          templateId,
+          templateVersionId,
+          targets: [
+            { baseId: ruleBaseId, sheetId: context.sheetId },
+            { baseId: derived.baseId, sheetId: derived.sheetId },
+          ],
+        })
+      }
+      const gates = this.fwbGateChecksFor(query)
+
+      const rawSnap = snapRow.form_snapshot
+      const formValues = (rawSnap && typeof rawSnap === 'object' && !Array.isArray(rawSnap)
+        ? rawSnap
+        : (() => { try { return JSON.parse(String(rawSnap ?? '{}')) as Record<string, unknown> } catch { return {} } })()) as Record<string, unknown>
+
+      // D3: exactly one { recordId: string }; 0 / multi / free-text / extra keys → reject (no oracle).
+      const boundRecordId = extractExactLinkedRecordId(formValues[linkField.recordLinkFieldId])
+      if (!boundRecordId) throw new Error('fwb_rejected:linked_record')
+
+      // Cross-base gate with rule CREATOR (not event actor — §2.2). claim == derived target base.
+      // Same-base remains the fast path inside evaluateCrossBaseWriteGate.
+      const crossGate = await this.evaluateCrossBaseWriteGate(
+        query as AutomationDeps['queryFn'],
+        ruleCreatorId || null,
+        context.sheetId,
+        derived.sheetId,
+        derived.baseId,
+      )
+      if (crossGate.crossBase && crossGate.ok === false) {
+        // Values-free stable reason (do not leak the full gate error string's internal identifiers beyond code).
+        throw new Error('fwb_rejected:cross_base')
+      }
+
+      // Fire-time type recheck on the DERIVED target sheet (field retype/delete since save → reject).
+      const runtime = await resolveFwbRuntimeMappings(query, derived.sheetId, normalized.mappings)
+      if (!runtime.ok) throw new Error('fwb_rejected:mapping_target_changed')
+      const runtimeMappings = runtime.mappings
+
+      const trx = { query, isTransaction: true } as unknown as TransactionalQueryable
+      const queryFn = query as AutomationDeps['queryFn']
+
+      // Production bound-record checks: FOR UPDATE + lock + sheet/own-write/record-scope authority.
+      // Missing / unreadable / not-writable share fail-closed codes (no existence oracle on responses).
+      const linkChecks: RecordLinkChecks = {
+        fillerCanReadRecord: async () => false, // not used at execute time
+        recordExists: async (t, sheetId, recordId) => {
+          await acquireRecordLinkRowAuthLockOnQuery(t.query, sheetId, recordId)
+          const r = await t.query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+            [sheetId, recordId],
+          )
+          return r.rows.length > 0
+        },
+        recordIsLocked: async (t, sheetId, recordId) => {
+          const r = await t.query(
+            'SELECT locked, locked_by, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2',
+            [sheetId, recordId],
+          )
+          const row = r.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+          if (!row) return false // missing → handled by recordExists first
+          try {
+            ensureRecordNotLocked(ruleCreatorId || null, row, () => new Error('locked'))
+            return false
+          } catch {
+            return true
+          }
+        },
+        configurerCanWriteRecord: async (t, configurerUserId, sheetId, recordId) => {
+          if (!configurerUserId) return false
+          const resolved = await resolveSheetCapabilitiesForUserOnQuery(queryFn, sheetId, configurerUserId)
+          const sheetScope = (await loadSheetPermissionScopeMap(queryFn, [sheetId], configurerUserId)).get(sheetId)
+          const rowRes = await t.query(
+            'SELECT created_by FROM meta_records WHERE sheet_id = $1 AND id = $2',
+            [sheetId, recordId],
+          )
+          const createdBy = (rowRes.rows[0] as { created_by?: unknown } | undefined)?.created_by
+          const access = {
+            userId: configurerUserId,
+            permissions: resolved.permissions,
+            isAdminRole: resolved.isAdminRole,
+          }
+          const scopeMap = await loadRecordPermissionScopeMap(queryFn, sheetId, [recordId], configurerUserId)
+          return ensureRecordWriteAllowed(
+            resolved.capabilities,
+            sheetScope,
+            access,
+            typeof createdBy === 'string' ? createdBy : null,
+            'edit',
+            scopeMap,
+            recordId,
+          )
+        },
+      }
+
+      const seam: FwbUpdateSeam = {
+        updateRecordWithRevision: async (t, sheetId, recordId, values) => {
+          // xbase-write-gated: evaluateCrossBaseWriteGate accepted the server-pinned target above.
+          // lock-guarded: recordExists holds FOR UPDATE and calls ensureRecordNotLocked in this transaction.
+          // revision-emitted: recordRecordRevision runs below in this transaction before commit.
+          const updateRes = await t.query(
+            `UPDATE meta_records
+             SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
+                 version = version + 1,
+                 updated_at = NOW()
+             WHERE id = $2 AND sheet_id = $3
+             RETURNING version, data`,
+            [JSON.stringify(values), recordId, sheetId],
+          )
+          const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+          // Fail closed if the locked row vanished between FOR UPDATE and UPDATE (should be impossible
+          // under FOR UPDATE, but never report success with a missing mutation).
+          if (!updatedRow) throw new Error('fwb_rejected:linked_record_unavailable')
+          const nextVersion = Number(updatedRow.version)
+          await recordRecordRevision(t.query as AutomationDeps['queryFn'], {
+            sheetId,
+            recordId,
+            version: Number.isFinite(nextVersion) ? nextVersion : 0,
+            action: 'update',
+            source: 'automation',
+            // §2.2: write identity = rule creator, never the event actor (may be null on auto-approve).
+            actorId: ruleCreatorId || null,
+            changedFieldIds: Object.keys(values),
+            patch: values,
+            snapshot: normalizeJson(updatedRow.data),
+          })
+        },
+        enqueueOutbox: async (t, event) => {
+          await produceAutomationEvent(
+            { query: t.query, isTransaction: true } as unknown as TransactionalQueryable,
+            { eventType: event.eventType, eventId: event.eventId, payload: event.payload, automationDepth: event.automationDepth },
+          )
+        },
+      }
+
+      return executeUpdateBoundRecord(trx, {
+        claimId: `fwb_${randomUUID()}`,
+        instanceId,
+        ruleId: context.ruleId,
+        actionKey,
+        gateSubject: {
+          configurerUserId: ruleCreatorId,
+          ruleId: context.ruleId,
+          actionKey,
+          sourceTemplateId: templateId,
+          targetSheetId: derived.sheetId,
+          mode: 'update',
+        },
+        boundRecordId,
+        mappings: runtimeMappings,
+        formValues,
+        eventId: fwbEventId,
+        automationDepth,
+      }, gates, linkChecks, seam)
+    })
+
+    if (result.status === 'applied') {
+      return { actionType, status: 'success', output: { mode: 'update', alreadyApplied: false } }
+    }
+    if (result.status === 'already_applied') {
+      return { actionType, status: 'success', alreadyApplied: true, output: { mode: 'update', alreadyApplied: true } }
+    }
+    if (result.reason === 'permission_gates') {
+      return { actionType, status: 'failed', error: `fwb_rejected:permission_gates:${(result.failedGates ?? []).join(',')}` }
+    }
+    if (result.reason === 'mapping') {
+      return { actionType, status: 'failed', error: 'fwb_rejected:mapping' }
+    }
+    // Do not expose whether the filler-selected id is missing, locked, or merely
+    // unwritable through the persisted execution log. The internal reason still
+    // selects the fail-closed control path; the observable code is deliberately uniform.
+    return { actionType, status: 'failed', error: 'fwb_rejected:linked_record_unavailable' }
   }
 
   private async executeSendWebhook(
@@ -2851,7 +4522,7 @@ export class AutomationExecutor {
   ): OutboundIntentIdentity | null {
     if (!isClassBOutboundEnabled() || !identity) return null
     return {
-      kind: 'execution',
+      kind: identity.kind ?? 'execution',
       rootExecutionId: identity.rootExecutionId,
       actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
     }
@@ -2939,42 +4610,152 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const userIds = config.userIds as string[] | undefined
-    const message = config.message as string | undefined
+    // F9b r3: message shaping is now the button route's, byte-for-byte
+    // (routes/multitable-button.ts:229 `typeof ... === 'string' ? ....trim() : ''`). Before this, a
+    // whitespace-only or non-string message passed `if (!message)` and persisted a BLANK durable
+    // notification row - the bell renders `message` verbatim (MetaNotificationBell.vue:41-45), so a
+    // blank row is an undismissable no-op for the recipient. Both cases now take the same explicit
+    // step failure the button answers with MESSAGE_REQUIRED. The trimmed value is also what gets
+    // written and emitted, so padding never reaches the notification centre.
+    const message = typeof config.message === 'string' ? config.message.trim() : ''
 
     if (!userIds || userIds.length === 0) {
-      return { actionType: 'send_notification', status: 'failed', error: 'No user IDs specified' }
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
     }
     if (!message) {
       return { actionType: 'send_notification', status: 'failed', error: 'Notification message is required' }
     }
 
+    // F9b: normalize ONCE (trim + dedupe, the button route's exact recipient shaping) so the
+    // membership check, the durable rows and the emitted payload all speak about the SAME list.
+    const recipients = normalizeNotificationRecipients(userIds)
+    if (recipients.length === 0) {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
+    }
+
+    // F9b §4 FAIL-CLOSED SINK — no queryFn ⇒ no durable notification is possible. Do NOT fall back to
+    // an eventBus-only "delivery": that is exactly the phantom (test ran green, notification centre
+    // empty) this slice closes.
+    const queryFn = this.deps.queryFn
+    if (typeof queryFn !== 'function') {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR }
+    }
+
+    // F9b §1 RECIPIENT HARD-REJECT (no write) — see checkNotificationRecipients. Fail-closed on BOTH
+    // its branches (outside-roster and roster-unreadable); r2 split it out of the write try/catch so the
+    // reported stage is the stage that broke, and so the DRY RUN can run the identical check read-only.
+    const gate = await this.checkNotificationRecipients(queryFn, recipients, context)
+    if (!gate.ok) {
+      return { actionType: 'send_notification', status: 'failed', error: gate.error }
+    }
+
+    let persisted: number
     try {
-      // Emit notification event — CollabService or other handler picks this up.
-      //
-      // B1-S1 D0-A SCOPE NOTE: the DURABLE notification write does NOT live here. A
-      // button's durable Notification-Center delivery is a route-level dedicated
-      // side-effect transaction (see routes/multitable-button.ts) so it composes
-      // with the run's dedup + audit as one all-or-nothing unit. The automation-RULE
-      // path stays eventBus-only here — adding durable writes / member-filter / dedup
-      // to the shared executor would expand automation's behavior surface, which is
-      // out of scope for a button slice.
+      // F9b §2 DURABLE WRITE FIRST — one `notification.sent` row per recipient through the SAME seam
+      // the button route uses (no parallel INSERT, no new table, no dedup ledger borrowed from the
+      // button). A missing table or a failing INSERT is NEVER swallowed (no isUndefinedTableError
+      // "0 rows = success" here): it throws into the catch below and the step fails, so a
+      // `status:'success'` always implies durable rows.
+      // r2: `inserted` is the seam's OWN count (record-subscription-service.ts re-trims/re-filters before
+      // it builds rows), so output.persisted is a MEASUREMENT of what was written, not a restatement of
+      // what we asked for.
+      const result = await insertRecordSubscriptionNotifications(queryFn, {
+        userIds: recipients,
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        eventType: 'notification.sent',
+        message,
+        actorId: context.actorId ?? null,
+      })
+      persisted = result.inserted
+    } catch (err) {
+      return {
+        actionType: 'send_notification',
+        status: 'failed',
+        error: `send_notification durable write failed: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+
+    try {
+      // F9b §2 EMIT AFTER THE WRITE — the legacy realtime event still fires for any in-memory
+      // subscriber, but it can no longer announce a notification that was never persisted.
       this.deps.eventBus.emit('automation.notification', {
-        userIds,
+        userIds: recipients,
         message,
         sheetId: context.sheetId,
         recordId: context.recordId,
         actorId: context.actorId,
       })
-
-      return {
-        actionType: 'send_notification',
-        status: 'success',
-        output: { notifiedUsers: userIds.length },
-      }
     } catch (err) {
+      // Pre-F9b behaviour for a throwing subscriber is kept (step fails). The durable rows are
+      // already committed at this point — stated plainly rather than papered over.
       return { actionType: 'send_notification', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
+
+    return {
+      actionType: 'send_notification',
+      status: 'success',
+      output: { notifiedUsers: recipients.length, persisted },
+    }
   }
+
+  /**
+   * F9b §1 RECIPIENT GATE — the ONE membership check for this action. LIVE PATH ONLY.
+   *
+   * r2 NOTE (refutation A, blocker 2 — why the dry run does NOT call this): the simulate path is a
+   * pinned ZERO-DATABASE path (tests/unit/automation-v1.test.ts asserts `expect(deps.queryFn)
+   * .not.toHaveBeenCalled()` for every simulated step — 14 places, e.g. :679/:805/:1164), so a
+   * read-only roster preflight in simulate cannot be added without relaxing that invariant. The
+   * consequence is stated plainly instead of papered over: a TEST RUN never validates recipients, so a
+   * pre-existing rule aimed at someone outside the roster still test-runs green and only fails on its
+   * first LIVE trigger (and then skips the actions after it). Closing that needs its own slice
+   * (preflight + the zero-DB simulate invariant re-decided together); it is NOT done here.
+   *
+   * Same resolver, same set, SAME ARGUMENT as the button route (`loadSheetMemberUserIdSet(query,
+   * sheetId)`, routes/multitable-button.ts:243) — one recipient口径 for both surfaces, no drift. ANY
+   * recipient outside the roster fails the WHOLE step: no partial delivery, no durable row, no emit.
+   * WIDTH: the roster is the platform selectable-people set, NOT a per-sheet grant — see
+   * AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR above for the exact derivation.
+   * The `context.sheetId` argument is pinned by tests/unit/automation-rule-notification-persist.test.ts
+   * (“roster is resolved for the TRIGGERING sheet” asserts $1 of the roster query), because a roster
+   * read keyed by the wrong id would still answer a plausible list and stay green otherwise.
+   *
+   * FAIL-CLOSED ON BOTH BRANCHES, by two DIFFERENT mechanisms (r2 states them separately because r1's
+   * comment described only the first): a roster that resolves to ZERO ROWS is the EMPTY set, so every
+   * recipient is outside it ⇒ rejected; a roster read that THROWS never produces a set at all ⇒ the
+   * catch below rejects with ROSTER_UNAVAILABLE. Neither branch can fall through to a write.
+   */
+  private async checkNotificationRecipients(
+    queryFn: AutomationDeps['queryFn'],
+    recipients: string[],
+    context: ExecutionContext,
+  ): Promise<NotificationRecipientGate> {
+    let memberSet: Set<string>
+    try {
+      memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
+    } catch (err) {
+      logger.warn('[automation.send_notification] recipient roster unreadable; delivery refused', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length, // counts only — never the ids, never the message
+        error: err instanceof Error ? err.name : 'unknown',
+      })
+      return { ok: false, error: AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR, rejected: recipients.length }
+    }
+
+    const rejected = recipients.filter((userId) => !memberSet.has(userId)).length
+    if (rejected > 0) {
+      logger.warn('[automation.send_notification] recipients rejected: outside selectable-people roster', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length,
+        rejected, // counts only — never the ids, never the message
+      })
+      return { ok: false, error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR, rejected }
+    }
+    return { ok: true }
+  }
+
 
   private async executeSendEmail(
     config: SendEmailConfig,
@@ -3438,6 +5219,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkPersonMessage(
     config: SendDingTalkPersonMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
     const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
@@ -3706,6 +5488,17 @@ export class AutomationExecutor {
         chunkItems(recipients, DINGTALK_PERSON_BATCH_SIZE).map((batch) => ({ integrationId, batch })),
     )
 
+    // #4196 Class-B two-phase intent/outcome. Claim the action before the first token/send network
+    // call. A prior sent or ambiguous attempt short-circuits the whole multi-batch action: retrying
+    // it could duplicate any recipient batch that DingTalk already accepted.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_person_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_person_message')
+      }
+    }
+
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
     // throwing must not re-mark them failed — that used to write BOTH a success and a
     // failed delivery row for the same recipient in the same send attempt.
@@ -3767,6 +5560,15 @@ export class AutomationExecutor {
         for (const recipient of batch) sentRecipients.add(recipient)
       }
 
+      if (outboundId) {
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          'sent',
+          'dingtalk_person_sent',
+        )
+      }
+
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'success',
@@ -3812,6 +5614,28 @@ export class AutomationExecutor {
       const outcomeUnknownRecipients = outcomeUnknown && inFlightSendBatch
         ? new Set<(typeof resolvedRecipients)[number]>(inFlightSendBatch)
         : new Set<(typeof resolvedRecipients)[number]>()
+
+      if (outboundId) {
+        // The durable action outcome is deliberately more conservative than the legacy per-recipient
+        // delivery label. Per #4196 Q-B, every response/business rejection after a send began is
+        // ambiguous for automatic retry. Any earlier confirmed batch makes the whole action terminal
+        // sent; only a provable pre-dispatch failure with no successful batch remains retryable.
+        const outcome: OutboundOutcome = sentRecipients.size > 0
+          ? 'sent'
+          : inFlightSendBatch
+            ? classifyOutboundResult(classifyFetchError(error))
+            : 'failed'
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          outcome,
+          outcome === 'sent'
+            ? 'dingtalk_person_sent'
+            : outcome === 'outcome_unknown'
+              ? 'dingtalk_person_outcome_unknown'
+              : 'dingtalk_person_definite_non_delivery',
+        )
+      }
 
       await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
@@ -3905,12 +5729,15 @@ export class AutomationExecutor {
         // withTransaction (mirrors the HTTP lock path) — a transient error between the two must not leave
         // a durable version hole that fail-closed-refuses revert/reset until C6. The three disposition
         // markers live INSIDE the callback: each structural guard scans a fixed window above the SQL line.
-        const skipped = await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(effectiveSheetId, async (query) => {
           // #4196 Class-A claim — FIRST statement, SAME transaction as the lock UPDATE+marker below. A
           // duplicate (retry/replay) short-circuits: skip the version bump and the lock marker entirely.
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
             return 'duplicate' as const
           }
+          // W0-1 L6-a: withTransaction already holds the canonical fence. Mint after the Class-A claim so a
+          // duplicate remains a true no-op, then tag the marker and seal LAST in this same transaction.
+          const op = await mintOperation(query, effectiveSheetId)
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base lock rejected unless claim==truth + base-write.
           // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -3921,7 +5748,8 @@ export class AutomationExecutor {
             [lockedBy, effectiveRecordId, effectiveSheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null, ledger: op })
+          await sealOperation(query, op)
           return null
         })
         if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')
@@ -3929,12 +5757,15 @@ export class AutomationExecutor {
         // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole. Bump +
         // marker are atomic inside withTransaction (mirrors the HTTP unlock path) — no durable version hole.
         // Disposition markers live INSIDE the callback (fixed guard scan windows above the SQL line).
-        const skipped = await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(effectiveSheetId, async (query) => {
           // #4196 Class-A claim — FIRST statement, SAME transaction as the unlock UPDATE+marker below. A
           // duplicate (retry/replay) short-circuits: skip the version bump and the unlock marker entirely.
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
             return 'duplicate' as const
           }
+          // W0-1 L6-a: withTransaction already holds the canonical fence. Mint after the Class-A claim so a
+          // duplicate remains a true no-op, then tag the marker and seal LAST in this same transaction.
+          const op = await mintOperation(query, effectiveSheetId)
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base unlock rejected unless claim==truth + base-write.
           // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -3945,7 +5776,8 @@ export class AutomationExecutor {
             [effectiveRecordId, effectiveSheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null, ledger: op })
+          await sealOperation(query, op)
           return null
         })
         if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')
@@ -3965,6 +5797,7 @@ export class AutomationExecutor {
   private async executeSendDingTalkGroupMessage(
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const staticDestinationIds = Array.from(new Set([
       ...(Array.isArray(config.destinationIds)
@@ -4002,6 +5835,14 @@ export class AutomationExecutor {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk body template is required' }
     }
 
+    // W4-PRE-1b item E follow-up (#4526 review): same-shape `user_orgs` trust point as
+    // `api-tokens.ts`'s `requireOrgMemberAccess` and `attendance-admin.ts`'s
+    // `canReadAttendanceDirectoryReadiness` — this EXISTS clause authorizes org-scoped DingTalk
+    // destination USE (an actual outbound-send authorization, not a read-visibility filter) by
+    // the automation rule's creator. A deactivated platform account (`users.is_active=false`)
+    // must not keep this access via a `user_orgs` row that is still `is_active=true`, exactly per
+    // the item-E fix already applied to the other two sites — this one was missed by the
+    // original PR's grep inventory.
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations dg
@@ -4015,9 +5856,11 @@ export class AutomationExecutor {
               AND EXISTS (
                 SELECT 1
                 FROM user_orgs uo
+                JOIN users u ON u.id = uo.user_id
                 WHERE uo.user_id = $3
                   AND uo.org_id = dg.org_id
                   AND uo.is_active = true
+                  AND u.is_active = true
               )
             )
           )`,
@@ -4202,10 +6045,28 @@ export class AutomationExecutor {
       }
     }
 
+    // #4196 Class-B two-phase intent/outcome. All local validation and authorization above remains
+    // outside the intent: an invalid rule has dispatched nothing and needs no retry evidence. Once
+    // this claim commits, every destination send belongs to one action identity. A prior sent or
+    // ambiguous attempt must short-circuit the WHOLE action because retrying it would duplicate any
+    // destination that already received the message.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_group_message', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_group_message')
+      }
+    }
+
+    let sendSucceeded = false
+    let outcomeUnknownObserved = false
+
     for (const destination of orderedDestinations) {
       let deliveryRecorded = false
       let responseStatus: number | null = null
       let responseBody: string | null = null
+      let sendAttemptStarted = false
+      let destinationSendSucceeded = false
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
       try {
@@ -4213,8 +6074,10 @@ export class AutomationExecutor {
         if (!runtimeWebhook) {
           throw new Error(`DingTalk destination ${destination.name || destination.id} was not validated before send`)
         }
+        const signedWebhookUrl = buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret)
+        sendAttemptStarted = true
         const response = await (this.deps.fetchFn ?? globalThis.fetch)(
-          buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret),
+          signedWebhookUrl,
           {
             method: 'POST',
             headers: {
@@ -4229,6 +6092,9 @@ export class AutomationExecutor {
         responseStatus = response.status
         responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
         if (!response.ok) {
+          // The request body left this process and a response came back. Per #4196 Q-B this is
+          // ambiguous even for 4xx: never turn it into retryable `failed`.
+          outcomeUnknownObserved = true
           const errorMessage = `DingTalk request failed with HTTP ${response.status}`
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -4250,6 +6116,9 @@ export class AutomationExecutor {
         try {
           validateDingTalkRobotResponse(parsed)
         } catch (err) {
+          // HTTP 2xx with a DingTalk business error still proves only that the request was received,
+          // not that no downstream effect occurred. It is therefore outcome_unknown, not retryable.
+          outcomeUnknownObserved = true
           const errorMessage = err instanceof Error ? err.message : String(err)
           deliveryRecorded = true
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
@@ -4268,6 +6137,8 @@ export class AutomationExecutor {
           failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
           continue
         }
+        destinationSendSucceeded = true
+        sendSucceeded = true
         deliveryRecorded = true
         await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
           destinationId: destination.id,
@@ -4283,6 +6154,10 @@ export class AutomationExecutor {
         })
         successfulDestinations.push({ id: destination.id, name: destination.name })
       } catch (err) {
+        if (!destinationSendSucceeded && sendAttemptStarted) {
+          const outcome = classifyOutboundResult(classifyFetchError(err))
+          if (outcome !== 'failed') outcomeUnknownObserved = true
+        }
         if (!deliveryRecorded) {
           await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
             destinationId: destination.id,
@@ -4306,6 +6181,28 @@ export class AutomationExecutor {
       } finally {
         clearTimeout(timeout)
       }
+    }
+
+    if (outboundId) {
+      // Multi-destination aggregate: any confirmed success makes the action terminal `sent`, even
+      // when a later destination fails. Replaying the action would duplicate that confirmed send.
+      // With no success, any post-dispatch ambiguity is terminal outcome_unknown. Only when every
+      // attempted send is provably pre-dispatch non-delivery is the action retryable `failed`.
+      const outcome: OutboundOutcome = sendSucceeded
+        ? 'sent'
+        : outcomeUnknownObserved
+          ? 'outcome_unknown'
+          : 'failed'
+      await recordOutboundOutcome(
+        this.deps.queryFn,
+        outboundId,
+        outcome,
+        outcome === 'sent'
+          ? 'dingtalk_group_sent'
+          : outcome === 'outcome_unknown'
+            ? 'dingtalk_group_outcome_unknown'
+            : 'dingtalk_group_definite_non_delivery',
+      )
     }
 
     if (failedDestinations.length) {

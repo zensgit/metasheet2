@@ -18,6 +18,21 @@
 //       SECOND, genuinely-new batch for the same project; the patch never carries owner / sourceProjectNo
 //       / projectName (human_preserved + first-synced identity survive untouched); a duplicate/retried
 //       persist of the SAME snapshotBatchId leaves the project row untouched entirely (idempotent skip).
+//   (i) MVP 快照表字段存在性探针 (#5719 gap — the mvp-persist route probes the CANONICAL target, the
+//       four MVP snapshot tables this module writes were still resolved compute-only): a host whose
+//       DB-backed read omits columns from a snapshot table => 422 TARGET_SCHEMA_INCOMPLETE with exactly
+//       { targetObjectId, missingFields, fieldExistenceMode } and ZERO records I/O; a complete db host,
+//       an old host without the DB read, and a scope-refused host answer byte-identically (result AND
+//       writes); a host failure is a values-free 503 TARGET_SCHEMA_UNAVAILABLE; 409 not-provisioned
+//       keeps precedence; an exact replay is refused before its replay read; no sheet-identity gate
+//       (the fixture's derived sheet id diverges from findObjectSheet's and the probe still fires).
+//
+// MUTATIONS the (i) cases are calibrated against (run in-memory by the implementer's mutation runner,
+// never on disk): M1 probe loop removed => (i-a)(i-a2)(i-b)(i-d)(i-e)(i-g) red ((i-h) drives the guard
+// directly and (i-f) still 409s, so both survive it by design); M2 capability gate removed (old
+// host probed too) => (i-c) red, and `!== 'db'` guard removed (scope-degraded verdict refused) =>
+// (i-d) red; M3 details carry a sheet id / extra key => (i-a) red; M4 host failure rethrown raw =>
+// (i-e) red; M5 probe moved before sheet resolution => (i-f) red.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -31,8 +46,19 @@ const {
   RUN_OBJECT_ID,
   PROJECT_OBJECT_ID,
   PROJECT_KEY_FIELD,
-  __internals: { MVP_OBJECT_ID_SET, READ_PAGE_LIMIT, READ_MAX_PAGES, readExistingSnapshotLines },
+  __internals: {
+    MVP_OBJECT_ID_SET,
+    READ_PAGE_LIMIT,
+    READ_MAX_PAGES,
+    PERSIST_MAX_PLAN_LINES,
+    readExistingSnapshotLines,
+    MVP_PERSIST_TARGET_TEMPLATES,
+    assertMvpTargetFieldsExist,
+  },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
+const {
+  resolveFieldExistence,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 const {
   __internals: { LINE_FIELD_IDS },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-plan.cjs'))
@@ -58,6 +84,7 @@ const LEAKY_DRAWING_NO = `DRW_${SECRET}`
 // The MVP tables live under the INTERNAL staging project; the business projectId ('proj_1') is a DIFFERENT
 // value. Sheet resolution must use the staging targetProjectId — a lookup with the business project misses.
 const STAGING_PROJECT_ID = 'tenant_x:integration-core'
+const LOCK_TENANT_ID = 'tenant_x'
 
 let passed = 0
 let failed = 0
@@ -166,6 +193,7 @@ function basePlanInputs(overrides = {}) {
   return {
     projectId: 'proj_1',
     targetProjectId: STAGING_PROJECT_ID,
+    lockTenantId: LOCK_TENANT_ID,
     syncRunId: 'run_1',
     snapshotBatchId: 'batch_1',
     sourceProjectNo: 'PN-1',
@@ -195,6 +223,14 @@ async function main() {
     assert.equal(result.persisted, true)
     assert.equal(result.mode, 'created')
     assert.deepEqual(result.created, { batch: 1, lines: 2, run: 1 })
+    assert.equal(recordsApi.unitOfWorkCalls.length, 1, 'persist enters exactly one host-owned unit-of-work')
+    assert.deepEqual(recordsApi.unitOfWorkCalls[0], {
+      tenantId: LOCK_TENANT_ID,
+      sheetIds: [BATCH_SHEET_ID, LINE_SHEET_ID, RUN_SHEET_ID, PROJECT_SHEET_ID],
+      project: { sheetId: PROJECT_SHEET_ID, projectId: 'proj_1' },
+      batch: { sheetId: BATCH_SHEET_ID, snapshotBatchId: 'batch_1' },
+    })
+    assert.equal(recordsApi.recordsCallsOutsideUnitOfWork, 0, 'all idempotency reads and writes stay inside the unit-of-work')
 
     // 5 creates: 1 batch, 2 lines, 1 run, THEN the project row (upserted last) — in that order.
     assert.equal(recordsApi.createCalls.length, 5)
@@ -244,6 +280,97 @@ async function main() {
     assert.equal(logicalOf(recordsApi.createCalls[0]).projectId, 'proj_1')
   })
 
+  await run('atomic version allocation reuses stored version on exact replay and allocates max+1 for a changed batch', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const first = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ allocateSnapshotVersion: true }),
+    })
+    assert.equal(first.mode, 'created')
+    assert.equal(logicalOf(recordsApi.createCalls[0]).snapshotVersion, 1)
+
+    const createsBeforeReplay = recordsApi.createCalls.length
+    const replay = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ allocateSnapshotVersion: true }),
+    })
+    assert.equal(replay.mode, 'skipped_existing')
+    assert.equal(recordsApi.createCalls.length, createsBeforeReplay, 'exact replay writes nothing')
+
+    const changed = await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({
+        allocateSnapshotVersion: true,
+        syncRunId: 'run_2',
+        snapshotBatchId: 'batch_2',
+        expansionResult: cleanExpansionResult().map((row) => ({ ...row, sourceVersion: 'V3' })),
+      }),
+    })
+    assert.equal(changed.mode, 'created')
+    const batchVersions = recordsApi.createCalls
+      .filter((call) => call.sheetId === BATCH_SHEET_ID)
+      .map((call) => logicalOf(call).snapshotVersion)
+    assert.deepEqual(batchVersions, [1, 2])
+  })
+
+  await run('atomic version allocation rejects an explicit snapshotVersion before provisioning or records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({ allocateSnapshotVersion: true, snapshotVersion: 7 }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_CONFIG_INVALID' && error.details.field === 'snapshotVersion',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  await run('atomic version allocation policy rejects non-boolean values before provisioning or records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({ allocateSnapshotVersion: 'true', snapshotVersion: undefined }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_CONFIG_INVALID' &&
+        error.details.field === 'allocateSnapshotVersion',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  await run('atomic version allocation fails closed when project history exhausts the safe integer range', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ snapshotVersion: Number.MAX_SAFE_INTEGER }),
+    })
+    const createsBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({
+          allocateSnapshotVersion: true,
+          syncRunId: 'run_after_max',
+          snapshotBatchId: 'batch_after_max',
+        }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 && error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'history_unprovable',
+    )
+    assert.equal(recordsApi.createCalls.length, createsBefore, 'exhaustion writes nothing')
+  })
+
   // ---- project-scope split: targetProjectId (staging) resolves sheets; business projectId must NOT ----
   await run('targetProjectId is required — omitting it fails closed with NO provisioning/records access', async () => {
     const recordsApi = makeRecordsApi()
@@ -259,6 +386,22 @@ async function main() {
     )
     assert.equal(provisioning.findObjectSheetCalls, 0, 'no sheet resolved')
     assert.equal(recordsApi.createCalls.length, 0, 'no write')
+  })
+
+  await run('P4 hard cut: missing atomic unit-of-work capability fails before provisioning or records I/O', async () => {
+    const recordsApi = makeRecordsApi()
+    recordsApi.runStockPreparationPersistUnitOfWork = undefined
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning, ...basePlanInputs(),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 503 && error.code === 'PERSIST_UNIT_OF_WORK_UNAVAILABLE',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
   })
 
   await run('resolving sheets with the BUSINESS projectId misses — proves the split is load-bearing', async () => {
@@ -636,6 +779,8 @@ async function main() {
     })
 
     // A SECOND, genuinely different batch/syncRun for the SAME project — NOT a duplicate/retry.
+    // snapshotVersion bumps to 2: repeat syncs must be strictly monotonic per project (H-2
+    // precondition guard) — a default-version repeat sync now fails loudly (own test below).
     const second = await persistStockPreparationSyncRun({
       permission: 'admin',
       recordsApi,
@@ -643,6 +788,7 @@ async function main() {
       ...basePlanInputs({
         syncRunId: 'run_2',
         snapshotBatchId: 'batch_2',
+        snapshotVersion: 2,
         // sourceProjectNo/projectName supplied again (a real caller always sends the populator inputs);
         // they must NOT overwrite the ORIGINAL stored values on this patch path.
         sourceProjectNo: 'PN-CHANGED-LATER',
@@ -720,7 +866,13 @@ async function main() {
       const recordsApi = makeRecordsApi()
       const provisioning = makeProvisioning()
       await assert.rejects(
-        () => persistStockPreparationSyncRun({ permission, recordsApi, provisioning, ...basePlanInputs() }),
+        () => persistStockPreparationSyncRun({
+          permission,
+          recordsApi,
+          provisioning,
+          ...basePlanInputs(),
+          allocateSnapshotVersion: 'malformed',
+        }),
         (error) =>
           error instanceof StockPreparationSyncRunPersistError &&
           error.status === 403 &&
@@ -811,6 +963,689 @@ async function main() {
     )
     assert.equal(provisioning.findObjectSheetCalls, 0, 'fails before any sheet resolution')
     assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  // ── H-2 (P4 lock round-1): replay verifies the project LIVE POINTER, not just row existence ──────
+
+  await run('P4: a project-patch crash rolls back batch/lines/run/project together, then the same request retries cleanly', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const crashingApi = Object.create(recordsApi)
+    crashingApi.patchRecord = async (input = {}) => {
+      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash before project patch')
+      return recordsApi.patchRecord(input)
+    }
+    // Establish an existing project so the next sync exercises the patch branch.
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    const callsBeforeCrash = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi: crashingApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      /injected crash before project patch/,
+    )
+    assert.equal(recordsApi.createCalls.length, callsBeforeCrash, 'failed unit-of-work leaves zero new creates')
+    const retry = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    assert.equal(retry.mode, 'created')
+  })
+
+  await run('H-2: a legacy complete batch whose project pointer stayed older still fails closed on replay', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_1' },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin', recordsApi, provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' && error.details.reason === 'stale_pointer',
+    )
+  })
+
+  await run('H-2: pointer advanced by a LATER sync -> replaying the older batch still returns 200 skipped_existing', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    // Pointer now names run_2 (version 2). Replaying sync 1 must remain a legal exact replay.
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(replay.mode, 'skipped_existing')
+    assert.equal(replay.persisted, false)
+  })
+
+  await run('H-2: pointer naming a run with no batch row -> 409 pointer_unresolvable (fail closed)', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Corrupt the pointer to a run id no batch row carries (raw physical patch, as a poisoned/legacy
+    // row would look).
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    assert.equal(projectRows.length, 1)
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_ghost' },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' &&
+        error.details.target === 'project' &&
+        error.details.reason === 'pointer_unresolvable',
+    )
+  })
+
+  // ── H-3 (P4 lock round-1: Option-A prerequisite): explicit plan-size bound ──────────────────────
+
+  await run('H-3: plan larger than PERSIST_MAX_PLAN_LINES -> 422 PERSIST_PLAN_TOO_LARGE before ANY provisioning/records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ expansionResult: manyExpansionRows(PERSIST_MAX_PLAN_LINES + 1) }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_PLAN_TOO_LARGE' &&
+        error.details.field === 'snapshotLines' &&
+        error.details.maxLines === PERSIST_MAX_PLAN_LINES,
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0, 'rejected before sheet resolution')
+    assert.equal(recordsApi.createCalls.length, 0, 'rejected before any write')
+  })
+
+  await run('H-2 precondition: a repeat sync with a non-increasing snapshotVersion (incl. the default) -> 422 PERSIST_VERSION_NOT_MONOTONIC before any write', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    const writesAfterFirst = recordsApi.createCalls.length
+    for (const overrides of [
+      { syncRunId: 'run_2', snapshotBatchId: 'batch_2' }, // omitted -> defaults to 1 == history max
+      { syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 1 },
+    ]) {
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs(overrides) }),
+        (error) =>
+          error instanceof StockPreparationSyncRunPersistError &&
+          error.status === 422 &&
+          error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+          error.details.field === 'snapshotVersion' &&
+          error.details.reason === 'not_monotonic',
+      )
+    }
+    // 0 is not a strict version at all — the SHARED parser rejects it at PLAN level (R5: preview and
+    // commit reject identically; it never reaches the persist guard).
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 0 }) }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPlanError &&
+        error.status === 422 &&
+        error.details.field === 'snapshotVersion',
+    )
+    assert.equal(recordsApi.createCalls.length, writesAfterFirst, 'rejected before any write')
+  })
+
+  await run('R3: a legacy COMPLETE orphan batch still counts — intermediate version -> 422, next version proceeds', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // V1 commits fully (pointer -> run_1).
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Construct the pre-P4 legacy shape: V3 is complete while the live pointer remains on V1.
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+    })
+    const projectRows = await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'lastSyncRunId')]: 'run_1' },
+    })
+    // Round-3 finding: a pointer-only compare accepted V2 here (V2 > pointer V1) despite the complete
+    // V3 — the guard must scan the project's WHOLE batch history.
+    const writesBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'not_monotonic',
+    )
+    assert.equal(recordsApi.createCalls.length, writesBefore, 'rejected before any write')
+    // Moving past the orphan is allowed: V4 > max(V3).
+    const next = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_4', snapshotBatchId: 'batch_4', snapshotVersion: 4 }),
+    })
+    assert.equal(next.mode, 'created')
+  })
+
+  await run('R4: legacy complete history with NO project row still blocks a lower version: V2 rejected, V4 proceeds', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // Construct the pre-P4 legacy shape: V3 batch/lines/run are complete but the project row is absent.
+    await persistStockPreparationSyncRun({
+      permission: 'admin', recordsApi, provisioning,
+      ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+    })
+    recordsApi.store.set(PROJECT_SHEET_ID, [])
+    // Round-4 finding: gating the scan on projectRows.length === 1 skipped it here (no project row),
+    // so V2 slipped past the complete orphan V3. The scan must run for EVERY new batch.
+    const writesBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'not_monotonic',
+    )
+    assert.equal(recordsApi.createCalls.length, writesBefore, 'rejected before any write')
+    const next = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_4', snapshotBatchId: 'batch_4', snapshotVersion: 4 }),
+    })
+    assert.equal(next.mode, 'created')
+  })
+
+  await run('R4: strict version parsing — a null-version history row fails closed (history_unprovable), never coerced to 0', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // Corrupt V1's stored version to null (raw physical patch — legacy/degenerate data shape).
+    const batchRows = await recordsApi.queryRecords({
+      sheetId: BATCH_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')]: 'batch_1' },
+    })
+    await recordsApi.patchRecord({
+      sheetId: BATCH_SHEET_ID,
+      recordId: batchRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: null },
+    })
+    // Round-4 finding: Number(null) === 0 let this slip through as "max 0". Strict parsing must
+    // fail closed instead of silently writing V2 over unprovable history.
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'history_unprovable',
+    )
+    // Positive control: a numeric-STRING stored version is accepted by the strict parser.
+    await recordsApi.patchRecord({
+      sheetId: BATCH_SHEET_ID,
+      recordId: batchRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: '1' },
+    })
+    const ok = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    assert.equal(ok.mode, 'created')
+  })
+
+  await run("R5: coercive version FORMS ('01'/'+1'/'1e2'/'0x10'/unsafe) — CURRENT input rejects at plan level, zero writes", async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    for (const bad of ['01', '+1', '1e2', '0x10', 2 ** 53, '9007199254740993', 1.5]) {
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({
+          permission: 'admin',
+          recordsApi,
+          provisioning,
+          ...basePlanInputs({ syncRunId: 'run_x', snapshotBatchId: 'batch_x', snapshotVersion: bad }),
+        }),
+        (error) =>
+          error instanceof StockPreparationSyncRunPlanError &&
+          error.status === 422 &&
+          error.details.field === 'snapshotVersion',
+      )
+    }
+    assert.equal(recordsApi.createCalls.length, 0, 'zero writes across all rejected forms')
+  })
+
+  await run("R5: coercive version forms in HISTORY rows -> 422 history_unprovable, zero writes (Number() previously accepted every one)", async () => {
+    for (const bad of ['01', '+1', '1e2', '0x10', 2 ** 53]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const batchRows = await recordsApi.queryRecords({
+        sheetId: BATCH_SHEET_ID,
+        filters: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')]: 'batch_1' },
+      })
+      await recordsApi.patchRecord({
+        sheetId: BATCH_SHEET_ID,
+        recordId: batchRows[0].id,
+        changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: bad },
+      })
+      const writesBefore = recordsApi.createCalls.length
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({
+          permission: 'admin',
+          recordsApi,
+          provisioning,
+          ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+        }),
+        (error) =>
+          error instanceof StockPreparationSyncRunPersistError &&
+          error.status === 422 &&
+          error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+          error.details.reason === 'history_unprovable',
+      )
+      assert.equal(recordsApi.createCalls.length, writesBefore, 'zero writes on unprovable history')
+    }
+  })
+
+  await run('H-2: equal-version pointer on a DIFFERENT run (legacy/degenerate data) -> 409 pointer_unresolvable, never a silent 200', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+    })
+    // Simulate legacy degenerate data: flatten batch_2's version back to 1 (equal to batch_1) via a
+    // raw physical patch — the monotonic create guard makes this state unreachable going forward.
+    const batchRows = await recordsApi.queryRecords({
+      sheetId: BATCH_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')]: 'batch_2' },
+    })
+    assert.equal(batchRows.length, 1)
+    await recordsApi.patchRecord({
+      sheetId: BATCH_SHEET_ID,
+      recordId: batchRows[0].id,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: 1 },
+    })
+    // Replaying batch_1 now sees pointer=run_2 whose batch version EQUALS its own — not provably
+    // advanced -> fail closed.
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_PROJECT_POINTER_STALE' &&
+        error.details.reason === 'pointer_unresolvable',
+    )
+  })
+
+  await run('H-3: create AND exact replay both succeed at the true bound (PERSIST_MAX_PLAN_LINES lines)', async () => {
+    // Paginated fake: the replay path's bounded read must see REAL limit/offset pages (the plain fake
+    // returns everything in one oversized page and would false-trip the page-size guard).
+    const recordsApi = makePaginatedRecordsApi()
+    const provisioning = makeProvisioning()
+    const inputs = basePlanInputs({ expansionResult: manyExpansionRows(PERSIST_MAX_PLAN_LINES) })
+    const first = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...inputs })
+    assert.equal(first.mode, 'created')
+    assert.equal(first.created.lines, PERSIST_MAX_PLAN_LINES)
+    // The bound is defined as the largest EXACTLY-REPLAYABLE plan (short-page provability): the
+    // retry must be a clean 200 skip, never PERSIST_EXISTING_BATCH_READ_UNPROVABLE (round-2 finding:
+    // at 25,000 the create succeeded and every replay 409'd forever).
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...inputs })
+    assert.equal(replay.mode, 'skipped_existing')
+  })
+
+  await run('H-3: plan at EXACTLY the bound passes the cap (fails later on unprovisioned target, proving the cap did not fire)', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning({ missing: new Set([BATCH_OBJECT_ID]) })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ expansionResult: manyExpansionRows(PERSIST_MAX_PLAN_LINES) }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.code === 'PERSIST_TARGET_NOT_PROVISIONED',
+    )
+  })
+
+  // ---- (i) MVP 快照表字段存在性探针 — the write-path half of the readiness probe (#5719 gap) ----
+  //
+  // #5719 probes the CANONICAL target inside computeDryRun; the four MVP snapshot tables this module
+  // writes were still resolved compute-only, so a snapshot line table five columns short (222) went
+  // unnoticed until the records service rejected the write. These cases pin the probe on THIS path.
+  //
+  // `makeDbProvisioning` is the suite's own fake plus the host's DB-backed read
+  // (`resolveExistingObjectFieldIds`), answering per objectId. Its `getObjectSheetId` is the fixture's
+  // — it derives sheet_<sha1(project:object)>, which is NOT the sheet_<objectId> `findObjectSheet`
+  // answers — so a probe that copied #5719's sheet-identity gate would fall silent on every case here.
+  // `computedMissingOnRepeatByObjectId` makes the compute-only map omit ids on the SECOND
+  // `resolveFieldIds` call for an object (the first feeds resolveTargetFieldIds, which fails closed
+  // on omission; the second is the shared probe's scope-degraded fallback). A real compute-only host
+  // never omits, so this is not a model of production — it is the instrument that lets the scope arm
+  // SEE a probe that refuses on a non-`db` verdict.
+  const MISSING_LINE_FIVE = Object.freeze(['pathKey', 'designQty', 'designUnit', 'totalQuantity', 'sourceFingerprint'])
+  const MVP_PERSIST_OBJECT_IDS = Object.freeze([BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID, PROJECT_OBJECT_ID])
+  const TEMPLATE_IDS_BY_OBJECT_ID = Object.fromEntries(MVP_PERSIST_TARGET_TEMPLATES.map((template) => [template.objectId, template.fields.map((field) => field.id)]))
+
+  function makeDbProvisioning({
+    dbRead = true,
+    missingByObjectId = {},
+    scopeError = null,
+    dbReadError = null,
+    computedMissingOnRepeatByObjectId = {},
+    missing = new Set(),
+  } = {}) {
+    const fake = makeFakeProvisioning({ sheetIdByObjectId: SHEET_ID_BY_OBJECT_ID, stagingProjectId: STAGING_PROJECT_ID, missing })
+    const probeCalls = []
+    const resolveFieldIdsCalls = []
+    const repeatSeen = new Map()
+    const provisioning = {
+      calls: fake.calls,
+      probeCalls,
+      resolveFieldIdsCalls,
+      findObjectSheet: fake.findObjectSheet,
+      getObjectSheetId: fake.getObjectSheetId,
+      async resolveFieldIds(input = {}) {
+        resolveFieldIdsCalls.push({ projectId: input.projectId, objectId: input.objectId })
+        const resolved = await fake.resolveFieldIds(input)
+        const seen = (repeatSeen.get(input.objectId) || 0) + 1
+        repeatSeen.set(input.objectId, seen)
+        if (seen > 1) for (const id of computedMissingOnRepeatByObjectId[input.objectId] || []) delete resolved[id]
+        return resolved
+      },
+    }
+    if (dbRead) {
+      provisioning.resolveExistingObjectFieldIds = async ({ projectId, objectId, fieldIds } = {}) => {
+        probeCalls.push({ projectId, objectId, fieldIds: [...fieldIds] })
+        if (dbReadError) throw dbReadError
+        if (scopeError) throw scopeError
+        const resolved = await fake.resolveFieldIds({ projectId, objectId, fieldIds })
+        for (const id of missingByObjectId[objectId] || []) delete resolved[id]
+        return resolved
+      }
+    }
+    return provisioning
+  }
+
+  function scopeError(shape) {
+    const error = new Error('object is not in this plugin scope')
+    if (shape === 'name') error.name = 'MultitableObjectScopeError'
+    if (shape === 'code') error.code = 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN'
+    return error
+  }
+
+  function assertZeroRecordsIo(recordsApi, label) {
+    assert.equal(recordsApi.unitOfWorkCalls.length, 0, `${label}: the unit-of-work never opened`)
+    assert.equal(recordsApi.queryCalls.length, 0, `${label}: zero records reads`)
+    assert.equal(recordsApi.createCalls.length, 0, `${label}: zero creates`)
+    assert.equal(recordsApi.patchCallCount, 0, `${label}: zero patches`)
+  }
+
+  // Write payloads minus the project row's wall-clock stamp, so two runs are comparable.
+  function comparableWrites(recordsApi) {
+    return recordsApi.createCalls.map((call) => {
+      const { lastSyncedAt, ...rest } = logicalOf(call)
+      return { objectId: objectIdForSheet(call.sheetId), data: rest, stamped: typeof lastSyncedAt }
+    })
+  }
+
+  await run('(i-a) MVP field probe: a db host missing five snapshot-line columns => 422 TARGET_SCHEMA_INCOMPLETE, values-free, ZERO records I/O', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({ missingByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationSyncRunPersistError, 'the module\'s own error class')
+        assert.equal(error.status, 422)
+        assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+        assert.deepEqual(Object.keys(error.details).sort(), ['fieldExistenceMode', 'missingFields', 'targetObjectId'], 'exactly the three #5719 keys')
+        assert.equal(error.details.targetObjectId, LINE_OBJECT_ID)
+        assert.equal(error.details.fieldExistenceMode, 'db')
+        assert.deepEqual(error.details.missingFields, [...MISSING_LINE_FIVE], 'the five, in template order')
+        const text = JSON.stringify({ message: error.message, details: error.details })
+        assert.equal(text.includes('fld_'), false, 'no physical field id in the refusal')
+        assert.equal(text.includes('sheet_'), false, 'no sheet id in the refusal')
+        assert.equal(text.includes('proj_1'), false, 'no business project id in the refusal')
+        return true
+      },
+    )
+    assertZeroRecordsIo(recordsApi, '(i-a)')
+    // The probe asked about the tables this module writes, in write-resolution order, under the
+    // STAGING project (targetProjectId) — never the business projectId — and about each template in
+    // full: the same 口径 readiness asks.
+    assert.deepEqual(
+      provisioning.probeCalls.map((call) => call.objectId),
+      [BATCH_OBJECT_ID, LINE_OBJECT_ID],
+      'judged batch (complete) then line (refused); run/project never reached',
+    )
+    for (const call of provisioning.probeCalls) {
+      assert.equal(call.projectId, STAGING_PROJECT_ID, 'probe project is the staging targetProjectId')
+      assert.deepEqual(call.fieldIds, TEMPLATE_IDS_BY_OBJECT_ID[call.objectId], 'the full frozen template, nothing invented')
+    }
+    // No sheet-identity gate on this path (see makeDbProvisioning): the derived id was never consulted.
+    assert.equal(provisioning.calls.getObjectSheetId.length, 0, 'the probe never derived a sheet id')
+    // And every sheet had been proven provisioned first (409 precedence, see (i-f)).
+    assert.equal(provisioning.calls.findObjectSheet.length, 4, 'all four sheets resolved before the probe')
+  })
+
+  await run('(i-a2) MVP field probe: each of the four tables is judged; the first drifted one in write order names itself', async () => {
+    for (const [objectId, missingIds] of [
+      [BATCH_OBJECT_ID, ['snapshotVersion']],
+      [RUN_OBJECT_ID, ['inputShape', 'resultShape']],
+      [PROJECT_OBJECT_ID, ['owner']],
+    ]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeDbProvisioning({ missingByObjectId: { [objectId]: missingIds, [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => {
+          assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+          // batch precedes line in write order; run and project follow it.
+          const expected = objectId === BATCH_OBJECT_ID ? BATCH_OBJECT_ID : LINE_OBJECT_ID
+          assert.equal(error.details.targetObjectId, expected, `${objectId}: the first drifted table in write order is the one named`)
+          assert.deepEqual(error.details.missingFields, expected === BATCH_OBJECT_ID ? missingIds : [...MISSING_LINE_FIVE])
+          return true
+        },
+      )
+      assertZeroRecordsIo(recordsApi, `(i-a2) ${objectId}`)
+    }
+    // run / project alone drifted (line complete) => named directly.
+    for (const [objectId, missingIds] of [[RUN_OBJECT_ID, ['inputShape', 'resultShape']], [PROJECT_OBJECT_ID, ['owner']]]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeDbProvisioning({ missingByObjectId: { [objectId]: missingIds } })
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => error.code === 'TARGET_SCHEMA_INCOMPLETE' && error.details.targetObjectId === objectId,
+      )
+      assertZeroRecordsIo(recordsApi, `(i-a2) ${objectId} alone`)
+    }
+  })
+
+  // The old-host answer every degraded arm below must equal — built on its OWN fresh store, so the
+  // comparison cannot be trivialised by an idempotent `skipped_existing` replay.
+  const legacyRecordsApi = makeRecordsApi()
+  const legacyProvisioning = makeDbProvisioning({ dbRead: false })
+  const legacyResult = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi: legacyRecordsApi, provisioning: legacyProvisioning, ...basePlanInputs() })
+  const legacyWrites = comparableWrites(legacyRecordsApi)
+
+  await run('(i-b) MVP field probe: a db host missing nothing => result and writes deep-equal the old-host run', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning()
+    const result = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(result.mode, 'created')
+    assert.deepEqual(result, legacyResult, '(i-b): a complete probed host answers exactly what an old host answers')
+    assert.deepEqual(comparableWrites(recordsApi), legacyWrites, '(i-b): and writes exactly what an old host writes')
+    assert.deepEqual(provisioning.probeCalls.map((call) => call.objectId), [...MVP_PERSIST_OBJECT_IDS], '(i-b): all four judged, once each')
+    for (const call of provisioning.probeCalls) assert.equal(call.projectId, STAGING_PROJECT_ID)
+  })
+
+  await run('(i-c) MVP field probe: an old host without the DB read is never probed — zero extra provisioning calls, result unchanged', async () => {
+    assert.equal(legacyResult.mode, 'created')
+    assert.deepEqual(legacyResult.created, { batch: 1, lines: 2, run: 1 })
+    assert.equal(legacyProvisioning.probeCalls.length, 0)
+    // Exactly the four compute-only resolutions resolveScopedTarget always made — the probe added none.
+    assert.deepEqual(
+      legacyProvisioning.resolveFieldIdsCalls.map((call) => call.objectId),
+      [...MVP_PERSIST_OBJECT_IDS],
+      '(i-c): the legacy call trace is the pre-probe trace',
+    )
+    assert.equal(legacyProvisioning.calls.getObjectSheetId.length, 0)
+  })
+
+  await run('(i-d) MVP field probe: a host whose DB read refuses the object scope degrades to the old-host answer (name and code arms)', async () => {
+    for (const shape of ['name', 'code']) {
+      const recordsApi = makeRecordsApi()
+      // The degraded compute-only fallback omits the five on purpose (see makeDbProvisioning): a
+      // probe that refused on a `computed_scope_unavailable` verdict would be seen here.
+      const provisioning = makeDbProvisioning({
+        scopeError: scopeError(shape),
+        computedMissingOnRepeatByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] },
+      })
+      const result = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      assert.deepEqual(result, legacyResult, `(i-d ${shape}): degraded, not refused`)
+      assert.deepEqual(comparableWrites(recordsApi), legacyWrites, `(i-d ${shape}): writes unchanged`)
+      assert.equal(provisioning.probeCalls.length, 4, `(i-d ${shape}): the DB read was attempted for each table`)
+      // The instrument fired: the line table's compute map was consulted a second time (the
+      // fallback) and that answer omitted the five — and still nothing was refused.
+      assert.equal(provisioning.resolveFieldIdsCalls.filter((call) => call.objectId === LINE_OBJECT_ID).length, 2, `(i-d ${shape}): the scope-degraded fallback consulted the compute map`)
+    }
+  })
+
+  await run('(i-e) MVP field probe: a host failure on the DB read is a values-free 503 TARGET_SCHEMA_UNAVAILABLE, never the driver text, zero I/O', async () => {
+    const boom = new Error('connection terminated unexpectedly')
+    boom.code = 'ECONNRESET'
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({ dbReadError: boom })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationSyncRunPersistError)
+        assert.equal(error.status, 503)
+        assert.equal(error.code, 'TARGET_SCHEMA_UNAVAILABLE')
+        assert.deepEqual(Object.keys(error.details), ['targetObjectId'], 'the object id and nothing else')
+        assert.equal(error.details.targetObjectId, BATCH_OBJECT_ID, 'the first table judged')
+        assert.equal(error.cause, boom, 'the original rides on cause for the server log')
+        const text = JSON.stringify({ message: error.message, details: error.details })
+        assert.equal(text.includes('connection terminated'), false)
+        assert.equal(text.includes('ECONNRESET'), false)
+        return true
+      },
+    )
+    assertZeroRecordsIo(recordsApi, '(i-e)')
+  })
+
+  await run('(i-f) MVP field probe: an unprovisioned sheet still answers 409 PERSIST_TARGET_NOT_PROVISIONED — the probe runs only on provisioned sheets', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({
+      missing: new Set([LINE_OBJECT_ID]),
+      missingByObjectId: { [BATCH_OBJECT_ID]: ['snapshotVersion'] },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => error instanceof StockPreparationSyncRunPersistError && error.code === 'PERSIST_TARGET_NOT_PROVISIONED' && error.details.objectId === LINE_OBJECT_ID,
+    )
+    assert.equal(provisioning.probeCalls.length, 0, '(i-f): no DB read before every sheet is proven provisioned')
+    assertZeroRecordsIo(recordsApi, '(i-f)')
+  })
+
+  await run('(i-g) MVP field probe: an exact replay of a persisted batch is refused too when the columns are gone — before the replay read', async () => {
+    const recordsApi = makeRecordsApi()
+    const missingByObjectId = {}
+    const provisioning = makeDbProvisioning({ missingByObjectId })
+    const first = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(first.mode, 'created')
+    const queriesAfterCreate = recordsApi.queryCalls.length
+    const createsAfterCreate = recordsApi.createCalls.length
+    const unitsAfterCreate = recordsApi.unitOfWorkCalls.length
+    missingByObjectId[LINE_OBJECT_ID] = [...MISSING_LINE_FIVE]
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => error.code === 'TARGET_SCHEMA_INCOMPLETE' && error.details.targetObjectId === LINE_OBJECT_ID,
+    )
+    assert.equal(recordsApi.queryCalls.length, queriesAfterCreate, '(i-g): the replay read never ran')
+    assert.equal(recordsApi.createCalls.length, createsAfterCreate)
+    assert.equal(recordsApi.unitOfWorkCalls.length, unitsAfterCreate)
+    // Control: columns back => the exact replay skips as before.
+    delete missingByObjectId[LINE_OBJECT_ID]
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(replay.mode, 'skipped_existing')
+  })
+
+  await run('(i-h) MVP field probe: the exported guard is the shared probe (resolveFieldExistence) — same verdict, same details shape', async () => {
+    const provisioning = makeDbProvisioning({ missingByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+    const lineTemplate = MVP_PERSIST_TARGET_TEMPLATES.find((template) => template.objectId === LINE_OBJECT_ID)
+    const shared = await resolveFieldExistence({ provisioning, projectId: STAGING_PROJECT_ID, objectId: LINE_OBJECT_ID, fieldIds: TEMPLATE_IDS_BY_OBJECT_ID[LINE_OBJECT_ID] })
+    assert.equal(shared.fieldExistenceMode, 'db')
+    await assert.rejects(
+      () => assertMvpTargetFieldsExist(provisioning, STAGING_PROJECT_ID, lineTemplate),
+      (error) => {
+        assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+        assert.deepEqual(error.details.missingFields, TEMPLATE_IDS_BY_OBJECT_ID[LINE_OBJECT_ID].filter((id) => !shared.resolved[id]), 'the guard reports exactly what the shared probe omitted')
+        return true
+      },
+    )
+    // A complete table, an old host and a scope-refused host all resolve to undefined (no refusal).
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning(), STAGING_PROJECT_ID, lineTemplate), undefined)
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning({ dbRead: false }), STAGING_PROJECT_ID, lineTemplate), undefined)
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning({ scopeError: scopeError('name') }), STAGING_PROJECT_ID, lineTemplate), undefined)
   })
 
   console.log(`\nstock-preparation-sync-run-persist.test.cjs: ${passed} passed, ${failed} failed`)

@@ -16,9 +16,9 @@ on:
         required: false
         default: 'http://23.254.236.11:8081/api'
       org_id:
-        description: 'Org ID used for temporary holiday setup'
+        description: 'Explicit synthetic org authorized for temporary holiday setup'
         required: false
-        default: 'default'
+        default: ''
       verify_holiday:
         description: 'Verify holiday badge with temp holiday create/delete (true/false)'
         required: false
@@ -56,7 +56,11 @@ jobs:
     env:
       WEB_URL: ${{ inputs.web_url || vars.ATTENDANCE_WEB_BASE_URL || 'http://23.254.236.11:8081' }}
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}
-      ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
+      ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_SYNTHETIC_ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_SMOKE_ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      AUTH_EXPECTED_TENANT_ID: ${{ inputs.org_id || vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_EXPECTED_DEPLOY_SHA: ${{ vars.ATTENDANCE_EXPECTED_DEPLOY_SHA || '' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       REQUIRE_TOGGLE_CHECKS: ${{ inputs.require_toggle_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_TOGGLE_CHECKS || 'false' }}
       REQUIRE_SHELL_TAB_CHECKS: ${{ inputs.require_shell_tab_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_SHELL_TAB_CHECKS || 'false' }}
@@ -67,6 +71,7 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
       HEADLESS: 'true'
@@ -112,6 +117,12 @@ jobs:
         if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Verify configured acceptance target
+        if: ${{ env.DRILL_FAIL != 'true' }}
+        run: |
+          set -euo pipefail
+          node scripts/ops/attendance-acceptance-preflight.mjs > output/playwright/attendance-locale-zh-smoke/runtime-provenance-before.json
+
       - name: Resolve valid auth token
         if: ${{ env.DRILL_FAIL != 'true' }}
         id: resolve-auth-token
@@ -143,6 +154,7 @@ jobs:
               DEPLOY_HOST="${DEPLOY_HOST}" \
               DEPLOY_USER="${DEPLOY_USER}" \
               DEPLOY_SSH_KEY_B64="${DEPLOY_SSH_KEY_B64}" \
+              DEPLOY_KNOWN_HOSTS="${DEPLOY_KNOWN_HOSTS}" \
               DEPLOY_PATH="${DEPLOY_PATH}" \
               DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" \
               ./scripts/ops/resolve-attendance-smoke-token.sh 2> >(tee -a "${fallback_log}" >&2)
@@ -190,6 +202,10 @@ jobs:
         env:
           AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: pnpm verify:attendance-locale-zh
+
+      - name: Verify backend identity after smoke
+        if: ${{ env.DRILL_FAIL != 'true' }}
+        run: node scripts/ops/attendance-acceptance-preflight.mjs > output/playwright/attendance-locale-zh-smoke/runtime-provenance-after.json
 
       - name: Write step summary
         if: always()

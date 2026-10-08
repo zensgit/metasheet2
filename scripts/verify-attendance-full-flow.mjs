@@ -2,6 +2,8 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
+import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
@@ -164,12 +166,14 @@ async function refreshAuthToken(apiBase) {
     }
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
+      await verifyAcceptanceTokenTenant(apiBase, nextToken)
       token = nextToken
       return true
     }
     logInfo('WARN: token refresh response missing token')
     return false
   } catch (error) {
+    if (error instanceof AcceptanceTenantError) throw error
     logInfo(`WARN: token refresh error (${(error && error.message) || error})`)
     return false
   }
@@ -287,6 +291,7 @@ async function fetchAuthMeFeatures(apiBase) {
       const payload = body?.data ?? body ?? {}
       return payload?.features && typeof payload.features === 'object' ? payload.features : null
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       lastError = error
       const retriable = typeof error?.retriable === 'boolean' ? error.retriable : true
       if (!retriable || attempt >= authMeRetries) {
@@ -407,10 +412,7 @@ async function assertRecordsTableContainer(page) {
 }
 
 async function selectAdminSection(page, sectionId, headingName = null) {
-  const quickJump = page.locator('[data-admin-quick-jump="true"]').first()
-  if (await quickJump.count()) {
-    await quickJump.selectOption(sectionId)
-  }
+  await selectAttendanceAdminWorkspaceSection(page, sectionId, adminReadyTimeoutMs)
 
   const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
   await section.waitFor({ state: 'visible', timeout: adminReadyTimeoutMs })
@@ -760,6 +762,7 @@ async function resolveRecoveryUserId(apiBase) {
       const value = user?.userId || user?.id || user?.user_id || ''
       return String(value || '').trim()
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       if (attempt >= authMeRetries) {
         return ''
       }
@@ -826,6 +829,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       preparedByApiUpload = true
       logInfo(`Recovery assertion prepared via API upload: csvFileId=${uploaded.fileId} rows=${uploaded.rowCount || 'unknown'}`)
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       logInfo(`WARN: API upload path unavailable for recovery assertion (${(error && error.message) || error})`)
     }
 
@@ -1032,6 +1036,7 @@ async function run() {
 
   const apiBase = normalizeUrl(apiBaseEnv) || deriveApiBaseFromWebUrl(webUrl)
   await refreshAuthToken(apiBase)
+  await verifyAcceptanceTokenTenant(apiBase, token)
 
   // Resolve expected features:
   // 1) Explicit FEATURES_JSON override (local/dev).
@@ -1045,6 +1050,7 @@ async function run() {
         logInfo(`Loaded features from ${apiBase}/auth/me`)
       }
     } catch (error) {
+      if (error instanceof AcceptanceTenantError) throw error
       logInfo(`WARN: failed to load /auth/me features (${(error && error.message) || error})`)
     }
   }
