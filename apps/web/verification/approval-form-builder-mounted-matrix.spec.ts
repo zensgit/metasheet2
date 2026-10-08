@@ -1,4 +1,4 @@
-// F4 real-browser B1-B13 matrix (delta §5 F4, §7.2; F2-gate handoff condition 1) — driven by
+// F4 real-browser B1-B14 matrix (delta §5 F4, §7.2; F2-gate handoff condition 1) — driven by
 // GENUINE mouse drags (`locator.dragTo`), never synthetic DataTransfer, against the MOUNTED
 // PRODUCTION SURFACE: the real `TemplateAuthoringView.vue`, real Vue Router, real Element Plus,
 // flag ON (see verification/approval-form-builder-mounted-harness.ts). The F2 lane's
@@ -691,4 +691,80 @@ test('B13 — mounted detail preview: columns, disabled controls, and identity-s
   await expect(page.locator('[data-testid="approval-form-field-inspector-detail"]')).toBeVisible()
   await expect(detailCard.locator('[data-testid="approval-form-builder-detail-preview"]')).toBeVisible()
   await page.screenshot({ path: `${OUT}/afb-mounted-b13-detail-preview.png` })
+})
+
+// --- B14: record-link target pickers on the mounted default surface -------------------------------
+
+// Delta §3.4 / parity ledger deferral (3): on the default (flag ON) surface a record-link field must
+// be configurable from the inspector. The two catalog endpoints are stubbed by EXACT path (never a
+// broad api glob) so no module request of this lane can be swallowed.
+async function routeRecordLinkCatalog(page: Page): Promise<void> {
+  await page.route('**/api/multitable/bases', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      ok: true,
+      data: {
+        bases: [
+          { id: 'base_afb_sales', name: '销售空间' },
+          { id: 'base_afb_service', name: '客服空间' },
+        ],
+      },
+    }),
+  }))
+  await page.route('**/api/multitable/sheets', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      ok: true,
+      data: {
+        sheets: [
+          { id: 'sheet_afb_orders', name: '订单表', baseId: 'base_afb_sales' },
+          { id: 'sheet_afb_tickets', name: '工单表', baseId: 'base_afb_service' },
+        ],
+      },
+    }),
+  }))
+}
+
+test('B14 — record-link: palette add exposes typed base/sheet pickers in the inspector; a picked target clears the publish 表单字段 check; no raw id is rendered', async ({ page }) => {
+  await routeRecordLinkCatalog(page)
+  await mountFields(page)
+  await page.click('[data-testid="approval-template-section-basic"]')
+  await page.locator('[data-testid="approval-template-name"]').fill('关联记录模板')
+  await page.click('[data-testid="approval-template-section-fields"]')
+
+  await page.click('[data-testid="approval-form-palette-chip-record-link"]')
+  const linkCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="record-link"]').last()
+  await expect(linkCard).toHaveAttribute('data-selected', 'true')
+
+  const base = page.locator('[data-testid="approval-form-field-inspector-record-link-base"]')
+  const sheet = page.locator('[data-testid="approval-form-field-inspector-record-link-sheet"]')
+  const summary = page.locator('[data-testid="approval-form-field-inspector-record-link-summary"]')
+  await expect(base).toBeVisible()
+  await expect(base).toHaveAccessibleName('目标空间')
+  await expect(sheet).toHaveAccessibleName('目标表')
+  await expect(sheet).toBeDisabled()
+  await expect(base.locator('option')).toHaveText(['请选择目标空间', '销售空间', '客服空间'])
+  await expect(summary).toHaveText('尚未选择目标空间与目标表。')
+
+  await base.selectOption('base_afb_sales')
+  await expect(sheet).toBeEnabled()
+  await expect(sheet.locator('option')).toHaveText(['请选择目标表', '订单表'])
+  await sheet.selectOption('sheet_afb_orders')
+  await expect(summary).toHaveText('已选择目标空间与目标表。')
+
+  // The pins live in the builder session, not in transient DOM state: a selection round trip
+  // re-renders the inspector from the committed field.
+  await cards(page).first().click()
+  await expect(base).toHaveCount(0)
+  await linkCard.click()
+  await expect(base).toHaveValue('base_afb_sales')
+  await expect(sheet).toHaveValue('sheet_afb_orders')
+
+  await page.click('[data-testid="approval-template-publish-button"]')
+  await expect(page.locator('[data-testid="approval-publish-checklist-item-fields"]')).toHaveAttribute('data-ok', 'true')
+  await expect(page.locator('body')).not.toContainText('base_afb_')
+  await expect(page.locator('body')).not.toContainText('sheet_afb_')
+  await page.screenshot({ path: `${OUT}/afb-mounted-b14-record-link.png` })
 })

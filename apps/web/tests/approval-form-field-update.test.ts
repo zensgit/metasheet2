@@ -1350,3 +1350,178 @@ describe('approvalFormAuthoringAdapter - F3 one-entry-per-logical-edit history (
     expect(redone.focusLocalId).toBe('local_1')
   })
 })
+
+// --- record-link target pins (delta §3.4 typed pickers; parity ledger deferral (3)) ----------
+
+/**
+ * Delta §3.4 lists "record-link base/sheet typed pickers" among the inspector's type-specific
+ * controls, and the parity ledger's deferral (3) required the F4 mount to wire them so a field
+ * retyped into (or added as) record-link never reaches a configuration dead-end. The pins ride the
+ * SAME typed property patch as every other type-specific property: gated to `record-link`, one
+ * committed edit = one history entry, value-identical = zero entries, rejection = zero mutation.
+ * The catalog-dependent "keep the sheet only if it belongs to the new base" decision is the
+ * CALLER's (the command layer has no catalog); the caller submits both pins as ONE patch.
+ */
+describe('updateFormFieldProperties - record-link target pins (delta §3.4 typed pickers)', () => {
+  it('writes base + sheet pins on a record-link field, preserving identity/type; the serializer emits exactly { baseId, sheetId }', () => {
+    const source = draftWith([field(1, { type: 'record-link' }), field(2)])
+    const before = JSON.stringify(source)
+    const result = updateFormFieldProperties(source, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertOk(result)
+    expect(result.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'record-link',
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    expect(result.focusLocalId).toBe('local_1')
+    expect(JSON.stringify(source)).toBe(before)
+    expect(buildFormSchema(result.draft).fields[0].props).toEqual({
+      baseId: 'base_alpha',
+      sheetId: 'sheet_alpha_1',
+    })
+  })
+
+  it('a single-pin patch touches only that pin, and clearing both pins (the clearable picker) un-configures the field', () => {
+    const source = draftWith([
+      field(1, {
+        type: 'record-link',
+        recordLinkBaseId: 'base_alpha',
+        recordLinkSheetId: 'sheet_alpha_1',
+      }),
+    ])
+    const sheetOnly = updateFormFieldProperties(source, 'local_1', {
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    assertOk(sheetOnly)
+    expect(sheetOnly.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    const cleared = updateFormFieldProperties(sheetOnly.draft, 'local_1', {
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    assertOk(cleared)
+    expect(cleared.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    // A fresh (never-saved) field with both pins cleared is no longer "configured": the
+    // record_link_config retype refusal (FB-D6) lifts, so the author is never stuck.
+    expect(
+      collectFormFieldRetypeDependencies(cleared.draft, 'local_1', 'text'),
+    ).toEqual([])
+  })
+
+  it('rejects either pin on EVERY non-record-link type, and a mixed patch atomically, with zero mutation', () => {
+    const otherTypes = [
+      'text',
+      'textarea',
+      'number',
+      'date',
+      'datetime',
+      'select',
+      'multi-select',
+      'user',
+      'department',
+      'detail',
+      'date_range',
+      'explanation',
+    ] as const
+    for (const type of otherTypes) {
+      const source = draftWith([
+        field(1, {
+          type,
+          ...(type === 'detail' ? { detailColumns: [column(1)] } : {}),
+        }),
+      ])
+      const before = JSON.stringify(source)
+      for (const patch of [
+        { recordLinkBaseId: 'base_alpha' },
+        { recordLinkSheetId: 'sheet_alpha_1' },
+        { recordLinkBaseId: 'base_alpha', recordLinkSheetId: 'sheet_alpha_1' },
+      ]) {
+        expect(
+          updateFormFieldProperties(source, 'local_1', patch),
+        ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+        expect(JSON.stringify(source)).toBe(before)
+      }
+    }
+
+    // Mixed patch on a record-link field: a foreign type-specific key fails the WHOLE patch.
+    const link = draftWith([field(1, { type: 'record-link' })])
+    const linkBefore = JSON.stringify(link)
+    expect(
+      updateFormFieldProperties(link, 'local_1', {
+        recordLinkBaseId: 'base_alpha',
+        numberCurrencySymbol: '¥',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(link)).toBe(linkBefore)
+  })
+
+  it('adapter: a base change carrying BOTH pins is exactly ONE history entry; value-identical is ZERO; one undo restores base and sheet together', () => {
+    const adapter = createFormAuthoringAdapter()
+    const session = adapter.startSession(
+      draftWith([field(1, { type: 'record-link' }), field(2)]),
+    )
+    const pinned = adapter.updateFieldProperties(session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertAdapterOk(pinned)
+    expect(pinned.changed).toBe(true)
+    expect(pinned.session.history.undoStack).toHaveLength(1)
+
+    const identical = adapter.updateFieldProperties(pinned.session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    assertAdapterOk(identical)
+    expect(identical.changed).toBe(false)
+    expect(identical.session.history.undoStack).toHaveLength(1)
+
+    // Switching base: the caller cleared the sheet that does not belong to the new base, in the
+    // SAME patch — one logical edit, one entry.
+    const rebased = adapter.updateFieldProperties(identical.session, 'local_1', {
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    assertAdapterOk(rebased)
+    expect(rebased.changed).toBe(true)
+    expect(rebased.session.history.undoStack).toHaveLength(2)
+    expect(rebased.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+
+    const undone = adapter.undo(rebased.session)
+    assertAdapterOk(undone)
+    expect(undone.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_1',
+    })
+    const redone = adapter.redo(undone.session)
+    assertAdapterOk(redone)
+    expect(redone.session.draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    expect(redone.focusLocalId).toBe('local_1')
+  })
+
+  it('adapter: a rejected pin patch on a non-record-link field leaves the session UNCHANGED', () => {
+    const adapter = createFormAuthoringAdapter()
+    const session = adapter.startSession(draftWith([field(1), field(2)]))
+    const refused = adapter.updateFieldProperties(session, 'local_1', {
+      recordLinkBaseId: 'base_alpha',
+    })
+    expect(refused).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    if (!refused.ok) expect(refused.session).toBe(session)
+  })
+})
