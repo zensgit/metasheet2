@@ -312,7 +312,10 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
   // The first-mount test above cannot guard the reset in loadSettings(): the gate report starts as null, so the cards
   // read "unknown" whether or not the reset exists. The only way to be HOLDING a stale report is a successful load
   // followed by a failing reload. A remount restarts from null and would prove nothing, so both loads below go
-  // through ONE mounted app (`mounts` is asserted to be 1) and the failing load is triggered from the page itself.
+  // through ONE mounted app and the failing load is triggered from the page itself. (`mounts` is asserted to be 1 in
+  // every same-instance case only so that a later edit cannot quietly turn one into a remount case. The counter is
+  // the test's own, so it says nothing about the product: the evidence that the reset lines are guarded is that
+  // deleting one of them turns exactly its own case red.)
   // Trigger = the "Reload admin" button of the admin console header (@click="loadAdminData"), which is always
   // rendered in admin mode. The status-bar "Reload admin" action only exists after an error, and admin mode renders
   // no org input to drive the orgId watcher.
