@@ -107,6 +107,16 @@ describe('AttendanceScheduledFeatureStatus', () => {
     expect(root.textContent).not.toContain('已生效')
   })
 
+  it('is persistent page content, not a live region: no role and no aria-live anywhere (gate r1 NIT-2)', () => {
+    // An atomic polite live region would re-read the whole card on the first load and on every save, and the two
+    // cards would announce back to back.
+    const root = mountStatus({ configured: 'configured', gate: CLOSED })
+    const host = root.querySelector('[data-attendance-scheduled-feature-status]')!
+    expect(host.hasAttribute('role')).toBe(false)
+    expect(host.hasAttribute('aria-live')).toBe(false)
+    expect(root.querySelector('[role], [aria-live]')).toBeNull()
+  })
+
   it('has a pure display shape: no button, input, select, textarea or link', () => {
     const root = mountStatus({ configured: 'configured', gate: CLOSED })
     expect(root.querySelectorAll('button, input, select, textarea, a, form').length).toBe(0)

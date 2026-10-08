@@ -1,7 +1,6 @@
 <template>
   <div
     class="scheduled-status"
-    role="status"
     data-attendance-scheduled-feature-status
     :data-scheduled-feature="feature"
     :data-configured-state="view.configured"
@@ -12,6 +11,10 @@
       `attendanceScheduledFeatureStatus.ts` and nothing else - no fetch, no button, no write door. Two rows,
       always both shown: 「已配置」 (the saved org-side policy) and 「当前是否可运行」 (the server run switches).
       An open switch is shown as "on", never as "running".
+      Deliberately NOT a live region (no role="status" / aria-live): this is persistent page content that re-renders
+      on the first load and on every save, and an atomic polite region would re-read the whole card each time, with
+      the two cards announcing back to back. (Gate r1 NIT-2. The page's own status line is not a live region either
+      at this head - that is older and out of scope here.)
     -->
     <div class="scheduled-status__row">
       <span class="scheduled-status__label">{{ view.configLabel }}</span>
