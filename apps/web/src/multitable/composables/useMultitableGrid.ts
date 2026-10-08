@@ -15,7 +15,8 @@ import type {
   PersonalViewConfigOverlay,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
-import { isPropertyHiddenField } from '../utils/field-permissions'
+import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-permissions'
+import type { RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
@@ -573,6 +574,7 @@ export function useMultitableGrid(opts: {
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
   // per-fetch contract intact under interleaving (scroll-append racing a filter/sort/search/view change).
   let latestLoadRequestId = 0
+  let rangePending = false
 
   // Pagination
   const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
@@ -1449,6 +1451,73 @@ export function useMultitableGrid(opts: {
     return { updated, failed }
   }
 
+  async function patchRange(changes: RangeChange[]): Promise<PatchResult> {
+    if (rangePending) throw new Error('RANGE_BUSY')
+    rangePending = true
+    try {
+      const sheetId = opts.sheetId.value
+      const viewId = opts.viewId.value
+      const loadRequestId = latestLoadRequestId
+      if (!sheetId || !viewId || !changes.length || changes.length > 1000) {
+        throw new Error('RANGE_INVALID')
+      }
+      const rowsById = new Map(rows.value.map((row) => [row.id, row]))
+      const fieldsById = new Map(fields.value.map((field) => [field.id, field]))
+      const visibleIds = new Set(visibleFields.value.map((field) => field.id))
+      const writableTypes = new Set(['string', 'number', 'boolean', 'date', 'dateTime', 'select'])
+      const seen = new Set<string>()
+      const capturedChanges = changes.map(({ recordId, fieldId, value, expectedVersion }) => {
+        const row = rowsById.get(recordId)
+        const field = fieldsById.get(fieldId)
+        const cell = JSON.stringify([recordId, fieldId])
+        if (!row || !field || seen.has(cell)) throw new Error('RANGE_INVALID')
+        seen.add(cell)
+        if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || row.version !== expectedVersion) {
+          throw new Error('RANGE_STALE')
+        }
+        if (row.locked === true || resolveRowActions(recordId)?.canEdit === false
+          || viewPermission.value?.canAccess === false || !visibleIds.has(fieldId)
+          || fieldPermissions.value[fieldId]?.readOnly === true || isFieldAlwaysReadOnly(field)
+          || !writableTypes.has(field.type)) {
+          throw new Error('RANGE_READ_ONLY')
+        }
+        return { recordId, fieldId, value, expectedVersion }
+      })
+      const result = await client.patchRecords({
+        sheetId,
+        viewId,
+        partialSuccess: false,
+        changes: capturedChanges,
+      })
+      if (result.failed?.length) throw new Error('RANGE_INVALID')
+      // A navigation or reload can replace rows while the atomic server write is pending.
+      if (opts.sheetId.value === sheetId && opts.viewId.value === viewId
+        && latestLoadRequestId === loadRequestId) {
+        // Realtime may already have installed a newer revision for part of this batch.
+        const liveVersions = new Map(rows.value.map(row => [row.id, row.version]))
+        const superseded = new Set((result.updated ?? [])
+          .filter(update => (liveVersions.get(update.recordId) ?? update.version) > update.version)
+          .map(update => update.recordId))
+        applyPatchResult({
+          ...result,
+          updated: (result.updated ?? []).filter(update => !superseded.has(update.recordId)),
+          records: result.records?.filter(record => !superseded.has(record.recordId)),
+          linkSummaries: result.linkSummaries && Object.fromEntries(
+            Object.entries(result.linkSummaries).filter(([recordId]) => !superseded.has(recordId)),
+          ),
+          attachmentSummaries: result.attachmentSummaries && Object.fromEntries(
+            Object.entries(result.attachmentSummaries).filter(([recordId]) => !superseded.has(recordId)),
+          ),
+        })
+        lastBatchId.value = result.batchId ?? null
+        clearEditHistory()
+      }
+      return result
+    } finally {
+      rangePending = false
+    }
+  }
+
   function applyPatchResult(result?: PatchResult) {
     if (!result) return
     for (const update of result.updated ?? []) {
@@ -1681,7 +1750,7 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     addFilterGroup, updateFilterGroup, removeFilterGroup,
     applySortFilter,
-    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch,
+    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch, patchRange,
     // A3: exposed as the single echo-application seam for the AI shortcut
     // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
     applyPatchResult,

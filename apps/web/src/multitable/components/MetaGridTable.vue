@@ -1,5 +1,6 @@
 <template>
   <div ref="gridRoot" class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
+    <MetaGridRangeToolbar v-if="range.enabled.value" v-model:mode="range.mode.value" :busy="range.busy.value" :selected="!!range.selection.value && !editCell" :status="range.status.value" :zh="isZh" @copy="range.copy" @paste="range.paste" />
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
@@ -88,11 +89,17 @@
                 v-for="(field, ci) in visibleFields"
                 :key="field.id"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(item.row.id, field.id), 'meta-grid__cell--readonly': !isEditable(item.row.id, field), 'meta-grid__cell--focused': focusRow === item.navIndex && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(item.row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(item.row.id, field.id) }"
+                :class="{ 'meta-grid__cell--range': range.selected(item.navIndex, ci), 'meta-grid__cell--range-preview': range.previewed(item.navIndex, ci), 'meta-grid__cell--editing': isEditing(item.row.id, field.id), 'meta-grid__cell--readonly': !isEditable(item.row.id, field), 'meta-grid__cell--focused': focusRow === item.navIndex && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(item.row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(item.row.id, field.id) }"
+                :data-range-row="range.enabled.value ? item.navIndex : undefined"
+                :data-range-col="range.enabled.value ? ci : undefined"
+                :aria-selected="range.enabled.value ? range.selected(item.navIndex, ci) : undefined"
                 :style="cellStyle(item.row.id, field.id, ci)"
+                @mousedown="range.pointerDown($event, item.navIndex, ci)"
+                @mouseenter="range.pointerEnter(item.navIndex, ci)"
                 @dblclick="startEdit(item.row, field)"
                 @click.stop="onCellClick(item.navIndex, ci, item.row.id)"
               >
+                <button v-if="range.handleAt(item.navIndex, ci)" class="meta-grid__fill-handle" data-test="range-fill-handle" :aria-label="isZh ? '拖动填充选区' : 'Drag to fill range'" @mousedown.stop="range.startFill" @click.stop @dblclick.stop />
                 <span
                   v-if="!isEditing(item.row.id, field.id) && cellScaleIcon(item.row.id, field.id)"
                   class="meta-grid__cell-scale-icon"
@@ -262,11 +269,17 @@
                 :data-ci="ci"
                 :aria-label="field.name"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
+                :class="{ 'meta-grid__cell--range': range.selected(ri, ci), 'meta-grid__cell--range-preview': range.previewed(ri, ci), 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
+                :data-range-row="range.enabled.value ? ri : undefined"
+                :data-range-col="range.enabled.value ? ci : undefined"
+                :aria-selected="range.enabled.value ? range.selected(ri, ci) : undefined"
                 :style="cellStyle(row.id, field.id, ci, ri)"
+                @mousedown="range.pointerDown($event, ri, ci)"
+                @mouseenter="range.pointerEnter(ri, ci)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
               >
+                <button v-if="range.handleAt(ri, ci)" class="meta-grid__fill-handle" data-test="range-fill-handle" :aria-label="isZh ? '拖动填充选区' : 'Drag to fill range'" @mousedown.stop="range.startFill" @click.stop @dblclick.stop />
                 <span
                   v-if="!isEditing(row.id, field.id) && cellScaleIcon(row.id, field.id)"
                   class="meta-grid__cell-scale-icon"
@@ -441,6 +454,10 @@ import MetaCellEditor from './cells/MetaCellEditor.vue'
 import { dateTimeExportText } from '../utils/field-display'
 import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 import MetaFieldHeader from './MetaFieldHeader.vue'
+import MetaGridRangeToolbar from './MetaGridRangeToolbar.vue'
+import { useGridRangeSelection } from '../composables/useGridRangeSelection'
+import { isGridRangeFillEnabled } from '../utils/grid-range-fill-flags'
+import type { RangeChange } from '../utils/grid-range-fill'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
   handleCommentAffordanceKeydown,
@@ -496,6 +513,8 @@ const props = defineProps<{
   frozenTopRowCount?: number
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
+  rangeContextKey?: string
+  commitRange?: (changes: RangeChange[]) => Promise<unknown>
   columnWidths?: Record<string, number>
   linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
   // Native person (人员) display source (userId → {id,display}), parallel to linkSummaries.
@@ -1412,6 +1431,23 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
   handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
 }
 
+const range = useGridRangeSelection({
+  root: gridRoot,
+  enabled: () => isGridRangeFillEnabled() && !!props.commitRange,
+  editing: () => !!editCell.value,
+  rows: () => displayRows.value,
+  fields: () => props.visibleFields,
+  contextKey: () => props.rangeContextKey ?? '',
+  policyKey: () => JSON.stringify([props.canEdit, props.fieldReadOnlyIds, props.rowActionOverrides]),
+  canWrite: isEditable,
+  commit: changes => props.commitRange!(changes),
+  focus: point => {
+    const row = displayRows.value[point.row]
+    if (row) onCellClick(point.row, point.col, row.id)
+    scrollFocusedRowIntoWindow()
+  },
+})
+
 // D2 (grid-commit-reliability): a plain click on a DIFFERENT cell while an
 // editor is open must not leave the old editor mounted holding a draft (the
 // "dangling editor" bug — see confirmEdit/startEdit's matching guard below).
@@ -1736,6 +1772,7 @@ function onKeydown(e: KeyboardEvent) {
   // ONE gate (rather than three copies that could drift) means removing it reds every one of those
   // paths at once — see isValidGridKeydownTarget's doc comment above for the allowlist itself.
   if (!isValidGridKeydownTarget(e)) return
+  if (range.keydown(e, { row: focusRow.value, col: focusCol.value })) return
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
   if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
@@ -1899,12 +1936,16 @@ function onKeydown(e: KeyboardEvent) {
   // A1: after a vertical move, keep the focused row inside the rendered window so arrow-keys never land
   // on an un-mounted row (no-op when windowing is off / no focus).
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'Tab') {
+    range.select({ row: focusRow.value, col: focusCol.value })
     scrollFocusedRowIntoWindow()
   }
 }
 </script>
 
 <style scoped>
+.meta-grid__cell--range { box-shadow: inset 0 0 0 1px #4b76d9; background-image: linear-gradient(#3975f014, #3975f014); user-select: none; }
+.meta-grid__cell--range-preview { outline: 2px dashed #4b76d9; outline-offset: -2px; }
+.meta-grid__fill-handle { position: absolute; right: 0; bottom: 0; width: 9px; height: 9px; padding: 0; border: 1px solid white; background: #3567c9; cursor: crosshair; z-index: 3; }
 .meta-grid {
   position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;
   border: 1px solid var(--ms-border-light, #e7e8ec);
