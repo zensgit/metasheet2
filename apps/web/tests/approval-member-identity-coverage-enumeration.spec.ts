@@ -437,6 +437,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'conditionFormulaDryRunResult(node.key, branch.edgeKey)'],
+    // T5a (test report 2026-10-08): the branch-delete refusal reason — the node/edge keys are only
+    // the lookup arguments; the rendered text is a fixed business-language sentence
+    // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],

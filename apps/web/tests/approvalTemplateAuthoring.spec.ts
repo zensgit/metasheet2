@@ -2415,9 +2415,8 @@ describe('TemplateAuthoringView', () => {
 
   // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D; D0 §4.1):
   // condition branch cards get a "优先级 N" priority chip (branch ARRAY ORDER — never the edge key),
-  // and the default (fall-through) branch gets an explanatory copy card. No branch delete/duplicate
-  // affordance is mounted in this slice (out of scope per master §P1-D; a future slice may add
-  // delete with its own authorization — see docs/development ledger P1-D row).
+  // and the default (fall-through) branch gets an explanatory copy card. P1-D itself mounted no
+  // branch delete; T5a (test report 2026-10-08) adds it on the Canvas only — see the T5a test below.
   function buildThreeBranchConditionGraph() {
     return {
       nodes: [
@@ -2482,13 +2481,39 @@ describe('TemplateAuthoringView', () => {
     expect(branch3Operator).toBe('lt')
   })
 
-  // P1-1 (adversarial gate, 20260817): the branch-delete affordance previously mounted here
-  // (`removeConditionBranch` / `canRemoveConditionBranch`) is OUT OF SCOPE for §P1-D — no lock
-  // row authorizes deleting a topology node from a copy-and-priority slice. It has been dropped
-  // entirely (template button, view-layer handlers, `ApprovalNodeConfigEditorApi` members); the
-  // command layer itself (`graphTopologyEdit.ts`) is untouched and stays covered by its own suite.
-  // There is therefore no delete-affordance test here anymore — asserting its absence would be a
-  // vacuous "this component doesn't render a button it never imports" check.
+  // T5a (test report 2026-10-08): 「删除分支」 returns — on the CANVAS only, where it joins the unified
+  // undo history. The flag-off structured rollback list mounts the SAME config editor but has no
+  // Canvas undo control, so it must never offer the delete (negative half); the Canvas offers it on
+  // every non-default branch card and never on the default card (positive half — not vacuous).
+  it('T5a: 「删除分支」 is Canvas-only — absent from the flag-off rollback list, present on non-default Canvas branch cards, never on the default card', async () => {
+    setRouteParams({ id: 'tpl_t5a_rollback' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-condition-branch"]')).toHaveLength(3)
+    expect(container!.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull()
+    app?.unmount()
+    container?.remove()
+
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5a_canvas' })
+    await mountView()
+    await flushUi()
+    const condNode = container!.querySelector('[data-canvas-node="cond_1"] [data-testid="approval-canvas-node-select"]') as HTMLElement
+    condNode.click()
+    await flushUi()
+    const cards = Array.from(container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    ))
+    expect(cards).toHaveLength(3)
+    for (const card of cards) {
+      expect(card.querySelector('[data-testid="approval-condition-branch-remove"]')).not.toBeNull()
+    }
+    expect(container!.querySelector(
+      '[data-testid="approval-condition-default-branch"] [data-testid="approval-condition-branch-remove"]',
+    )).toBeNull()
+  })
 
   // P1-2 (adversarial gate, M8 honesty): the default-card copy must never assert a default flow
   // that doesn't exist. `conditionEdit.ts` maps an absent `config.defaultEdgeKey` to `''`, and

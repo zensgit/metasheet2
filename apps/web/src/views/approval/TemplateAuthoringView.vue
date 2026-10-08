@@ -1511,9 +1511,12 @@ import {
   appendCcNode,
   appendHandlerNode,
   collectParallelRegionNodeKeys,
+  conditionBranchRemovalBlocker,
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
+  planConditionBranchRemoval,
+  removeConditionBranch,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
 import {
@@ -2745,7 +2748,7 @@ function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
 function runTopologyOp(
   op: (graph: ApprovalGraph) => ApprovalGraph,
   selectionAfter?: ApprovalCanvasSelection,
-): void {
+): boolean {
   const result = applyTopologyOpToSession(
     canvasAuthoringHistory.value,
     draft.value,
@@ -2754,13 +2757,14 @@ function runTopologyOp(
   )
   if (!result.ok) {
     loadError.value = result.errorMessage ?? '该拓扑操作不适用于当前流程结构'
-    return
+    return false
   }
   draft.value = result.draft
   canvasAuthoringHistory.value = result.history
   if (result.history.selection.kind === 'node') {
     selectedCanvasNode.value = result.history.selection.nodeKey
   }
+  return true
 }
 
 function onCanvasUndo(): void {
@@ -2786,6 +2790,38 @@ function onCanvasRedo(): void {
 
 function onAddConditionBranch(nodeKey: string): void {
   runTopologyOp((graph) => addConditionBranch(graph, nodeKey), { kind: 'node', nodeKey })
+}
+// T5a (test report 2026-10-08): delete a NON-default condition branch through the SAME typed
+// topology-op path every structural edit uses, so it is one entry in the unified undo history
+// (D0 §7.1). Refusals are decided BEFORE mutation by a dry run of the same command and surfaced as a
+// business-language reason (D0 §4.2); the default branch is never offered (D0 §4.1). Deleting the
+// last non-default branch removes the gateway and keeps the default path in its place.
+const canvasAuthoringActive = computed(() => canvasV2Enabled.value)
+function conditionBranchRemovalReason(nodeKey: string, edgeKey: string): string | null {
+  return conditionBranchRemovalBlocker(canvasEffectiveGraph.value, nodeKey, edgeKey)
+}
+function onRemoveConditionBranch(nodeKey: string, edgeKey: string): void {
+  if (readOnly.value || !canvasAuthoringActive.value) return
+  const blocker = conditionBranchRemovalReason(nodeKey, edgeKey)
+  if (blocker) {
+    ElMessage.warning(blocker)
+    return
+  }
+  const plan = planConditionBranchRemoval(canvasEffectiveGraph.value, nodeKey, edgeKey)
+  const applied = runTopologyOp(
+    (graph) => removeConditionBranch(graph, nodeKey, edgeKey),
+    plan.removedGateway ? { kind: 'none' } : { kind: 'node', nodeKey },
+  )
+  if (!applied) return
+  if (plan.removedGateway) {
+    // The gateway is gone: close its inspector and hand focus to the node now in its slot
+    // (D0 §5 "returns focus ... to the nearest surviving neighbor").
+    clearCanvasSelection()
+    if (plan.replacementNodeKey) focusCanvasNodeSelector(plan.replacementNodeKey)
+  }
+  ElMessage.success(plan.removedGateway
+    ? '已删除分支并移除条件节点（保留默认分支流程），可点击「撤销」恢复'
+    : '已删除分支，可点击「撤销」恢复')
 }
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
@@ -2972,6 +3008,17 @@ async function selectCanvasNode(nodeKey: string): Promise<void> {
 }
 function clearCanvasSelection(): void {
   selectedCanvasNode.value = null
+}
+/** Move keyboard focus to a canvas node's selector without scrolling the page (D0 §5 focus
+ *  return). No-op when the node is not rendered (e.g. the flag-off rollback list). */
+function focusCanvasNodeSelector(nodeKey: string): void {
+  void nextTick(() => {
+    if (typeof document === 'undefined') return
+    // Match by attribute VALUE (no selector interpolation — node keys are data, never CSS).
+    const card = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="approval-canvas-node"]'))
+      .find((candidate) => candidate.getAttribute('data-canvas-node') === nodeKey)
+    card?.querySelector<HTMLElement>('[data-testid="approval-canvas-node-select"]')?.focus({ preventScroll: true })
+  })
 }
 // Inspector node for the right-side panel. Selection is preserved across list/canvas toggles while
 // the key still exists; once the graph no longer carries that key, selection clears.
@@ -3480,6 +3527,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionFormulaDryRunLoading,
   dryRunConditionFormula,
   conditionOutgoingEdgeKeys,
+  // T5a/T5b: Canvas-hosted editor (branch delete + add-lane hint) — see canvasAuthoringActive.
+  canvasAuthoringActive,
+  conditionBranchRemovalBlocker: conditionBranchRemovalReason,
+  removeConditionBranch: onRemoveConditionBranch,
   conditionEdgeLabel,
   graphEdgeTargetLabel,
   graphNodeLabel,

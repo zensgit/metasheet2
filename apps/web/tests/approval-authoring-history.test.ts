@@ -13,9 +13,12 @@ import {
   undoAuthoringSession,
 } from '../src/approvals/approvalAuthoringHistory'
 import {
+  addConditionBranch,
+  addParallelBranch,
   appendApprovalNode,
   insertConditionGateway,
   moveLinearNode,
+  removeConditionBranch,
 } from '../src/approvals/graphTopologyEdit'
 import {
   buildApprovalGraph,
@@ -451,5 +454,124 @@ describe('approvalAuthoringHistory — inspector map edits survive move/undo', (
     expect(
       (a1Redo.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind,
     ).toBe('direct_manager')
+  })
+})
+
+// ── T5a/T5b (test report 2026-10-08): a gateway's branch list is topology. Undo/redo of a branch
+// add/delete must restore the branch list WITH the edges (previously the surviving gateway kept its
+// LIVE config, so undo left a branch pointing at a deleted edge — or dropped a restored branch and
+// its rules). Inspector edits made after the op still survive on branches present on both sides.
+describe('approvalAuthoringHistory — gateway branch lists follow the restored topology', () => {
+  function conditionGraph(): ApprovalGraph {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'c1',
+          type: 'condition',
+          name: '判断',
+          config: {
+            branches: [
+              { edgeKey: 'e-a', conjunction: 'and', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+              { edgeKey: 'e-b', conjunction: 'and', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] },
+            ],
+            defaultEdgeKey: 'e-low',
+          },
+        },
+        { key: 'a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }] } },
+        { key: 'b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'direct_manager' }] } },
+        { key: 'cc', type: 'cc', name: '抄送', config: { targetType: 'user', targetIds: ['u1'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-c', source: 'start', target: 'c1' },
+        { key: 'e-a', source: 'c1', target: 'a' },
+        { key: 'e-b', source: 'c1', target: 'b' },
+        { key: 'e-low', source: 'c1', target: 'cc' },
+        { key: 'e-a-cc', source: 'a', target: 'cc' },
+        { key: 'e-b-cc', source: 'b', target: 'cc' },
+        { key: 'e-cc-end', source: 'cc', target: 'end' },
+      ],
+    }
+  }
+  const branchesOf = (graph: ApprovalGraph, key: string) =>
+    (graph.nodes.find((n) => n.key === key)!.config as { branches: Array<{ edgeKey: string; rules: Array<{ value?: unknown }> }> }).branches
+
+  it('undo of a condition-branch DELETE restores the branch with its rules; a later rule edit on the surviving branch is kept', () => {
+    let draft = draftWithGraph(conditionGraph())
+    let history = reseedAuthoringSessionHistory(draft)
+    const removed = applyTopologyOpToSession(history, draft, (g) => removeConditionBranch(g, 'c1', 'e-b'), { kind: 'node', nodeKey: 'c1' })
+    expect(removed.ok).toBe(true)
+    draft = removed.draft
+    history = removed.history
+    expect(branchesOf(buildApprovalGraph(draft), 'c1').map((b) => b.edgeKey)).toEqual(['e-a'])
+
+    // Inspector-only edit AFTER the delete, on the surviving branch.
+    draft.conditionEdits!.c1.branches[0].rules[0].value = 5000
+    const undone = undoAuthoringSession(history, buildApprovalGraph(draft))
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    draft = draftFromSessionGraph(draft, undone.history.graph)
+    history = undone.history
+    const restored = buildApprovalGraph(draft)
+    expect(branchesOf(restored, 'c1').map((b) => b.edgeKey)).toEqual(['e-a', 'e-b'])
+    expect(branchesOf(restored, 'c1')[0].rules[0].value).toBe(5000) // live edit survives
+    expect(branchesOf(restored, 'c1')[1].rules[0].value).toBe(100) // deleted branch's rules restored
+    expect(restored.nodes.some((n) => n.key === 'b')).toBe(true)
+
+    const redone = redoAuthoringSession(history, restored)
+    expect(redone.ok).toBe(true)
+    if (!redone.ok) return
+    const again = buildApprovalGraph(draftFromSessionGraph(draft, redone.history.graph))
+    expect(branchesOf(again, 'c1').map((b) => b.edgeKey)).toEqual(['e-a'])
+    expect(branchesOf(again, 'c1')[0].rules[0].value).toBe(5000)
+  })
+
+  it('undo of a condition-branch ADD drops the added branch entry together with its edge (no dangling branch)', () => {
+    let draft = draftWithGraph(conditionGraph())
+    const history = reseedAuthoringSessionHistory(draft)
+    const added = applyTopologyOpToSession(history, draft, (g) => addConditionBranch(g, 'c1'), { kind: 'node', nodeKey: 'c1' })
+    expect(added.ok).toBe(true)
+    draft = added.draft
+    expect(branchesOf(buildApprovalGraph(draft), 'c1')).toHaveLength(3)
+    const undone = undoAuthoringSession(added.history, buildApprovalGraph(draft))
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    const restored = undone.history.graph
+    const edgeKeys = new Set(restored.edges.map((edge) => edge.key))
+    expect(branchesOf(restored, 'c1').map((b) => b.edgeKey)).toEqual(['e-a', 'e-b'])
+    for (const branch of branchesOf(restored, 'c1')) expect(edgeKeys.has(branch.edgeKey)).toBe(true)
+  })
+
+  it('undo of a parallel-branch ADD restores the 2-lane branch list; a joinMode edit made afterwards survives', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'p', type: 'parallel', name: '并行', config: { branches: ['e-p-a', 'e-p-b'], joinMode: 'all', joinNodeKey: 'end' } },
+        { key: 'a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }] } },
+        { key: 'b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'direct_manager' }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-p', source: 'start', target: 'p' },
+        { key: 'e-p-a', source: 'p', target: 'a' },
+        { key: 'e-p-b', source: 'p', target: 'b' },
+        { key: 'e-a-end', source: 'a', target: 'end' },
+        { key: 'e-b-end', source: 'b', target: 'end' },
+      ],
+    }
+    let draft = draftWithGraph(graph)
+    const history = reseedAuthoringSessionHistory(draft)
+    const added = applyTopologyOpToSession(history, draft, (g) => addParallelBranch(g, 'p'), { kind: 'node', nodeKey: 'p' })
+    expect(added.ok).toBe(true)
+    draft = added.draft
+    draft.parallelEdits!.p.joinMode = 'any'
+    const undone = undoAuthoringSession(added.history, buildApprovalGraph(draft))
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    const restored = buildApprovalGraph(draftFromSessionGraph(draft, undone.history.graph))
+    const config = restored.nodes.find((n) => n.key === 'p')!.config as { branches: string[]; joinMode: string }
+    expect(config.branches).toEqual(['e-p-a', 'e-p-b'])
+    expect(config.joinMode).toBe('any')
   })
 })

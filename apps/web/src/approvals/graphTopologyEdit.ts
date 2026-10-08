@@ -263,11 +263,36 @@ function reachableDistances(graph: ApprovalGraph, startKey: string): Map<string,
   return distances
 }
 
-/** Find the nearest node reachable from every current condition path. */
-function conditionRejoinTarget(graph: ApprovalGraph, config: ConditionNodeConfig): string | undefined {
-  const pathEdgeKeys = [...config.branches.map((branch) => branch.edgeKey), config.defaultEdgeKey]
+function trimmedEdgeKey(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+/**
+ * Runtime-possible exit edges of a condition node — mirrors the backend authoring walk
+ * (`conditionSuccessorTargets`, ApprovalProductService.ts) and
+ * `ApprovalGraphExecutor.resolveConditionTarget`: every configured branch edge, plus the default
+ * edge when one is designated; with NO default the runtime falls through to the node's FIRST
+ * outgoing edge, so that edge is a path too. Deduplicated, declaration order.
+ */
+function conditionRuntimePathEdgeKeys(graph: ApprovalGraph, conditionNodeKey: string, config: ConditionNodeConfig): string[] {
+  const keys: string[] = []
+  const push = (raw: unknown): void => {
+    const key = trimmedEdgeKey(raw)
+    if (key && !keys.includes(key)) keys.push(key)
+  }
+  for (const branch of config.branches ?? []) push(branch.edgeKey)
+  const defaultEdgeKey = trimmedEdgeKey(config.defaultEdgeKey)
+  if (defaultEdgeKey) push(defaultEdgeKey)
+  else push(outEdges(graph, conditionNodeKey)[0]?.key)
+  return keys
+}
+
+/** Nearest node reachable from every given path head (min of max distance, then total distance). */
+function nearestCommonSuccessor(graph: ApprovalGraph, conditionNodeKey: string, pathEdgeKeys: string[]): string | undefined {
+  // One path has no convergence to infer — its own head would trivially win the distance race.
+  if (pathEdgeKeys.length < 2) return undefined
   const pathTargets = pathEdgeKeys
-    .map((edgeKey) => graph.edges.find((edge) => edge.key === edgeKey)?.target)
+    .map((edgeKey) => graph.edges.find((edge) => edge.key === edgeKey && edge.source === conditionNodeKey)?.target)
     .filter((target): target is string => Boolean(target))
   if (pathTargets.length !== pathEdgeKeys.length) return undefined
   const distances = pathTargets.map((target) => reachableDistances(graph, target))
@@ -279,6 +304,24 @@ function conditionRejoinTarget(graph: ApprovalGraph, config: ConditionNodeConfig
       totalDistance: distances.reduce((sum, path) => sum + path.get(node.key)!, 0),
     }))
     .sort((a, b) => a.maxDistance - b.maxDistance || a.totalDistance - b.totalDistance)[0]?.key
+}
+
+/**
+ * Find the convergence point of a condition node's branches.
+ *
+ * T5a (test report 2026-10-08) / verify X2: the previous shape always counted
+ * `config.defaultEdgeKey` as a path, so a condition WITHOUT a designated default (the default
+ * picker is clearable, and legacy rows can lack one) produced `undefined` — `addConditionBranch`
+ * then fell back to the `end` node (skipping every downstream node) and `removeConditionBranch`
+ * refused as "ambiguous". The runtime-possible exits are used first (backend mirror); when they
+ * name fewer than two paths (e.g. one rule branch, no default, the old default edge still drawn),
+ * every drawn outgoing edge is used instead, so the inferred join is the one the canvas shows.
+ */
+function conditionRejoinTarget(graph: ApprovalGraph, conditionNodeKey: string, config: ConditionNodeConfig): string | undefined {
+  const runtimePaths = conditionRuntimePathEdgeKeys(graph, conditionNodeKey, config)
+  if (runtimePaths.length >= 2) return nearestCommonSuccessor(graph, conditionNodeKey, runtimePaths)
+  const drawnPaths = [...new Set(outEdges(graph, conditionNodeKey).map((edge) => edge.key))]
+  return nearestCommonSuccessor(graph, conditionNodeKey, drawnPaths)
 }
 
 /**
@@ -612,7 +655,7 @@ export function addConditionBranch(graph: ApprovalGraph, conditionNodeKey: strin
   // Prefer the real convergence point. The default edge may point to its own approval node rather
   // than directly to the join, so blindly targeting defaultEdge.target can serialize both paths.
   const defaultEdge = graph.edges.find((e) => e.key === config.defaultEdgeKey)
-  const rejoinTarget = conditionRejoinTarget(graph, config)
+  const rejoinTarget = conditionRejoinTarget(graph, conditionNodeKey, config)
     ?? defaultEdge?.target
     ?? graph.nodes.find((n) => n.type === 'end')?.key
   if (!rejoinTarget) throw new Error('addConditionBranch: no default edge / end node to rejoin')
@@ -644,25 +687,192 @@ export function addConditionBranch(graph: ApprovalGraph, conditionNodeKey: strin
   }
 }
 
-/** Remove a condition branch by edgeKey: drops the branch entry, its edge, the target node + the target's out-edges. Keeps the default edge intact. */
-export function removeConditionBranch(graph: ApprovalGraph, conditionNodeKey: string, edgeKey: string): ApprovalGraph {
+// ── T5a (test report 2026-10-08): condition-branch delete ─────────────────────────────────────────
+// D0 §4.1 / §4.2: a non-default branch can be deleted; the default branch never; deleting a branch
+// never silently changes the default; shapes that cannot be proven safe are refused BEFORE
+// mutation with the reason surfaced (never heuristically rewritten). The command stays pure and
+// anti-flatten: every untouched node/edge is deep-cloned verbatim.
+
+/** Stable discriminator for a refused condition-branch delete (tests pin these). */
+export type ConditionBranchRemovalRefusalCode =
+  | 'default-branch'
+  | 'unknown-branch'
+  | 'ambiguous-convergence'
+  | 'complex-branch'
+  | 'handler-in-branch'
+  | 'last-branch-without-default'
+  | 'gateway-not-linear'
+  | 'gateway-is-parallel-join'
+  | 'empty-parallel-lane'
+
+/** Values-free, business-language reasons (D0 §13: business words only — never keys/ids). */
+const CONDITION_BRANCH_REMOVAL_REASONS: Readonly<Record<ConditionBranchRemovalRefusalCode, string>> = {
+  'default-branch': '默认分支不能删除',
+  'unknown-branch': '该分支已不存在，请刷新后重试',
+  'ambiguous-convergence': '无法确定该分支的汇合位置，暂不支持删除',
+  'complex-branch': '该分支含嵌套结构或与其他分支共用节点，暂不支持删除',
+  // Handler (办理) deletion is a separate, not-yet-authorized capability (Lock-3); deleting a
+  // branch that carries one would be a back door to it, so it is refused, not silently included.
+  'handler-in-branch': '该分支含办理节点，暂不支持删除',
+  'last-branch-without-default': '未指定默认分支，不能删除最后一个条件分支',
+  'gateway-not-linear': '该条件节点有多条上游连线，暂不支持删除最后一个分支',
+  'gateway-is-parallel-join': '该条件节点是并行分支的汇合点，暂不支持删除最后一个分支',
+  'empty-parallel-lane': '删除后并行分支将没有审批节点，暂不支持删除',
+}
+
+/** A refused topology edit: `code` for tests/telemetry, `reason` for the authoring UI. */
+export class ConditionBranchRemovalRefusal extends Error {
+  readonly code: ConditionBranchRemovalRefusalCode
+  readonly reason: string
+  constructor(code: ConditionBranchRemovalRefusalCode) {
+    super(`removeConditionBranch: refused (${code})`)
+    this.name = 'ConditionBranchRemovalRefusal'
+    this.code = code
+    this.reason = CONDITION_BRANCH_REMOVAL_REASONS[code]
+  }
+}
+
+function refuseBranchRemoval(code: ConditionBranchRemovalRefusalCode): never {
+  throw new ConditionBranchRemovalRefusal(code)
+}
+
+export interface ConditionBranchRemovalResult {
+  graph: ApprovalGraph
+  /** True when the deleted branch was the LAST non-default one, so the whole condition gateway was
+   *  removed and the default path now sits in its place. */
+  removedGateway: boolean
+  /** The node now occupying the gateway's slot (default-path head) when `removedGateway`. */
+  replacementNodeKey?: string
+}
+
+/**
+ * Walk one condition branch from its fork edge to `rejoinNodeKey`, collecting an EXCLUSIVE linear
+ * body: every body node is approval/cc, has exactly one incoming and one outgoing edge, and is
+ * reached only through this branch. An empty branch (fork edge straight into the join) has no body.
+ * Anything else — a nested gateway, a node shared with another path, a cycle, a dead end — is
+ * refused, never rewritten (D0 §4.2: "complex or shared branch shapes that cannot be proven safe
+ * are refused").
+ */
+function exclusiveConditionBranchBody(
+  graph: ApprovalGraph,
+  branchEdge: ApprovalEdge,
+  rejoinNodeKey: string,
+): { bodyNodeKeys: string[]; dropEdgeKeys: Set<string> } {
+  const bodyNodeKeys: string[] = []
+  const dropEdgeKeys = new Set<string>([branchEdge.key])
+  const nodesByKey = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]))
+  let currentKey = branchEdge.target
+  while (currentKey !== rejoinNodeKey) {
+    if (bodyNodeKeys.includes(currentKey)) refuseBranchRemoval('complex-branch')
+    const current = nodesByKey.get(currentKey)
+    if (!current) refuseBranchRemoval('ambiguous-convergence')
+    if (current.type === 'handler') refuseBranchRemoval('handler-in-branch')
+    if (current.type !== 'approval' && current.type !== 'cc') refuseBranchRemoval('complex-branch')
+    const incoming = inEdges(graph, currentKey)
+    const outgoing = outEdges(graph, currentKey)
+    if (incoming.length !== 1 || outgoing.length !== 1) refuseBranchRemoval('complex-branch')
+    bodyNodeKeys.push(currentKey)
+    dropEdgeKeys.add(outgoing[0].key)
+    currentKey = outgoing[0].target
+  }
+  return { bodyNodeKeys, dropEdgeKeys }
+}
+
+/**
+ * Remove a NON-default condition branch (its config entry, fork edge, and its exclusive linear body
+ * — empty and multi-node bodies both supported). The default branch is never removable and is never
+ * changed. Deleting the LAST non-default branch removes the whole condition gateway and keeps the
+ * default path in its place (the gateway's single incoming edge is re-pointed at the default-path
+ * head, keeping its key so any enclosing gateway config stays valid). Throws
+ * `ConditionBranchRemovalRefusal` (with a business-language `reason`) for every shape it will not
+ * touch; the input graph is never mutated.
+ */
+export function planConditionBranchRemoval(
+  graph: ApprovalGraph,
+  conditionNodeKey: string,
+  edgeKey: string,
+): ConditionBranchRemovalResult {
   const node = graph.nodes.find((n) => n.key === conditionNodeKey)
   if (!node || node.type !== 'condition') throw new Error(`removeConditionBranch: ${conditionNodeKey} is not a condition node`)
   const config = clone(node.config) as ConditionNodeConfig
-  if (config.defaultEdgeKey === edgeKey) throw new Error('removeConditionBranch: cannot remove the default (fall-through) edge')
-  if (!config.branches.some((b) => b.edgeKey === edgeKey)) throw new Error(`removeConditionBranch: ${edgeKey} not a branch of ${conditionNodeKey}`)
-  const defaultEdge = graph.edges.find((edge) => edge.key === config.defaultEdgeKey)
-  const rejoinTarget = conditionRejoinTarget(graph, config) ?? defaultEdge?.target
-  if (!rejoinTarget) throw new Error('removeConditionBranch: branch convergence is ambiguous')
-  const { branchNodeKey: targetKey, dropEdges } = removableSingleNodeBranch(
-    graph,
-    conditionNodeKey,
-    edgeKey,
-    rejoinTarget,
-    'removeConditionBranch',
-  )
-  return {
-    nodes: graph.nodes.filter((n) => n.key !== targetKey).map((n) => (n.key === conditionNodeKey ? { ...clone(n), config: { ...config, branches: config.branches.filter((b) => b.edgeKey !== edgeKey) } } : clone(n))),
-    edges: graph.edges.filter((e) => !dropEdges.has(e.key)).map(clone),
+  const branches = Array.isArray(config.branches) ? config.branches : []
+  const defaultEdgeKey = trimmedEdgeKey(config.defaultEdgeKey)
+  if (defaultEdgeKey && defaultEdgeKey === edgeKey) refuseBranchRemoval('default-branch')
+  if (!branches.some((branch) => branch.edgeKey === edgeKey)) refuseBranchRemoval('unknown-branch')
+  const branchEdge = graph.edges.find((edge) => edge.key === edgeKey)
+  if (!branchEdge || branchEdge.source !== conditionNodeKey) refuseBranchRemoval('ambiguous-convergence')
+
+  const isLastBranch = branches.length === 1
+  const defaultEdge = defaultEdgeKey
+    ? graph.edges.find((edge) => edge.key === defaultEdgeKey && edge.source === conditionNodeKey)
+    : undefined
+  if (isLastBranch && !defaultEdge) {
+    refuseBranchRemoval(defaultEdgeKey ? 'ambiguous-convergence' : 'last-branch-without-default')
+  }
+
+  const rejoinNodeKey = conditionRejoinTarget(graph, conditionNodeKey, config)
+  if (!rejoinNodeKey) refuseBranchRemoval('ambiguous-convergence')
+  const { bodyNodeKeys, dropEdgeKeys } = exclusiveConditionBranchBody(graph, branchEdge, rejoinNodeKey)
+  const dropNodeKeys = new Set(bodyNodeKeys)
+
+  if (!isLastBranch) {
+    return {
+      removedGateway: false,
+      graph: {
+        nodes: graph.nodes
+          .filter((n) => !dropNodeKeys.has(n.key))
+          .map((n) => (n.key === conditionNodeKey
+            ? { ...clone(n), config: { ...config, branches: branches.filter((branch) => branch.edgeKey !== edgeKey) } }
+            : clone(n))),
+        edges: graph.edges.filter((edge) => !dropEdgeKeys.has(edge.key)).map(clone),
+      },
+    }
+  }
+
+  // Last non-default branch → collapse the gateway onto its default path. Only the plain shape is
+  // rewritten: exactly one incoming edge, no stray outgoing edge, not referenced as a parallel join.
+  const incoming = inEdges(graph, conditionNodeKey)
+  if (incoming.length !== 1) refuseBranchRemoval('gateway-not-linear')
+  const outgoingKeys = outEdges(graph, conditionNodeKey).map((edge) => edge.key)
+  if (outgoingKeys.some((key) => key !== edgeKey && key !== defaultEdge!.key)) refuseBranchRemoval('complex-branch')
+  const isParallelJoin = graph.nodes.some((candidate) => candidate.type === 'parallel'
+    && (candidate.config as ParallelNodeConfig).joinNodeKey === conditionNodeKey)
+  if (isParallelJoin) refuseBranchRemoval('gateway-is-parallel-join')
+
+  const replacementNodeKey = defaultEdge!.target
+  dropNodeKeys.add(conditionNodeKey)
+  dropEdgeKeys.add(defaultEdge!.key)
+  const collapsed: ApprovalGraph = {
+    nodes: graph.nodes.filter((n) => !dropNodeKeys.has(n.key)).map(clone),
+    edges: graph.edges
+      .filter((edge) => !dropEdgeKeys.has(edge.key))
+      .map((edge) => (edge.key === incoming[0].key ? { ...clone(edge), target: replacementNodeKey } : clone(edge))),
+  }
+  // D0 §4.2: every parallel branch keeps ≥1 body node — collapsing a gateway that was a lane's
+  // only content onto an EMPTY default path would leave fork→join directly.
+  if (!hasEmptyParallelBranch(graph) && hasEmptyParallelBranch(collapsed)) refuseBranchRemoval('empty-parallel-lane')
+  return { graph: collapsed, removedGateway: true, replacementNodeKey }
+}
+
+/** Remove a non-default condition branch (see `planConditionBranchRemoval`). */
+export function removeConditionBranch(graph: ApprovalGraph, conditionNodeKey: string, edgeKey: string): ApprovalGraph {
+  return planConditionBranchRemoval(graph, conditionNodeKey, edgeKey).graph
+}
+
+/**
+ * Pre-mutation predicate for the authoring UI: `null` when the branch can be deleted, else the
+ * business-language reason the disabled control shows (D0 §4.2 "rejected pre-mutation with the
+ * reason surfaced"). Dry-runs the SAME command, so the UI can never disagree with it.
+ */
+export function conditionBranchRemovalBlocker(
+  graph: ApprovalGraph,
+  conditionNodeKey: string,
+  edgeKey: string,
+): string | null {
+  try {
+    planConditionBranchRemoval(graph, conditionNodeKey, edgeKey)
+    return null
+  } catch (error) {
+    return error instanceof ConditionBranchRemovalRefusal ? error.reason : CONDITION_BRANCH_REMOVAL_REASONS['ambiguous-convergence']
   }
 }

@@ -182,6 +182,13 @@ const ElSelect = defineComponent({
         this.$emit('update:modelValue', value)
         this.$emit('change', value)
       },
+      // T5a / verify X1 stub fidelity (test-only): Element Plus 2.11 clears a `clearable` select by
+      // emitting its `valueOnClear`, whose default is `undefined` (use-empty-values
+      // DEFAULT_VALUE_ON_CLEAR) — NOT ''. A test dispatches `ep-clear` to reproduce that exactly.
+      onEpClear: () => {
+        this.$emit('update:modelValue', undefined)
+        this.$emit('change', undefined)
+      },
     }, this.$slots.default?.())
   },
 })
@@ -410,6 +417,54 @@ function buildLinearReorderGraph() {
       { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
       { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
       { key: 'e-c-end', source: 'app_c', target: 'end' },
+    ],
+  }
+}
+
+/** T5a: two rule branches + a default, all rejoining at cc_1 (the image4 shape with a 2nd branch). */
+function buildTwoBranchConditionGraph(options: { handlerInSecondBranch?: boolean } = {}) {
+  const approval = (key: string, name: string, kind: string) => ({
+    key,
+    type: 'approval',
+    name,
+    config: { assigneeSources: [{ kind }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+  })
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'cond_1',
+        type: 'condition',
+        name: '金额判断',
+        config: {
+          branches: [
+            { edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' },
+            { edgeKey: 'e-b', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }], conjunction: 'and' },
+          ],
+          defaultEdgeKey: 'e-low',
+        },
+      },
+      approval('app_a', '高额审批', 'dept_head'),
+      approval('app_b', '中额审批', 'direct_manager'),
+      ...(options.handlerInSecondBranch
+        ? [{ key: 'handler_b', type: 'handler', name: '中额办理', config: { assigneeSources: [{ kind: 'requester' }] } }]
+        : []),
+      { key: 'cc_1', type: 'cc', name: '抄送财务', config: { targetType: 'user', targetIds: ['u_finance'] } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-c', source: 'start', target: 'cond_1' },
+      { key: 'e-a', source: 'cond_1', target: 'app_a' },
+      { key: 'e-b', source: 'cond_1', target: 'app_b' },
+      { key: 'e-low', source: 'cond_1', target: 'cc_1' },
+      { key: 'e-a-cc', source: 'app_a', target: 'cc_1' },
+      ...(options.handlerInSecondBranch
+        ? [
+            { key: 'e-b-h', source: 'app_b', target: 'handler_b' },
+            { key: 'e-h-cc', source: 'handler_b', target: 'cc_1' },
+          ]
+        : [{ key: 'e-b-cc', source: 'app_b', target: 'cc_1' }]),
+      { key: 'e-cc-end', source: 'cc_1', target: 'end' },
     ],
   }
 }
@@ -707,6 +762,147 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
     expect(container!.querySelector('[data-canvas-node="approval_mid"]')).toBeNull()
+  })
+
+  // ── T5a (test report 2026-10-08): 「删除分支」 on condition branch cards ─────────────────────────
+  function inspectorBranchCards(): HTMLElement[] {
+    return Array.from(container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    )) as HTMLElement[]
+  }
+
+  it('T5a: non-default branch cards carry 「删除分支」, the default card never does; deleting one branch keeps the gateway selected, drops the branch body + rule, and is ONE undo step', async () => {
+    setRouteParams({ id: 'tpl_t5a_branch_delete' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      const remove = card.querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement | null
+      expect(remove, 'every non-default branch card offers delete').not.toBeNull()
+      expect(remove!.disabled).toBe(false)
+      expect(remove!.textContent?.trim()).toBe('删除分支')
+    }
+    // D0 §4.1: the default card has NO delete control at all (structural, not merely disabled).
+    const defaultCard = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-default-branch"]',
+    ) as HTMLElement
+    expect(defaultCard).not.toBeNull()
+    expect(defaultCard.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull()
+
+    ;(cards[1].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.getAttribute('data-inspector-node')).toBe('cond_1') // gateway stays selected
+    expect(inspectorBranchCards()).toHaveLength(1)
+    expect(container!.querySelector('[data-canvas-node="app_b"]')).toBeNull()
+
+    // ONE undo restores the branch, its body node and its rule (same unified history as every
+    // structural edit). Selection-on-undo follows the session history's recorded selection — a
+    // pre-existing contract this slice does not change — so the gateway is re-selected to inspect.
+    const undoBtn = container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement
+    expect(undoBtn.disabled).toBe(false)
+    undoBtn.click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="app_b"]')).not.toBeNull()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    expect(inspectorBranchCards()).toHaveLength(2)
+
+    // Redo, then save: the payload carries neither the branch, its node, its edges, nor its rule.
+    ;(container!.querySelector('[data-testid="approval-canvas-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const condition = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1')
+    expect(condition.config.branches.map((b: any) => b.edgeKey)).toEqual(['e-a'])
+    expect(condition.config.defaultEdgeKey).toBe('e-low')
+    expect(payload.approvalGraph.nodes.some((n: any) => n.key === 'app_b')).toBe(false)
+    expect(payload.approvalGraph.edges.some((e: any) => e.key === 'e-b' || e.key === 'e-b-cc')).toBe(false)
+  })
+
+  it('T5a: deleting the LAST non-default branch removes the condition node, keeps the default path, closes the inspector, and undo brings it all back', async () => {
+    setRouteParams({ id: 'tpl_t5a_last_branch' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(1)
+    ;(cards[0].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-canvas-node="cond_1"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_high"]')).toBeNull()
+    expect(container!.querySelector('[data-canvas-node="cc_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-canvas-node="cond_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-canvas-node="approval_high"]')).not.toBeNull()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    expect(inspectorBranchCards()).toHaveLength(1)
+
+    ;(container!.querySelector('[data-testid="approval-canvas-redo"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.some((n: any) => n.type === 'condition')).toBe(false)
+    // The start edge keeps its key and now enters the old default path head.
+    expect(payload.approvalGraph.edges.find((e: any) => e.key === 'e-start-c')).toMatchObject({ source: 'start', target: 'cc_1' })
+  })
+
+  it('T5a: a branch the command refuses (it carries a 办理 node) keeps 「删除分支」 disabled and states why', async () => {
+    setRouteParams({ id: 'tpl_t5a_refused' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph({ handlerInSecondBranch: true }) as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const cards = inspectorBranchCards()
+    expect(cards).toHaveLength(2)
+    const deletable = cards[0].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement
+    const refused = cards[1].querySelector('[data-testid="approval-condition-branch-remove"]') as HTMLButtonElement
+    expect(deletable.disabled).toBe(false) // positive control on the same gateway
+    expect(refused.disabled).toBe(true)
+    expect(cards[1].querySelector('[data-testid="approval-condition-branch-remove-blocked"]')?.textContent?.trim())
+      .toBe('该分支含办理节点，暂不支持删除')
+    expect(cards[0].querySelector('[data-testid="approval-condition-branch-remove-blocked"]')).toBeNull()
+  })
+
+  it('T5a / verify X1: clearing the clearable default-branch picker (Element Plus emits undefined) stores "no default" instead of throwing', async () => {
+    setRouteParams({ id: 'tpl_t5a_clear_default' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildTwoBranchConditionGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const nodeCount = container!.querySelectorAll('[data-testid="approval-canvas-node"]').length
+    const picker = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-default-edge"]',
+    ) as HTMLSelectElement
+    expect(picker).not.toBeNull()
+    picker.dispatchEvent(new Event('ep-clear'))
+    await flushUi()
+
+    // The canvas still renders (its effective graph did not throw) and the honest empty state shows.
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(nodeCount)
+    expect(container!.querySelector('[data-testid="approval-condition-default-copy-empty"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect('defaultEdgeKey' in payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config).toBe(false)
   })
 
   it('read-only mode renders inspector details but disables mutation controls', async () => {
