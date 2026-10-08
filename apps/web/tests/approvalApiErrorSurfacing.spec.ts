@@ -123,6 +123,74 @@ describe('approvalRequestError', () => {
 })
 
 /**
+ * T5b (test report 2026-10-08) — the three template WRITE paths (create / update / publish) used the
+ * generic `apiPost`/`apiFetch` throw ("API error: 400"), so `describeTemplateAuthoringError` never
+ * saw a machine code and every failure read 「保存表单失败」 (verify E2: its unit test constructed the
+ * error by hand — the production seam was never exercised). These drive the REAL functions through
+ * a stubbed fetch with the `USE_MOCK` gate off (`resetModules` + `stubEnv('DEV', false)`, the escape
+ * already used below), so a revert of any one call site reds here.
+ */
+describe('template write paths surface ApprovalApiError with code + details (T5b)', () => {
+  const ERROR_BODY = {
+    error: {
+      code: 'VALIDATION_ERROR',
+      message: 'approvalGraph parallel branches must not contain the same approver',
+      details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['lane_1', 'lane_2'] },
+    },
+  }
+
+  async function withFailingFetch(run: (api: typeof import('../src/approvals/api')) => Promise<unknown>): Promise<unknown> {
+    vi.resetModules()
+    vi.stubEnv('DEV', false)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: async () => ERROR_BODY,
+      clone() { return this },
+    }))
+    try {
+      const api = await import('../src/approvals/api')
+      try {
+        await run(api)
+      } catch (error) {
+        return { error, ApprovalApiErrorClass: api.ApprovalApiError }
+      }
+      return { error: undefined, ApprovalApiErrorClass: api.ApprovalApiError }
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+      vi.resetModules()
+    }
+  }
+
+  for (const [label, call] of [
+    ['createTemplate', (api: typeof import('../src/approvals/api')) => api.createTemplate({ key: 'k', name: 'n', formSchema: { fields: [] }, approvalGraph: { nodes: [], edges: [] } } as never)],
+    ['updateTemplate', (api: typeof import('../src/approvals/api')) => api.updateTemplate('tpl_1', { name: 'n' } as never)],
+    ['publishTemplate', (api: typeof import('../src/approvals/api')) => api.publishTemplate('tpl_1', { policy: { allowRevoke: true } } as never)],
+  ] as const) {
+    it(`${label} rejects with ApprovalApiError carrying status, code and details`, async () => {
+      const outcome = await withFailingFetch(call) as { error: unknown; ApprovalApiErrorClass: typeof ApprovalApiError }
+      expect(outcome.error).toBeInstanceOf(outcome.ApprovalApiErrorClass)
+      const error = outcome.error as ApprovalApiError
+      expect(error.status).toBe(400)
+      expect(error.code).toBe('VALIDATION_ERROR')
+      expect(error.details).toEqual(ERROR_BODY.error.details)
+    })
+  }
+
+  it('approvalRequestError keeps only a plain-object `details` (arrays / scalars are dropped)', async () => {
+    let caught: unknown
+    try {
+      await approvalRequestError(fakeResponse(400, async () => ({ error: { code: 'X', message: 'm', details: ['not', 'an', 'object'] } })))
+    } catch (err) {
+      caught = err
+    }
+    expect((caught as ApprovalApiError).details).toBeUndefined()
+  })
+})
+
+/**
  * Lock-9 FE fix round (2026-08-22, gate P1-2) — `getApprovalHistory` itself is behind the same
  * `USE_MOCK` gate `approvalRequestError` above is documented as unable to bypass under Vitest
  * (`DEV` is always `true`), so this exercises the extracted pure normalizer directly rather than

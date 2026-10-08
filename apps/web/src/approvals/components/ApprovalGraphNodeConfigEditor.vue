@@ -330,6 +330,13 @@
         <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.map((edgeKey) => graphEdgeTargetLabel(node.key, edgeKey)).join('、') || '（无）' }}</li>
         <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey ? graphNodeLabel((node.config as ParallelNodeConfig).joinNodeKey) : '（无）' }}</li>
       </ul>
+      <!-- T5b (test report 2026-10-08): say where more lanes come from — the lane count is not fixed
+           at two, and 「+添加分支」 in the inspector toolbar above adds one per click. -->
+      <p
+        v-if="canvasAuthoringActive && !readOnly"
+        class="template-authoring__hint"
+        data-testid="approval-parallel-add-branch-hint"
+      >共 {{ (node.config as ParallelNodeConfig).branches.length }} 个并行分支，点击上方「+添加分支」可再增加一路</p>
     </div>
 
     <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /

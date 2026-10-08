@@ -3,6 +3,7 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../../src/services/ApprovalProductService'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -748,5 +749,107 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
     const errorPayload = await templateResponse.json() as { error?: { code?: string; message?: string } }
     expect(errorPayload.error?.code).toBe('VALIDATION_ERROR')
     expect(errorPayload.error?.message || '').toMatch(/same approver/i)
+  })
+
+  // T5b (test report 2026-10-08): `addParallelBranch` seeds every extra lane with the configure-
+  // before-publish placeholder role, so lane 3 shared it with lane 2 and the untouched draft could
+  // not even be SAVED (opaque 「保存表单失败」). The placeholder is not an approver: the draft saves,
+  // and publish is still refused — by the placeholder gate.
+  it('T5b: lanes holding only the approver placeholder save (create 201, update 200) and are refused at publish with the placeholder code', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-parallel-placeholder')
+    const placeholderLane = (key: string) => ({
+      key,
+      type: 'approval',
+      config: {
+        assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+      },
+    })
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'parallel_fork_ph',
+          type: 'parallel',
+          config: { branches: ['edge-fork-1-ph', 'edge-fork-2-ph', 'edge-fork-3-ph'], joinMode: 'all', joinNodeKey: 'finance_review_ph' },
+        },
+        { key: 'lane_1_ph', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['legal-1'] } },
+        placeholderLane('lane_2_ph'),
+        placeholderLane('lane_3_ph'),
+        { key: 'finance_review_ph', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['finance-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork-ph', source: 'start', target: 'parallel_fork_ph' },
+        { key: 'edge-fork-1-ph', source: 'parallel_fork_ph', target: 'lane_1_ph' },
+        { key: 'edge-fork-2-ph', source: 'parallel_fork_ph', target: 'lane_2_ph' },
+        { key: 'edge-fork-3-ph', source: 'parallel_fork_ph', target: 'lane_3_ph' },
+        { key: 'edge-1-join-ph', source: 'lane_1_ph', target: 'finance_review_ph' },
+        { key: 'edge-2-join-ph', source: 'lane_2_ph', target: 'finance_review_ph' },
+        { key: 'edge-3-join-ph', source: 'lane_3_ph', target: 'finance_review_ph' },
+        { key: 'edge-join-end-ph', source: 'finance_review_ph', target: 'end' },
+      ],
+    }
+
+    const createResponse = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: { key: `approval-wp1-parallel-ph-${Date.now()}`, name: 'Parallel Placeholder Lanes', formSchema: buildFormSchema(), approvalGraph: graph },
+    })
+    expect(createResponse.status, await createResponse.clone().text()).toBe(201)
+    const template = await createResponse.json() as { id: string }
+    createdTemplateIds.add(template.id)
+
+    const updateResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}`, adminToken, {
+      method: 'PATCH',
+      body: { approvalGraph: graph },
+    })
+    expect(updateResponse.status, await updateResponse.clone().text()).toBe(200)
+
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status).toBe(400)
+    const publishError = await publishResponse.json() as { error?: { code?: string } }
+    expect(publishError.error?.code).toBe('APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED')
+  })
+
+  it('T5b: a REAL shared static approver still 400s, and the HTTP envelope names the two branches (values-free)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-parallel-dup-details')
+    const response = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `approval-wp1-parallel-dup-details-${Date.now()}`,
+        name: 'Parallel Duplicate Details',
+        formSchema: buildFormSchema(),
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'fork_dd', type: 'parallel', config: { branches: ['e-fork-a-dd', 'e-fork-b-dd'], joinMode: 'all', joinNodeKey: 'join_dd' } },
+            { key: 'branch_a_dd', type: 'approval', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['shared-role'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'branch_b_dd', type: 'approval', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['shared-role'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'join_dd', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['finance-dd'] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-dd', source: 'start', target: 'fork_dd' },
+            { key: 'e-fork-a-dd', source: 'fork_dd', target: 'branch_a_dd' },
+            { key: 'e-fork-b-dd', source: 'fork_dd', target: 'branch_b_dd' },
+            { key: 'e-a-join-dd', source: 'branch_a_dd', target: 'join_dd' },
+            { key: 'e-b-join-dd', source: 'branch_b_dd', target: 'join_dd' },
+            { key: 'e-join-end-dd', source: 'join_dd', target: 'end' },
+          ],
+        },
+      },
+    })
+    expect(response.status).toBe(400)
+    const payload = await response.json() as { error?: { code?: string; details?: Record<string, unknown> } }
+    expect(payload.error?.code).toBe('VALIDATION_ERROR')
+    expect(payload.error?.details).toEqual({
+      reason: 'parallel_duplicate_approver',
+      nodeKey: 'fork_dd',
+      conflictingNodeKeys: ['branch_a_dd', 'branch_b_dd'],
+    })
   })
 })

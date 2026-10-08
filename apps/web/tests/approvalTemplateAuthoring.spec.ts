@@ -87,11 +87,14 @@ vi.mock('../src/approvals/api', () => ({
   ApprovalApiError: class ApprovalApiError extends Error {
     status: number
     code?: string
-    constructor(message: string, status = 0, code?: string) {
+    // T5b: mirrors the real class's optional values-free `details` (4th constructor argument).
+    details?: Record<string, unknown>
+    constructor(message: string, status = 0, code?: string, details?: Record<string, unknown>) {
       super(message)
       this.name = 'ApprovalApiError'
       this.status = status
       this.code = code
+      this.details = details
     }
   },
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
@@ -2896,6 +2899,123 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
+  })
+
+  // ── T5b (test report 2026-10-08): adding a 3rd+ parallel lane must be reachable and savable ──
+  function buildCcChainGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'user', targetIds: ['u_1'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-a', source: 'start', target: 'approval_1' },
+        { key: 'e-a-c', source: 'approval_1', target: 'cc_1' },
+        { key: 'e-c-e', source: 'cc_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('T5b: inserting a parallel gateway from an edge 「+」 selects the NEW gateway (D0 §3.4); its 「+添加分支」 grows a 3rd lane and the card states the lane count', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_parallel' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-parallel"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector, 'the new gateway opens in the inspector').not.toBeNull()
+    expect(inspector.getAttribute('data-inspector-type')).toBe('parallel')
+    const gatewayKey = inspector.getAttribute('data-inspector-node')!
+    expect(gatewayKey).not.toBe('approval_1') // never the source node
+    const summary = () => container!.querySelector(
+      `[data-canvas-node="${gatewayKey}"] .template-authoring__canvas-node-summary`,
+    )?.textContent?.trim()
+    expect(summary()).toBe('2 个并行分支 · 全部完成后合并')
+
+    const addLane = inspector.querySelector(`[data-testid="approval-canvas-add-parallel-${gatewayKey}"]`) as HTMLButtonElement
+    expect(addLane.textContent?.trim()).toBe('+添加分支')
+    addLane.click()
+    await flushUi()
+    expect(summary()).toBe('3 个并行分支 · 全部完成后合并')
+    expect(container!.querySelector('[data-testid="approval-parallel-add-branch-hint"]')?.textContent).toContain('共 3 个并行分支')
+
+    // The untouched 3-lane draft (two placeholder lanes) reaches the save endpoint — the FE never
+    // blocked it; the backend half of the fix lets the server accept it too.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === gatewayKey).config.branches).toHaveLength(3)
+  })
+
+  it('T5b: a gateway fork edge carries NO insertion 「+」 (no insert command is valid there, D0 §3.4/§15); ordinary edges keep theirs', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_fork_edges' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-parallel"]') as HTMLButtonElement).click()
+    await flushUi()
+    // insertParallelGateway is deterministic: fork edges edge_1/edge_2 (gateway → lanes), join edges
+    // edge_3/edge_4 (lanes → cc_1); `e-a-c` keeps its key and now enters the gateway.
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-edge"]')).toHaveLength(7)
+    const controlled = Array.from(container!.querySelectorAll('[data-testid="approval-canvas-edge-insert"]'))
+      .map((control) => control.getAttribute('data-edge-key'))
+      .sort()
+    expect(controlled).toEqual(['e-a-c', 'e-c-e', 'e-s-a', 'edge_3', 'edge_4'])
+  })
+
+  it('T5b: a save the server rejects because two parallel branches share an approver names BOTH branches — never the opaque 「保存表单失败」 or a node key', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_dup' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'fork_1', type: 'parallel', name: '会签', config: { branches: ['e-f-a', 'e-f-b'], joinMode: 'all', joinNodeKey: 'end' } },
+          { key: 'lane_a', type: 'approval', name: '财务甲', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'lane_b', type: 'approval', name: '财务乙', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-f', source: 'start', target: 'fork_1' },
+          { key: 'e-f-a', source: 'fork_1', target: 'lane_a' },
+          { key: 'e-f-b', source: 'fork_1', target: 'lane_b' },
+          { key: 'e-a-e', source: 'lane_a', target: 'end' },
+          { key: 'e-b-e', source: 'lane_b', target: 'end' },
+        ],
+      },
+    }))
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    updateTemplateSpy.mockRejectedValue(new ApprovalApiError(
+      'approvalGraph parallel branches must not contain the same approver',
+      400,
+      'VALIDATION_ERROR',
+      { reason: 'parallel_duplicate_approver', nodeKey: 'fork_1', conflictingNodeKeys: ['lane_a', 'lane_b'] },
+    ))
+    await mountView()
+    await flushUi()
+    scrolledElements = []
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.textContent).toContain('并行分支「会签」中「财务甲」与「财务乙」的审批人相同')
+    expect(summary.textContent).not.toContain('保存表单失败')
+    for (const key of ['fork_1', 'lane_a', 'lane_b', 'finance', 'same approver']) {
+      expect(summary.textContent).not.toContain(key)
+    }
+    expect(scrolledElements.at(-1)).toBe(summary) // brought into view, not left above the canvas
   })
 
   it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {

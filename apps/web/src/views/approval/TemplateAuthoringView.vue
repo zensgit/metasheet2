@@ -416,6 +416,7 @@
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
+            :can-insert-on-edge="canInsertOnCanvasEdge"
             :can-insert-parallel-on-edge="canInsertParallelOnEdge"
             :can-insert-handler-on-edge="canInsertHandlerOnEdge"
             :canvas-move-target-label="canvasMoveTargetLabel"
@@ -2036,7 +2037,12 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
+    // T5b (test report 2026-10-08) — D0 §3.2: the card's (first) summary line states the lane COUNT
+    // and the join consequence ("3 个并行分支 · 全部完成后合并"), so an author can see that the lane
+    // count grows and is not fixed at two. The lane names stay on the next line.
+    const laneCount = Array.isArray(cfg.branches) ? cfg.branches.length : 0
     return [
+      `${laneCount} 个并行分支 · ${cfg.joinMode === 'any' ? '任一完成后继续' : '全部完成后合并'}`,
       `并行分支：${parallelBranchLabels(node)}`,
       `汇聚节点：${graphNodeDisplayName(cfg.joinNodeKey)}`,
       `汇聚模式：${cfg.joinMode ?? '（无）'}`,
@@ -2845,11 +2851,32 @@ function onInsertHandlerAfter(nodeKey: string): void {
   runTopologyOp((graph) => appendHandlerNode(graph, nodeKey), { kind: 'none' })
   selectInsertedNode(beforeKeys)
 }
+// T5b (test report 2026-10-08) — D0 §3.4: an insertion "selects/focuses the new node with the
+// inspector open". Gateway inserts used to leave the SOURCE node selected, so the gateway's own
+// 「+添加分支」 never appeared and a second +并行 built a second two-lane gateway in series. The
+// gateway key is resolved by a dry run of the SAME deterministic op on the SAME effective graph
+// the session applies it to, and passed as `selectionAfter` so undo/redo history stays coherent.
+function insertedNodeKeyOfType(
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  type: ApprovalNode['type'],
+): string | undefined {
+  try {
+    const before = canvasEffectiveGraph.value
+    const beforeKeys = new Set(before.nodes.map((node) => node.key))
+    return op(before).nodes.find((node) => node.type === type && !beforeKeys.has(node.key))?.key
+  } catch {
+    return undefined // the real run reports the refusal; selection simply stays put
+  }
+}
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
+  const op = (graph: ApprovalGraph) => insertConditionGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'condition')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
+  const op = (graph: ApprovalGraph) => insertParallelGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'parallel')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
@@ -4078,11 +4105,29 @@ async function persistDraft() {
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '保存表单失败')
+    loadError.value = describeTemplateAuthoringError(error, '保存表单失败', authoringErrorContext)
+    // T5b: the failure banner sits at the top of the page — bring it into view (a long flow leaves
+    // the author scrolled far below it, so the save looked like it silently did nothing).
+    void revealAuthoringFailure()
     return null
   } finally {
     saving.value = false
   }
+}
+
+// T5b (test report 2026-10-08): business labels for the nodes a failed write's values-free
+// `details` names. Resolved against the graph the failed request carried (a failed save leaves the
+// draft untouched; a failed publish runs right after a successful save of the same keys). Never
+// returns a key — an unknown key yields `undefined`, i.e. the unattributed copy.
+function authoringErrorNodeLabel(nodeKey: string): string | undefined {
+  const node = canvasEffectiveGraph.value.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return undefined
+  return node.name?.trim() || nodeTypeLabel(node.type)
+}
+const authoringErrorContext = { nodeLabel: authoringErrorNodeLabel }
+async function revealAuthoringFailure(): Promise<void> {
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
 }
 
 async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
@@ -4164,7 +4209,8 @@ async function confirmPublish() {
     ElMessage.success('表单已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '发布表单失败')
+    loadError.value = describeTemplateAuthoringError(error, '发布表单失败', authoringErrorContext)
+    void revealAuthoringFailure()
   } finally {
     publishing.value = false
   }

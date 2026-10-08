@@ -3683,6 +3683,69 @@ describe('ApprovalProductService', () => {
       const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
       expect(result.publishedDefinitionId).toBe('pub-par')
     })
+
+    // ── T5b (test report 2026-10-08): the configure-before-publish placeholder role is not an
+    // approver. Every lane `addParallelBranch` adds carries it, so a 3rd lane shared it with the
+    // 2nd and the STATIC duplicate check 400'd the untouched draft at SAVE — contradicting the
+    // placeholder's contract (draft saves, publish is guarded). ──
+    function placeholderLanesGraph(laneSources: unknown[]) {
+      const lanes = laneSources.map((source, index) => ({ key: `lane_${index + 1}`, source }))
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: lanes.map((lane) => `e-fork-${lane.key}`), joinMode: 'all', joinNodeKey: 'join' } },
+          ...lanes.map((lane) => ({
+            key: lane.key,
+            type: 'approval',
+            config: { assigneeSources: [lane.source], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+          })),
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          ...lanes.map((lane) => ({ key: `e-fork-${lane.key}`, source: 'fork', target: lane.key })),
+          ...lanes.map((lane) => ({ key: `e-${lane.key}-join`, source: lane.key, target: 'join' })),
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    it('T5b: two (or more) lanes holding the approver PLACEHOLDER pass the save-time graph gate; publish then fails with the existing placeholder-not-configured code', async () => {
+      const { APPROVAL_ROLE_CONFIGURE_SENTINEL, ApprovalProductService, assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const placeholder = { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }
+      // The exact shape insertParallelGateway + one addParallelBranch produce: requester + 2 placeholders.
+      const graph = placeholderLanesGraph([{ kind: 'requester' }, placeholder, placeholder])
+      // Save path (createTemplate/updateTemplate call assertApprovalGraph with NO options).
+      expect(() => assertApprovalGraph(graph)).not.toThrow()
+      // Publish is still guarded — by the placeholder gate, not the duplicate-approver one.
+      mockParallelPublish(graph)
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED' })
+    })
+
+    it('T5b: a REAL static approver shared by two lanes is still rejected — same code and message — now with values-free branch attribution', async () => {
+      const { APPROVAL_ROLE_CONFIGURE_SENTINEL, assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const finance = { kind: 'static_role', roleIds: ['finance'] }
+      // Positive control on the exemption's narrowness: a placeholder lane between two real
+      // duplicates must not mask them.
+      const graph = placeholderLanesGraph([finance, { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }, finance])
+      let thrown: unknown
+      try {
+        assertApprovalGraph(graph)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branches must not contain the same approver',
+        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['lane_1', 'lane_3'] },
+      })
+      // Values-free: the attribution carries node keys only, never the shared approver id.
+      expect(JSON.stringify((thrown as { details?: unknown }).details)).not.toContain('finance')
+    })
   })
 
   describe('parallel branch all-path join reachability (author / publish)', () => {

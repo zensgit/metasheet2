@@ -288,6 +288,10 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
             移动
           </el-button>
         </template>
+        <!-- T5b (test report 2026-10-08): the visible label is 「+添加分支」 — "并行分支/条件分支" was
+             simultaneously the gateway TYPE, the edge-menu item that inserts a NEW gateway, and this
+             add-a-lane action, so authors who had "added a parallel branch" did not read this as
+             "add another lane". The accessible names stay type-specific (pinned). -->
         <el-button
           v-if="node.type === 'condition'"
           size="small"
@@ -295,7 +299,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
           :aria-label="`为${graphNodeLabel(node.key)}添加条件分支`"
           @click="emit('add-condition-branch', node.key)"
         >
-          +条件分支
+          +添加分支
         </el-button>
         <el-button
           v-if="node.type === 'parallel'"
@@ -304,7 +308,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
           :aria-label="`为${graphNodeLabel(node.key)}添加并行分支`"
           @click="emit('add-parallel-branch', node.key)"
         >
-          +并行分支
+          +添加分支
         </el-button>
         <template v-if="canInsertAfter(node)">
           <el-button
