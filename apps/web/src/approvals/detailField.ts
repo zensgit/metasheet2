@@ -437,6 +437,11 @@ function matchOptionLabel(options: FormOption[] | undefined, value: unknown): st
   return match ? match.label : String(value)
 }
 
+/** O-8 / F8-1: the Intl locale the shell language maps to. */
+function displayLocale(isZh: boolean): string {
+  return isZh ? 'zh-CN' : 'en-US'
+}
+
 /**
  * Mirrors the detail view's own zh-CN date formatting (`new Date(x).toLocaleString('zh-CN')`),
  * but — unlike that helper — passes the raw value through unchanged when it doesn't parse as a
@@ -445,7 +450,31 @@ function matchOptionLabel(options: FormOption[] | undefined, value: unknown): st
 function formatDisplayDate(value: unknown, isZh = true): string {
   const raw = String(value)
   const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString(isZh ? 'zh-CN' : 'en-US')
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString(displayLocale(isZh))
+}
+
+const CIVIL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * Test report 2026-10-08, T4a-E2: a `date` value is a FLOATING civil date (Lock-8 D-2), stored as
+ * the strict `YYYY-MM-DD` string the server validates. `formatDisplayDate` reads such a string as
+ * UTC midnight, so it showed a time of day that was never entered (08:00:00 at UTC+8) and, for a
+ * viewer west of UTC, the PREVIOUS day. This renders the string date-only from its own
+ * year/month/day, as a UTC calendar day formatted in UTC, so every viewer in every timezone sees
+ * the day that was entered. Returns `null` for anything that is not a real strict calendar string;
+ * the caller then keeps the instant path (legacy instant values, unparsable text).
+ */
+function formatCivilDate(value: unknown, isZh: boolean): string | null {
+  if (typeof value !== 'string') return null
+  const match = CIVIL_DATE_PATTERN.exec(value)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const calendarDay = new Date(Date.UTC(year, month - 1, day))
+  calendarDay.setUTCFullYear(year)
+  if (calendarDay.getUTCMonth() !== month - 1 || calendarDay.getUTCDate() !== day) return null
+  return calendarDay.toLocaleDateString(displayLocale(isZh), { timeZone: 'UTC' })
 }
 
 /** O-8 / F8-1: the list separator used when several display values share one cell. */
@@ -486,7 +515,9 @@ export function formatLegacyAttachmentValue(value: unknown, isZh = true): string
  * null/undefined/'' always render as '-' regardless of type. `select` maps the stored value to
  * its option label, falling back to the raw value when no option matches (e.g. an option
  * renamed/removed after the instance was created); `multi-select` maps each stored value the
- * same way and joins with '、'; `date` uses `formatDisplayDate` (pass-through on unparsable);
+ * same way and joins with '、'; `date` renders a strict `YYYY-MM-DD` civil string date-only via
+ * `formatCivilDate` (timezone-independent) and anything else via `formatDisplayDate`, which
+ * `datetime` always uses (pass-through on unparsable);
  * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user)
  * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
  * string/object snapshots remain readable without the new refs endpoint.
@@ -501,6 +532,7 @@ function formatDisplayValue(field: FormField, value: unknown, isZh: boolean): st
       return values.map((entry) => matchOptionLabel(field.options, entry)).join(displayListSeparator(isZh))
     }
     case 'date':
+      return formatCivilDate(value, isZh) ?? formatDisplayDate(value, isZh)
     case 'datetime':
       return formatDisplayDate(value, isZh)
     case 'number': {
@@ -538,7 +570,11 @@ function formatDisplayValue(field: FormField, value: unknown, isZh: boolean): st
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const { start, end } = value as { start?: unknown; end?: unknown }
         if (start !== undefined && end !== undefined) {
-          return `${formatDisplayDate(start, isZh)} ~ ${formatDisplayDate(end, isZh)}`
+          // T4a-E2: a `dateType: 'date'` range stores civil `YYYY-MM-DD` endpoints — same rendering
+          // as a `date` field. The time-of-day granularities keep the instant path.
+          const civil = field.props?.dateType === 'date'
+          const endpoint = (raw: unknown) => (civil ? formatCivilDate(raw, isZh) : null) ?? formatDisplayDate(raw, isZh)
+          return `${endpoint(start)} ~ ${endpoint(end)}`
         }
       }
       return '-'

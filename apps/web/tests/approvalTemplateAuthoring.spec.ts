@@ -2722,6 +2722,47 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
+  // Test report 2026-10-08, T4a (+E1): the 试运行 form's date/datetime pickers take the SAME settings
+  // as the fill form (approvals/datePickerFormat.ts), whose real-picker behaviour is proven in
+  // approval-date-picker-values.spec.ts. This spec never registers ElDatePicker, so Vue renders the
+  // unresolved `<el-date-picker>` element and every bound prop lands on it as a plain attribute —
+  // that attribute set IS the wiring under test.
+  it('T4a: the 试运行 date picker binds YYYY-MM-DD and the datetime picker binds minute format, a minute-truncated default time and a date-and-time placeholder', async () => {
+    setRouteParams({ id: 'tpl_tryrun_dates' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'trip_day', type: 'date', label: '出发日期' },
+          { id: 'meet_at', type: 'datetime', label: '会议时间' },
+          { id: 'land_at', type: 'datetime', label: '落地时间', placeholder: '请填写航班落地时间' },
+        ],
+      } as any,
+    }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const panel = container!.querySelector('[data-testid="approval-template-tryrun-panel"]')
+    expect(panel).not.toBeNull()
+    const pickers = Array.from(panel!.querySelectorAll('el-date-picker'))
+    const datePicker = pickers.find((el) => el.getAttribute('type') === 'date')
+    const datetimePickers = pickers.filter((el) => el.getAttribute('type') === 'datetime')
+    expect(datePicker).toBeTruthy()
+    expect(datetimePickers).toHaveLength(2)
+
+    expect(datePicker!.getAttribute('value-format')).toBe('YYYY-MM-DD')
+    for (const picker of datetimePickers) {
+      expect(picker.getAttribute('format')).toBe('YYYY-MM-DD HH:mm')
+      const defaultTime = new Date(picker.getAttribute('default-time') ?? '')
+      expect(Number.isNaN(defaultTime.getTime())).toBe(false)
+      expect(defaultTime.getSeconds()).toBe(0)
+    }
+    expect(datetimePickers[0].getAttribute('placeholder')).toBe('请选择日期和时间')
+    // An author-written placeholder still wins.
+    expect(datetimePickers[1].getAttribute('placeholder')).toBe('请填写航班落地时间')
+  })
+
   it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
     setRouteParams({ id: 'tpl_formula_dry_run' })
     const graph = {
