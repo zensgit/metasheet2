@@ -313,6 +313,13 @@ export function dateTimeTextNamesZone(text: unknown): boolean {
 // optional trailing time part that is IGNORED (the day is the day as written).
 const CALENDAR_DAY_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ].*)?$/
 
+// Text that STARTS like an ISO-ish day. Reaching the fallback with this shape means the grammar above refused it.
+const ISO_DAY_PREFIX_RE = /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/
+
+// Text that is just a number (`2026`, `5`, `-1`, `20260918`, `1758211200000`, `46283.5`). V8's legacy parser
+// reads such text as a year, a month in 2001, or a year in the far future — never a day anybody wrote.
+const BARE_NUMBER_RE = /^[+-]?\d+(?:\.\d+)?$/
+
 /**
  * The calendar day named by import text for a date-only field — `YYYY-MM-DD`, or `null` when the text
  * names no day. NO timezone math (PR #6083 review item 2): the previous
@@ -322,6 +329,9 @@ const CALENDAR_DAY_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ].*)?$/
  *   2. text that names its own zone (`Z`, `±hh:mm`, `GMT`) → the UTC calendar day of that instant;
  *   3. anything else `Date.parse` accepts (`9/24/26`, `Sep 24 2026`) → its LOCAL calendar components, which
  *      are the day as written for a zone-less spelling regardless of where the browser is.
+ * Refused before rules 2–3 (#6204 / #6181 edges, the same text the server's grammar refuses): an ISO-ish day the
+ * grammar did not accept — mixed separators, or text glued straight onto the day (`2026-09-18Z`, which `Date.parse`
+ * reads as UTC midnight and rule 3 then put on the BROWSER's day) — and text that is just a number.
  */
 export function calendarDayFromText(input: unknown): string | null {
   const text = normalizeDateTimeInput(input)
@@ -333,9 +343,12 @@ export function calendarDayFromText(input: unknown): string | null {
     if (!isValidWallClock(clock)) return null
     return `${pad(clock.year, 4)}-${pad(clock.month)}-${pad(clock.day)}`
   }
-  // An ISO-like shape that failed the grammar (mixed separators `2026-09/24`, impossible day) is refused
-  // outright (N7) — V8's lenient legacy parser would otherwise accept it below.
-  if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]|$)/.test(text)) return null
+  // An ISO-like shape that failed the grammar (mixed separators `2026-09/24`, impossible day, a designator glued
+  // onto the day `2026-09-18Z`) is refused outright (N7, widened by #6204) — V8's lenient legacy parser would
+  // otherwise accept it below.
+  if (ISO_DAY_PREFIX_RE.test(text)) return null
+  // A bare number is not a day (#6204): never guessed as a year, a 2001 month, an epoch or a spreadsheet serial.
+  if (BARE_NUMBER_RE.test(text)) return null
   const ms = Date.parse(text)
   if (!Number.isFinite(ms)) return null
   const date = new Date(ms)
@@ -454,6 +467,18 @@ const DATE_TIME_TEXT_RE = /[T\s]\d{1,2}:\d{2}/
  * instants into the managed table's date columns) is the day it falls on in the business timezone, so every
  * viewer sees the same day. `null` when the value is empty or names no day (callers keep their own fallback).
  * (Moved here from field-display.ts unchanged, #6204 — field-display re-exports it.)
+ *
+ * ONE rule with the server (core-backend `date-time-wall-clock.ts` `formatDateOnlyValue`, #6204 / #6181 edges) —
+ * the same input gives the same day on both sides:
+ *   - a day as written, no time part (`2026-09-18`, `2026/9/18`, `2026年9月18日`) → that day, no zone math;
+ *   - an instant → its business-timezone day: ISO with `Z` / `±hh:mm` / `±hhmm`, PostgreSQL's text form with an
+ *     hour-only offset (`2026-09-17 16:00:00+00` → `2026-09-18`), a zone-less wall clock with a time (read in the
+ *     business zone), an epoch-ms NUMBER, a Date;
+ *   - names no day → `null` (the caller shows / exports the raw text): an ISO-ish day with text glued on
+ *     (`2026-09-18Z` — no time, so not an instant; it used to land on the browser's day), a string that is just a
+ *     number (`2026`, `20260918`, `1758211200000` — never guessed as a year, a yyyymmdd or an epoch).
+ * Web-only (pre-existing, not on the server): a spelling only `Date.parse` reads (`9/18/2026`, `Sep 18 2026`) and a
+ * day followed by non-time text (`2026-09-18 junk`) keep their day here; the server keeps the raw text.
  */
 export function formatDateOnlyValue(value: unknown): string | null {
   if (value === null || value === undefined || value === '') return null

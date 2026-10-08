@@ -234,6 +234,28 @@ describe('formatDateOnlyValue — a day as written keeps its day, an instant tak
     // An epoch no Date can hold is unreadable — never handed to Intl (which would throw and fail the export).
     expect(formatDateOnlyValue(1e20, SH)).toBeNull()
   })
+
+  // #6204 (#6181 edges 2–4): ONE rule with the web's formatDateOnlyValue (apps/web business-timezone.ts) — the web
+  // spec (multitable-field-display-i18n.spec.ts) carries the same inputs with the same expectations.
+  it('PostgreSQL text form with an hour-only offset is an instant on its zone day (was: raw text)', () => {
+    expect(formatDateOnlyValue('2026-09-17 16:00:00+00', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-17 15:59:59+00', SH)).toBe('2026-09-17')
+    expect(formatDateOnlyValue('2026-09-17 16:00:00.123456+00', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-18 00:00:00+08', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue(' 2026-09-17 16:00:00+00 ', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-17 16:00:00+00', NY)).toBe('2026-09-17')
+  })
+
+  it('an ISO-ish day with a designator glued on, and a string that is just a number, name no day', () => {
+    expect(formatDateOnlyValue('2026-09-18Z', SH)).toBeNull()
+    expect(formatDateOnlyValue('2026-09-18z', SH)).toBeNull()
+    expect(formatDateOnlyValue('2026-09-17T16:00Z', SH)).toBe('2026-09-18') // with a time it IS an instant
+    for (const text of ['2026', '5', '0', '-1', '+5', '20260918', '1758211200000', '46283.5', '2026.9']) {
+      expect(formatDateOnlyValue(text, SH)).toBeNull()
+    }
+    // An epoch-ms NUMBER stays an instant (both sides).
+    expect(formatDateOnlyValue(Date.parse('2026-09-17T16:00:00.000Z'), SH)).toBe('2026-09-18')
+  })
 })
 
 describe('independent of the PROCESS timezone (out-of-process probes)', { timeout: 90_000 }, () => {
