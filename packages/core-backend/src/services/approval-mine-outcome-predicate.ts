@@ -30,6 +30,13 @@ import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
  * admin jump, without any new event. A terminal instance with no qualifying outcome record
  * (imported or externally mirrored data with no audit trail) is never badged.
  *
+ * CANCEL ROUNDS. A cancel round badges once — the round itself, when someone else approves it —
+ * only because the original request's `approved → cancelled` `revoke` row carries the round's
+ * requester (= the original requester) as its actor, a choice ApprovalProductService's cancel-round
+ * redemption still flags for owner registration. If the owner registers the approver or a system
+ * sentinel there instead, the original request badges as well (two badges for one revocation):
+ * revisit this rule together with that registration.
+ *
  * Shares `approval_reads` with the 待我处理 / 抄送 unread states (no new table, by decision), and the
  * same documented transaction-start timestamp race as `approvalCcUnreadConditionSql`: a mark-read
  * that commits while the deciding transaction is still open can mark that outcome seen.
