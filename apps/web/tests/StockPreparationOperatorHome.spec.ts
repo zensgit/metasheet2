@@ -196,6 +196,13 @@ describe('operatorNextStep — 设计稿 §4.2 七条规则(优先级从上到�
     expect(resync.key).toBe('resync')
     expect(resync.action).toBeNull()
     expect(resync.zh).toContain('请联系拉取人员')
+    // Rule 3 keeps its action (deciding is the floor's own step) but its trailing sync clause follows
+    // the flag too.
+    const pending = operatorNextStep({ ...base, pendingDecisionCount: 2, canPull: false })
+    expect(pending.action).toBe('go-confirm')
+    expect(pending.zh).toContain('告知拉取人员再同步一次')
+    expect(pending.zh).not.toContain('回来再同步一次')
+    expect(operatorNextStep({ ...base, pendingDecisionCount: 2 }).zh).toContain('回来再同步一次')
     // The other rules are untouched by the flag.
     expect(operatorNextStep({ ...base, missingComponentsCount: 3, canPull: false }).action).toBe('view-missing')
     // Absent reads as true — callers without a principal keep today's words.

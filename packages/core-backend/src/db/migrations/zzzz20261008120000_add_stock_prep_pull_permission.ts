@@ -17,9 +17,18 @@ import { sql } from 'kysely'
  * administrator could not create the 「备料拉取人员」 role at all.
  *
  * Same shape as the 0830 seed, including its ONE deliberate omission: NO `role_permissions` insert.
- * R-11's mapping is 零自动 — the new code starts with ZERO holders. The operator creates the
- * 「备料拉取人员」 role (read + operate + pull) in 角色管理 BEFORE upgrading, because the gate change
- * takes effect on upgrade with no switch. Roles are site data and are not seeded here.
+ * R-11's mapping is 零自动 — the new code starts with ZERO holders. Roles are site data and are not
+ * seeded here. THE ORDER ON SITE, stated because the naive one is impossible: the role cannot be
+ * created BEFORE this migration (the role editor refuses the code until this row exists), and the
+ * gate takes effect on upgrade with no switch. So: upgrade (this migration runs, the gate is live)
+ * → immediately create 「备料拉取人员」 (read + operate + pull) in 角色管理 and assign it → grant the
+ * account 开通插件使用 for `stock-prep` if it is a new account. In the window between upgrade and
+ * role creation only a platform admin, a `stock-prep:admin` or an `integration:*` holder can pull
+ * (the scheduled pull on an admin token is unaffected); the floor and the future pullers cannot.
+ *
+ * ROLLBACK: down() deletes EVERY role/user binding of `stock-prep:pull` (FK order); re-running up()
+ * restores the catalogue row only, never the bindings — after a rollback + re-upgrade the
+ * 「备料拉取人员」 role must be granted the code again.
  *
  * The row text is byte-identical to the `STOCK_PREP_PULL` descriptor in the plugin module; the
  * plugin permission-matrix suite pins the two against each other. `INSERT INTO permissions (...)

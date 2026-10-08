@@ -1933,6 +1933,14 @@ describe('项目备料页 — the operator project board', () => {
     // the 「拉一个新项目」 heading and the honest sentence, never a second box with the same label.
     expect(root.querySelectorAll('[data-testid="stock-prep-project-board-input"]').length).toBe(1)
     expect(root.querySelectorAll('input[list="stock-prep-board-directory-options"]').length).toBe(1)
+    // R-33: the board WIRES its own pull predicate into the home (`:can-pull="canRunPull"`), so the
+    // puller (this file's default actor) sees 「拉一个新项目」 and an operate-only mount sees the
+    // 「打开一个项目」 variant instead of an invitation to pull.
+    expect(root.querySelector('.sp-home__quick-open-title')?.textContent).toContain('拉一个新项目')
+    remount()
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    const floor = await mountBoard({ projectNo: '' })
+    expect(floor.querySelector('.sp-home__quick-open-title')?.textContent).toContain('打开一个项目')
   })
 
   it('P0-2: every OTHER spec in this file seeds a projectNo and therefore never sees the home page', async () => {

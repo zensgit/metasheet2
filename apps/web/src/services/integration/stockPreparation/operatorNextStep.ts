@@ -120,8 +120,14 @@ export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStep
     const n = input.pendingDecisionCount
     return {
       key: 'pending',
-      zh: `有 ${n} 件系统拿不准的事等您拿主意;处理完回来再同步一次。`,
-      en: `${n} thing(s) need your call — come back and sync again once you are done.`,
+      // R-33: the trailing clause is the one part of this rule that drives a pull, so it follows
+      // `canPull` like rules 1 and 4; the action (go and decide) is the floor's own and stays.
+      zh: canPull
+        ? `有 ${n} 件系统拿不准的事等您拿主意;处理完回来再同步一次。`
+        : `有 ${n} 件系统拿不准的事等您拿主意;处理完告知拉取人员再同步一次。`,
+      en: canPull
+        ? `${n} thing(s) need your call — come back and sync again once you are done.`
+        : `${n} thing(s) need your call — once you are done, tell a pull operator (拉取人员) to sync again.`,
       actionZh: `现在就处理这 ${n} 件事`,
       actionEn: `Handle these ${n} now`,
       action: 'go-confirm',
