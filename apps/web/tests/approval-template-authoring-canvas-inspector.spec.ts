@@ -1246,6 +1246,59 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }
   })
 
+  // ── T5c (test report 2026-10-08): the inspector stays in view on a long flow ──────────────────
+  // jsdom cannot lay anything out, so these pin the MECHANISM; the real-browser proof (scroll the
+  // document to the last node, click it, the inspector heading/footer are in the viewport and not
+  // under the sticky bars) is verification/approval-canvas-sole-surface.spec.ts.
+  it('T5c: on desktop the rail is sticky below the sticky header + step bar and capped to the visible height; the flow card stops clipping sticky; ≤960px stays stacked', () => {
+    const rail = CANVAS_INSPECTOR_SHELL_SOURCE.match(/\.template-authoring__canvas-inspector\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rail).toMatch(/position:\s*sticky;/)
+    expect(rail).toMatch(/top:\s*128px;/)
+    expect(rail).toMatch(/max-height:\s*max\(320px, calc\(100vh - 320px\)\);/)
+    expect(rail).not.toMatch(/max-height:\s*none/)
+    expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(
+      /@media \(max-width: 960px\)\s*\{\s*\.template-authoring__canvas-inspector\s*\{[^}]*position:\s*static;[^}]*max-height:\s*none;/,
+    )
+    // el-card ships overflow:hidden, which makes the CARD the sticky scroller (sticky never engages).
+    expect(PARENT_AUTHORING_SOURCE).toMatch(/\.template-authoring__panel--flow\s*\{\s*overflow:\s*clip;\s*\}/)
+    expect(PARENT_AUTHORING_SOURCE).toMatch(/class="template-authoring__panel template-authoring__panel--flow"/)
+  })
+
+  it('T5c: desktop selection does not drag the page to the inspector (the sticky rail is already in view)', async () => {
+    const originalMatchMedia = window.matchMedia
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    const scrollIntoViewSpy = vi.fn()
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: vi.fn().mockReturnValue({ matches: false }) })
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoViewSpy })
+    try {
+      setRouteParams({ id: 'tpl_t5c_desktop' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+      await mountView()
+      await flushUi()
+      clickCanvasNode('join_1')
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-node')).toBe('join_1')
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(window, 'matchMedia', { configurable: true, value: originalMatchMedia })
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
+    }
+  })
+
+  it('T5c / D0 §5: closing the inspector returns keyboard focus to the node it was editing', async () => {
+    setRouteParams({ id: 'tpl_t5c_focus' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('cc_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-close"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+    const selector = container!.querySelector('[data-canvas-node="cc_1"] [data-testid="approval-canvas-node-select"]')
+    expect(document.activeElement).toBe(selector)
+  })
+
   it('child-owned condition styles apply in the canvas inspector (scoped CSS ownership)', async () => {
     // Source contract: condition layout rules live on the extracted child, not only the parent.
     // (Parent scoped CSS cannot style the child's markup; this guards against regressing that.)

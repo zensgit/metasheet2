@@ -408,12 +408,26 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
 </template>
 
 <style scoped>
-/* B1: full-height right rail flush to the workspace's right edge. `align-items: stretch` +
-   `gap: 0` on the parent row (`.template-authoring__canvas-workspace`, TemplateAuthoringView.vue)
-   already stretch this to the row's full height with no gap before it — that part predates this
-   slice (#4917 restyle removed the old `max-height: min(70vh, 720px)` cap in favor of
-   `max-height: none` below). This slice's OWN scope is the footer action bar (below) and its own
-   internal scroll stays exactly where it already was, on the body region only. */
+/* B1: right rail flush to the workspace's right edge (`align-items: stretch` + `gap: 0` on the
+   parent row, `.template-authoring__canvas-workspace`, TemplateAuthoringView.vue).
+   T5c (test report 2026-10-08) — D0 §5 desktop geometry "full height below header, independent
+   scroll": #4917 removed every cap, so on a long flow this rail became exactly as tall as the
+   canvas and the page (not the canvas) scrolled — selecting a node far down left the inspector's
+   header, actions and settings at the TOP of that tall rail, off screen. The rail now sticks just
+   below the sticky page header + step bar and is capped to the visible height, so its body
+   scrolls on its own (the footer 关闭 stays reachable).
+   - top: the step bar is sticky at `top: 72px` and measures 52px in Chromium
+     (TemplateAuthoringView.vue), so the sticky stack ends at 124px of the scroll container
+     (`.app-main` in the app, the document in the verification harness); 128px leaves a hairline.
+   - max-height: a sticky box is clamped by its containing block (the workspace row). At maximum
+     page scroll the row's bottom sits above the viewport bottom by the card padding, the sticky
+     「下一步」 bar and the shell padding (~120px), and the app nav (50px) sits above the scroll
+     container — the cap leaves room for all of it so the rail is never pushed up under the step
+     bar on the far-down-node path. It also bounds how far inspector content can stretch the row,
+     so a long inspector can no longer drive the stage height up.
+   - sticky only engages because the flow card no longer clips with `overflow: hidden` (see
+     `.template-authoring__panel--flow` in TemplateAuthoringView.vue).
+   ≤960px keeps the stacked presentation (static, scrolled into view on select). */
 .template-authoring__canvas-inspector {
   flex: 0 0 400px;
   width: 400px;
@@ -426,7 +440,9 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   background: var(--el-bg-color);
   display: flex;
   flex-direction: column;
-  max-height: none;
+  position: sticky;
+  top: 128px;
+  max-height: max(320px, calc(100vh - 320px));
   overflow: hidden;
   scroll-margin-top: 164px;
 }
@@ -555,6 +571,7 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   .template-authoring__canvas-inspector {
     flex: 1 1 auto;
     width: 100%;
+    position: static;
     max-height: none;
   }
 }

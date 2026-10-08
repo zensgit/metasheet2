@@ -367,7 +367,11 @@
         </div>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
+      <el-card
+        v-show="activeAuthoringSection === 'flow'"
+        class="template-authoring__panel template-authoring__panel--flow"
+        shadow="never"
+      >
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>审批流程</strong>
@@ -453,7 +457,7 @@
             :can-insert-after="canInsertAfter"
             :can-insert-parallel-after="canInsertParallelAfter"
             :can-remove-node="canRemoveNode"
-            @close="clearCanvasSelection"
+            @close="closeCanvasInspector"
             @move-up="(key) => moveCanvasNodeStep(key, 'up')"
             @move-down="(key) => moveCanvasNodeStep(key, 'down')"
             @begin-move="beginCanvasNodeMove"
@@ -2966,12 +2970,16 @@ const canvasStageStyle = computed<CSSProperties>(() => {
   const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
   const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
   const vpW = canvasViewportState.value.width
-  const vpH = canvasViewportState.value.height
+  // T5c (test report 2026-10-08) — stage min-height ratchet: the viewport's height is content-driven
+  // (no cap since #4917), so feeding its own `clientHeight` back in as the stage's pixel
+  // min-height/height made every enlargement permanent — a zoom-in, a tall inspector stretching
+  // the row, any sync — and the page only ever grew until reload. The stage now sizes from the
+  // canvas content alone; the viewport keeps its own CSS min-height, so short flows look the same.
   return {
     minWidth: '100%',
-    minHeight: vpH ? `${vpH}px` : '100%',
+    minHeight: '100%',
     width: `${Math.max(vpW, scaledW)}px`,
-    height: `${Math.max(vpH, scaledH + 56)}px`,
+    height: `${scaledH + 56}px`,
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'flex-start',
@@ -3035,6 +3043,13 @@ async function selectCanvasNode(nodeKey: string): Promise<void> {
 }
 function clearCanvasSelection(): void {
   selectedCanvasNode.value = null
+}
+/** D0 §5: "closing ... returns focus to the canvas node" — the inspector unmounts on close, which
+ *  would otherwise drop focus to <body>. */
+function closeCanvasInspector(): void {
+  const nodeKey = selectedCanvasNode.value
+  clearCanvasSelection()
+  if (nodeKey) focusCanvasNodeSelector(nodeKey)
 }
 /** Move keyboard focus to a canvas node's selector without scrolling the page (D0 §5 focus
  *  return). No-op when the node is not rendered (e.g. the flag-off rollback list). */
@@ -4542,6 +4557,15 @@ onUnmounted(() => {
   border-color: var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   box-shadow: var(--ms-shadow-card);
+}
+
+/* T5c (test report 2026-10-08): Element Plus ships `.el-card { overflow: hidden }`. An
+   overflow:hidden ancestor becomes the sticky containing scroller (the card never scrolls, so the
+   canvas inspector's `position: sticky` never engaged) and also clips descendants' scroll-margin.
+   `clip` keeps the rounded-corner clipping without creating a scroll container. Scoped to the flow
+   card only. */
+.template-authoring__panel--flow {
+  overflow: clip;
 }
 
 .template-authoring__section-actions {
