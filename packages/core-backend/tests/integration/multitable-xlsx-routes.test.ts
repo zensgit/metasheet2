@@ -426,4 +426,96 @@ describe('multitable xlsx routes', () => {
       vi.unstubAllEnvs()
     }
   })
+
+  // #6204 item 2 (#6181 edge 1): a LOOKUP of a `date` (date-only) column exports each looked-up value as the
+  // `YYYY-MM-DD` day that column shows — the same rule as a direct `date` column (#6182): a day as written keeps its
+  // day, a stored instant is its business-timezone day (Asia/Shanghai default), a value that names no day keeps its
+  // raw text. Before this, only date-TIME lookup targets were formatted and a date lookup exported the raw ISO.
+  test('lookup of a date column exports the YYYY-MM-DD day the column shows (instant on its business day)', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_link', name: 'Orders', type: 'link', property: { foreignSheetId: 'sheet_orders' }, order: 2 },
+      { id: 'fld_day_lookup', name: 'Ship day', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_ship_day', foreignSheetId: 'sheet_orders' }, order: 3 },
+      { id: 'fld_note_lookup', name: 'Note', type: 'lookup', property: { linkFieldId: 'fld_link', targetFieldId: 'fld_note', foreignSheetId: 'sheet_orders' }, order: 4 },
+    ]
+    const foreignFieldRows = [
+      { id: 'fld_ship_day', name: 'Ship day', type: 'date', property: {}, order: 1 },
+      { id: 'fld_note', name: 'Note', type: 'string', property: {}, order: 2 },
+    ]
+    const instant = '2026-09-17T16:00:00.000Z' // 2026-09-18 00:00 北京时间; its UTC day is 09-17
+    const queryHandler: QueryHandler = async (sql, params) => {
+      if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+        const id = String(params?.[0])
+        return { rows: [{ id, base_id: 'base_xlsx', name: id === SHEET_ID ? 'XLSX Sheet' : 'Orders', description: null }] }
+      }
+      if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+        return { rows: [{ id: String(params?.[0]) }] }
+      }
+      if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+        return { rows: params?.[0] === SHEET_ID ? fieldRows : params?.[0] === 'sheet_orders' ? foreignFieldRows : [] }
+      }
+      if (sql.includes('FROM meta_views WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'view_sorted', sheet_id: SHEET_ID, name: 'Sorted', type: 'grid', filter_info: {},
+            sort_info: { rules: [{ fieldId: 'fld_day_lookup', desc: false }] }, group_info: {}, hidden_field_ids: [], config: {},
+          }],
+        }
+      }
+      if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1')) {
+        return { rows: [{ id: 'rec_1', version: 1, data: { fld_name: 'Alpha', fld_link: ['ord_1', 'ord_2', 'ord_3'] }, created_at: null }] }
+      }
+      if (sql.includes('FROM meta_links')) {
+        return {
+          rows: [
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_1' },
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_2' },
+            { field_id: 'fld_link', record_id: 'rec_1', foreign_record_id: 'ord_3' },
+          ],
+        }
+      }
+      if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+        expect(params?.[0]).toBe('sheet_orders')
+        return {
+          rows: [
+            { id: 'ord_1', data: { fld_ship_day: instant, fld_note: instant } },
+            { id: 'ord_2', data: { fld_ship_day: '2026-09-20', fld_note: 'plain' } },
+            { id: 'ord_3', data: { fld_ship_day: 'not a day', fld_note: 'x' } },
+          ],
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+    try {
+      const { app } = await createApp({ tokenPerms: ['multitable:read'], queryHandler })
+      const csvResponse = await request(app)
+        .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv&viewId=view_sorted`)
+        .buffer(true)
+        .parse(parseBody)
+        .expect(200)
+      const lines = Buffer.from(csvResponse.body).toString('utf8').replace(/^﻿/, '').split(/\r?\n/)
+      expect(lines[0]).toBe('Name,Orders,Ship day,Note')
+      // Ship day: instant → its business day (raw ISO before; its UTC day would be 09-17), day as written kept,
+      // junk kept raw. Note (a text target holding the same ISO text) stays raw: the format follows the TYPE.
+      expect(lines[1]).toBe(`Alpha,"ord_1, ord_2, ord_3","2026-09-18, 2026-09-20, not a day","${instant}, plain, x"`)
+
+      const xlsxResponse = await request(app)
+        .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?viewId=view_sorted`)
+        .buffer(true)
+        .parse(parseBody)
+        .expect(200)
+      const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+      const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' }) as unknown[][]
+      expect(rows[1]?.[2]).toBe('2026-09-18, 2026-09-20, not a day')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
 })
