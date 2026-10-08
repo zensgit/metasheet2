@@ -35,7 +35,8 @@ on:
 jobs:
   browser-verify:
     name: Approval browser verify (chromium)
-    runs-on: ubuntu-latest
+    # Same expression as plugin-tests.yml `test` (afd32b704). Unset MS2_PLUGIN_RUNNER keeps ubuntu-latest.
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout repository

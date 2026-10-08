@@ -54,7 +54,8 @@ permissions:
 jobs:
   recovery-schema-drift:
     name: recovery-schema-drift
-    runs-on: ubuntu-latest
+    # Same expression as plugin-tests.yml `test` (afd32b704). Unset MS2_PLUGIN_RUNNER keeps ubuntu-latest.
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 25
     services:
       postgres:
