@@ -164,17 +164,31 @@ export function formatDateTimeValue(value: unknown, timeZone: string): string | 
 // Beyond this an epoch-ms is not a representable `Date` and `Intl` throws (`RangeError`) formatting it.
 const MAX_EPOCH_MS = 8.64e15
 
+// #6204: PostgreSQL's text form of a timestamptz ends in an HOUR-ONLY offset (`2026-09-17 16:00:00+00`); the ISO
+// grammar wants `±hh:mm`. Anchored on the time part before it, so a bare day's `-DD` is never read as an offset.
+// Same pattern and rewrite as the web's `formatBusinessTimestamp` (apps/web business-timezone.ts
+// HOUR_ONLY_OFFSET_RE), which the web's `formatDateOnlyValue` goes through. Applied to date-only values only —
+// date-time parsing (import / REST / filters) is unchanged.
+const DATE_ONLY_HOUR_OFFSET_RE = /(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)([+-]\d{2})$/
+
 /**
  * #6181: `YYYY-MM-DD` of a STORED `date` (date-only) value — the day the grid shows it on (the web's
- * field-display.ts `formatDateOnlyValue`, #6178):
+ * `formatDateOnlyValue`, #6178; apps/web business-timezone.ts since #6204):
  *
  *   - a day as written — no time part: `2026-09-18`, `2026/9/18`, `2026年9月18日` — keeps that day, no zone math;
- *   - an instant — `2026-09-17T16:00:00.000Z`, a zone-less `2026-09-18 08:00` (a wall clock in `timeZone`), an
- *     epoch number, a Date — is the day it falls on in `timeZone` (`2026-09-18` in Asia/Shanghai), never the
- *     UTC day of the instant.
+ *   - an instant — `2026-09-17T16:00:00.000Z`, `±hh:mm` / `±hhmm`, PostgreSQL's hour-only offset
+ *     (`2026-09-17 16:00:00+00`, #6204), a zone-less `2026-09-18 08:00` (a wall clock in `timeZone`), an epoch-ms
+ *     number, a Date — is the day it falls on in `timeZone` (`2026-09-18` in Asia/Shanghai), never the UTC day of
+ *     the instant.
  *
- * `null` when the value names no day (junk, an impossible date, an unrepresentable epoch) — the caller keeps its
- * raw projection.
+ * `null` when the value names no day — the caller keeps its raw projection: junk, an impossible date, an
+ * unrepresentable epoch, an ISO-ish day with text glued on (`2026-09-18Z`: no time, so not an instant), a string
+ * that is just a number (`2026`, `20260918`, `1758211200000` — never guessed as a year, a yyyymmdd or an epoch).
+ *
+ * ONE rule with the web (#6204 / #6181 edges): the web helper gives the same day / `null` for every input listed
+ * above (both specs carry the same cases). Web-only, pre-existing: a spelling only `Date.parse` reads
+ * (`9/18/2026`) and a day followed by non-time text keep their day there; here they stay raw — zone-less text
+ * outside the grammar is never handed to `Date.parse` on the server (it would read the PROCESS zone).
  */
 export function formatDateOnlyValue(value: unknown, timeZone: string): string | null {
   if (typeof value === 'string') {
@@ -184,7 +198,8 @@ export function formatDateOnlyValue(value: unknown, timeZone: string): string | 
       return isValidWallClockParts(parts) ? `${pad(parts.year, 4)}-${pad(parts.month)}-${pad(parts.day)}` : null
     }
   }
-  const ms = dateTimeValueToUtcMs(value, timeZone)
+  const input = typeof value === 'string' ? value.trim().replace(DATE_ONLY_HOUR_OFFSET_RE, '$1$2:00') : value
+  const ms = dateTimeValueToUtcMs(input, timeZone)
   if (ms === null || !(Math.abs(ms) <= MAX_EPOCH_MS)) return null
   const p = getZonedParts(ms, timeZone)
   return `${pad(p.year, 4)}-${pad(p.month)}-${pad(p.day)}`
