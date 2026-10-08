@@ -636,6 +636,7 @@ main() {
     "thresholds_file": "$THRESHOLDS_FILE"
   },
   "percentiles": $(echo "$percentiles_json" | jq '.metrics'),
+  "sampling": $(echo "$percentiles_json" | jq '.sampling'),
   "counters": {
     "cache_hit_rate": $cache_hit_rate,
     "cache_hit_rate_source": "$cache_hit_rate_source",
