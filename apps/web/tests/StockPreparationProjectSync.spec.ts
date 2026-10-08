@@ -34,6 +34,7 @@ import {
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
 } from '../src/services/integration/stockPreparation/projectSync'
+import { STOCK_PREP_SYNC_REASON_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
 
 const PROJECT_NO = 'P2026-001'
 
@@ -358,6 +359,13 @@ describe('項目接入 — the four-step import run', () => {
     })
     const report = await runStockPreparationProjectSync(api, PROJECT_NO)
     expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_NOT_PERMITTED' })
+    // R-33 (2026-10-08): the sentence under that reason names the code that is actually missing —
+    // the 拉取人员's pull — and never sends a floor operator to obtain 「备料操作」, which they hold.
+    const plain = STOCK_PREP_SYNC_REASON_PLAIN.PLAN_READ_NOT_PERMITTED
+    expect(plain.zhNext).toContain('拉取人员')
+    expect(plain.zhNext).not.toContain('备料操作')
+    expect(plain.enNext).toContain('pull')
+    expect(plain.enNext).not.toContain('operate permission')
   })
 
   it('G-3h2: a bare 401 on the plan is its own reason — an expired session, not a permission refusal', async () => {

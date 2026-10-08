@@ -294,7 +294,9 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    // R-33 (2026-10-08): the default actor is the 拉取人员 (read+operate+PULL) — the person who runs
+    // the board's pull. The floor operator (no pull) is exercised by name where the pull is the point.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
     h.roles = []
     routeApi()
     resetStockPreparationOperatorHomeDirectoryThrottle()
@@ -782,7 +784,9 @@ describe('项目备料页 — the operator project board', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    // R-33 (2026-10-08): the default actor is the 拉取人员 (read+operate+PULL) — the person who runs
+    // the board's pull. The floor operator (no pull) is exercised by name where the pull is the point.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
     h.roles = []
     routeApi()
     routerPush.mockReset()
@@ -884,14 +888,22 @@ describe('项目备料页 — the operator project board', () => {
       .toEqual(backendAccess.STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS.map((step: Record<string, unknown>) => ({ ...step })))
 
     // The web predicate and the server rule must admit the same principals for the pull action.
+    // R-33 (2026-10-08): the tier is PULL — the puller is admitted, the floor operator is not.
+    const admitted: Record<string, boolean> = {}
     for (const actor of [
+      { permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], roles: [] as string[] },
       { permissions: ['stock-prep:read', 'stock-prep:operate'], roles: [] as string[] },
+      { permissions: ['stock-prep:read', 'stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:operate', 'stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:pull'], roles: [] as string[] },
+      { permissions: ['stock-prep:admin'], roles: [] as string[] },
       { permissions: ['stock-prep:operate'], roles: [] as string[] },
       { permissions: ['stock-prep:read'], roles: [] as string[] },
       { permissions: ['integration:write'], roles: [] as string[] },
       { permissions: ['integration:admin'], roles: ['admin'] },
       { permissions: [] as string[], roles: [] as string[] },
     ]) {
+      admitted[actor.permissions.join('+') || '(none)'] = canRunStockPrepProjectSync({ roles: actor.roles, permissions: actor.permissions })
       h.permissions = [...actor.permissions]
       h.roles = [...actor.roles]
       const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
@@ -900,6 +912,16 @@ describe('项目备料页 — the operator project board', () => {
       const legacyAdmin = flattened.includes('integration:admin') || flattened.includes('role:admin')
       expect(canRunStockPrepProjectSync({ roles: h.roles, permissions: h.permissions })).toBe(serverAdmitsOperator || legacyAdmin)
     }
+    // LITERAL expectations as well as parity, so the parity cannot be satisfied by both sides being
+    // wrong together: the puller and the two admins are in, the floor operator and every degenerate
+    // grant are out.
+    expect(admitted['stock-prep:read+stock-prep:operate+stock-prep:pull'], 'the 拉取人员 pulls').toBe(true)
+    expect(admitted['stock-prep:admin'], 'stock-prep:admin pulls through the ladder').toBe(true)
+    expect(admitted['integration:admin'], 'the platform admin pulls').toBe(true)
+    expect(admitted['stock-prep:read+stock-prep:operate'], 'the floor operator no longer pulls (R-33)').toBe(false)
+    expect(admitted['stock-prep:read+stock-prep:pull'], 'pull without operate confers nothing').toBe(false)
+    expect(admitted['stock-prep:operate+stock-prep:pull'], 'pull without read confers nothing').toBe(false)
+    expect(admitted['stock-prep:pull'], 'pull alone confers nothing').toBe(false)
   })
 
   // ---- B-02 the handoff button is optional ---------------------------------------------------
@@ -1449,6 +1471,41 @@ describe('项目备料页 — the operator project board', () => {
     expect(empty.textContent).toContain('平台管理员')
   })
 
+  it('B-14 / R-33: the floor operator (read+operate, no pull) is sent to the 拉取人员, never at a button they do not have', async () => {
+    // The actor the 2026-10-08 ruling is about: the floor operator opens the board
+    // (canOpenStockPrepProjectBoard) but no longer satisfies canRunStockPrepProjectSync.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.textContent).toContain('还没有数据')
+    expect(empty.textContent).toContain('请联系拉取人员')
+    // Not pointed at the control: the empty state does not name 从PLM拉取数据 as something to press…
+    expect(empty.textContent).not.toContain('下面的「从PLM拉取数据」')
+    // …and not told to get a permission they already hold.
+    expect(empty.textContent).not.toContain('备料操作权限')
+    // The pull control itself is absent and the panel says why, in the same words.
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
+    const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
+    expect(denied).not.toBeNull()
+    expect(denied.textContent).toContain('请联系拉取人员')
+  })
+
+  it('B-14 / R-33: the 拉取人员 keeps the self-serve empty state and the pull control', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    h.roles = []
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const empty = root.querySelector('[data-testid="stock-prep-project-board-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.textContent).toContain('下面的「从PLM拉取数据」')
+    expect(empty.textContent).not.toContain('请联系拉取人员')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
+  })
+
   // ---- B-15: A STALE RESPONSE NEVER OVERWRITES THE PROJECT THE OPERATOR JUST OPENED -----------
 
   it('B-15: an in-flight refresh cannot land on a newly opened project', async () => {
@@ -1876,6 +1933,14 @@ describe('项目备料页 — the operator project board', () => {
     // the 「拉一个新项目」 heading and the honest sentence, never a second box with the same label.
     expect(root.querySelectorAll('[data-testid="stock-prep-project-board-input"]').length).toBe(1)
     expect(root.querySelectorAll('input[list="stock-prep-board-directory-options"]').length).toBe(1)
+    // R-33: the board WIRES its own pull predicate into the home (`:can-pull="canRunPull"`), so the
+    // puller (this file's default actor) sees 「拉一个新项目」 and an operate-only mount sees the
+    // 「打开一个项目」 variant instead of an invitation to pull.
+    expect(root.querySelector('.sp-home__quick-open-title')?.textContent).toContain('拉一个新项目')
+    remount()
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    const floor = await mountBoard({ projectNo: '' })
+    expect(floor.querySelector('.sp-home__quick-open-title')?.textContent).toContain('打开一个项目')
   })
 
   it('P0-2: every OTHER spec in this file seeds a projectNo and therefore never sees the home page', async () => {
