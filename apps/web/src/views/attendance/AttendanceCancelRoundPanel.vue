@@ -263,8 +263,17 @@ const showEntry = computed(() =>
 const launchBlocked = computed(() => round.value?.outcome === 'pending')
 
 const statusKey = computed(() => (round.value ? cancelRoundStatusKeyFromSummary(round.value) : 'status_unavailable'))
+/**
+ * 「请假仍然有效」 is said only of a leave that IS still approved (reviewer finding F2, 2026-10-08): the round
+ * did not cancel it (V1 / V3–V6), the row says approved (a leave cancelled some other way — the direct
+ * cancel, which leaves the round alone — never shows it), and the round was not closed BECAUSE the leave
+ * is no longer approved: that block code comes from the fresh summary read and wins over a parent row
+ * that may be stale or diverge from the original document.
+ */
 const leaveStillValid = computed(() =>
-  ['cancellation_pending_approval', 'cancellation_rejected', 'cancellation_withdrawn', 'cancellation_window_closed', 'cancellation_blocked']
+  props.request.status === 'approved'
+  && round.value?.blockCode !== 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED'
+  && ['cancellation_pending_approval', 'cancellation_rejected', 'cancellation_withdrawn', 'cancellation_window_closed', 'cancellation_blocked']
     .includes(statusKey.value),
 )
 const blockCopy = computed(() => describeCancelRoundBlock(round.value?.blockCode, isZh.value))
