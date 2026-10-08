@@ -114,6 +114,19 @@ vi.mock('../src/approvals/api', () => ({
   listTemplateCategories: () => listTemplateCategoriesSpy(),
 }))
 
+// T2 (record-link target pickers on the default Designer 2.0 surface): the record-link catalog is
+// the ONE network dependency the authoring view owns for record-link fields (F0 gate #2). Control
+// it deterministically instead of letting the real MultitableApiClient hit the network. Only a draft
+// that contains a record-link field ever reaches it, so every other test in this file is unaffected.
+const listBasesSpy = vi.fn()
+const listSheetsSpy = vi.fn()
+vi.mock('../src/multitable/api/client', () => ({
+  multitableClient: {
+    listBases: (...args: unknown[]) => listBasesSpy(...args),
+    listSheets: (...args: unknown[]) => listSheetsSpy(...args),
+  },
+}))
+
 vi.mock('element-plus', () => ({
   ElMessage: {
     success: vi.fn(),
@@ -4295,6 +4308,199 @@ describe('TemplateAuthoringView', () => {
       // deliberate resync, not silently reset to some OTHER count).
       const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
       expect(cards.length).toBe(beforeSave)
+    })
+
+    // ── T2 (test report 2026-10-08): on the DEFAULT surface (flag ON) a record-link field had no
+    // target picker anywhere — only the flag-OFF inline editor carried one — so 保存草稿 and 发布
+    // were both blocked by「需要选择目标空间与目标表」. Delta §3.4 + parity ledger deferral (3):
+    // the inspector carries the typed base/sheet pickers over the PARENT-OWNED catalog.
+    describe('record-link target base/sheet pickers in the Designer 2.0 inspector (delta §3.4)', () => {
+      const BASE_SELECT = 'approval-form-field-inspector-record-link-base'
+      const SHEET_SELECT = 'approval-form-field-inspector-record-link-sheet'
+
+      beforeEach(() => {
+        approvalCanvasV2.value = true
+        listBasesSpy.mockReset()
+        listSheetsSpy.mockReset()
+        listBasesSpy.mockResolvedValue({
+          bases: [
+            { id: 'base_alpha', name: '销售空间' },
+            { id: 'base_beta', name: '客服空间' },
+          ],
+        })
+        listSheetsSpy.mockResolvedValue({
+          sheets: [
+            { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+            { id: 'sheet_beta_1', name: '工单表', baseId: 'base_beta' },
+          ],
+        })
+      })
+
+      function byTestId<T extends HTMLElement = HTMLElement>(testid: string): T | null {
+        return container!.querySelector(`[data-testid="${testid}"]`) as T | null
+      }
+
+      function optionTexts(testid: string): string[] {
+        const select = byTestId<HTMLSelectElement>(testid)
+        return select ? Array.from(select.options).map((option) => option.textContent?.trim() ?? '') : []
+      }
+
+      async function changeSelect(testid: string, value: string): Promise<void> {
+        const select = byTestId<HTMLSelectElement>(testid)
+        expect(select, `${testid} must be rendered`).not.toBeNull()
+        select!.value = value
+        select!.dispatchEvent(new Event('change', { bubbles: true }))
+        await flushUi()
+      }
+
+      async function publishFieldsCheck(): Promise<{ ok: string | null; text: string }> {
+        byTestId<HTMLButtonElement>('approval-template-publish-button')!.click()
+        await flushUi()
+        const dialog = byTestId('approval-publish-checklist')
+        expect(dialog).not.toBeNull()
+        const item = dialog!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')!
+        const result = { ok: item.getAttribute('data-ok'), text: item.textContent ?? '' }
+        const cancel = Array.from(dialog!.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === '取消',
+        )
+        cancel!.click()
+        await flushUi()
+        return result
+      }
+
+      it('palette add → pick base and sheet in the inspector → the 表单字段 publish check passes and 保存草稿 pins exactly { baseId, sheetId }', async () => {
+        await mountView()
+        setInput('approval-template-name', '关联记录审批')
+        await flushUi()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+
+        const linkCard = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        )
+        expect(linkCard?.getAttribute('data-selected')).toBe('true')
+        expect(listBasesSpy).toHaveBeenCalledTimes(1)
+
+        // The tester's screenshot state: the 表单字段 item fails on the missing target.
+        const before = await publishFieldsCheck()
+        expect(before.ok).toBe('false')
+        expect(before.text).toContain('需要选择目标空间与目标表')
+
+        // The default surface now carries the typed pickers (business names only).
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间', '客服空间'])
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        expect(optionTexts(SHEET_SELECT)).toEqual(['请选择目标表', '订单表'])
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+
+        const after = await publishFieldsCheck()
+        expect(after.ok).toBe('true')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = createTemplateSpy.mock.calls[0][0] as {
+          formSchema: { fields: Array<{ type: string; props?: unknown }> }
+        }
+        const linkField = payload.formSchema.fields.find((entry) => entry.type === 'record-link')
+        expect(linkField?.props).toEqual({ baseId: 'base_alpha', sheetId: 'sheet_alpha_1' })
+      })
+
+      it('retyping an existing field INTO record-link in the inspector reaches the same pickers (no configuration dead-end)', async () => {
+        await mountView()
+        setInput('approval-template-name', '改类型为关联记录')
+        await flushUi()
+        expect(byTestId(BASE_SELECT)).toBeNull()
+
+        await changeSelect('approval-form-field-inspector-type', 'record-link')
+        const retyped = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        )
+        expect(retyped).not.toBeNull()
+        expect(listBasesSpy).toHaveBeenCalledTimes(1)
+
+        await changeSelect(BASE_SELECT, 'base_beta')
+        await changeSelect(SHEET_SELECT, 'sheet_beta_1')
+        const check = await publishFieldsCheck()
+        expect(check.ok).toBe('true')
+      })
+
+      it('an edit-mode template whose saved target is no longer in the catalog shows 目标不可用 and the publish check names it; re-picking in the inspector repairs it and the update payload carries the new pins', async () => {
+        setRouteParams({ id: 'tpl_record_link' })
+        getTemplateSpy.mockResolvedValue(buildTemplate({
+          formSchema: {
+            fields: [
+              { id: 'amount', type: 'number', label: '金额', required: true },
+              { id: 'reviewer', type: 'user', label: '审批人', required: true },
+              {
+                id: 'linked',
+                type: 'record-link',
+                label: '客户关联',
+                props: { baseId: 'base_gone', sheetId: 'sheet_gone' },
+              },
+            ],
+          },
+        }))
+        await mountView()
+        await flushUi()
+
+        const linkCard = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        ) as HTMLElement
+        expect(linkCard).not.toBeNull()
+        linkCard.click()
+        await flushUi()
+
+        const base = byTestId<HTMLSelectElement>(BASE_SELECT)!
+        expect(base.value).toBe('base_gone')
+        expect(base.options[base.selectedIndex]?.textContent?.trim()).toBe('目标不可用')
+        expect(container!.textContent).not.toMatch(/base_gone|sheet_gone/)
+
+        const stale = await publishFieldsCheck()
+        expect(stale.ok).toBe('false')
+        expect(stale.text).toContain('目标不可用，请重新选择目标空间与目标表')
+
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+        const repaired = await publishFieldsCheck()
+        expect(repaired.ok).toBe('true')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = updateTemplateSpy.mock.calls[0][1] as {
+          formSchema: { fields: Array<{ id: string; props?: unknown }> }
+        }
+        expect(payload.formSchema.fields.find((entry) => entry.id === 'linked')?.props).toEqual({
+          baseId: 'base_alpha',
+          sheetId: 'sheet_alpha_1',
+        })
+      })
+
+      it('a catalog failure shows the parent-owned error with 重试 inside the inspector; retry refetches through the view and fills the pickers', async () => {
+        listBasesSpy.mockRejectedValue(new Error('catalog unavailable'))
+        listSheetsSpy.mockRejectedValue(new Error('catalog unavailable'))
+        await mountView()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+
+        const error = byTestId('approval-form-field-inspector-record-link-catalog-error')
+        expect(error?.textContent).toContain('关联表目录加载失败，请重试')
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间'])
+
+        listBasesSpy.mockResolvedValue({ bases: [{ id: 'base_alpha', name: '销售空间' }] })
+        listSheetsSpy.mockResolvedValue({
+          sheets: [{ id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' }],
+        })
+        byTestId<HTMLButtonElement>('approval-form-field-inspector-record-link-catalog-retry')!.click()
+        await flushUi()
+        await flushUi()
+
+        expect(listBasesSpy).toHaveBeenCalledTimes(2)
+        expect(byTestId('approval-form-field-inspector-record-link-catalog-error')).toBeNull()
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间'])
+      })
     })
   })
   })
