@@ -19,7 +19,10 @@
  *    `withPermission('attendance:approve')`, the nine keys of each `listed.push({ … })` item equal the
  *    client's `PendingCancelRoundItem` fields, and the success envelope `data: { items, total }` — the
  *    three anchors design MD §11.10 names for the stacked tree (B2 gate P3-2);
- *  - the decision / withdraw bodies accept `expectedRoundId` and the client's decision sends it (phase D D2).
+ *  - the decision / withdraw bodies accept `expectedRoundId` and the client's decision and withdraw send it
+ *    (phase D D2; the withdraw half since the 2026-10-08 reviewer finding F1). The wire-body assertions in
+ *    the Core / AttendancePanel / CenterRoute / DetailView specs are the authority; these text pins only
+ *    keep the two client functions' shapes from drifting apart.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -94,11 +97,13 @@ describe('write-route success body (owner 14:3x 「Minimal action response」)',
     expect(withdraw).toContain('respondCancelRoundActionOutcome(res, request.requestId, result.round)')
   })
 
-  it('the client reads the decided round from data.roundId (the key the server sends)', async () => {
+  it('the client reads the decided and the withdrawn round from data.roundId (the key the server sends)', async () => {
     const source = read('apps/web/src/approvals/cancelRound.ts')
-    const decide = blockAfter(source, 'export async function decideCancelRound(')
-    expect(decide).toContain('data?.roundId')
-    expect(decide).not.toMatch(/payload\??\.roundId/)
+    for (const head of ['export async function decideCancelRound(', 'export async function withdrawCancelRound(']) {
+      const body = blockAfter(source, head)
+      expect(body, head).toContain('data?.roundId')
+      expect(body, head).not.toMatch(/payload\??\.roundId/)
+    }
   })
 })
 
@@ -214,7 +219,7 @@ describe('attendance-side pending list (owner 16:5x 「Attendance-side list」; 
 })
 
 describe('the listed round travels with the decision (phase D D2)', () => {
-  it('the decision and withdraw bodies accept expectedRoundId and hand it to the port; the client decision sends it', () => {
+  it('the decision and withdraw bodies accept expectedRoundId and hand it to the port; the client decision and withdraw send it', () => {
     const decisionSchema = blockAfter(PLUGIN, 'const cancelRoundDecisionBodySchema = z.object(')
     const withdrawSchema = blockAfter(PLUGIN, 'const cancelRoundWithdrawBodySchema = z.object(')
     expect(decisionSchema).toContain('expectedRoundId: z.string()')
@@ -225,6 +230,7 @@ describe('the listed round travels with the decision (phase D D2)', () => {
     expect(withdraw).toContain('expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId)')
     const client = read('apps/web/src/approvals/cancelRound.ts')
     expect(blockAfter(client, 'export async function decideCancelRound(')).toContain("withOptionalText('expectedRoundId', expectedRoundId)")
+    expect(blockAfter(client, 'export async function withdrawCancelRound(')).toContain("withOptionalText('expectedRoundId', expectedRoundId)")
     // the stale refusal the client maps is the one the port answers
     expect(PORT).toMatch(/code: APPROVAL_ERROR_CODES\.INVALID_STATUS_TRANSITION/)
     expect(blockAfter(client, 'export async function decideListedCancelRound(')).toContain("=== 'INVALID_STATUS_TRANSITION'")
