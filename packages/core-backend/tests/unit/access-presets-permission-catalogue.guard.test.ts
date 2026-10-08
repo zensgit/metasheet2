@@ -21,8 +21,17 @@
  *     that is neither a literal nor a bound parameter) stops the test;
  *   - a migration whose `up()` source contains an insert into `permissions` but yields no code stops
  *     the test.
- * A migration this reader misses can only make the catalogue smaller, which turns this test red, not
- * green.
+ * Known limits (review of #6253): the reader only runs migrations whose SOURCE TEXT contains a raw SQL
+ * `INSERT INTO permissions` / `DELETE FROM permissions` / `UPDATE permissions`; a migration that removes
+ * or renames a code through the query builder (`db.deleteFrom('permissions')`,
+ * `db.updateTable('permissions').set({ code })`) or through a `.sql` file would NOT be run here, so the
+ * catalogue it derives could then be WIDER than a fresh install's. None exists today; if one is added,
+ * extend the pre-filter (or drop it and run every `up()`).
+ *
+ * What this test proves is the FRESH-INSTALL catalogue. A database that ran a migration before that
+ * migration was later edited to add a code (this happened once: `attendance:import` was added to
+ * `zzzz20260117090000_add_attendance_permissions.ts` on 2026-05-13) does not have that code unless a
+ * forward migration or a runtime path inserts it; such upgraded databases are outside this guard.
  *
  * Runtime self-registration (PluginRbacProvisioningService, attendance-admin role templates) and the
  * dev seed (scripts/seed-rbac.ts) are not counted: a preset must work on a fresh install whatever
