@@ -665,6 +665,7 @@ import {
   getApproval,
   getPendingCount,
   markAllApprovalsRead,
+  markApprovalRead,
   remindApproval,
   listTemplates,
   type ApprovalCsvExportResult,
@@ -1769,13 +1770,46 @@ watch(
   [selectedApprovalId, masterDetailEnabled],
   ([id, enabled]) => {
     if (enabled && id) {
-      void paneController.select(id)
+      void paneController.select(id).then(() => markPaneSelectionRead(id))
     } else {
       paneController.clear()
     }
   },
   { immediate: true },
 )
+
+// Opening an item in the wide-screen pane IS opening it. The full detail page records the read on
+// every load (ApprovalDetailView's `loadDetailPage` → `markApprovalRead`); the pane never did, so
+// a user at >= 1440px who only ever previewed items there produced no `approval_reads` row at all
+// and the 待我处理 unread dot / header 未读 count never cleared for them.
+//
+// Called ONLY from the selection watcher above, once the pane has actually rendered THIS
+// selection: a failed fetch, or one superseded by a later selection or a close, marks nothing.
+// The post-reload pane refresh inside `loadCurrentTab()` goes through `paneController.select`
+// directly and does not re-mark. Every selection made with Up/Down marks its row read too — it is
+// shown in the pane exactly like a clicked one. Fire-and-forget like the detail page: this is
+// presence data, a failure is silent and never a toast. On success the row's own dot is cleared in
+// place and the badge re-polled, so neither waits for the next list reload.
+function markPaneSelectionRead(id: string): void {
+  if (selectedApprovalId.value !== id || paneApproval.value?.id !== id) return
+  void Promise.resolve()
+    .then(() => markApprovalRead(id))
+    .then(() => {
+      clearRowUnreadMarkers(id)
+      void refreshPendingBadgeCount()
+    })
+    .catch(() => {})
+}
+
+// Clears the read-state marker(s) of the row just read in the pane, on the active tab's loaded
+// page, without reloading the list (a reload would drop the 批量 selection). Only ever flips a
+// marker the server set to "unread" to "read"; a row the server left unannotated stays so.
+function clearRowUnreadMarkers(id: string): void {
+  for (const row of activeTabRows.value) {
+    if (row.id !== id) continue
+    if (row.isRead === false) row.isRead = true
+  }
+}
 
 // B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
 // raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
