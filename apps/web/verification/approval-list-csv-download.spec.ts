@@ -173,12 +173,21 @@ test.describe('approval center — 导出 CSV', () => {
     expect(exportRequest.params.getAll('format')).toEqual(['csv'])
     expect(exportRequest.params.has('page')).toBe(false)
     expect(exportRequest.params.has('pageSize')).toBe(false)
-    const { format, ...exportFilters } = Object.fromEntries(exportRequest.params.entries())
+    // T1: besides `format`, the real page now asks for user-facing column labels in the language it
+    // shows — `header` and `lang` are pulled out here exactly like `format`, so the comparison below
+    // is still "the export's FILTERS equal the list's filters". The harness pins zh-CN.
+    const { format, header, lang, ...exportFilters } = Object.fromEntries(exportRequest.params.entries())
     expect(format).toBe('csv')
+    expect(header).toBe('label')
+    expect(lang).toBe('zh')
+    expect(exportRequest.params.getAll('header')).toEqual(['label'])
+    expect(exportRequest.params.getAll('lang')).toEqual(['zh'])
     const lastList = seen.listRequests.at(-1)!
     // Positive control: the list request really carried paging and the two applied filters.
     expect(lastList.get('page')).toBe('1')
     expect(lastList.get('pageSize')).not.toBeNull()
+    expect(lastList.has('header')).toBe(false)
+    expect(lastList.has('lang')).toBe(false)
     expect(exportFilters).toEqual(withoutPaging(lastList))
     expect(exportFilters).toMatchObject({ tab: 'pending', sourceSystem: 'platform', search: 'PO-2026' })
 

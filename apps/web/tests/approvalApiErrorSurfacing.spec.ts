@@ -334,6 +334,111 @@ describe('exportApprovalsCsv (F3-E1)', () => {
     expect(requestOf(fetchMock).url.search).toBe('?format=csv')
   })
 
+  // T1 (tester report 20261008, item 1) — header mode is OPT-IN. Every pin above is deliberately
+  // left exactly as it was: a call with no options is byte-identical to before this change, so those
+  // pins still describe the default request (and keep proving that nothing is sent unasked). The
+  // cases below pin the new surface: the options add exactly `header` and `lang`, with their values.
+  describe('T1: header mode and language (opt-in second argument)', () => {
+    const FILTERS = {
+      tab: 'mine' as const,
+      status: 'approved' as const,
+      search: '采购 A&B',
+      sourceSystem: 'platform' as const,
+      templateId: 'tpl_7',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+
+    it.each(['zh', 'en'] as const)('{ header: label, lang: %s } adds exactly those two keys, with those values, beside every filter and format', async (lang) => {
+      const { response } = csvResponse(FULL_HEADERS)
+      const fetchMock = vi.fn().mockResolvedValue(response)
+      await withFetch(fetchMock, () => exportApprovalsCsv(FILTERS, { header: 'label', lang }))
+      const { url } = requestOf(fetchMock)
+      expect(Object.fromEntries(url.searchParams.entries())).toEqual({
+        ...FILTERS,
+        format: 'csv',
+        header: 'label',
+        lang,
+      })
+      expect(url.searchParams.getAll('header')).toEqual(['label'])
+      expect(url.searchParams.getAll('lang')).toEqual([lang])
+      expect(url.searchParams.getAll('format')).toEqual(['csv'])
+    })
+
+    it('an options-only call (no filters) is exactly format + header + lang, in that order', async () => {
+      const { response } = csvResponse(FULL_HEADERS)
+      const fetchMock = vi.fn().mockResolvedValue(response)
+      await withFetch(fetchMock, () => exportApprovalsCsv(undefined, { header: 'label', lang: 'en' }))
+      expect(requestOf(fetchMock).url.search).toBe('?format=csv&header=label&lang=en')
+    })
+
+    it('each option is sent only when given: header alone, lang alone, and an empty options object', async () => {
+      for (const [options, keys] of [
+        [{ header: 'code' as const }, ['format', 'header', 'tab']],
+        [{ lang: 'zh' as const }, ['format', 'lang', 'tab']],
+        [{}, ['format', 'tab']],
+      ] as const) {
+        const { response } = csvResponse(FULL_HEADERS)
+        const fetchMock = vi.fn().mockResolvedValue(response)
+        await withFetch(fetchMock, () => exportApprovalsCsv({ tab: 'pending' }, options))
+        expect([...requestOf(fetchMock).url.searchParams.keys()].sort()).toEqual(keys)
+      }
+    })
+
+    it('POSITIVE CONTROL: with no options at all nothing about headers or language is sent (the default stays server-side)', async () => {
+      const { response } = csvResponse(FULL_HEADERS)
+      const fetchMock = vi.fn().mockResolvedValue(response)
+      await withFetch(fetchMock, () => exportApprovalsCsv(FILTERS))
+      const { url } = requestOf(fetchMock)
+      expect(url.searchParams.has('header')).toBe(false)
+      expect(url.searchParams.has('lang')).toBe(false)
+    })
+
+    it('still never sends limit / offset / paging of its own when options are given', async () => {
+      const { response } = csvResponse(FULL_HEADERS)
+      const fetchMock = vi.fn().mockResolvedValue(response)
+      await withFetch(fetchMock, () => exportApprovalsCsv({ tab: 'pending', ...({ page: 3, pageSize: 10 } as object) }, { header: 'label', lang: 'zh' }))
+      expect([...requestOf(fetchMock).url.searchParams.keys()].sort()).toEqual(['format', 'header', 'lang', 'tab'])
+    })
+
+    it('with options, the export still carries exactly the filters listApprovals sends for the same query, and the list request carries neither option', async () => {
+      const { response } = csvResponse(FULL_HEADERS)
+      const fetchMock = vi.fn(async (rawUrl: string) => (
+        new URL(rawUrl).searchParams.get('format') === 'csv'
+          ? response
+          : { ok: true, status: 200, json: async () => ({ data: [], total: 0 }), clone() { return this } }
+      ))
+      vi.resetModules()
+      vi.stubEnv('DEV', false)
+      vi.stubGlobal('fetch', fetchMock)
+      try {
+        const api = await import('../src/approvals/api')
+        await api.listApprovals({ ...FILTERS, page: 2, pageSize: 10 })
+        await api.exportApprovalsCsv(FILTERS, { header: 'label', lang: 'zh' })
+      } finally {
+        vi.unstubAllEnvs()
+        vi.unstubAllGlobals()
+        vi.resetModules()
+      }
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const [listParams, exportParams] = fetchMock.mock.calls.map(([rawUrl]) => (
+        Object.fromEntries(new URL(rawUrl).searchParams.entries())
+      ))
+      // Positive control: the list request really went out with paging and its filters.
+      expect(listParams).toMatchObject({ page: '2', pageSize: '10', tab: 'mine', status: 'approved' })
+      expect(listParams).not.toHaveProperty('header')
+      expect(listParams).not.toHaveProperty('lang')
+      const { page: _page, pageSize: _pageSize, ...listFilters } = listParams
+      const { format, header, lang, ...exportFilters } = exportParams
+      expect(format).toBe('csv')
+      expect(header).toBe('label')
+      expect(lang).toBe('zh')
+      expect(exportFilters).toEqual(listFilters)
+      expect(Object.keys(exportFilters).sort()).toEqual(Object.keys(FILTERS).sort())
+    })
+  })
+
   it('carries exactly the filters listApprovals sends for the same query (one shared mapping)', async () => {
     const query = {
       tab: 'completed' as const,
