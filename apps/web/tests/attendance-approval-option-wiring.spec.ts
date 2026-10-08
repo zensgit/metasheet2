@@ -286,14 +286,19 @@ describe('AttendanceView · 需要审批 is labelled as not in effect', () => {
     expect(root.querySelector('[data-attendance-approval-option-hint="leave"]')?.textContent).toContain('取消勾选不会免除审批')
   })
 
-  it('does not touch the outdoor-punch approval option, which IS enforced', async () => {
+  // Split in two (gate r1 NIT-3): the first is a true PIN - green on the base commit, where the outdoor option has
+  // no badge either - and the second asserts the NEW badges, so it is red on base by construction.
+  it('PIN: does not touch the outdoor-punch approval option, which IS enforced - no badge on it', async () => {
     const root = await mountAdmin()
     const label = Array.from(root.querySelectorAll('label'))
       .find((candidate) => candidate.textContent?.includes('Require approval for outdoor punches'))
     expect(label).toBeTruthy()
     expect(label!.textContent).not.toContain('Not in effect yet')
     expect(label!.querySelector('[data-attendance-approval-option-badge]')).toBeNull()
-    // exactly the two not-in-effect badges exist on the whole page: leave type + overtime rule
+  })
+
+  it('exactly the two not-in-effect badges exist on the whole page: leave type + overtime rule', async () => {
+    const root = await mountAdmin()
     expect(root.querySelectorAll('[data-attendance-approval-option-badge]').length).toBe(2)
   })
 })
