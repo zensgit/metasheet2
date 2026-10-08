@@ -3754,6 +3754,27 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     return nodeKey ? { nodeKey, ...rest } : rest
   }
 
+  /**
+   * Gate r1 NIT-2: one history row's EXACT wire `metadata`. The route rebuilds it key by key and
+   * omits it entirely when no whitelisted key applies — never `{}` — so an empty expectation asserts
+   * the key is ABSENT; comparing `metadata ?? {}` would also accept a fabricated `{}`. Returns the
+   * shape it asserted, so a caller can pin the branch it means to exercise.
+   */
+  function expectWireMetadata(
+    item: { metadata?: Record<string, unknown> },
+    expected: Record<string, unknown>,
+  ): 'omitted' | 'exact' {
+    if (Object.keys(expected).length === 0) {
+      expect(
+        Object.prototype.hasOwnProperty.call(item, 'metadata'),
+        'no whitelisted key applies: metadata is omitted, never {}',
+      ).toBe(false)
+      return 'omitted'
+    }
+    expect(item.metadata).toEqual(expected)
+    return 'exact'
+  }
+
   async function historyItems(instanceId: string, token: string): Promise<{
     text: string
     items: { action?: string; metadata?: Record<string, unknown> }[]
@@ -4105,8 +4126,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const humanHistory = await historyItems(human.roundInstanceId, human.requesterToken)
       const humanRejectItem = humanHistory.items.find((item) => item.action === 'reject')
       expect(humanRejectItem, 'the human reject row must be in the timeline').toBeTruthy()
-      // T4cd: at most the row's own node key crosses — no close-reason key, nothing fabricated.
-      expect(humanRejectItem!.metadata ?? {}).toEqual(withStoredNodeKey(humanStored, {}))
+      // T4cd: at most the row's own node key crosses — no close-reason key, nothing fabricated. The
+      // human reject row stores its node key, so its wire metadata is exactly `{ nodeKey }`, compared
+      // exactly (gate r1 NIT-2), not through `metadata ?? {}`.
+      expect(typeof humanStored.nodeKey).toBe('string')
+      expect(expectWireMetadata(humanRejectItem!, withStoredNodeKey(humanStored, {}))).toBe('exact')
       expect(humanHistory.text.includes('cancelRoundCloseReason')).toBe(false)
       expect(humanHistory.text.includes('round_expired')).toBe(false)
 
@@ -4228,8 +4252,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
       const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
       const rejectItem = history.items.find((item) => item.action === 'reject')
-      // T4cd: at most the row's own node key crosses; the planted close reason never does.
-      expect(rejectItem!.metadata ?? {}).toEqual(withStoredNodeKey(stored, {}))
+      // T4cd: at most the row's own node key crosses; the planted close reason never does. The system
+      // close row stores its node key, so its wire metadata is exactly `{ nodeKey }` (gate r1 NIT-2).
+      expect(typeof stored.nodeKey).toBe('string')
+      expect(expectWireMetadata(rejectItem!, withStoredNodeKey(stored, {}))).toBe('exact')
       expect(history.text.includes('totally-bogus')).toBe(false)
       expect(history.text.includes('cancelRoundCloseReason')).toBe(false)
 
@@ -4376,7 +4402,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     expect(carriers.length).toBe(1)
     expect(carriers[0].metadata).toEqual(withStoredNodeKey(storedById.get(String(carriers[0].id)) ?? {}, { cancellationOutcome: expectedOutcome }))
     for (const other of approveItems.filter((item) => item !== carriers[0])) {
-      expect(other.metadata ?? {}).toEqual(withStoredNodeKey(storedById.get(String(other.id)) ?? {}, {}))
+      // Gate r1 NIT-2: exact — its own stored node key, or no `metadata` key at all, never `{}`.
+      expectWireMetadata(other, withStoredNodeKey(storedById.get(String(other.id)) ?? {}, {}))
     }
     expectNoForbiddenKeys(history.text, 'history')
     expect(history.text.includes('delegatedFrom')).toBe(false)
