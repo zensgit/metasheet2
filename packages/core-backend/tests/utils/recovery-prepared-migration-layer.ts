@@ -4,6 +4,8 @@ import * as checkpoints from '../../src/db/migrations/zzzz20260918120000_add_rec
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as attachmentStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 
+import * as abandonedBindings from '../../src/db/migrations/zzzz20261001120000_add_archive_abandoned_object_bindings'
+
 const suspended = new WeakSet<Kysely<unknown>>()
 
 /** Older migration suites roll back the parent catalog. Unwind only an empty newer layer first. */
@@ -13,6 +15,7 @@ export async function suspendPreparedMigrationLayer(db: Kysely<unknown>): Promis
   if (!result.rows[0]?.present) return
   // The production down refuses populated storage; never force-drop test or retained payloads.
   await db.transaction().execute(async (tx) => {
+    await abandonedBindings.down(tx)
     await attachmentStages.down(tx)
     await manualRequests.down(tx)
     await prepared.down(tx)
@@ -29,11 +32,13 @@ export async function restorePreparedMigrationLayer(db: Kysely<unknown>): Promis
     await prepared.up(tx)
     await manualRequests.up(tx)
     await attachmentStages.up(tx)
+    await abandonedBindings.up(tx)
     // A second up audits both recreated layers rather than merely checking table presence.
     await checkpoints.up(tx)
     await prepared.up(tx)
     await manualRequests.up(tx)
     await attachmentStages.up(tx)
+    await abandonedBindings.up(tx)
   })
   suspended.delete(db)
 }

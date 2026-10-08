@@ -32,9 +32,9 @@ interface Histogram {
 }
 
 interface PercentileResult {
-  p50: number;
-  p95: number;
-  p99: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
   count: number;
   sum: number;
   mean: number;
@@ -128,7 +128,7 @@ function parsePrometheusMetrics(text: string): Histogram[] {
         labels[match[1]] = match[2];
       }
 
-      const le = labels.le ? parseFloat(labels.le) : Infinity;
+      const le = labels.le === '+Inf' ? Infinity : labels.le ? parseFloat(labels.le) : Infinity;
       delete labels.le; // Remove 'le' from labels as it's stored separately
 
       const key = `${metricName}:${JSON.stringify(labels)}`;
@@ -202,14 +202,18 @@ function parsePrometheusMetrics(text: string): Histogram[] {
 /**
  * Calculate percentile from histogram buckets
  */
-function calculatePercentile(buckets: HistogramBucket[], totalCount: number, percentile: number): number {
+function calculatePercentile(buckets: HistogramBucket[], totalCount: number, percentile: number): number | null {
   if (totalCount === 0) return 0;
+  if (!Number.isFinite(totalCount)) return null;
 
   const targetCount = totalCount * percentile;
 
   // Find the bucket containing the percentile
   for (let i = 0; i < buckets.length; i++) {
     if (buckets[i].count >= targetCount) {
+      // An unbounded or invalid range cannot yield a finite percentile.
+      if (!Number.isFinite(buckets[i].le)) return null;
+
       // Linear interpolation within bucket
       if (i === 0) {
         // First bucket: assume uniform distribution from 0 to le
@@ -221,6 +225,7 @@ function calculatePercentile(buckets: HistogramBucket[], totalCount: number, per
         const currCount = buckets[i].count;
         const prevLe = buckets[i - 1].le;
         const currLe = buckets[i].le;
+        if (!Number.isFinite(prevLe)) return null;
 
         if (currCount === prevCount) {
           // No samples in this bucket
@@ -233,10 +238,8 @@ function calculatePercentile(buckets: HistogramBucket[], totalCount: number, per
     }
   }
 
-  // If we reach here, percentile is in the +Inf bucket
-  // Return the last finite bucket value
-  const lastFiniteBucket = buckets.filter(b => isFinite(b.le)).pop();
-  return lastFiniteBucket ? lastFiniteBucket.le : 0;
+  // The buckets do not cover the requested rank.
+  return null;
 }
 
 /**
@@ -295,7 +298,7 @@ async function main() {
     const thresholdsData = JSON.parse(thresholdsContent);
 
     // Extract unique prometheus_metric values from latency thresholds
-    const targetMetrics = Array.from(new Set(
+    const targetMetrics = Array.from(new Set<string>(
       thresholdsData.thresholds
         .filter((t: any) => t.kind === 'latency')
         .map((t: any) => t.prometheus_metric)
@@ -317,7 +320,7 @@ async function main() {
       const result = calculatePercentiles(histogram);
 
       console.error(`[INFO] ${key}:`);
-      console.error(`       P50=${result.p50.toFixed(3)}s, P95=${result.p95.toFixed(3)}s, P99=${result.p99.toFixed(3)}s`);
+      console.error(`       P50=${result.p50?.toFixed(3) ?? 'null'}s, P95=${result.p95?.toFixed(3) ?? 'null'}s, P99=${result.p99?.toFixed(3) ?? 'null'}s`);
       console.error(`       count=${result.count}, mean=${result.mean.toFixed(3)}s`);
 
       metrics[key] = result;

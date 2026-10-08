@@ -3,6 +3,7 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
+import { assertRecoveryLocalFilesystem } from './recovery-local-filesystem'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const LIMIT = 16_384
@@ -25,9 +26,7 @@ async function directory(configured: string): Promise<Root> {
   const stat = await fs.lstat(configured, { bigint: true })
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o077n) !== 0n) refuse()
   const real = await fs.realpath(configured)
-  const filesystem = await fs.statfs(real)
-  const supported = process.platform === 'linux' ? [0xef53, 0x58465342, 0x9123683e] : process.platform === 'darwin' ? [25] : []
-  if (!supported.includes(filesystem.type)) refuse()
+  await assertRecoveryLocalFilesystem(real)
   return { configured, real, dev: stat.dev, ino: stat.ino }
 }
 function nested(first: string, second: string): boolean {

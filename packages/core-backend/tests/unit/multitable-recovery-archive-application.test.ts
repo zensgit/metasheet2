@@ -142,6 +142,21 @@ describe('recovery archive application composition', () => {
     },
   )
 
+  it('carries the actual native pool and explicitly bounded immutable manual capture limits', async () => {
+    const nativePool = { connect: vi.fn(), options: { connectionTimeoutMillis: 20 } }
+    const manualCaptureLimits = { maxBytes: 4096, timeoutMs: 100 }
+    const database = { ...fakeDatabaseRuntime().runtime, nativePool }
+    const app = createRecoveryArchiveApplication(() => ({ ...fakeComposition(fakeProviders()), manualCaptureLimits }),
+      () => database, ENABLED_ENV)
+    expect(app.routerOptions?.recoveryArchiveDatabaseRuntime?.nativePool).toBe(nativePool)
+    expect(app.routerOptions?.recoveryArchiveManualCaptureLimits).toEqual({ maxBytes: 4096, timeoutMs: 100 })
+    manualCaptureLimits.maxBytes = 1
+    expect(app.routerOptions?.recoveryArchiveManualCaptureLimits?.maxBytes).toBe(4096)
+    expect(Object.isFrozen(app.routerOptions?.recoveryArchiveManualCaptureLimits)).toBe(true)
+    expect(nativePool.options).toEqual({ connectionTimeoutMillis: 20 })
+    await app.stopWorker()
+  })
+
   it('forwards only explicitly configured immutable manual capture policy', async () => {
     const manualCapture = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 60, expiresAfterSeconds: 600 }
     const composition = { ...fakeComposition(fakeProviders()), manualCapture }

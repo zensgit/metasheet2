@@ -16,6 +16,7 @@ import * as path from 'path'
 
 import type { StorageServiceImpl } from '../services/StorageService'
 import type { StorageFile } from '../types/plugin'
+import { isAttachmentMetadataCommitUncertain } from './attachment-metadata-admission'
 import { archiveSourceProtectionEnabled, claimDirectAttachmentPurge, stampClaimedAttachmentPurge, type AttachmentPurgeTransaction } from './attachment-purge-claim'
 
 // ---------------------------------------------------------------------------
@@ -478,10 +479,12 @@ export async function storeAttachment(
     const row = (insert.rows as Array<Record<string, unknown>>)[0]
     return { row, uploaded }
   } catch (dbErr) {
-    try {
-      await storage.delete(uploaded.id)
-    } catch {
-      // best-effort cleanup after DB failure
+    if (!isAttachmentMetadataCommitUncertain(dbErr)) {
+      try {
+        await storage.delete(uploaded.id)
+      } catch {
+        // best-effort cleanup after DB failure
+      }
     }
     throw dbErr
   }
