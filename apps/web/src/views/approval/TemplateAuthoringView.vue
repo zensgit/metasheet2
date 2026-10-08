@@ -362,7 +362,9 @@
             :draft="draft"
             :read-only="readOnly"
             :drag-session="approvalFormDragSession"
+            :record-link-catalog="recordLinkAuthoringCatalog"
             @draft-change="onFormBuilderDraftChange"
+            @retry-record-link-catalog="retryRecordLinkCatalog"
           />
         </div>
       </el-card>
@@ -1583,6 +1585,7 @@ import {
   dateRangeVisibilityEndpointOptions,
   dateRangeVisibilityFieldId,
   visibilityReferenceBaseFieldId,
+  type RecordLinkAuthoringCatalog,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1743,6 +1746,20 @@ function retryRecordLinkCatalog(): void {
 const recordLinkCatalogValidation = computed(() => ({
   loaded: recordLinkCatalogLoaded.value,
   sheets: recordLinkSheets.value,
+}))
+
+/**
+ * Delta §3.4 / parity ledger deferral (3): the Designer 2.0 inspector's typed base/sheet pickers
+ * render THIS view's catalog read-only (F0 gate #2 — this view stays the only fetch/state owner)
+ * and send a retry intent back to `retryRecordLinkCatalog`. Pin edits go through the builder's
+ * typed command path, never through the flag-OFF editor's direct field mutation below.
+ */
+const recordLinkAuthoringCatalog = computed<RecordLinkAuthoringCatalog>(() => ({
+  bases: recordLinkBases.value,
+  sheets: recordLinkSheets.value,
+  loading: recordLinkCatalogLoading.value,
+  loaded: recordLinkCatalogLoaded.value,
+  error: recordLinkCatalogError.value,
 }))
 
 function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
