@@ -403,6 +403,9 @@ assert_threshold() {
     if [ "$unit" = "seconds" ] && [ "$sample_count" -eq 0 ]; then
         status="na"
         comparison="N/A"
+    elif [ "$unit" = "seconds" ] && [ "$actual_value" = "null" ]; then
+        status="fail"
+        comparison=$([ "$threshold_type" = "upper_bound" ] && echo "≤" || echo "≥")
     else
         # Normal pass/fail logic
         if [ "$threshold_type" = "upper_bound" ]; then
@@ -573,11 +576,11 @@ main() {
                         local label_str=$(echo "$label_selector" | jq -r 'to_entries | map("\(.key)=\"\(.value)\"") | join(",")')
                         local metric_key="${prom_metric}{${label_str}}"
                         # Use jq --arg to pass metric_key safely (avoids quote escaping issues)
-                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" --arg ptype "$percentile_type" '.metrics[$key][$ptype]')
                         sample_count=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" '.metrics[$key].count // 0')
                     else
                         # No labels, use metric name directly
-                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" --arg ptype "$percentile_type" '.metrics[$key][$ptype]')
                         sample_count=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" '.metrics[$key].count // 0')
                     fi
                 fi
@@ -636,6 +639,7 @@ main() {
     "thresholds_file": "$THRESHOLDS_FILE"
   },
   "percentiles": $(echo "$percentiles_json" | jq '.metrics'),
+  "sampling": $(echo "$percentiles_json" | jq '.sampling'),
   "counters": {
     "cache_hit_rate": $cache_hit_rate,
     "cache_hit_rate_source": "$cache_hit_rate_source",

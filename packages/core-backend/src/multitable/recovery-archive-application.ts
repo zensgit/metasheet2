@@ -1,3 +1,8 @@
+import { createRecoveryArchiveOwnedCleanup } from '../routes/univer-meta'
+import type { RecoveryArchiveScopeIdentity } from './recovery-archive-worker-authorization'
+import type { RecoveryArchiveOwnedCleanupResult } from './recovery-archive-owned-cleanup'
+import type { RecoveryArchiveAbandonedObjectStore } from './recovery-archive-abandoned-object-store'
+import { snapshotRecoveryArchiveCaptureLimits, type RecoveryArchiveCaptureLimits } from './recovery-archive-bounded-source'
 import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
@@ -43,6 +48,7 @@ export interface RecoveryArchiveApplicationComposition {
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
   readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
+  readonly manualCaptureLimits?: RecoveryArchiveCaptureLimits
   readonly attachmentStorage?: RecoveryArchivePreviewRuntime['attachmentStorage']
   readonly attachmentCleanupStorage?: { retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> }
 }
@@ -55,6 +61,7 @@ export interface RecoveryArchiveApplication {
   stopWorker(): Promise<void>
   releaseCustody(): void
   retireExpiredAttachmentStage(objectId: string): Promise<void>
+  cleanupExpiredBuilder(identity: RecoveryArchiveScopeIdentity, generationId: string): Promise<RecoveryArchiveOwnedCleanupResult>
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
@@ -83,6 +90,7 @@ export function createRecoveryArchiveApplication(
       async stopWorker() {},
       releaseCustody() {},
       async retireExpiredAttachmentStage() { throw new Error(ATTACHMENT_CLEANUP_REFUSED) },
+      async cleanupExpiredBuilder() { throw new Error('RECOVERY_ARCHIVE_OWNED_CLEANUP_REFUSED') },
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -127,16 +135,32 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
     ...(composition.manualCapture ? { recoveryArchiveManualPolicy: composition.manualCapture } : {}),
+    ...(composition.manualCaptureLimits ? { recoveryArchiveManualCaptureLimits: composition.manualCaptureLimits } : {}),
   })
   let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
   let workerDrained = false
-  const activeCleanups = new Set<Promise<void>>()
+  const activeCleanups = new Set<Promise<unknown>>()
   const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
+  let builderCleanup: ReturnType<typeof createRecoveryArchiveOwnedCleanup> | undefined
+  if (composition.manualCapture && composition.manualCaptureLimits && database.nativePool) {
+    try {
+      builderCleanup = createRecoveryArchiveOwnedCleanup({ pool: database.nativePool, limits: composition.manualCaptureLimits,
+        policy: composition.manualCapture, provider: composition.objectStore as RecoveryArchiveObjectStoreProvider & RecoveryArchiveAbandonedObjectStore,
+        transactionDepth: database.transactionDepthProbe })
+    } catch { /* Missing cleanup capability refuses on command entry; never resolves another provider. */ }
+  }
   return Object.freeze({
     routerOptions,
+    async cleanupExpiredBuilder(identity: RecoveryArchiveScopeIdentity, generationId: string) {
+      if (workerState === 'stopped' || workerState === 'failed' || !builderCleanup) throw new Error('RECOVERY_ARCHIVE_OWNED_CLEANUP_REFUSED')
+      const pending = builderCleanup({ identity, generationId })
+      activeCleanups.add(pending)
+      try { return await pending } catch { throw new Error('RECOVERY_ARCHIVE_OWNED_CLEANUP_REFUSED') }
+      finally { activeCleanups.delete(pending) }
+    },
     async retireExpiredAttachmentStage(objectId: string) {
       if (workerState === 'stopped' || workerState === 'failed' || !composition.attachmentCleanupStorage) {
         throw new Error(ATTACHMENT_CLEANUP_REFUSED)
@@ -170,7 +194,7 @@ export function createRecoveryArchiveApplication(
     async stopWorker() {
       workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop && activeCleanups.size === 0) {
+      if (!workerLoop && activeCleanups.size === 0 && !builderCleanup) {
         workerDrained = true
         return
       }
@@ -178,6 +202,7 @@ export function createRecoveryArchiveApplication(
       workerStop = stopRecoveryArchiveWorkerLoop({ async stop() {
         await loop?.stop()
         await Promise.allSettled([...activeCleanups])
+        await builderCleanup?.drain()
       } }).then(
         () => {
           workerDrained = true
@@ -241,6 +266,7 @@ function snapshotComposition(
     asyncResumeHorizonMs: source.asyncResumeHorizonMs,
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
+    ...(source.manualCaptureLimits === undefined ? {} : { manualCaptureLimits: snapshotRecoveryArchiveCaptureLimits(source.manualCaptureLimits) }),
     ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
     ...(source.attachmentStorage === undefined ? {} : { attachmentStorage: snapshotAttachmentStorage(source.attachmentStorage) }),
     ...(source.attachmentCleanupStorage === undefined ? {} : { attachmentCleanupStorage: snapshotAttachmentCleanupStorage(source.attachmentCleanupStorage) }),
@@ -306,6 +332,7 @@ function snapshotDatabaseRuntime(
     transaction: source.transaction,
     query: source.query,
     transactionDepthProbe: source.transactionDepthProbe,
+    ...(source.nativePool ? { nativePool: source.nativePool } : {}),
   })
 }
 

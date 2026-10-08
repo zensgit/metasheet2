@@ -1377,6 +1377,7 @@ jobs:
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           METASHEET_REAL_DB_TEST_STEP: '1' # marks the real-DB allowlist step so a fail-not-skip sentinel can scope its throw here only
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"
@@ -1488,6 +1489,19 @@ jobs:
             tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts \
             tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts \
             tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-source-deletion-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-records-entry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-sheet-config-entry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-view-share-entry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-owned-cleanup-realdb.test.ts \
             tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \
             tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts \
             tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts \

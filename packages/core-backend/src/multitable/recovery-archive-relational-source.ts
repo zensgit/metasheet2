@@ -124,7 +124,17 @@ export async function readRecoveryArchiveCaptureSource(
     }
     const result = await query(SOURCE_SQL, [scope.sheetId, scope.baseId, scope.workspaceId])
     if (result.rows.length !== 1) throw new Error()
-    const raw = result.rows[0] as { sections?: unknown; attachment_candidates?: unknown }
+    return admitRecoveryArchiveCaptureSource(result.rows[0])
+  } catch {
+    // SQL/provider errors may contain source identifiers and must not escape.
+    throw new RecoveryArchiveRelationalSourceError()
+  }
+}
+
+/** Shared closed admission for already captured DB metadata; this is not ownership authority. */
+export function admitRecoveryArchiveCaptureSource(value: unknown): RecoveryArchiveCaptureSource {
+  try {
+    const raw = value as { sections?: unknown; attachment_candidates?: unknown }
     if (!raw || typeof raw.sections !== 'object' || raw.sections === null || Array.isArray(raw.sections)) {
       throw new Error()
     }
@@ -153,7 +163,6 @@ export async function readRecoveryArchiveCaptureSource(
     assertReferencedAttachments(projected, candidates)
     return { sections: projected, attachmentCandidates: candidates }
   } catch {
-    // SQL/provider errors may contain source identifiers and must not escape.
     throw new RecoveryArchiveRelationalSourceError()
   }
 }

@@ -166,6 +166,7 @@ describe('ApprovalDepartmentPicker', () => {
           hasChildren: false,
         }],
       })
+      .mockResolvedValueOnce({ departments: [] })
     const updates = await mountPicker()
     ;(container!.querySelector('[data-testid="approval-department-tree-mode"]') as HTMLButtonElement).click()
     await flushUi()
@@ -182,5 +183,10 @@ describe('ApprovalDepartmentPicker', () => {
     await flushUi()
     expect(searchSpy).toHaveBeenLastCalledWith('', 50, 'dept-root')
     expect(container!.textContent).toContain('产品部')
+    expect(container!.querySelector('.approval-department-picker__tree-header span')?.textContent).toBe('总部')
+    ;(container!.querySelector('.approval-department-picker__tree-header button') as HTMLButtonElement).click()
+    await flushUi()
+    expect(searchSpy).toHaveBeenLastCalledWith('', 50, null)
+    expect(container!.querySelector('.approval-department-picker__tree-header span')?.textContent).toBe('全部部门')
   })
 })

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import * as cleanupAnchorMigration from '../../src/db/migrations/zzzz20261007120000_amend_recovery_archive_cleanup_anchor'
 import * as checkpointMigration from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
 
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
@@ -86,6 +87,7 @@ let db: Kysely<unknown>
 let schemaIsUp = false
 let initialFingerprint = ''
 let restoreCheckpointSchema = false
+let restoreCleanupAnchorSchema = false
 let seqCursor = SEQ_BASE
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -346,6 +348,7 @@ async function amendmentFingerprint(): Promise<string> {
 async function truncateOwnedState(): Promise<void> {
   if (!schemaIsUp) return
   const childTables = [
+    'meta_recovery_archive_abandoned_bindings',
     'meta_recovery_archive_attachment_stages',
     'meta_recovery_archive_manual_requests',
     'meta_recovery_archive_prepared_captures',
@@ -681,6 +684,13 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
     // Preserve the historical amendment's exact fingerprint assertions while
     // removing/reapplying its newer dependent migration in causal order.
+    const cleanupAnchor = await sql<{ body_hash: string }>`SELECT md5(p.prosrc) AS body_hash
+      FROM pg_catalog.pg_proc p
+      WHERE p.oid=pg_catalog.to_regprocedure('public.meta_recovery_archives_claim_anchor_reservation_guard()')`.execute(db)
+    if (cleanupAnchor.rows.length > 0 && cleanupAnchor.rows[0].body_hash !== '9d0e0a0832d262412b4464ba103ace82') {
+      await db.transaction().execute(cleanupAnchorMigration.down)
+      restoreCleanupAnchorSchema = true
+    }
     const checkpoint = await sql<{ present: boolean }>`SELECT EXISTS (
       SELECT 1 FROM pg_catalog.pg_constraint
       WHERE conrelid=pg_catalog.to_regclass('public.meta_record_history_operations')
@@ -792,6 +802,7 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     } finally {
       try {
         if (restoreCheckpointSchema) await db.transaction().execute(checkpointMigration.up)
+        if (restoreCleanupAnchorSchema) await db.transaction().execute(cleanupAnchorMigration.up)
       } finally {
         await db.destroy()
       }

@@ -556,6 +556,7 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
     transaction,
     query,
     transactionDepthProbe: pool.transactionDepthProbe,
+    nativePool: pool.getInternalPool(),
   })
 }
 
@@ -3523,6 +3524,13 @@ export class MetaSheetServer {
   async retireExpiredRecoveryAttachmentStage(objectId: string): Promise<void> {
     if (this.stopPromise) throw new Error('RECOVERY_ARCHIVE_ATTACHMENT_CLEANUP_REFUSED')
     await this.recoveryArchiveApplication.retireExpiredAttachmentStage(objectId)
+  }
+
+  /** Explicit scoped operator cleanup, through the same composed lifecycle and fresh authority. */
+  async cleanupExpiredRecoveryArchiveBuilder(identity: import('./multitable/recovery-archive-worker-authorization').RecoveryArchiveScopeIdentity,
+    generationId: string): Promise<import('./multitable/recovery-archive-owned-cleanup').RecoveryArchiveOwnedCleanupResult> {
+    if (this.stopPromise) throw new Error('RECOVERY_ARCHIVE_OWNED_CLEANUP_REFUSED')
+    return this.recoveryArchiveApplication.cleanupExpiredBuilder(identity, generationId)
   }
 
   private async waitForShutdownBarrier(

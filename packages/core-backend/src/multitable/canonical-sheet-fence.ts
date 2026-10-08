@@ -45,6 +45,7 @@
  * why: the two operations' respective PIT-lock holding windows do not span the same gaps their fence/block
  * discipline does).
  */
+import { assertInTransaction } from './pg-transaction-guard'
 
 export type FenceQuery = (
   sql: string,
@@ -144,9 +145,9 @@ export function isWriterBlockState(v: unknown): v is WriterBlockState {
 /** Thrown by a fenced writer that observes a durable recovery block. Values-free (no state details leaked to
  * the client beyond the coarse code); callers map it to a 409-class refusal.
  *
- * `state` is null only for a subclass that refuses for another reason and must reuse the callers' existing
- * `instanceof SheetWriterBlockedError` skip branch (field retype slice 3a: the derived-merge target re-check,
- * `DerivedMergeTargetRetypedError` in field-schema-fence-recheck.ts). Every durable-block throw passes a state. */
+ * `state` is null for untrusted archive admission authority or a subclass that refuses for another reason
+ * and must reuse the callers' existing `instanceof SheetWriterBlockedError` skip branch (field retype slice
+ * 3a: `DerivedMergeTargetRetypedError` in field-schema-fence-recheck.ts). Known durable blocks pass a state. */
 export class SheetWriterBlockedError extends Error {
   readonly code = 'SHEET_WRITER_BLOCKED'
   readonly sheetId: string
@@ -197,6 +198,28 @@ async function hasRecoveryWriterStateColumn(query: FenceQuery): Promise<boolean>
  * against a sheet that is now blocked. Throws `SheetWriterBlockedError` when a block is present.
  */
 export async function assertNoActiveWriterBlock(query: FenceQuery, sheetId: string): Promise<void> {
+  if (process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED === 'true' &&
+      process.env.MULTITABLE_ENABLE_WRITER_FENCE === 'true') {
+    let raw: unknown
+    try {
+      const isolation = await query('SHOW transaction_isolation')
+      if (isolation.rows.length !== 1 ||
+          (isolation.rows[0] as { transaction_isolation?: unknown } | undefined)?.transaction_isolation !== 'read committed') {
+        throw new SheetWriterBlockedError(sheetId, null)
+      }
+      await assertInTransaction({ query: async (sql, params) => {
+        const result = await query(sql, params)
+        return { rows: result.rows as Record<string, unknown>[], rowCount: result.rowCount ?? null }
+      } }, 'recovery_archive_writer_admission')
+      const res = await query('SELECT recovery_writer_state FROM public.meta_sheets WHERE id = $1', [sheetId])
+      if (res.rows.length !== 1) throw new SheetWriterBlockedError(sheetId, null)
+      raw = (res.rows[0] as { recovery_writer_state?: unknown } | undefined)?.recovery_writer_state
+    } catch {
+      throw new SheetWriterBlockedError(sheetId, null)
+    }
+    if (raw === null) return
+    throw new SheetWriterBlockedError(sheetId, isWriterBlockState(raw) ? raw : null)
+  }
   if (!(await hasRecoveryWriterStateColumn(query))) return
   const res = await query('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])
   const raw = (res.rows[0] as { recovery_writer_state?: unknown } | undefined)?.recovery_writer_state
