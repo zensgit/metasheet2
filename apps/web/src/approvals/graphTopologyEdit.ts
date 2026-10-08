@@ -835,6 +835,10 @@ export function planConditionBranchRemoval(
   if (incoming.length !== 1) refuseBranchRemoval('gateway-not-linear')
   const outgoingKeys = outEdges(graph, conditionNodeKey).map((edge) => edge.key)
   if (outgoingKeys.some((key) => key !== edgeKey && key !== defaultEdge!.key)) refuseBranchRemoval('complex-branch')
+  // Defence in depth (gate r1 NIT-1): a valid parallel gateway has ≥2 lanes (backend-enforced), so
+  // its join has ≥2 incoming edges and `gateway-not-linear` above already refuses it. Only a
+  // malformed single-lane parallel reaches this line; collapsing its join would leave the
+  // parallel's `joinNodeKey` naming a deleted node, so it is refused rather than rewritten.
   const isParallelJoin = graph.nodes.some((candidate) => candidate.type === 'parallel'
     && (candidate.config as ParallelNodeConfig).joinNodeKey === conditionNodeKey)
   if (isParallelJoin) refuseBranchRemoval('gateway-is-parallel-join')

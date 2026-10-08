@@ -31,6 +31,15 @@ function labelsOf(values: unknown, context: TemplateAuthoringErrorContext): stri
 }
 
 /**
+ * Gate r1 NIT-5: two nodes that share one business label (e.g. two lanes both named after their
+ * node type) would read 「审批」与「审批」, which names nothing. Such a pair falls back to the
+ * unattributed copy instead; the values-free details carry no lane position to number them by.
+ */
+function distinctLabels(labels: string[]): boolean {
+  return new Set(labels).size === labels.length
+}
+
+/**
  * Authoring writes never echo arbitrary backend messages. Known machine codes
  * get actionable copy; everything else stays values-free and identifier-free.
  *
@@ -48,14 +57,14 @@ export function describeTemplateAuthoringError(
   if (details.reason === 'parallel_duplicate_approver') {
     const lanes = labelsOf(details.conflictingNodeKeys, context)
     const gateway = labelOf(details.nodeKey, context)
-    if (lanes.length === 2) {
+    if (lanes.length === 2 && distinctLabels(lanes)) {
       return `并行分支${gateway ? `「${gateway}」` : ''}中「${lanes[0]}」与「${lanes[1]}」的审批人相同，请为每个分支选择不同的审批人`
     }
     return '并行分支中有两个分支的审批人相同，请为每个分支选择不同的审批人'
   }
   if (error.code === 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT') {
     const nodes = labelsOf(details.conflictingNodeKeys, context)
-    if (nodes.length >= 2) {
+    if (nodes.length >= 2 && distinctLabels(nodes.slice(0, 2))) {
       return `并行分支中「${nodes[0]}」与「${nodes[1]}」的审批人可能重复，请调整审批人配置后重试`
     }
   }
