@@ -682,6 +682,7 @@ import {
 } from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { ensureUserNamesResolved } from '../../approvals/directoryResolve'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
 import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -705,7 +706,7 @@ const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 // `templateSchemas` cache as a prop). See `useApprovalListFieldSummary.ts` for the full rationale
 // (live-template substitute for the list DTO's missing frozen formSchema, the live-label drift
 // tradeoff, and the session-scoped negative caching on fetch failure).
-const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor } = useApprovalListFieldSummary()
+const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor } = useApprovalListFieldSummary()
 const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.pendingApprovals,
   ...store.myApprovals,
@@ -801,6 +802,17 @@ const paneShowQuickActions = computed(() => {
   return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row)
 })
 const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(paneDisplayRow.value) : ''))
+// Test report 2026-10-08 T4b (gate r1 P3-4): the pane's row is not always a list row. A `?detail=`
+// deep link to an instance that is not on the loaded page renders the single-fetch `paneApproval`,
+// which `allVisibleApprovals` (and so `ensureLoadedForRows`' resolve) never sees, so its summary's
+// 人员 ids were never queued. This reads the pane row against the CACHED schema only: it re-fires when
+// a list row sharing the template loads that schema after the pane opened, and it never fetches a
+// template for the pane (the B2-01 summary stays cache-only).
+watch(
+  () => summaryUserIdsFor(paneDisplayRow.value),
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 // Reuses the EXACT same shared gate the row-level inline approve button already reads
 // (`inlineApprovingId`) — never a second, independently-tracked loading flag. This is also the
 // mechanism that makes a "pane bypasses the shared handler" mutation mechanically detectable: if

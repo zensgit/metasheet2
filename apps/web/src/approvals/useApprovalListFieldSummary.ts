@@ -99,15 +99,24 @@ export function useApprovalListFieldSummary() {
     // T4b: once the schemas are in, queue the member ids of the rows' top-level `user` values for
     // the shared batch resolve, so the summary line can show names. Runs here (an async side effect
     // the caller's watch triggers), never from the render-time `summaryLineFor`.
-    ensureUserNamesResolved(rows.flatMap((row) => {
-      const schema = row.templateId ? schemas.get(row.templateId) : undefined
-      return schema ? collectFormUserIds(schema, row.formSnapshot ?? null, { includeDetailColumns: false }) : []
-    }))
+    ensureUserNamesResolved(rows.flatMap((row) => summaryUserIdsFor(row)))
+  }
+
+  /**
+   * T4b — the member ids a row's summary line names: its top-level `user` values, read against the
+   * CACHED schema only (this never fetches a template). It reads the reactive cache, so a caller's
+   * watch over it re-fires once the schema lands (gate r1 P3-4: the master-detail pane's row).
+   */
+  function summaryUserIdsFor(
+    row: (Pick<UnifiedApprovalDTO, 'templateId'> & Partial<Pick<UnifiedApprovalDTO, 'formSnapshot'>>) | null | undefined,
+  ): string[] {
+    const schema = row?.templateId ? schemas.get(row.templateId) : undefined
+    return row && schema ? collectFormUserIds(schema, row.formSnapshot ?? null, { includeDetailColumns: false }) : []
   }
 
   function summaryLineFor(row: Pick<UnifiedApprovalDTO, 'templateId' | 'formSnapshot'>): string {
     return resolveRowSummaryLine(schemas, row, isZh.value)
   }
 
-  return { schemas, ensureLoadedForRows, summaryLineFor }
+  return { schemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor }
 }
