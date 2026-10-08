@@ -23,7 +23,9 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  *   - count == the rows the 抄送我的 list marks `ccUnread`, and ≤ that list's total, for EACH
  *     `sourceSystem` value (a count that read `sourceSystem` differently from the list ⇒ red);
  *   - role-typed CC: counted for the role holder the list shows it to, not for a token-only or a
- *     user_roles-only holder the list does not show it to;
+ *     user_roles-only holder the list does not show it to — and CLEARED once that holder opens it:
+ *     the role arm decides "read" on the count AND on the row (a count or a row annotation that
+ *     matched user-typed CC rows only would never clear it ⇒ red);
  *   - todo-center lock B: a viewer who is ONLY a CC target has `/pending-count` {0,0} and
  *     `/api/todo/count` 0 while their CC count is positive (fold a CC arm into the pending query ⇒
  *     red); this is the class the lock's A0 fixtures do not contain;
@@ -35,7 +37,14 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  *     `from_status IS DISTINCT FROM to_status` ⇒ red); a later comment does not re-light a seen
  *     outcome; opened-while-pending is still unseen (drop the time comparison ⇒ red); another
  *     person's read does not count (drop the user test ⇒ red); a timeout jump and a terminal
- *     return (which emits no completion event) are badged.
+ *     return (which emits no completion event) are badged. Two shape guards no production writer
+ *     exercises today are pinned with synthetic rows: a request still in review whose latest entry
+ *     into pending was written by someone else is not counted (drop the terminal-status test ⇒
+ *     red); a terminal request whose current status no audit row explains — a PLM sync after a
+ *     bridge decision — is not counted (drop `to_status = status` ⇒ red).
+ *   - each per-row flag stays on its own tab: with both switches on, 待我处理 rows carry neither
+ *     key, 抄送我的 rows no `outcomeUnseen`, 我发起的 rows no `ccUnread` (drop either annotation's
+ *     tab test ⇒ red).
  *
  * FIXTURE DISCIPLINE. Every id is suffixed per run and every identity's role claim is unique, so
  * the shared integration database's other rows cannot reach these counts. Timestamps are written
@@ -112,6 +121,8 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     terminalReturn: `nb_out_terminal_return_${suffix}`,
     laterComment: `nb_out_later_comment_${suffix}`,
     plm: `plm:nb_out_plm_${suffix}`,
+    pendingEnteredByOther: `nb_out_pending_by_other_${suffix}`,
+    plmStatusResynced: `plm:nb_out_plm_resynced_${suffix}`,
   }
   const seededInstanceIds = [...Object.values(ids), ...Object.values(outcomeIds)]
   const seededUserIds = [
@@ -233,6 +244,23 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     expect(status).toBe(200)
     const payload = body as { data: Array<{ id: string; outcomeUnseen?: boolean }>; total: number }
     return { rows: payload.data.filter((row) => seededInstanceIds.includes(row.id)), total: payload.total }
+  }
+
+  /** This suite's own rows of any tab's feed, with every key exactly as the server sent it. */
+  async function feedRows(bearer: string, tab: string, sourceSystem = 'all'): Promise<Array<{ id: string } & Record<string, unknown>>> {
+    const { status, body } = await getJson(`/api/approvals?tab=${tab}&sourceSystem=${sourceSystem}&limit=200`, bearer)
+    expect(status).toBe(200)
+    const payload = body as { data: Array<{ id: string } & Record<string, unknown>> }
+    return payload.data.filter((row) => seededInstanceIds.includes(row.id))
+  }
+
+  async function markRead(bearer: string, instanceId: string): Promise<number> {
+    const response = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/mark-read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    return response.status
   }
 
   beforeAll(async () => {
@@ -364,6 +392,21 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     // plm — a mirrored request of requester2 rejected through the bridge ⇒ new under `all` / `plm`.
     await seedInstance(outcomeIds.plm, 'rejected', 'plm', requester2Id)
     await seedRecord(outcomeIds.plm, 'reject', deciderId, 'pending', 'rejected', 10)
+    // pendingEnteredByOther — STILL IN REVIEW, and the newest row that moved it INTO `pending` was
+    // written by someone else (a submission on the requester's behalf). No production writer does
+    // this today — the only entry into pending with from ≠ to is the requester's own `created` — so
+    // this is a synthetic shape guard: only a TERMINAL current status is an outcome ⇒ not counted
+    // (drop the terminal-status test ⇒ red).
+    await seedInstance(outcomeIds.pendingEnteredByOther, 'pending', 'platform', requester2Id)
+    await seedRecord(outcomeIds.pendingEnteredByOther, 'created', otherId, null, 'pending', 10)
+    // plmStatusResynced — a PLM mirror the decider approved through the bridge 20 min ago (the
+    // bridge writes an audit row; the requester never opened it since), whose status a later PLM
+    // sync then moved to `rejected` — the mirror upsert writes NO audit row. The bridge row did not
+    // bring the request into its CURRENT status, so it is not the outcome, and no row did ⇒ not
+    // counted: the documented "no audit trail ⇒ never badged" (a decision taken inside PLM never
+    // badges). Drop `to_status = status` ⇒ the stale bridge approval is read as the outcome ⇒ red.
+    await seedInstance(outcomeIds.plmStatusResynced, 'rejected', 'plm', requester2Id)
+    await seedRecord(outcomeIds.plmStatusResynced, 'approve', deciderId, 'pending', 'approved', 20)
 
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
@@ -453,12 +496,7 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       const viewer = await token(viewerId, inertRole)
       const before = await ccUnreadCount(viewer)
 
-      const marked = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(ids.fresh)}/mark-read`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${viewer}`, 'Content-Type': 'application/json' },
-        body: '{}',
-      })
-      expect(marked.status).toBe(200)
+      expect(await markRead(viewer, ids.fresh)).toBe(200)
 
       expect(await ccUnreadCount(viewer)).toBe(before - 1)
       const { rows } = await ccTab(viewer)
@@ -483,6 +521,27 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       const userRolesOnly = await token(userRolesOnlyHolderId, inertRole)
       expect((await ccTab(userRolesOnly)).rows).toEqual([])
       expect(await ccUnreadCount(userRolesOnly)).toBe(0)
+    })
+
+    it('role-typed CC: once the holder opens it through the real mark-read endpoint, the count AND the row clear', async () => {
+      process.env.APPROVAL_CC_UNREAD_BADGE_ENABLED = 'true'
+      const holder = await token(roleHolderId, ccRole)
+
+      // Before: unread on both sides.
+      expect(await ccUnreadCount(holder)).toBe(1)
+      expect((await ccTab(holder)).rows.find((row) => row.id === ids.role)?.ccUnread).toBe(true)
+
+      // The ONLY CC row that targets the holder here is role-typed. The read must be compared with
+      // THAT row's time on both sides: a count, or a per-row annotation, that matched user-typed CC
+      // rows only would compare the read with no CC row at all (NULL) and keep the item unread
+      // forever — the badge would never clear for a role-typed CC.
+      try {
+        expect(await markRead(holder, ids.role)).toBe(200)
+        expect(await ccUnreadCount(holder)).toBe(0)
+        expect((await ccTab(holder)).rows.find((row) => row.id === ids.role)?.ccUnread).toBe(false)
+      } finally {
+        await pool().query('DELETE FROM approval_reads WHERE user_id = $1 AND instance_id = $2', [roleHolderId, ids.role])
+      }
     })
 
     it('lock B: a viewer who is ONLY a CC target has zero pending and zero todo, while their CC count is positive', async () => {
@@ -520,7 +579,7 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       for (const row of rows) expect(Object.prototype.hasOwnProperty.call(row, 'outcomeUnseen')).toBe(false)
     })
 
-    it('the rule: decided by someone else and not opened since ⇒ new; self-decided, seen, still pending or merely commented ⇒ not', async () => {
+    it('the rule: decided by someone else and not opened since ⇒ new; self-decided, seen, still pending, merely commented or unexplained by any audit row ⇒ not', async () => {
       process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
       const requester2 = await token(requester2Id, inertRole)
       const { rows } = await mineTab(requester2)
@@ -540,6 +599,8 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
         [outcomeIds.terminalReturn]: true,
         [outcomeIds.laterComment]: false,
         [outcomeIds.plm]: true,
+        [outcomeIds.pendingEnteredByOther]: false,
+        [outcomeIds.plmStatusResynced]: false,
       })
       expect(verdict[outcomeIds.notMine]).toBeUndefined()
       expect(await outcomeCount(requester2)).toBe(6)
@@ -549,9 +610,9 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
       const requester2 = await token(requester2Id, inertRole)
       const expected: Record<string, { unseen: number; rows: number }> = {
-        all: { unseen: 6, rows: 13 },
-        platform: { unseen: 5, rows: 12 },
-        plm: { unseen: 1, rows: 1 },
+        all: { unseen: 6, rows: 15 },
+        platform: { unseen: 5, rows: 13 },
+        plm: { unseen: 1, rows: 2 },
       }
       for (const [sourceSystem, want] of Object.entries(expected)) {
         const { rows, total } = await mineTab(requester2, sourceSystem)
@@ -568,12 +629,7 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       const requester2 = await token(requester2Id, inertRole)
       const before = await outcomeCount(requester2)
 
-      const marked = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(outcomeIds.rejectedNew)}/mark-read`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${requester2}`, 'Content-Type': 'application/json' },
-        body: '{}',
-      })
-      expect(marked.status).toBe(200)
+      expect(await markRead(requester2, outcomeIds.rejectedNew)).toBe(200)
 
       expect(await outcomeCount(requester2)).toBe(before - 1)
       const { rows } = await mineTab(requester2)
@@ -596,6 +652,43 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       expect(pending.body).toEqual({ count: 0, unreadCount: 0 })
       const todo = await getJson('/api/todo/count', requester2)
       expect(todo.body?.count).toBe(0)
+    })
+  })
+
+  describe('both switches ON — each per-row flag stays on its own tab', () => {
+    it('待我处理 rows carry neither flag, 抄送我的 rows no outcomeUnseen, 我发起的 rows no ccUnread', async () => {
+      process.env.APPROVAL_CC_UNREAD_BADGE_ENABLED = 'true'
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const has = (row: object, key: string): boolean => Object.prototype.hasOwnProperty.call(row, key)
+
+      // 待我处理: the approver's own active seats (the lock-B witnesses' instances). The list route
+      // asks for both annotations whenever their switches are on; only the service's tab test keeps
+      // them (and their extra queries) off this tab.
+      const approver = await token(approverId, inertRole)
+      const pendingRows = await feedRows(approver, 'pending')
+      expect(pendingRows.map((row) => row.id)).toEqual(expect.arrayContaining([ids.ccOnlyUser, ids.ccOnlyRole]))
+      for (const row of pendingRows) {
+        expect(has(row, 'ccUnread'), row.id).toBe(false)
+        expect(has(row, 'outcomeUnseen'), row.id).toBe(false)
+      }
+
+      // 抄送我的: its own flag on every row, never the 我发起的 one.
+      const viewer = await token(viewerId, inertRole)
+      const ccRows = await feedRows(viewer, 'cc')
+      expect(ccRows.length).toBeGreaterThan(0)
+      for (const row of ccRows) {
+        expect(has(row, 'ccUnread'), row.id).toBe(true)
+        expect(has(row, 'outcomeUnseen'), row.id).toBe(false)
+      }
+
+      // 我发起的: likewise the other way round.
+      const requester2 = await token(requester2Id, inertRole)
+      const mineRows = await feedRows(requester2, 'mine')
+      expect(mineRows.length).toBeGreaterThan(0)
+      for (const row of mineRows) {
+        expect(has(row, 'outcomeUnseen'), row.id).toBe(true)
+        expect(has(row, 'ccUnread'), row.id).toBe(false)
+      }
     })
   })
 })
