@@ -573,6 +573,12 @@ export interface UnifiedApprovalDTO {
    * tab; callers must treat that as "no dot", never guess a value.
    */
   isRead?: boolean
+  /**
+   * 抄送我的 unread (test report 2026-10-08): populated ONLY on the 抄送我的 (cc) tab and only while
+   * the server's CC-badge switch is on — `true` when the viewer has not opened this row since the
+   * newest CC targeting them. `undefined` everywhere else; callers treat that as "no dot".
+   */
+  ccUnread?: boolean
   createdAt: string
   updatedAt: string
 }

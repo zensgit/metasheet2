@@ -50,6 +50,7 @@ import {
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import { isApprovalCcUnreadBadgeEnabled } from '../services/approval-notify-badge-flags'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
 import {
   assignmentMatchesActor,
@@ -2636,6 +2637,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         actorPermissions: resolveApprovalActorPermissions(req),
         limit,
         offset,
+        // 抄送我的 per-row unread (test report 2026-10-08): only while its switch is on, and never
+        // for the CSV export (whose columns do not carry it). Off ⇒ the feed is byte-identical.
+        annotateCcUnread: !isCsvExport && isApprovalCcUnreadBadgeEnabled(),
       })
 
       if (isCsvExport) {
@@ -3221,6 +3225,65 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_PENDING_COUNT_FAILED',
         'Failed to compute pending approval count',
         () => res.json({ count: 0, unreadCount: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 抄送我的 unread badge (test report 2026-10-08, T3). A DEDICATED count, never folded into
+  // `/pending-count`, `/api/todo/count` or the todo / approval socket counts: the ratified
+  // todo-center lock B fixes those to population ① (active seats), and being CC'd is not "waiting
+  // for me". Behind APPROVAL_CC_UNREAD_BADGE_ENABLED (default OFF, exact 'true'): while off this
+  // answers 404 with its own code — before touching the database — so a client cannot mistake a
+  // switched-off feature for "zero unread". The count is the 抄送我的 feed for the SAME
+  // `sourceSystem` mapping the list uses (`resolveApprovalListSourceOptions`) plus the unread
+  // conjunct (`ApprovalBridgeService.countCcUnreadForViewer`), so it never exceeds that tab's total.
+  // Registered before `GET /api/approvals/:id`, which would otherwise capture this literal path.
+  r.get('/api/approvals/cc-unread-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalCcUnreadBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_CC_UNREAD_BADGE_DISABLED', 'The CC unread badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countCcUnreadForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_CC_UNREAD_COUNT_FAILED',
+        'Failed to count unread CC approvals',
+        () => res.json({ count: 0, degraded: true }),
       )
     }
   })

@@ -27,13 +27,14 @@ import type {
   ApprovalBridgePlmAdapter,
   ApprovalInstanceRow,
   ApprovalQueryOptions,
+  ApprovalTabBadgeCountOptions,
   PlmSyncOptions,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
-import { approvalCcTabConditionSql } from './approval-cc-predicate'
+import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -809,6 +810,42 @@ export class ApprovalBridgeService {
     }
   }
 
+  /**
+   * 抄送我的 unread badge (test report 2026-10-08): the 抄送我的 feed — `buildListWhere` with
+   * `tab: 'cc'` and the caller's source scope, i.e. the very statement the tab lists — with ONE
+   * conjunct appended (`approvalCcUnreadConditionSql`, bound to the placeholders the tab filter
+   * bound). It can therefore never exceed the tab's own total for the same `sourceSystem`, and it
+   * equals the number of rows that tab marks `ccUnread` across all its pages. Client filters the
+   * tab may also carry (search, status, template, date window) are deliberately not applied: a
+   * badge counts the tab, not the current search — the same convention as the 待我处理 badge.
+   */
+  async countCcUnreadForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'cc',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalCcUnreadConditionSql({
+        instanceRef: 'approval_instances',
+        actorParam: listWhere.tabActorParam,
+        rolesParam: listWhere.tabRolesParam,
+      }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
   async listApprovals(options?: ApprovalQueryOptions): Promise<{
     data: UnifiedApprovalDTO[]
     total: number
@@ -860,6 +897,36 @@ export class ApprovalBridgeService {
       readInstanceIds = new Set(readResult.rows.map((row) => row.instance_id))
     }
 
+    // 抄送我的 unread (test report 2026-10-08): resolved ONLY when the caller asks for it (the route
+    // does while APPROVAL_CC_UNREAD_BADGE_ENABLED is on) and only on the cc tab. Same conjunct the
+    // badge count appends to this same feed (`approvalCcUnreadConditionSql`), bound to the SAME
+    // values the tab filter bound — so the rows marked here are exactly the rows the badge counts.
+    let ccUnreadInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateCcUnread === true
+      && options.tab === 'cc'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const ccParams: unknown[] = [
+        instancesResult.rows.map((row) => row.id),
+        params[listWhere.tabActorParam - 1],
+      ]
+      let ccRolesParam: number | null = null
+      if (listWhere.tabRolesParam !== null) {
+        ccParams.push(params[listWhere.tabRolesParam - 1])
+        ccRolesParam = ccParams.length
+      }
+      const ccUnreadResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalCcUnreadConditionSql({ instanceRef: 'approval_instances', actorParam: 2, rolesParam: ccRolesParam })}`,
+        ccParams,
+      )
+      ccUnreadInstanceIds = new Set(ccUnreadResult.rows.map((row) => row.id))
+    }
+
     const data = instancesResult.rows.map((row) => {
       const dto = toUnifiedDTO(
         row,
@@ -868,6 +935,9 @@ export class ApprovalBridgeService {
       )
       if (readInstanceIds) {
         dto.isRead = readInstanceIds.has(row.id)
+      }
+      if (ccUnreadInstanceIds) {
+        dto.ccUnread = ccUnreadInstanceIds.has(row.id)
       }
       return dto
     })

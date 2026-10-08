@@ -18,6 +18,10 @@ name: Approval real-DB acceptance (list scope determined server-side)
 #     in its own lane — that the identity the capability calls an administrator is the SAME one the
 #     list scope above serves another approver's row to. That agreement had only ever been
 #     established as text agreement between two source strings.
+#   - tests/integration/approval-notify-badges.db.test.ts — the approval center's tab read-state
+#     badges (test report 2026-10-08): each badge count is the tab's own feed (this lane's list
+#     scope) plus one unread conjunct, so it lives beside the scope it is built on. It flips its
+#     own default-OFF switches in-process only, per test, and restores them afterwards.
 # The org pin ships DEFAULT OFF and nothing in this lane flips the shipped default — the list-scope
 # suite's own afterEach clears the in-process override, and the capability suite never sets it.
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
@@ -48,6 +52,9 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-list-scope-server-side.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-admin-capability-realdb.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-notify-badges.db.test.ts'
+      - 'packages/core-backend/src/services/approval-cc-predicate.ts'
+      - 'packages/core-backend/src/services/approval-notify-badge-flags.ts'
       - 'packages/core-backend/src/services/approval-admin-capability.ts'
       - 'packages/core-backend/tests/unit/approvals-bridge-routes.test.ts'
       - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
@@ -63,6 +70,9 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-list-scope-server-side.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-admin-capability-realdb.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-notify-badges.db.test.ts'
+      - 'packages/core-backend/src/services/approval-cc-predicate.ts'
+      - 'packages/core-backend/src/services/approval-notify-badge-flags.ts'
       - 'packages/core-backend/src/services/approval-admin-capability.ts'
       - 'packages/core-backend/tests/unit/approvals-bridge-routes.test.ts'
       - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
@@ -141,13 +151,14 @@ jobs:
           tests/integration/approval-list-scope-server-side.db.test.ts
           tests/integration/approval-wp2-source-filter.api.test.ts
           tests/integration/approval-admin-capability-realdb.db.test.ts
+          tests/integration/approval-notify-badges.db.test.ts
           --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-list-scope-server-side.db.test.ts,approval-wp2-source-filter.api.test.ts,approval-admin-capability-realdb.db.test.ts"
+            echo "suites=approval-list-scope-server-side.db.test.ts,approval-wp2-source-filter.api.test.ts,approval-admin-capability-realdb.db.test.ts,approval-notify-badges.db.test.ts"
             echo "scope=GET /api/approvals server-determined visibility scope; tab default + unknown-tab refusal; org pin (default OFF) forced ON in-process; approval-administrator capability predicate + route + its agreement with the scope admin arm"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"

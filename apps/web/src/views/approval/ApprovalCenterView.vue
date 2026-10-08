@@ -415,6 +415,26 @@
       </el-tab-pane>
 
       <el-tab-pane :label="t.tabCc" name="cc">
+        <!-- Test report 2026-10-08 (T3): unread-CC badge, ONLY while the server's CC-badge switch is
+             on (session feature `approvalCcUnreadBadge`); off ⇒ the plain `t.tabCc` label above, and
+             no count request at all. Its own count — never folded into 待办/未读 above (lock B). -->
+        <template v-if="ccUnreadBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabCc }}</span>
+            <el-tooltip
+              v-if="ccUnreadCount > 0"
+              :content="ccUnreadBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="ccUnreadCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-cc-unread-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
@@ -433,6 +453,7 @@
           :empty-text="tabEmptyText.cc"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'cc' ? selectedApprovalId : null"
+          :unread-dot-for="ccUnreadBadgeEnabled ? isCcUnreadRow : undefined"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -663,6 +684,7 @@ import {
   dispatchAction,
   exportApprovalsCsv,
   getApproval,
+  getCcUnreadCount,
   getPendingCount,
   markAllApprovalsRead,
   markApprovalRead,
@@ -730,6 +752,10 @@ watch(allVisibleApprovals, (rows) => {
 const { hasFeature } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+
+// Test report 2026-10-08 (T3): the 抄送我的 unread badge + row dots. Mirrors the server switch the
+// count endpoint is gated on; while false nothing below issues a request or renders anything.
+const ccUnreadBadgeEnabled = computed(() => hasFeature('approvalCcUnreadBadge'))
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
 // Reuses the SAME matchMedia-based composable/pattern as `isMobileLayout` above (a second,
@@ -891,6 +917,7 @@ const { isZh } = useLocale()
 const t = computed(() => (isZh.value ? CENTER_ZH : CENTER_EN))
 const filterSummaryText = computed(() => (isZh.value ? `已启用 ${activeFilterCount.value} 项筛选` : `${activeFilterCount.value} filter(s) active`))
 const pendingBadgeTooltip = computed(() => (isZh.value ? `待办 ${pendingTotalCount.value} / 其中 ${pendingBadgeCount.value} 未读` : `${pendingTotalCount.value} to-do / ${pendingBadgeCount.value} unread`))
+const ccUnreadBadgeTooltip = computed(() => `${ccUnreadCount.value} ${t.value.ccUnreadBadgeSuffix}`)
 const newTodoPillText = computed(() => (isZh.value ? `${newTodoPill.value.delta} 条新待办 · 点击刷新` : `${newTodoPill.value.delta} new to-do(s) · click to refresh`))
 const selectionCountText = computed(() => (isZh.value ? `已选 ${selectedPending.value.length} 项` : `${selectedPending.value.length} selected`))
 const batchRejectSummaryText = computed(() => (isZh.value ? `将驳回所选的 ${selectedPending.value.length} 项审批。` : `The ${selectedPending.value.length} selected approval(s) will be rejected.`))
@@ -1296,6 +1323,38 @@ function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): voi
   // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
   // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
+  // The tab badges have no event of their own (test report 2026-10-08: no new realtime event in
+  // this slice). An existing counts frame — e.g. the one the server sends this user after their
+  // own mark-read — is used as a cue to re-ask; the frame's payload is never read for them.
+  void refreshTabBadgeCounts()
+}
+
+// Test report 2026-10-08 — tab read-state badges. Each is its OWN count from its own endpoint,
+// requested only while its session feature is on, and never mixed into 待办 / 未读 above (todo-center
+// lock B keeps those on active seats). Refreshed on every list (re)load, on tab switch (both go
+// through loadCurrentTab), after a pane read, and on an existing approval counts frame — there is
+// no dedicated realtime event, so a CC that arrives while the page sits idle shows on the next of
+// those. Decorative like the pending badge: a failed or disabled count hides the badge (0).
+const ccUnreadCount = ref(0)
+async function refreshCcUnreadCount(): Promise<void> {
+  if (!ccUnreadBadgeEnabled.value) {
+    ccUnreadCount.value = 0
+    return
+  }
+  try {
+    // Read through a closure (never at setup): several approval-center specs mock the api module
+    // with an explicit export list that does not name this function.
+    const result = await Promise.resolve().then(() => getCcUnreadCount(sourceSystemFilter.value))
+    ccUnreadCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    ccUnreadCount.value = 0
+  }
+}
+async function refreshTabBadgeCounts(): Promise<void> {
+  await refreshCcUnreadCount()
+}
+function isCcUnreadRow(row: UnifiedApprovalDTO): boolean {
+  return row.ccUnread === true
 }
 
 useApprovalCountsRealtime({
@@ -1589,6 +1648,7 @@ function loadCurrentTab() {
   // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
   // reload had already fetched. A choke point cannot be forgotten by the next call site.
   void refreshPendingBadgeCount({ resnapshot: true })
+  void refreshTabBadgeCounts()
   // UI-7: this is also the ONE place every list reload passes through — including a pane-triggered
   // 通过/驳回 (`handleInlineApprove`/`submitRowReject` both call `loadCurrentTab()` on success), and
   // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
@@ -1791,12 +1851,14 @@ watch(
 // presence data, a failure is silent and never a toast. On success the row's own dot is cleared in
 // place and the badge re-polled, so neither waits for the next list reload.
 function markPaneSelectionRead(id: string): void {
-  if (selectedApprovalId.value !== id || paneApproval.value?.id !== id) return
+  if (selectedApprovalId.value !== id) return
+  if (paneApproval.value?.id !== id) return
   void Promise.resolve()
     .then(() => markApprovalRead(id))
     .then(() => {
       clearRowUnreadMarkers(id)
       void refreshPendingBadgeCount()
+      void refreshTabBadgeCounts()
     })
     .catch(() => {})
 }
@@ -1808,6 +1870,7 @@ function clearRowUnreadMarkers(id: string): void {
   for (const row of activeTabRows.value) {
     if (row.id !== id) continue
     if (row.isRead === false) row.isRead = true
+    if (row.ccUnread === true) row.ccUnread = false
   }
 }
 

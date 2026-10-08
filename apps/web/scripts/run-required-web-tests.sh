@@ -1397,6 +1397,13 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # approval-web-guard.yml's targeted run line. It matches exactly one spec file, and a bidirectional
 # substring scan against every token in this file finds no token that contains it or is contained by
 # it (`approval-form-draft` is the closest neighbour and shares no substring relation).
+# Test report 2026-10-08 (tab read-state badges: 抄送我的 unread-CC, 我发起的 new-outcome, both behind
+# default-OFF server switches): ONE token added, `approval-center-notify-badges`, for
+# apps/web/tests/approval-center-notify-badges.spec.ts, paired with the same token on
+# approval-web-guard.yml's targeted run line. It matches exactly that one spec file. Bidirectional
+# substring scan against every token on this line: it contains none of them, and the only token that
+# contains it is the bare `approval-center`, which already incidentally collects every
+# `approval-center-*` spec — listed explicitly anyway, per this file's own discipline (see the UI-7 note).
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1409,6 +1416,7 @@ exec npx vitest run \
   approval-center \
   approval-center-detail-pane-controller \
   approval-center-master-detail \
+  approval-center-notify-badges \
   approval-comments-client \
   approval-comments-panel \
   approval-common-template-presets \

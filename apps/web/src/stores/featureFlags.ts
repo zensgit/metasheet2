@@ -40,6 +40,13 @@ export interface ProductFeatures {
    */
   approvalFwbWriteback: boolean
   /**
+   * 抄送我的 unread badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_CC_UNREAD_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/cc-unread-count. While false the approval center issues no count
+   * request and shows no badge or row dot on 抄送我的. Never inferred from role/mode/plugin state.
+   */
+  approvalCcUnreadBadge: boolean
+  /**
    * W6-3 (#4556) OD-W6-7=(a) — group effective-policy panel gate. Mirrors the backend's two-layer
    * default-OFF switch (master `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED` env AND a per-org
    * exact allowlist — see `w6-group-effective-policy-panel-flag.ts`). No role/mode/plugin
@@ -94,6 +101,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalAttachments: false,
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
+  approvalCcUnreadBadge: false,
   attendanceGroupEffectivePolicyPanel: false,
   elearning: false,
   tasks: false,
@@ -277,6 +285,8 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_fwb_writeback === 'boolean'
           ? featuresNode.approval_fwb_writeback
           : undefined,
+    approvalCcUnreadBadge:
+      typeof featuresNode.approvalCcUnreadBadge === 'boolean' ? featuresNode.approvalCcUnreadBadge : undefined,
     attendanceGroupEffectivePolicyPanel:
       typeof featuresNode.attendanceGroupEffectivePolicyPanel === 'boolean'
         ? featuresNode.attendanceGroupEffectivePolicyPanel
@@ -406,6 +416,12 @@ function resolveFeatures(
     backend.approvalFwbWriteback,
   )
 
+  // 抄送我的 unread badge: same default-OFF discipline — only an explicit backend/override boolean.
+  const approvalCcUnreadBadge = boolOrDefault(
+    override.approvalCcUnreadBadge,
+    backend.approvalCcUnreadBadge,
+  )
+
   // W6-3 (#4556) OD-W6-7=(a): same default-OFF discipline — only an explicit backend/override
   // boolean enables it; no admin/mode/plugin inference.
   const attendanceGroupEffectivePolicyPanel = boolOrDefault(
@@ -437,6 +453,7 @@ function resolveFeatures(
     approvalAttachments,
     approvalCanvasV2,
     approvalFwbWriteback,
+    approvalCcUnreadBadge,
     attendanceGroupEffectivePolicyPanel,
     elearning,
     tasks,

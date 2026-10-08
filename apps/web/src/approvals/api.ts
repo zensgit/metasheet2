@@ -1610,6 +1610,30 @@ export async function getPendingCount(
 }
 
 /**
+ * Badge count of one approval-center tab (test report 2026-10-08). Each badge has its own endpoint
+ * behind its own default-OFF server switch; the caller asks only when the matching session
+ * feature is on. `degraded` mirrors the pending-count contract (schema not ready ⇒ 0 + flag).
+ */
+export interface ApprovalTabBadgeCountResponse {
+  count: number
+  degraded?: boolean
+}
+
+/**
+ * 抄送我的 unread count — CC'd approvals the viewer has not opened since the newest CC targeting
+ * them, over the same feed the 抄送我的 tab lists for this `sourceSystem`. Never part of the
+ * 待办 counts.
+ */
+export async function getCcUnreadCount(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<ApprovalTabBadgeCountResponse> {
+  if (USE_MOCK) {
+    return { count: 0 }
+  }
+  return apiGet(`/api/approvals/cc-unread-count?sourceSystem=${encodeURIComponent(sourceSystem)}`)
+}
+
+/**
  * Wave 2 WP3 slice 2 — mark a single approval as read for the current user.
  *
  * Used by `ApprovalDetailView` on-mount (fire-and-forget). The endpoint is
