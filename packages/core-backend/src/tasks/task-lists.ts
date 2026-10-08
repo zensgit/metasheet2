@@ -11,21 +11,21 @@
  *         are a task-level role, not a list-level one — this module never invents a THIRD role
  *         scheme; `toTaskListMemberships` is the one bridge between the two).
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  */
 import { type TaskListMembership } from './task-access'
 import { normalizeUserText } from './task-ids'
 
-// ── List-scoped role closed set (§3.1: "清单角色闭集 read/edit/owner") ──────────────────────────
+// ── List-scoped role closed set: read / edit / owner (R12) ──────────────────────────────────────
 
-/** Closed role set for `task_list_members.role` (M4 ruling pack v2 §3.1 / R12). */
+/** Closed role set for `task_list_members.role` (R12). */
 export const TASK_LIST_MEMBER_ROLES = ['read', 'edit', 'owner'] as const
 export type TaskListMemberRole = (typeof TASK_LIST_MEMBER_ROLES)[number]
 
 /** Roles an `applyAddMember`/`applyChangeMemberRole` CALLER may directly assign — `owner` is set
- * only via `applyTransferOwner` (ASSUMPTION(task-d): R12(c) "owner 唯一…只能先转让" reads as: no
- * write path ever assigns 'owner' except the transfer transition itself). */
+ * only via `applyTransferOwner` (ASSUMPTION(task-d): [R12(c)] a list has one owner and ownership
+ * moves only by transfer, so no write path assigns 'owner' except the transfer transition). */
 export const TASK_LIST_MEMBER_ASSIGNABLE_ROLES = ['read', 'edit'] as const
 export type TaskListMemberAssignableRole = (typeof TASK_LIST_MEMBER_ASSIGNABLE_ROLES)[number]
 
@@ -86,9 +86,9 @@ export function toTaskListMemberships(
   })
 }
 
-// ── List-action ability matrix (§3.1: "canListAction(ctx, action) 的动作闭集") ───────────────────
+// ── List-action ability matrix: the closed action set of `canListAction` ─────────────────────────
 
-/** Closed action set for `canListAction` (M4 ruling pack v2 §3.1). */
+/** Closed action set for `canListAction`. */
 export const TASK_LIST_ACTIONS = [
   'view',
   'rename',
@@ -106,8 +106,8 @@ export type TaskListAction = (typeof TASK_LIST_ACTIONS)[number]
  * archive it even at `'read'`, per §13-14, without being promoted to a stronger membership role). */
 export type TaskListCtxRole = TaskListMemberRole | 'none'
 
-// ASSUMPTION(task-d): [R12(a)] "调用者在该清单是 edit 或 owner" is the ONLY explicit ruling-pack text
-// for a list-action ability; `add_item`/`remove_item` below are ruling-derived. `manage_members`,
+// ASSUMPTION(task-d): [R12(a)] `add_item`/`remove_item` need list `edit` or `owner`; R12(a) is the
+// only ruling item that names a list-action ability. `manage_members`,
 // `manage_groups`, and `rename` are this module's OWN CHOICE (not named by any R-number): they
 // follow the same "edit-or-owner" class as `add_item`/`remove_item` because R12 gives list-editor
 // no narrower carve-out anywhere, and `task-access.ts`'s `TASK_ROLE_ABILITY` uses the same
@@ -154,8 +154,8 @@ const TASK_LIST_ROLE_ABILITY: Record<Exclude<TaskListCtxRole, 'none'>, Record<Ta
 
 /**
  * `archive`/`unarchive` additionally pass for the list's CREATOR even at `role: 'read'` (lock
- * §13-14 `:776`, already-decided direction: "归档权 = created_by ∪ edit/owner"). Every other
- * action ignores `isCreator` and reads the role table only.
+ * §13-14 `:776`, an already-decided direction: the list's creator and its `edit` / `owner` members
+ * may archive). Every other action ignores `isCreator` and reads the role table only.
  */
 export function canListAction(
   ctx: { role: TaskListCtxRole; isCreator?: boolean },
@@ -171,7 +171,7 @@ export function canListAction(
   return TASK_LIST_ROLE_ABILITY[ctx.role][action]
 }
 
-// ── Soft limits (§3.1 "限额常量"; M4 ruling pack v2 D14) ─────────────────────────────────────────
+// ── Soft limits ([D14]) ──────────────────────────────────────────────────────────────────────────
 
 // ASSUMPTION(task-d): [D14] soft limits are single-point, reversible constants (D14 is a "gate
 // default", not an owner ruling) — same rationale as task-c's A5 (`TASK_ASSIGNEE_SOFT_LIMIT`).
@@ -223,7 +223,7 @@ export type ApplyAddListMemberResult =
   | { ok: false; reason: TaskListMemberWriteReason }
 
 // ASSUMPTION(task-d): [R17] `isActiveInOrg` is a caller-supplied boolean (the actual
-// `user_orgs(user_id, org, is_active)` lookup is I/O — the caller's job, same pattern as
+// active-member lookup (the login test) is I/O — the caller's job, same pattern as
 // `task-membership.ts`'s soft-limit checks being pure booleans the caller assembles). Already-a-
 // member is checked BEFORE the org-membership gate: re-adding an existing member is always a noop
 // regardless of that member's current org status (this function never REMOVES a row).
@@ -346,14 +346,14 @@ export type ApplyTransferOwnerResult =
   | { ok: false; reason: TaskListTransferOwnerReason }
 
 // ASSUMPTION(task-d): [R12(d)] `toUserId` must already be a list member (`target_not_member` if
-// not) — the ruling pack's exact words are "转让时原 owner 降为 edit", which presumes a `to` who is
-// already inside the member set; it does not say a transfer may ALSO implicitly add a brand-new
-// member. Requiring pre-membership is the conservative, reversible reading.
+// not): R12(d) demotes the former owner to `edit`, which presumes a target already in the member
+// set, and it does not say a transfer may also add a new member. Requiring pre-membership is the
+// conservative, reversible reading.
 /**
  * R12(c)/(d): `fromUserId` must currently hold `'owner'` (422 `not_owner` otherwise — this is also
  * what makes `canListAction(…, 'transfer_owner')` and this function's own guard agree).
  * `fromUserId === toUserId` ⇒ noop. Otherwise: `toUserId` → `'owner'`, `fromUserId` → `'edit'`
- * (never `'read'` — R12(d) "原 owner 降为 edit" is exact), event `owner_transferred`.
+ * (never `'read'`: R12(d) demotes the former owner to `edit`), event `owner_transferred`.
  */
 export function applyTransferOwner(input: {
   members: TaskListMemberRow[]
@@ -406,7 +406,7 @@ export function applyUnarchive(input: { archivedAt: Date | null; actorId: string
   return { archivedAt: null, events: [{ type: 'unarchived', userId: input.actorId }] }
 }
 
-// ── Add/remove a task to/from a list: two-event plan (M4 ruling pack v2 §3.4 D2) ─────────────────
+// ── Add/remove a task to/from a list: two-event plan ([D2]) ──────────────────────────────────────
 
 export type TaskListItemTaskEventType = 'list_added' | 'list_removed'
 export interface TaskListItemTaskEvent {

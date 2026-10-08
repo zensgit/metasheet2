@@ -7,8 +7,8 @@
  *         assignee ∪ follower ∪ list_member 排除 actor;recipient_role 闭集"), §4.2 `:101` (`task_events`
  *         closed set)
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  * §3.4 D13 collects the v2 revision of §13-19's DETAIL rules this module implements (the DIRECTION
  * itself — "creator ∪ assignee ∪ follower ∪ list_member, exclude actor" — is already decided).
  */
@@ -16,12 +16,11 @@
 // ── Event → notification matrix: the D13 trigger closed set ──────────────────────────────────────
 
 // ASSUMPTION(task-d): [D13] the trigger closed set is `completed`/`completed_by_any`/`reopened`/
-// `deleted`/`commented` — `attachment_added` is explicitly deferred to P2 (D13: "P2 附件上线时再加
-// attachment_added"). `self_completed`/`self_reopened` NEVER notify (a solo actor completing/
+// `deleted`/`commented` — `attachment_added` is deferred to P2 (D13: it joins the set when
+// attachments ship). `self_completed`/`self_reopened` NEVER notify (a solo actor completing/
 // reopening their own row in an `all`-mode task where others remain unaffected does not fan out).
 // ASSUMPTION(task-d): [R05-opt] `assignee_added` is deliberately ABSENT from this literal array —
-// it is NOT a notifiable event by default ("被加负责人收通知" is the pack's own invented design, no
-// corpus source page — defaults to OFF). Adopting R05-opt means adding the literal string
+// notifying a newly added assignee is OFF by default. Adopting R05-opt means adding the literal string
 // `'assignee_added'` to this array (there is no separate on/off flag to flip: a closed TS union
 // this small has no clean way to be "widened" by a boolean without also touching every switch that
 // exhaustively matches `TaskNotifiableEvent`, so the array literal itself IS the single point of
@@ -49,7 +48,7 @@ export interface ResolveNotificationRecipientsInput {
   assigneeIds: string[]
   followerIds: string[]
   // ASSUMPTION(task-d): [D13] union of every member (read/edit/owner) of every list containing this
-  // task — INCLUDING archived lists ("已归档清单也算,因为归档不改变任务侧行为").
+  // task — INCLUDING archived lists (archiving does not change anything on the task side).
   listMemberIds: string[]
   actorId: string
 }
@@ -95,13 +94,12 @@ export interface TaskAssigneeCompletionShape {
   completedAt: Date | null
 }
 
-// ASSUMPTION(task-d): [R06] "收件人为未完成的负责人(completed_at IS NULL),零负责人时发给
-// creator" — read LITERALLY: zero ASSIGNEE ROWS (not merely zero INCOMPLETE ones) falls back to the
-// creator. A task with assignee rows that are ALL already complete returns an EMPTY array here
-// (not the creator) — such a task should already be `done` and filtered out by
-// `isReminderSkippedByTaskState` before this function is even reached; this function does not
-// re-derive that skip itself. Followers never receive reminders (R06: "关注人不收提醒",《创建任务》
-// :26).
+// ASSUMPTION(task-d): [R06] the recipients are the incomplete assignees (completed_at IS NULL), and
+// the creator when the task has no assignee — read LITERALLY: zero ASSIGNEE ROWS (not merely zero
+// INCOMPLETE ones) falls back to the creator. A task with assignee rows that are ALL already
+// complete returns an EMPTY array here (not the creator) — such a task should already be `done` and
+// filtered out by `isReminderSkippedByTaskState` before this function is even reached; this
+// function does not re-derive that skip itself. Followers never receive reminders (R06).
 /** Reminder-family recipients: incomplete assignees, or `[creatorId]` when there are NO assignee
  * rows at all. */
 export function resolveReminderRecipients(input: {
@@ -129,7 +127,7 @@ export function reminderRecipientRole(hasAssignees: boolean): TaskNotificationRe
 // notification).
 // ASSUMPTION(task-d): [D13] recorded with `recipientRole: 'list_member'` even though the recipient
 // is specifically the creator — the `task_list_events` recipient-role closed set has no separate
-// "list creator" value, so this is the closest bucket (D13's exact words: "recipient_role='list_member'").
+// "list creator" value, so this is the closest bucket (D13 records this family as `list_member`).
 /** See the two ASSUMPTION notes immediately above for the ruling this implements. */
 export function resolveListArchiveNotificationRecipients(input: {
   listCreatorId: string

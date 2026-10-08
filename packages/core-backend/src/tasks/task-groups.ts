@@ -7,15 +7,15 @@
  *         `:103` (`task_list_events` closed set: `group_created`/`group_renamed`/`group_deleted`),
  *         `:101` (`task_events` closed set: `group_changed`)
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  */
 import { normalizeUserText } from './task-ids'
 
 // ASSUMPTION(task-d): [R11] the `scope` closed set is `list | user` (锁 `:779` "建议
-// task_groups.scope='user'"); R11 is unratified. The exactly-one-default-group-per-scope rule and
-// "delete reassigns to the default group" (see `applyCreateGroup`/`applyDeleteGroup` below) are
-// R11's stated detail rules, not separate rulings.
+// task_groups.scope='user'"); the owner ruled R11 on 2026-10-07. The exactly-one-default-group-
+// per-scope rule and "delete reassigns to the default group" (see `applyCreateGroup` /
+// `applyDeleteGroup` below) are R11's stated detail rules, not separate rulings.
 // ── Scope closed set (§13-17 / R11) ───────────────────────────────────────────────────────────
 
 export const TASK_GROUP_SCOPES = ['list', 'user'] as const
@@ -63,9 +63,9 @@ export function validateTaskGroupName(raw: unknown): ValidateTaskGroupNameResult
   return { ok: true, name: normalized }
 }
 
-// ── task_list_events (LIST-scope groups only — D2: "个人分组的移动不写事件", extended here to
-//    创建/改名/删除 for the same reason: a `task_list_events` row needs a `listId`, and a USER-scope
-//    group has none) ────────────────────────────────────────────────────────────────────────────
+// ── task_list_events (LIST-scope groups only — D2 writes no event for a personal-group move;
+//    extended here to create / rename / delete for the same reason: a `task_list_events` row needs
+//    a `listId`, and a USER-scope group has none) ────────────────────────────────────────────────────────────────────────────
 
 export type TaskGroupListEventType = 'group_created' | 'group_renamed' | 'group_deleted'
 export interface TaskGroupListEvent {
@@ -138,7 +138,7 @@ export type ApplyDeleteGroupResult =
   | { ok: false; reason: TaskGroupDeleteReason }
 
 // ASSUMPTION(task-d): [R11] deleting the scope's own default group is never allowed ⇒ `is_default`;
-// items in a deleted (non-default) group move to `defaultGroupId` — R11's "删组后项回默认组".
+// items in a deleted (non-default) group move to `defaultGroupId` (R11).
 /**
  * `group` absent ⇒ `not_found`. Otherwise: items in the deleted group move to
  * `defaultGroupId` — the caller re-points `task_group_items.group_id`, this function only names
@@ -181,14 +181,15 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
 }
 
 // ASSUMPTION(task-d): [D2] `group_changed` (a `task_events` row) fires only when the item's GROUP
-// actually changes (`fromGroupId !== toGroupId`), and — mirroring D2's explicit "个人分组的移动不写
-// 事件" for the list/user split — only when `scope === 'list'`. A pure REORDER within the SAME group
+// actually changes (`fromGroupId !== toGroupId`), and — mirroring D2, under which a move between
+// personal groups writes no event — only when `scope === 'list'`. A pure REORDER within the SAME group
 // (no group change) never emits `group_changed`, in either scope: the lock's `task_events` closed
 // set records what happened to the TASK (which group it's in), not the group's internal item order.
 /**
  * Recomputes integer positions for `toGroupId`'s FULL new order (`nextOrderedItemIds`, the target
- * group's item ids in final order, `itemId` included at its new spot) — "整数重排…在同一事务内重排"
- * means the caller writes every returned position in one transaction, not just the moved item's.
+ * group's item ids in final order, `itemId` included at its new spot). Positions are integers and
+ * a reorder happens in one transaction (R11): the caller writes every returned position in that
+ * transaction, not just the moved item's.
  * Same group AND identical order to `previousOrderedItemIds` (the FROM group's order before the
  * move) ⇒ noop (`changed: false`, no positions, no events) — this is the module's "no change ⇒ no
  * event" rule applied to reordering specifically.

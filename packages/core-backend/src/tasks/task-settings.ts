@@ -6,8 +6,8 @@
  * Lock:   task-feature-design-lock-20260917.md §13-4 `:741` (`badge_scope` closed set, already-decided
  *         direction), §13-7 `:750` (`task_user_settings`, suggested)
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  */
 import { validateViewerTimeZoneHeader } from './task-dates'
 import { parseRemindPolicy, type TaskRemindPolicy } from './task-reminders'
@@ -37,7 +37,7 @@ export function parseBadgeScope(raw: unknown): ParseBadgeScopeResult {
 
 // ASSUMPTION(task-d): [D5] `badge_scope === 'off'` ⇒ `null`, and the CALLER short-circuits
 // (`/pending-count` returns `{count:0, badgeScope:'off'}` without querying `task_assignees`/`tasks`
-// at all — D5 says so explicitly: "不查库").
+// at all — D5 requires that no query is sent).
 /**
  * `'overdue'`/`'overdue_or_today'` map 1:1 onto `task-access.ts`'s `TaskPendingScope` (they are
  * literal string supersets of each other's values, by design — badge scope is a SUBSET of pending
@@ -50,11 +50,10 @@ export function pendingScopeForBadge(scope: TaskBadgeScope): TaskPendingScope | 
 }
 
 // ASSUMPTION(task-d): [R02] `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` (and the
-// `task_user_settings` table itself) are R02's recommended value — R02 is unratified (锁 `:750`:
-// "表本身是建议").
-// ASSUMPTION(task-d): [R07] `timeZone` is a SEPARATE ruling from the other three fields — M4 ruling
-// pack v2 §0.1 explicitly MOVED it out of R02 ("原④「加 time_zone 列」移到 R07,因为只有每日汇总用
-// 它"): it exists only because `task-reminders.ts`'s daily digest needs the recipient's own zone,
+// `task_user_settings` table itself) take R02's value; the owner ruled R02 on 2026-10-07 (the lock
+// lists the table itself as a suggestion, `:750`).
+// ASSUMPTION(task-d): [R07] `timeZone` belongs to R07, not R02: the column exists only because
+// `task-reminders.ts`'s daily digest needs the recipient's own zone,
 // not because of anything in R02's `default_remind_policy`/`badge_scope` shape. The DDL CHECK
 // `daily_reminder_enabled=false OR time_zone IS NOT NULL` is R07's, enforced here at the
 // application layer (`daily_reminder_requires_time_zone` below).
@@ -97,7 +96,7 @@ export type ParseSettingsPatchResult =
 // `dailyReminderEnabled` ends up `true`).
 // ASSUMPTION(task-d): [D7] `timeZone` is normalized via `task-dates.ts`'s
 // `validateViewerTimeZoneHeader` so a WRITTEN zone is normalized THE SAME WAY a READ viewer-tz
-// header is — "写入 time_zone 时只落规范名".
+// header is: only the normalized name is ever written.
 /**
  * Merges `patch` onto `current` field-by-field (each field validated independently — closed sets
  * via `parseBadgeScope`/`parseRemindPolicy`), then enforces the daily-reminder-needs-a-zone

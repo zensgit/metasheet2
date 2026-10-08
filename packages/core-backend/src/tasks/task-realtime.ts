@@ -6,22 +6,23 @@
  * Lock:   task-feature-design-lock-20260917.md §13-30 `:798` (suggested: per-user room, P0-A emits
  *         on complete/assign/reopen)
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  */
 
 // ASSUMPTION(task-d): [R16] recipients are the UNION of the assignee set BEFORE and AFTER the
 // write — not just one side. A pure reassignment (someone added AND someone else removed in the
 // same write) must reach BOTH the newly-added person (their badge now needs to count this task) and
 // the newly-removed person (their badge no longer does); a person present on both sides is
-// naturally deduplicated by the `Set`. Followers never receive this event (R16: "关注人的计数不会
-// 变,不发" — the badge R16 invalidates is driven off the `assigned` view, not `following`).
+// naturally deduplicated by the `Set`. Followers never receive this event (R16: a follower's count
+// does not change, so nothing is sent — the badge R16 invalidates is driven off the `assigned` view,
+// not `following`).
 // Output is sorted (own choice, not ruling-derived — deterministic, diffable, and order-independent
 // for a caller that just iterates the room list).
 /**
  * `tasks:counts-updated` room recipients (R16): union of `beforeAssignees` and `afterAssignees`.
- * The event this feeds is a bare invalidation signal with NO count/task payload (R16: "载荷只作
- * 失效信号" — the client re-fetches `/pending-count` with its own `x-viewer-time-zone` header) —
+ * The event this feeds is a bare invalidation signal with NO count/task payload (R16: the payload
+ * only invalidates — the client re-fetches `/pending-count` with its own `x-viewer-time-zone` header) —
  * this module only computes the recipient set, it does not shape any payload.
  */
 export function countsUpdateRecipients(beforeAssignees: string[], afterAssignees: string[]): string[] {

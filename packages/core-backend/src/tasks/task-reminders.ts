@@ -18,8 +18,8 @@
  * companion write-time guard: `time_zone` is validated at write, so a well-formed task row should
  * never reach here with a bad zone — this is defense in depth, not the primary guard).
  *
- * This whole module implements the M4 ruling pack v2 (PROPOSED, not owner-ratified) — every
- * `ASSUMPTION(task-d)` comment below names the ruling id it implements the RECOMMENDED value of.
+ * Each `ASSUMPTION(task-d)` comment below names the ruling item it implements. The owner ruled the
+ * R and N items on 2026-10-07 (values and R12's narrowed form: PR-3a design §11).
  */
 import { computeDateReminderOccurrence, isDateReminderDue } from '../multitable/automation-date-reminder'
 import { isValidIanaTimeZone } from '../multitable/automation-timezone'
@@ -33,10 +33,11 @@ export type TaskRemindPolicy = { mode: 'default' } | { mode: 'none' }
 export type ParseRemindPolicyReason = 'invalid_policy'
 export type ParseRemindPolicyResult = { ok: true; policy: TaskRemindPolicy } | { ok: false; reason: ParseRemindPolicyReason }
 
-// ASSUMPTION(task-d): [R02③] "缺省未知值 422 并配负例;缺行视为 default" is written about the ROW
-// being absent from `task_user_settings` entirely. This function additionally treats a `null`/
-// `undefined` COLUMN VALUE (a row exists, but `default_remind_policy` itself is null) the same way
-// — defaulting to `{mode:'default'}` — generalizing "missing" to cover both cases; ANY other
+// ASSUMPTION(task-d): [R02③] an unknown value is 422 and a missing row means `default`; the
+// missing-row half is about the ROW being absent from `task_user_settings` entirely. This function
+// additionally treats a `null`/`undefined` COLUMN VALUE (a row exists, but `default_remind_policy`
+// itself is null) the same way — defaulting to `{mode:'default'}` — generalizing "missing" to cover
+// both cases; ANY other
 // non-matching value (wrong shape, unknown `mode`, extra/missing keys) is rejected. This is the
 // ROW-READ context specifically. `task-settings.ts`'s `parseSettingsPatch` — the PATCH-WRITE
 // context — does NOT call this function with a `null` `defaultRemindPolicy`: an explicit `null`
@@ -69,7 +70,7 @@ export interface ComputeDefaultRemindAtInput {
   /** Already-computed `due_at` (e.g. via `task-dates.ts`'s `computeDueAt`) — required for the
    * scheduled branch; ignored for all-day. */
   dueAt: Date | null
-  /** The TASK's own IANA zone (never the viewer's — lock §4.4 "不用查看者时区"). */
+  /** The TASK's own IANA zone (never the viewer's zone — lock §4.4). */
   timeZone: string
   policy: TaskRemindPolicy
 }
@@ -145,7 +146,7 @@ export function computeDefaultRemindAt(input: ComputeDefaultRemindAtInput): Date
   return occurrenceIso === null ? null : new Date(occurrenceIso)
 }
 
-// ── Write-time enqueue guard (R06: "写入时 remind_at ≤ now 就不入队、不补发") ─────────────────────
+// ── Write-time enqueue guard (R06: remind_at ≤ now at write is neither enqueued nor backfilled) ─
 
 /** Strictly-future check at WRITE time — the write path's own gate, separate from the scan-time
  * window below. A `remindAt` at or before `writtenAt` is never enqueued (no backfill on write). */
@@ -156,13 +157,13 @@ export function shouldEnqueueReminder(remindAt: Date, writtenAt: Date): boolean 
 // ── Scan-time firing window (R06) ─────────────────────────────────────────────────────────────
 
 // ASSUMPTION(task-d): [R06] `W`, the scan/backfill grace window, is a SINGLE-POINT constant here —
-// R06's recommended value is 2 hours, "不小于调度间隔" (not smaller than the scheduler's tick
-// interval; PR-3b, which sets `TASKS_SCHEDULER_INTERVAL_MS`, owns keeping that inequality true).
+// R06's value is 2 hours, and W must not be smaller than the scheduler's tick interval (PR-3b,
+// which sets `TASKS_SCHEDULER_INTERVAL_MS`, owns keeping that inequality true).
 export const TASK_REMINDER_SCAN_WINDOW_MS = 2 * 60 * 60 * 1000
 
 /**
  * R06: `floor ≤ remind_at ≤ now` AND `remind_at > now − W` — calls `isDateReminderDue` DIRECTLY
- * (lock/plan `:171` "原样复用"), rather than reimplementing its three-way bound check. `floor` is
+ * (reused as is, lock/plan `:171`), rather than reimplementing its three-way bound check. `floor` is
  * the `occurred_at` of the event that most recently WROTE the current `remind_at` (a `created` or
  * `remind_changed` `task_events` row) — the caller reads that timestamp; this function does not
  * derive it. A `remindAt` outside the window is neither generated nor backfilled (R06).
@@ -171,7 +172,8 @@ export function isTaskReminderDue(remindAt: Date, now: Date, floor: Date): boole
   return isDateReminderDue(remindAt.toISOString(), now.getTime(), TASK_REMINDER_SCAN_WINDOW_MS, floor.getTime())
 }
 
-// ASSUMPTION(task-d): [R06] "到点时任务已完成或已软删,就不发 (skipped)" — a tiny pure predicate
+// ASSUMPTION(task-d): [R06] a task that is done or soft-deleted when its reminder falls due gets no
+// reminder (skipped) — a tiny pure predicate
 // over already-loaded task state, kept here (not invented as a throwaway inline check at the PR-3b
 // call site) because it is a named part of R06's recommended algorithm and is independently
 // testable/mutable.
@@ -194,18 +196,18 @@ export function isReminderSkippedByTaskState(
   return task.remindAt.getTime() !== deliveryRemindAt.getTime()
 }
 
-// ── outbox source_key builders — all four families (§3.1 "source_key 四族构造器") ────────────────
+// ── outbox source_key builders — all four families ───────────────────────────────────────────────
 
-// ASSUMPTION(task-d): [R05/R06/R07] the M4 ruling pack quotes only the PREFIX of each family
-// verbatim (`task_reminder:<taskId>:<remind_at>:…`, `task_daily:<date>:…`,
+// ASSUMPTION(task-d): [R05/R06/R07] the ruling items fix only the PREFIX of each family
+// (`task_reminder:<taskId>:<remind_at>:…`, `task_daily:<date>:…`,
 // `task_list_event:<listId>:<eventId>:recipient:<uid>:channel:<ch>` for the fourth family — R05(e)).
 // The `…`/interior shape for the reminder and daily families, and the THIRD family (regular
-// completed/reopened/deleted/commented event notifications) entirely, are not spelled out
-// character-for-character anywhere in the pack. This module fills them in by following the ONE
+// completed/reopened/deleted/commented event notifications) entirely, are not fixed by any ruling
+// item. This module fills them in by following the ONE
 // concrete precedent that IS in the repo — `UnscheduledReminderService.ts`'s
 // `'unscheduled:' + id + ':recipient:' + userId + ':channel:' + channel` — extended to all four
 // families for a consistent, reviewable shape. `channel` is a caller-supplied string, not a closed
-// enum here: the pack gives no closed channel set for tasks, and the attendance precedent
+// enum here: no ruling item gives a closed channel set for tasks, and the attendance precedent
 // (`attendance_notification_deliveries.channel`) is untyped `text` resolved at runtime, not a DDL
 // CHECK, so this module does not invent one either.
 
@@ -291,10 +293,10 @@ function addCivilDays(dateStr: string, days: number): string {
 // text, and so a future change to either half (e.g. the digest excluding already-overdue items)
 // only has to touch one clause.
 /**
- * "已逾期的任务与今明两天将截止的未完成任务" (《任务设置》:13). `status !== 'open'` or
- * `completedByViewer` ⇒ `false` first (R07: "加 status open、本人未完成"). Otherwise: overdue
- * (`isOverdue`) OR due at/before tomorrow in `viewerTz` — scheduled: `dueAt` before the START of
- * the day AFTER tomorrow; all-day: `dueDate <= tomorrow`.
+ * The daily digest holds the viewer's overdue tasks and the open tasks due today or tomorrow.
+ * `status !== 'open'` or `completedByViewer` ⇒ `false` first (R07: open tasks the viewer has not
+ * completed). Otherwise: overdue (`isOverdue`) OR due at/before tomorrow in `viewerTz` — scheduled:
+ * `dueAt` before the START of the day AFTER tomorrow; all-day: `dueDate <= tomorrow`.
  */
 export function isInDailyDigest(task: TaskDailyDigestShape, now: Date, viewerTz: string): boolean {
   if (task.status !== 'open' || task.completedByViewer) return false
@@ -313,19 +315,19 @@ export function isInDailyDigest(task: TaskDailyDigestShape, now: Date, viewerTz:
 export interface TaskDailyDigestConditionInput {
   actorParam: string
   orgParam: string
-  /** The RECIPIENT's own configured `time_zone` (never a fallback to the task's own zone — R07's
-   * "按用户 time_zone" is unconditional; `task-settings.ts`'s `parseSettingsPatch` is what makes
-   * sure a user with `dailyReminderEnabled` can never have a null `timeZone` in the first place).
+  /** The RECIPIENT's own configured `time_zone` (never a fallback to the task's own zone — R07
+   * always uses the recipient's own time_zone; `task-settings.ts`'s `parseSettingsPatch` is what
+   * makes sure a user with `dailyReminderEnabled` can never have a null `timeZone` in the first place).
    * Bound as `$3`, same slot `task-access.ts`'s `buildTaskPendingCondition` uses for viewer tz. */
   viewerTzParam: string
 }
 
 /**
- * SQL text for R07's content rule, DERIVED FROM `buildTaskScopeCondition({view:'assigned'})` (same
- * "由 assigned 臂派生" requirement `buildTaskPendingCondition` already follows) — never writes its
- * own role arm. Mirrors `isInDailyDigest` above; the `isOverdue`-equivalent half is dropped here (it
- * is the same logically-subsumed redundancy noted above) since a SQL predicate has no reviewability
- * benefit from restating it, only extra text.
+ * SQL text for R07's content rule, DERIVED FROM `buildTaskScopeCondition({view:'assigned'})` (the
+ * same derived-from-the-assigned-arm requirement `buildTaskPendingCondition` already follows) —
+ * never writes its own role arm. Mirrors `isInDailyDigest` above; the `isOverdue`-equivalent half
+ * is dropped here (it is the same logically-subsumed redundancy noted above) since a SQL predicate
+ * has no reviewability benefit from restating it, only extra text.
  */
 export function buildTaskDailyDigestCondition(input: TaskDailyDigestConditionInput): TaskScopeCondition {
   const { actorParam, orgParam, viewerTzParam } = input

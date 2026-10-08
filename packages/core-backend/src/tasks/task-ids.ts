@@ -11,10 +11,10 @@
  * was added by owner ruling 2026-09-26 (「按建议」 on the `tev_` proposal); lock §4.1 lists only
  * tsk/tlst/tcmt, so this is a recorded addition to that list.
  *
- * ASSUMPTION(task-d): [M4 ruling pack v2, R23] `group` (`tgrp`, for `task_groups.id`) and
- * `listEvent` (`tlev`, for `task_list_events.id`) are added here — the M4 pack's recommended
- * value, NOT an owner ruling (R23 is unratified). `task_notification_deliveries.id` is a uuid
- * (R23), not a generated domain id, so it gets no entry here. List/task/comment/group members and
+ * ASSUMPTION(task-d): [R23] `group` (`tgrp`, for `task_groups.id`) and `listEvent` (`tlev`, for
+ * `task_list_events.id`) are added here; the owner ruled R23 on 2026-10-07.
+ * `task_notification_deliveries.id` is a uuid (R23), not a generated domain id, so it gets no entry
+ * here. List/task/comment/group members and
  * items use composite primary keys (R23), so they need no id prefix either.
  */
 export const TASK_ID_PREFIXES = {

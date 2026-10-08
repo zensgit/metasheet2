@@ -106,7 +106,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 | 8 | `task-pagination.ts` `parsePageParams` 的 `limit` 上界 | 去掉 `\|\| parsed > TASK_PAGE_LIMIT_MAX` | 红 2(边界格 + 不静默夹取格),还原后 19/19 绿 |
 | 9 | `task-notifications.ts` `RECIPIENT_ROLE_PRIORITY`(§6 修复之后的版本 —— 证明常量现在真正驱动行为) | `['creator','assignee','follower','list_member']` 改成 `['creator','follower','assignee','list_member']`(交换 assignee/follower 顺序) | 红 2(`assignee>follower` 优先级断言 + 「assignee+follower 同一人应记 assignee」的 mutation-sensitive 断言),还原后 24/24 绿 |
 
-后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(`scratchpad/mutation-check-round2.py`,未提交,只跑在本地)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 用 `--reporter=verbose` 跑对应测试文件、既按退出码判红/绿、也把实际失败的用例标题抓下来当证据 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。下面表格「结果」列里带引号的用例标题就是脚本抓到的真实失败标题,不是转述;19 处全部 PASS。最后一次重跑是在只有这两份 doc 文件有未提交改动的工作区上做的(`packages/` 当时与 `279c82002e` 逐字节一致——`git diff 279c82002e HEAD -- packages/` 零输出,`git diff` 命令本身也证实了这一点),两次哈希相同,都是 `2061953acb44e2c3201b2527efdbcba184b65ecd63fe44234fb0f5c63313ea59`(这是**那份 docs diff 的哈希,不是空 diff 的哈希**——空 diff 的哈希是 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,`printf '' | shasum -a 256` 算出来的,跟上面那个不是一回事)。两次相同证明脚本自己跑完之后 `packages/` 目录(唯一会被脚本 mutate 的地方)和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
+后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(未提交,放在私有工件目录)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 用 `--reporter=verbose` 跑对应测试文件、既按退出码判红/绿、也把实际失败的用例标题抓下来当证据 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。下面表格「结果」列里带引号的用例标题就是脚本抓到的真实失败标题,不是转述;19 处全部 PASS。最后一次重跑是在只有这两份 doc 文件有未提交改动的工作区上做的(`packages/` 当时与 `279c82002e` 逐字节一致——`git diff 279c82002e HEAD -- packages/` 零输出,`git diff` 命令本身也证实了这一点),两次哈希相同,都是 `2061953acb44e2c3201b2527efdbcba184b65ecd63fe44234fb0f5c63313ea59`(这是**那份 docs diff 的哈希,不是空 diff 的哈希**——空 diff 的哈希是 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,`printf '' | shasum -a 256` 算出来的,跟上面那个不是一回事)。两次相同证明脚本自己跑完之后 `packages/` 目录(唯一会被脚本 mutate 的地方)和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
 
 | # | 模块 / 被改的守卫 | 改法 | 结果 |
 |---|---|---|---|
@@ -144,7 +144,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 ## 5. 未验证 / 留给后续
 
 - 没有 DDL、路由、服务或前端代码;真实数据库、staging、生产环境:NOT RUN(本切片范围之外)。
-- M4 裁决包 v2 尚未经 owner ratify——本文档只验证「纯函数按裁决包推荐值实现且自洽」,不代表任何 R 编号已经裁定;设计文档 §5 的 ASSUMPTION 表是改动裁决后要回来重新核对的清单。
+- owner 于 2026-10-07 裁定了 R、N 条目,取值与本切片实现的相同(R12 取 PR-3a 的收窄版);本文档验证的是纯函数按这些取值实现且自洽;设计文档 §5 的 ASSUMPTION 表是改动裁决后要回来重新核对的清单。
 - `isInDailyDigest`(TS)与 `buildTaskDailyDigestCondition`(SQL)的双形对拍(裁决包候选门 M4-c 要求):需要真实 Postgres,留给 PR-3a(见设计文档 §6)。
 
 ## 6. 独立复核 fixup(同分支后续 commit,非 amend)
@@ -155,7 +155,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 - **commit `25df44d066`**:
   - `task-notifications.ts` 的 `RECIPIENT_ROLE_PRIORITY` 声明了但从未被 `resolveNotificationRecipients` 读取——真正的优先级是硬编码在四次 `consider(...)` 调用的书写顺序里;改后 owner 就算裁定不同优先级、把这个常量改一下,行为也不会跟着变。已改成显式 `for (const role of RECIPIENT_ROLE_PRIORITY)` 驱动,常量现在是唯一真相(mutation #9 证实)。
   - `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` 这个"开关"常量改成 `true` 不会让 `assignee_added` 真的进入 `TASK_NOTIFIABLE_EVENTS`(该数组是独立的字面量,不读这个布尔值)——是纯装饰性的死代码。已删除该常量与对应测试断言,`[R05-opt]` 标记直接移到 `TASK_NOTIFIABLE_EVENTS` 数组本身上,数组字面量就是唯一真相。
-  - `task-settings.ts` 里 `timeZone` 字段与 `daily_reminder_requires_time_zone` 校验被错标成 R02③/R02④——M4 裁决包 v2 §0.1 已把这一列明确从 R02 移到 R07("原④『加 time_zone 列』移到 R07")。改标为 `[R07]`,`[R02]` 只留给 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 三个字段。设计文档 §2.5/§5 与对应测试标题同步改正。
+  - `task-settings.ts` 里 `timeZone` 字段与 `daily_reminder_requires_time_zone` 校验被错标成 R02③/R02④——这一列属于 R07,不属于 R02。改标为 `[R07]`,`[R02]` 只留给 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 三个字段。设计文档 §2.5/§5 与对应测试标题同步改正。
 - **commit `279c82002e`**(第三轮独立复核,协调方转述的 13 个编号项;编号与协调方原文一一对应):
   1. `task-lists.ts` `applyAddMember`/`applyChangeMemberRole`:`role` 参数只有编译期类型,没有运行时闭集校验——两处入口现在都先调用新导出的 `parseTaskListMemberRole(raw: unknown)`(同一函数,不是两套平行逻辑),`'owner'`/未知字符串/非字符串一律 422 `invalid_role`,且排在其它检查之前。
   2. `task-lists.ts` `toTaskListMemberships`:闭集外的 `role` 此前会落进三元表达式的 `else` 分支,静默变成 `'editor'`(过度授权)。改成显式三分支,闭集外 `throw TypeError`(同 `canListAction` 的 fail-closed-by-throwing 风格)。

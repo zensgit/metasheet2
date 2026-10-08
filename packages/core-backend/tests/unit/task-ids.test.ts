@@ -10,8 +10,8 @@ import {
 
 describe('task-ids', () => {
   describe('TASK_ID_PREFIXES', () => {
-    // ASSUMPTION(task-d): [R23] `group`/`listEvent` added here per the M4 ruling pack v2's
-    // recommended (not owner-ratified) new prefixes for `task_groups.id` / `task_list_events.id`.
+    // ASSUMPTION(task-d): [R23] `group`/`listEvent` added here: the R23 prefixes (ruled 2026-10-07)
+    // for `task_groups.id` / `task_list_events.id`.
     it('is the closed six-kind set (task-d adds group/listEvent per R23)', () => {
       expect(TASK_ID_PREFIXES).toEqual({
         task: 'tsk',
