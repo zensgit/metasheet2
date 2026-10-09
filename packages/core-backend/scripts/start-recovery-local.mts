@@ -21,6 +21,7 @@ const cancel = () => {
 process.on('SIGTERM', cancel)
 process.on('SIGINT', cancel)
 process.once('disconnect', cancel)
+if (process.connected === false) cancel()
 try {
   const local = await prepareRecoveryLocalStartup({
     env: process.env,
