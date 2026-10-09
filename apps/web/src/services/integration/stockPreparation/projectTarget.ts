@@ -4,8 +4,10 @@
 //   GET  /api/integration/stock-preparation/projects/:projectNo/target   OPERATE
 //   POST /api/integration/stock-preparation/projects/:projectNo/target   PULL (201 created / 200 replay)
 //   GET  /api/integration/stock-preparation/project-targets              OPERATE
+//   POST /api/integration/stock-preparation/projects/:projectNo/target/archive   PULL (S4, R-38)
+//   POST /api/integration/stock-preparation/projects/:projectNo/target/restore   PULL (S4, R-38)
 //
-// All three answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
+// All five answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
 // switch is off. That answer is how this module knows the switch is off — and with it off, the pull
 // panel walks EXACTLY the flow it walked before S2 (`kind: 'legacy'` below): no confirmation, no
 // create, no extra sentence.
@@ -16,12 +18,19 @@
 //                    ├─ unreadable (anything else) ────────────────────────▶ STOP, say so, offer 重试
 //                    ├─ absent  ─ (pull tier?) ─ confirm 「新建」 ─ CREATE ─▶ preview ─ confirm ─ write
 //                    ├─ active  ─ (pull tier?) ─ confirm 「重新拉取」 ──────▶ the old four-step run
-//                    └─ archived ──────────────────────────────────────────▶ stop (restore is S4)
+//                    └─ archived ──────────────────────────────────────────▶ stop; a puller may
+//                                    「恢复并重新拉取」 (S4): type the number → RESTORE → run again
 //
 //   CREATE COMES BEFORE THE PREVIEW (Q4). With the switch on, a dry run against an unregistered
 //   project is refused 409 ABSENT, so the sheet must exist first. Declining the preview leaves the
 //   new sheet in place (「还没拉过」) — there is no 「撤销新建」; an empty sheet nobody needs is archived
 //   by a puller (S4).
+//
+// ARCHIVE / RESTORE (S4, ADR §6, register R-38) — `changeStockPreparationProjectTargetLifecycle`. 归档
+// 代替删除 (Q2): archiving changes the server's registry row only; the sheet, its rows and its grants
+// stay. The operator TYPES the project number shown on the page; nothing is sent until it matches
+// (`stockPrepProjectNumbersMatch`), and the server compares it again (400
+// STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH). Pull tier only; anyone else is told whom to ask.
 //
 // THE SERVER STAYS AUTHORITATIVE. `canPull` (workbenchAccess.canRunStockPrepProjectSync) and `may.*`
 // only decide what this page OFFERS; every route re-checks its own gate. A probe that could not be
@@ -77,6 +86,10 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_JOB_TARGET_STALE',
   'TABLE_ACTION_TARGET_TENANT_MISMATCH',
   'TABLE_ACTION_TARGET_OWNER_UNKNOWN',
+  // S4 (R-38): the archive / restore refusals.
+  'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED',
+  'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED',
+  'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH',
 ])
 
 export interface StockPrepProjectTargetState {
@@ -102,6 +115,15 @@ export interface StockPrepProjectTargetCreated {
   sheetId: string | null
   viewId: string | null
   todoViewId: string | null
+}
+
+/** What archive / restore answer (S4): the row's handles and enums after the transition. */
+export interface StockPrepProjectTargetLifecycleResult {
+  status: StockPrepProjectTargetStatus
+  sheetId: string | null
+  archivedAt: string | null
+  restoredAt: string | null
+  may: { create: boolean; archive: boolean; restore: boolean }
 }
 
 export interface StockPrepProjectTargetListItem {
@@ -193,6 +215,23 @@ export function clampStockPrepProjectTargetCreated(raw: unknown): StockPrepProje
   }
 }
 
+/** The archive / restore payload, or null. Strict like the state clamp: the status must be one the
+ *  transition can end in, and `may` must be three booleans. */
+export function clampStockPrepProjectTargetLifecycle(raw: unknown): StockPrepProjectTargetLifecycleResult | null {
+  if (!isRecord(raw)) return null
+  const status = statusOf(raw.status)
+  if (!status || status === 'absent') return null
+  const may = isRecord(raw.may) ? raw.may : null
+  if (!may || typeof may.create !== 'boolean' || typeof may.archive !== 'boolean' || typeof may.restore !== 'boolean') return null
+  return {
+    status,
+    sheetId: handleOf(raw.sheetId),
+    archivedAt: timestampOf(raw.archivedAt),
+    restoredAt: timestampOf(raw.restoredAt),
+    may: { create: may.create, archive: may.archive, restore: may.restore },
+  }
+}
+
 export function clampStockPrepProjectTargetList(raw: unknown): StockPrepProjectTargetList | null {
   if (!isRecord(raw) || !Array.isArray(raw.items)) return null
   const items: StockPrepProjectTargetListItem[] = []
@@ -254,6 +293,9 @@ export interface StockPreparationProjectTargetApi {
   get(projectNo: string): Promise<StockPrepProjectTargetState>
   create(projectNo: string): Promise<StockPrepProjectTargetCreated>
   list(): Promise<StockPrepProjectTargetList>
+  /** S4 (R-38). Optional so an older test double still type-checks; the real client has both. */
+  archive?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
+  restore?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
 }
 
 async function readEnvelope<T>(response: Response | undefined, route: string, clamp: (raw: unknown) => T | null): Promise<T> {
@@ -300,6 +342,26 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
       const response = await apiFetch(`${TARGET_BASE}/project-targets${suffix}`)
       return readEnvelope(response, route, clampStockPrepProjectTargetList)
     },
+    // S4: the body is the server's closed allowlist `{ confirmProjectNo }` and there is NO query —
+    // like the create, a write carries no steering field; the tenant is the authenticated principal's.
+    async archive(projectNo: string, confirmProjectNo: string) {
+      const route = 'POST …/projects/:projectNo/target/archive'
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/archive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmProjectNo }),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectTargetLifecycle)
+    },
+    async restore(projectNo: string, confirmProjectNo: string) {
+      const route = 'POST …/projects/:projectNo/target/restore'
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmProjectNo }),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectTargetLifecycle)
+    },
   }
 }
 
@@ -343,7 +405,7 @@ export type StockPrepProjectPullOutcome =
   | { kind: 'cancelled'; stage: 'create' | 'repull' }
   /** No sheet yet, and this caller cannot create one. */
   | { kind: 'contact_puller' }
-  /** Archived: read-only until a puller restores it (S4). */
+  /** Archived: read-only until a puller restores it (S4: 「恢复并重新拉取」 when `mayRestore`). */
   | { kind: 'archived'; mayRestore: boolean; state: StockPrepProjectTargetState }
   /** The create (or the repair's replay) was refused; nothing was pulled. */
   | { kind: 'create_refused'; status: number; code: string | null }
@@ -422,6 +484,56 @@ export async function runStockPreparationProjectPull(
   if (go !== true) return { kind: 'cancelled', stage: 'repull' }
   const report = await deps.runSync({ projectSheet: true })
   return { kind: 'synced', mode: 'existing', createdSheet: false, report, after: await rereadCounts(api, projectNo) }
+}
+
+// ---------------------------------------------------------------------------
+// S4 — archive / restore (ADR §6, register R-38)
+// ---------------------------------------------------------------------------
+
+export type StockPrepProjectLifecycleAction = 'archive' | 'restore'
+
+export type StockPrepProjectLifecycleOutcome =
+  /** The transition happened; `state` is the sheet as re-read afterwards (null if unreadable). */
+  | { kind: 'done'; action: StockPrepProjectLifecycleAction; state: StockPrepProjectTargetState | null }
+  /** The typed number does not match the project: NOTHING was sent. */
+  | { kind: 'mismatch'; action: StockPrepProjectLifecycleAction }
+  /** This caller does not hold the pull tier: nothing was sent; say whom to ask. */
+  | { kind: 'contact_puller'; action: StockPrepProjectLifecycleAction }
+  /** The server refused (ALREADY_ARCHIVED / NOT_ARCHIVED / CONFIRM_MISMATCH / a gate…). */
+  | { kind: 'refused'; action: StockPrepProjectLifecycleAction; status: number; code: string | null }
+
+/**
+ * The typed confirmation, compared the way the server compares it: both sides trimmed, nothing else
+ * folded (no case folding, no prefix match), and an empty answer never matches.
+ */
+export function stockPrepProjectNumbersMatch(projectNo: string, typed: string): boolean {
+  const expected = projectNo.trim()
+  const given = typed.trim()
+  return expected.length > 0 && given === expected
+}
+
+/**
+ * Archive or restore ONE project's sheet. Pull tier only (`canPull` is the client mirror; the server
+ * re-checks its own gate). A mismatched confirmation is stopped HERE, before any request — the server
+ * would refuse it too, but nothing should leave the browser on a typo.
+ */
+export async function changeStockPreparationProjectTargetLifecycle(
+  deps: Pick<StockPrepProjectPullDeps, 'targetApi' | 'canPull'>,
+  action: StockPrepProjectLifecycleAction,
+  projectNo: string,
+  typedProjectNo: string,
+): Promise<StockPrepProjectLifecycleOutcome> {
+  const api = deps.targetApi
+  if (!api || !deps.canPull) return { kind: 'contact_puller', action }
+  if (!stockPrepProjectNumbersMatch(projectNo, typedProjectNo)) return { kind: 'mismatch', action }
+  const call = action === 'archive' ? api.archive : api.restore
+  if (typeof call !== 'function') return { kind: 'refused', action, status: 0, code: null }
+  try {
+    await call.call(api, projectNo.trim(), typedProjectNo.trim())
+  } catch (error) {
+    return { kind: 'refused', action, status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
+  }
+  return { kind: 'done', action, state: await rereadCounts(api, projectNo) }
 }
 
 /**

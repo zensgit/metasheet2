@@ -868,6 +868,18 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
 # `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
 # substring of any of them; it matches exactly one file on disk.
+# 一个项目一张备料表 S4 (ADR adr-stock-prep-project-sheets-20261008 §6, register R-38, 2026-10-09): ONE
+# token added, `StockPreparationProjectArchive` — the NEW spec (apps/web/tests/
+# StockPreparationProjectArchive.spec.ts) for archive / restore: the client (POST, body exactly
+# `{ confirmProjectNo }`, no query), the typed-confirmation flow, 项目备料页's 「归档项目」 / 「恢复这张表」
+# controls, the pull panel's 「恢复并重新拉取」, the removed 「恢复入口随后上线」 placeholder and the PA-ALIGN
+# block the permission-matrix suite defers to for the two new manifest controls. Named so that the S2
+# token `StockPreparationProjectTarget` is NOT a substring of it (a `…ProjectTargetArchive` name would
+# have been matched by that token too). Substring collision checked in BOTH directions: no existing
+# token is a substring of `StockPreparationProjectArchive` (its neighbours `StockPreparationProjectBoard`
+# / `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
+# of any token, and it matches exactly one file on disk.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1831,6 +1843,7 @@ exec npx vitest run \
   StockPreparationOpsPanel \
   StockPreparationPosturePlainLanguage \
   StockPreparationPrepLineView \
+  StockPreparationProjectArchive \
   StockPreparationProjectBoard \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
