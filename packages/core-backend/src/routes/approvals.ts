@@ -30,6 +30,7 @@ import {
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 import {
   executeApprovalActionFromCardDelivery,
@@ -50,6 +51,10 @@ import {
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import {
+  isApprovalCcUnreadBadgeEnabled,
+  isApprovalMineOutcomeBadgeEnabled,
+} from '../services/approval-notify-badge-flags'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
 import {
   assignmentMatchesActor,
@@ -186,6 +191,128 @@ export function resolveApprovalExportLimit(rawLimit: unknown): number {
   return parsePaging(rawLimit, APPROVAL_EXPORT_ROW_CAP, APPROVAL_EXPORT_ROW_CAP)
 }
 
+// T1 (tester report 20261008, item 1) — the approval center's "导出 CSV" wrote the DTO's camelCase
+// keys as its header row. The server now ALSO knows each column's user-facing label and each engine
+// status's user-facing word, in zh and en, and writes them when the request OPTS IN with
+// `?header=label` (+ `?lang=zh|en`). The shipped default is unchanged — no `header` means `code`,
+// the exact bytes this endpoint has always produced — so every existing caller keeps working.
+//
+// DISPLAY TRANSFORMS ONLY. The value behind every cell is still read off the SAME already-projected
+// `UnifiedApprovalDTO` (contract §1.6 / §2-D: no new fetch, no new field), and the column set, the
+// column order, the UTC timestamps and the single `formSnapshot` JSON cell are identical in both
+// modes. Every cell — the label row included — still goes through `sanitizeCsvRow` (contract §3.3).
+export type ApprovalExportHeaderMode = 'label' | 'code'
+export type ApprovalExportLang = 'zh' | 'en'
+
+export interface ApprovalExportCsvOptions {
+  header: ApprovalExportHeaderMode
+  lang: ApprovalExportLang
+}
+
+/**
+ * What a request that names neither `header` nor `lang` gets. `header: 'code'` is the shipped
+ * behaviour (contract §5: no change to what existing callers receive); `lang` is only read in label
+ * mode, where an absent `lang` means `zh` (the product's primary language).
+ */
+export const APPROVAL_EXPORT_CSV_DEFAULT_OPTIONS: Readonly<ApprovalExportCsvOptions> = Object.freeze<ApprovalExportCsvOptions>({
+  header: 'code',
+  lang: 'zh',
+})
+
+export type ApprovalExportCsvOptionsResult =
+  | { ok: true; options: ApprovalExportCsvOptions }
+  | { ok: false; code: 'APPROVAL_EXPORT_HEADER_INVALID' | 'APPROVAL_EXPORT_LANG_INVALID'; message: string }
+
+/**
+ * The ONLY place `?header=` / `?lang=` are interpreted. Only called for a CSV request — on the JSON
+ * list both parameters stay accepted-and-ignored, like every other unknown parameter, because
+ * contract §5 forbids changing an existing read endpoint's semantics.
+ *
+ * Exact literals, like `format=csv` itself: no trimming, no case-folding, and a non-string
+ * (`?header=a&header=b`, `?header[]=a`) is invalid, not absent. An EMPTY value is invalid too —
+ * unlike `tab` / `sourceSystem` there is no cleared-filter-chip caller to protect here. Unlike
+ * `format`, a bad value is a 400 rather than a quiet fallback: a caller that asked for labels and
+ * got keys (or the reverse) would otherwise not notice. Only an ABSENT parameter takes the default.
+ * Messages never echo the received value.
+ */
+export function resolveApprovalExportCsvOptions(query: { header?: unknown; lang?: unknown }): ApprovalExportCsvOptionsResult {
+  const rawHeader = query.header
+  const rawLang = query.lang
+  let header = APPROVAL_EXPORT_CSV_DEFAULT_OPTIONS.header
+  if (rawHeader !== undefined) {
+    if (rawHeader !== 'label' && rawHeader !== 'code') {
+      return {
+        ok: false,
+        code: 'APPROVAL_EXPORT_HEADER_INVALID',
+        message: "header must be exactly 'label' or 'code'",
+      }
+    }
+    header = rawHeader
+  }
+  let lang = APPROVAL_EXPORT_CSV_DEFAULT_OPTIONS.lang
+  if (rawLang !== undefined) {
+    if (rawLang !== 'zh' && rawLang !== 'en') {
+      return {
+        ok: false,
+        code: 'APPROVAL_EXPORT_LANG_INVALID',
+        message: "lang must be exactly 'zh' or 'en'",
+      }
+    }
+    lang = rawLang
+  }
+  return { ok: true, options: { header, lang } }
+}
+
+/**
+ * Label-mode words for the engine instance statuses — the SAME five pairs the approval center's list
+ * renders from `apps/web/src/utils/statusDomains.ts` (`approvalInstance` domain). The two copies are
+ * pinned against each other by `tests/unit/approval-export-csv-labels.test.ts`, which reads that web
+ * file, so editing either side alone turns a required check red.
+ */
+export const APPROVAL_EXPORT_STATUS_LABELS: Readonly<Record<string, Readonly<Record<ApprovalExportLang, string>>>> = {
+  pending: { zh: '待处理', en: 'Pending' },
+  approved: { zh: '已通过', en: 'Approved' },
+  rejected: { zh: '已驳回', en: 'Rejected' },
+  revoked: { zh: '已撤回', en: 'Revoked' },
+  cancelled: { zh: '已取消', en: 'Cancelled' },
+}
+
+/**
+ * The `status` cell in label mode. A status with no word in the table is written as it is, never
+ * blanked (same fail-safe as the list's `resolveStatusDisplay`).
+ *
+ * CANCEL-ROUND ROWS KEEP THE RAW STATUS. The ratified change-request lock (§15.2 / P-2) gives a
+ * cancel round its own word table, because there a system closure and an approver's rejection share
+ * the engine status `rejected` and must stay distinguishable on every surface that words the status;
+ * the criterion that separates them (the close reason) is not on the list DTO, and this endpoint may
+ * not fetch it (contract §1.6). The generic words above would print 「已驳回」 for a system-closed
+ * round — exactly the byte-identical look that lock forbids — so for these rows no word is invented
+ * and the cell stays what it has always been. Giving them the cancel-round words is an owner choice
+ * that needs the close reason on the list DTO first (see the T1 area notes).
+ */
+export function approvalExportStatusDisplay(
+  dto: Pick<UnifiedApprovalDTO, 'status' | 'workflowKey'>,
+  lang: ApprovalExportLang,
+): unknown {
+  if (isCancelRoundInstance({ workflow_key: dto.workflowKey })) return dto.status
+  const status = dto.status
+  if (typeof status === 'string' && Object.prototype.hasOwnProperty.call(APPROVAL_EXPORT_STATUS_LABELS, status)) {
+    return APPROVAL_EXPORT_STATUS_LABELS[status][lang]
+  }
+  return status
+}
+
+export interface ApprovalExportCsvColumn {
+  /** The stable machine key; the header cell in `header=code` mode (the shipped default). */
+  header: string
+  /** The user-facing header cell in `header=label` mode, per UI language. */
+  label: Readonly<Record<ApprovalExportLang, string>>
+  /** The cell value, read directly off the DTO (both modes, unless `display` overrides it). */
+  value: (dto: UnifiedApprovalDTO) => unknown
+  /** Label-mode cell override, for a column whose raw value is an engine enum. */
+  display?: (dto: UnifiedApprovalDTO, lang: ApprovalExportLang) => unknown
+}
+
 // P3-1 — the CSV column projection. Every value is read DIRECTLY off the SAME `UnifiedApprovalDTO`
 // the JSON list response serializes (contract §1.6: hidden-field redaction and the record-link
 // read-projection sentinel are already baked into `dto.formSnapshot` by the time it reaches this
@@ -196,34 +323,66 @@ export function resolveApprovalExportLimit(rawLimit: unknown): number {
 // Comments and attachments are deliberately absent: they are not part of `UnifiedApprovalDTO` and
 // are each authorized by their own gate (contract §1.6) — fetching them here would open a second,
 // ungated path to a resource that already has one.
-const APPROVAL_EXPORT_CSV_COLUMNS: ReadonlyArray<{
-  header: string
-  value: (dto: UnifiedApprovalDTO) => unknown
-}> = [
-  { header: 'id', value: (d) => d.id },
-  { header: 'sourceSystem', value: (d) => d.sourceSystem },
-  { header: 'externalApprovalId', value: (d) => d.externalApprovalId ?? null },
-  { header: 'workflowKey', value: (d) => d.workflowKey ?? null },
-  { header: 'businessKey', value: (d) => d.businessKey ?? null },
-  { header: 'requestNo', value: (d) => d.requestNo ?? null },
-  { header: 'title', value: (d) => d.title ?? null },
-  { header: 'status', value: (d) => d.status },
-  { header: 'requesterId', value: (d) => d.requester?.id ?? null },
-  { header: 'requesterName', value: (d) => d.requester?.name ?? null },
-  { header: 'subject', value: (d) => d.subject ?? null },
-  { header: 'currentStep', value: (d) => d.currentStep },
-  { header: 'totalSteps', value: (d) => d.totalSteps },
-  { header: 'templateId', value: (d) => d.templateId ?? null },
-  { header: 'templateVersionId', value: (d) => d.templateVersionId ?? null },
-  { header: 'currentNodeKey', value: (d) => d.currentNodeKey ?? null },
+//
+// T1 labels: where a list/detail column already has a word (审批编号 / 标题 / 发起人 / 状态 /
+// Request no. / Title / Requester / Status — `approvalCenterLabels.ts`), the label IS that word, and
+// a unit test reads that file to keep them equal. `createdAt` / `updatedAt` are written as UTC ISO
+// strings (`toISOString()`), while the list shows them in the browser's local time, so their labels
+// say UTC rather than imply the list's clock. No label starts with a formula-lead character, a
+// comma or a quote, and the en labels contain no CJK — all asserted by the same unit test.
+export const APPROVAL_EXPORT_CSV_COLUMNS: ReadonlyArray<ApprovalExportCsvColumn> = [
+  { header: 'id', label: { zh: '审批实例ID', en: 'Instance ID' }, value: (d) => d.id },
+  { header: 'sourceSystem', label: { zh: '来源系统', en: 'Source system' }, value: (d) => d.sourceSystem },
+  { header: 'externalApprovalId', label: { zh: '外部审批ID', en: 'External approval ID' }, value: (d) => d.externalApprovalId ?? null },
+  { header: 'workflowKey', label: { zh: '流程标识', en: 'Workflow key' }, value: (d) => d.workflowKey ?? null },
+  { header: 'businessKey', label: { zh: '业务标识', en: 'Business key' }, value: (d) => d.businessKey ?? null },
+  { header: 'requestNo', label: { zh: '审批编号', en: 'Request no.' }, value: (d) => d.requestNo ?? null },
+  { header: 'title', label: { zh: '标题', en: 'Title' }, value: (d) => d.title ?? null },
+  {
+    header: 'status',
+    label: { zh: '状态', en: 'Status' },
+    value: (d) => d.status,
+    display: (d, lang) => approvalExportStatusDisplay(d, lang),
+  },
+  { header: 'requesterId', label: { zh: '发起人ID', en: 'Requester ID' }, value: (d) => d.requester?.id ?? null },
+  { header: 'requesterName', label: { zh: '发起人', en: 'Requester' }, value: (d) => d.requester?.name ?? null },
+  { header: 'subject', label: { zh: '审批对象', en: 'Subject' }, value: (d) => d.subject ?? null },
+  { header: 'currentStep', label: { zh: '当前步骤', en: 'Current step' }, value: (d) => d.currentStep },
+  { header: 'totalSteps', label: { zh: '总步骤数', en: 'Total steps' }, value: (d) => d.totalSteps },
+  { header: 'templateId', label: { zh: '审批表单ID', en: 'Form ID' }, value: (d) => d.templateId ?? null },
+  { header: 'templateVersionId', label: { zh: '审批表单版本ID', en: 'Form version ID' }, value: (d) => d.templateVersionId ?? null },
+  { header: 'currentNodeKey', label: { zh: '当前节点标识', en: 'Current node key' }, value: (d) => d.currentNodeKey ?? null },
   // Already redacted (hidden-field fence) AND record-link-projected (sentinel for an
   // unauthorized viewer) at DTO-construction time — see `ApprovalBridgeService.listApprovals`'s
   // `toUnifiedDTO` + `projectRecordLinkFormSnapshotsForViewerBatch` calls. This router never
   // touches the raw stored `form_snapshot`.
-  { header: 'formSnapshot', value: (d) => d.formSnapshot ?? null },
-  { header: 'createdAt', value: (d) => d.createdAt },
-  { header: 'updatedAt', value: (d) => d.updatedAt },
+  { header: 'formSnapshot', label: { zh: '表单信息', en: 'Form details' }, value: (d) => d.formSnapshot ?? null },
+  { header: 'createdAt', label: { zh: '发起时间（UTC）', en: 'Submitted (UTC)' }, value: (d) => d.createdAt },
+  { header: 'updatedAt', label: { zh: '更新时间（UTC）', en: 'Updated (UTC)' }, value: (d) => d.updatedAt },
 ]
+
+/**
+ * The CSV body's lines (no terminator, no BOM): the header row, then one row per admitted DTO. The
+ * `?format=csv` branch of `GET /api/approvals` calls THIS function, so a test that drives it
+ * exercises the production serializer, not a copy. Both rows go through `sanitizeCsvRow`
+ * (contract §3.1 / §3.3 — header cells are cells). `columns` defaults to the real projection; it is
+ * a parameter only so a test can prove the label row is sanitized without a hostile real label.
+ */
+export function buildApprovalExportCsvLines(
+  dtos: readonly UnifiedApprovalDTO[],
+  options: ApprovalExportCsvOptions = APPROVAL_EXPORT_CSV_DEFAULT_OPTIONS,
+  columns: ReadonlyArray<ApprovalExportCsvColumn> = APPROVAL_EXPORT_CSV_COLUMNS,
+): string[] {
+  const labelled = options.header === 'label'
+  const lines = [sanitizeCsvRow(columns.map((column) => (labelled ? column.label[options.lang] : column.header)))]
+  for (const dto of dtos) {
+    lines.push(sanitizeCsvRow(columns.map((column) => (
+      labelled && column.display ? column.display(dto, options.lang) : column.value(dto)
+    ))))
+  }
+  return lines
+}
+
 const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])
 // B3-04 (design-lock 2026-07-05): the participant-facing directory picker. Unlike the template-author
 // directory above, this serves ordinary approval ACTIONS (transfer / add-sign), the fill-form user
@@ -267,6 +426,29 @@ interface ApprovalRouterOptions {
 // approval-instance-readability.ts (OD-S1-18(b): "the divergence of any one of them is a P1").
 export function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
+}
+
+/**
+ * How `GET /api/approvals` turns its validated `sourceSystem` query value into the feed's source
+ * options: `platform` / `plm` narrow to that source; `all` asks for the mixed feed AND switches the
+ * tab filters to their external-source branch; an absent value keeps the legacy rule that an
+ * explicitly supplied tab implies the platform feed (and no tab means the mixed feed).
+ *
+ * Exported so a count over a tab (the 抄送我的 / 我发起的 badges) maps the SAME query value onto
+ * the SAME list options as the tab it counts — a badge that read `all` differently from the list
+ * could count rows the tab never shows.
+ */
+export function resolveApprovalListSourceOptions(
+  rawSourceSystem: string,
+  tabProvided: boolean,
+): { sourceSystem: 'platform' | 'plm' | undefined; includeExternalTabSources: boolean } {
+  const explicit = rawSourceSystem === 'all' || rawSourceSystem === ''
+    ? undefined
+    : (rawSourceSystem as 'platform' | 'plm')
+  return {
+    sourceSystem: rawSourceSystem !== '' ? explicit : (tabProvided ? 'platform' : undefined),
+    includeExternalTabSources: rawSourceSystem === 'all',
+  }
 }
 
 function parsePaging(value: unknown, fallback: number, max: number = MAX_APPROVAL_PAGE_SIZE): number {
@@ -2395,6 +2577,22 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // validated parameters this slice does not touch).
       isCsvExport = req.query.format === 'csv'
 
+      // T1 — `?header=label|code` and `?lang=zh|en` select how the CSV's header row and status words
+      // are written (see `resolveApprovalExportCsvOptions`). They are read ONLY on this CSV branch:
+      // on the JSON list they are accepted-and-ignored like every other unknown parameter (contract
+      // §5), and no pre-existing caller can be sending them to the CSV branch, so a 400 here refuses
+      // nothing that used to work. Validated before any query runs.
+      let exportCsvOptions: ApprovalExportCsvOptions = APPROVAL_EXPORT_CSV_DEFAULT_OPTIONS
+      if (isCsvExport) {
+        const resolved = resolveApprovalExportCsvOptions(req.query)
+        // `=== false`, not `!resolved.ok`: this package compiles without `strict`, where only the
+        // explicit comparison narrows the `ok`-discriminated union (same form as the other callers).
+        if (resolved.ok === false) {
+          return res.status(400).json(approvalErrorResponse(resolved.code, resolved.message))
+        }
+        exportCsvOptions = resolved.options
+      }
+
       // Wave 2 WP2: `sourceSystem` drives the unified Inbox filter.
       //   - 'all'      → mixed feed across platform + plm (no filter)
       //   - 'platform' → platform-owned approvals only
@@ -2412,7 +2610,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
         ? undefined
         : (rawSourceSystem as 'platform' | 'plm')
-      const sourceSystemProvided = rawSourceSystem !== ''
       // P3-1 — refuse `?format=csv&sourceSystem=plm` outright, BEFORE it can reach the
       // `sourceSystem === 'plm'` sync branch below. Two independent reasons converge on the same
       // 400, not one: (1) that branch calls `bridgeService.syncPlmApprovals({ status, limit,
@@ -2587,16 +2784,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // THIS EXPRESSION ALONE IS NOT ENOUGH, and saying otherwise was a defect in its own right:
       // `listApprovals`'s non-external branch used to push its own
       // `COALESCE(source_system, 'platform') = 'platform'` conjunct for ANY tab, so leaving
-      // `effectiveSourceSystem` undefined still produced a platform-only feed once `tab` always had
+      // the effective source undefined still produced a platform-only feed once `tab` always had
       // a value. `tabDefaulted` below is what actually keeps the tab-less request on the mixed
       // platform+plm feed; measured at the merge-base, a tab-less request returned both source
       // systems and an explicit `?tab=pending` returned platform rows only, and both still do.
-      const effectiveSourceSystem = sourceSystemProvided
-        ? sourceSystem
-        : (tabProvided ? 'platform' : undefined)
+      // (`resolveApprovalListSourceOptions` is that mapping, shared with the tab badge counts.)
+      const effectiveSource = resolveApprovalListSourceOptions(rawSourceSystem, tabProvided)
 
       const result = await bridgeService.listApprovals({
-        sourceSystem: effectiveSourceSystem,
+        sourceSystem: effectiveSource.sourceSystem,
         status,
         workflowKey,
         businessKey,
@@ -2609,12 +2805,17 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // own status filter is served NO tab, so the query is the scope plus that filter.
         tab: defaultTabSuppressedByStatusFilter ? undefined : tab,
         tabDefaulted: !tabProvided,
-        includeExternalTabSources: rawSourceSystem === 'all',
+        includeExternalTabSources: effectiveSource.includeExternalTabSources,
         actorId: actorId || undefined,
         actorRoles,
         actorPermissions: resolveApprovalActorPermissions(req),
         limit,
         offset,
+        // 抄送我的 per-row unread (test report 2026-10-08): only while its switch is on, and never
+        // for the CSV export (whose columns do not carry it). Off ⇒ the feed is byte-identical.
+        annotateCcUnread: !isCsvExport && isApprovalCcUnreadBadgeEnabled(),
+        // 我发起的 per-row new outcome: same rule — only while its own switch is on, never for CSV.
+        annotateMineOutcomeUnseen: !isCsvExport && isApprovalMineOutcomeBadgeEnabled(),
       })
 
       if (isCsvExport) {
@@ -2666,10 +2867,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // to throw today — but the fix removes the window BY CONSTRUCTION rather than relying on
         // that staying true: no header is reachable from any code path that has not already
         // finished building `body`.
-        const lines = [sanitizeCsvRow(APPROVAL_EXPORT_CSV_COLUMNS.map((column) => column.header))]
-        for (const dto of admitted) {
-          lines.push(sanitizeCsvRow(APPROVAL_EXPORT_CSV_COLUMNS.map((column) => column.value(dto))))
-        }
+        // T1: header row + data rows come from `buildApprovalExportCsvLines`, the one serializer —
+        // `header=code` (the default) is byte-identical to what this inline loop used to write.
+        const lines = buildApprovalExportCsvLines(admitted, exportCsvOptions)
         // Fix round (P3-4, gate finding): prepend a UTF-8 BOM, matching this repo's own newest CSV
         // exporter's precedent (`routes/univer-meta.ts`'s `format === 'csv'` branch: "UTF-8 BOM so
         // Excel opens non-ASCII (e.g. CJK) CSV without mojibake — matches common export tooling").
@@ -3200,6 +3400,122 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_PENDING_COUNT_FAILED',
         'Failed to compute pending approval count',
         () => res.json({ count: 0, unreadCount: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 抄送我的 unread badge (test report 2026-10-08, T3). A DEDICATED count, never folded into
+  // `/pending-count`, `/api/todo/count` or the todo / approval socket counts: the ratified
+  // todo-center lock B fixes those to population ① (active seats), and being CC'd is not "waiting
+  // for me". Behind APPROVAL_CC_UNREAD_BADGE_ENABLED (default OFF, exact 'true'): while off this
+  // answers 404 with its own code — before touching the database — so a client cannot mistake a
+  // switched-off feature for "zero unread". The count is the 抄送我的 feed for the SAME
+  // `sourceSystem` mapping the list uses (`resolveApprovalListSourceOptions`) plus the unread
+  // conjunct (`ApprovalBridgeService.countCcUnreadForViewer`), so it never exceeds that tab's total.
+  // Registered before `GET /api/approvals/:id`, which would otherwise capture this literal path.
+  r.get('/api/approvals/cc-unread-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalCcUnreadBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_CC_UNREAD_BADGE_DISABLED', 'The CC unread badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countCcUnreadForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_CC_UNREAD_COUNT_FAILED',
+        'Failed to count unread CC approvals',
+        () => res.json({ count: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 我发起的 new-outcome badge (test report 2026-10-08, T6). Same contract and same placement rule as
+  // `/cc-unread-count` above: a dedicated count (never part of the lock-B 待办 counts or their socket
+  // events), behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED (default OFF, exact 'true'; off ⇒ 404 with its
+  // own code before any query), counting the 我发起的 feed for the list's own `sourceSystem` mapping
+  // plus the new-outcome conjunct (`ApprovalBridgeService.countMineOutcomesUnseenForViewer`). A
+  // requester gets no realtime frame when someone else decides their request (only the actor and
+  // the remaining seats are pushed); the badge refreshes on the next list load or tab switch.
+  r.get('/api/approvals/mine-outcomes/unseen-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalMineOutcomeBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_MINE_OUTCOME_BADGE_DISABLED', 'The new-outcome badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countMineOutcomesUnseenForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_MINE_OUTCOME_COUNT_FAILED',
+        'Failed to count unseen request outcomes',
+        () => res.json({ count: 0, degraded: true }),
       )
     }
   })

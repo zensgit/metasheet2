@@ -362,12 +362,18 @@
             :draft="draft"
             :read-only="readOnly"
             :drag-session="approvalFormDragSession"
+            :record-link-catalog="recordLinkAuthoringCatalog"
             @draft-change="onFormBuilderDraftChange"
+            @retry-record-link-catalog="retryRecordLinkCatalog"
           />
         </div>
       </el-card>
 
-      <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
+      <el-card
+        v-show="activeAuthoringSection === 'flow'"
+        class="template-authoring__panel template-authoring__panel--flow"
+        shadow="never"
+      >
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>审批流程</strong>
@@ -416,6 +422,7 @@
             :node-type-label="nodeTypeLabel"
             :canvas-node-by-key="canvasNodeByKey"
             :can-move-canvas-node="canMoveCanvasNode"
+            :can-insert-on-edge="canInsertOnCanvasEdge"
             :can-insert-parallel-on-edge="canInsertParallelOnEdge"
             :can-insert-handler-on-edge="canInsertHandlerOnEdge"
             :canvas-move-target-label="canvasMoveTargetLabel"
@@ -452,7 +459,7 @@
             :can-insert-after="canInsertAfter"
             :can-insert-parallel-after="canInsertParallelAfter"
             :can-remove-node="canRemoveNode"
-            @close="clearCanvasSelection"
+            @close="closeCanvasInspector"
             @move-up="(key) => moveCanvasNodeStep(key, 'up')"
             @move-down="(key) => moveCanvasNodeStep(key, 'down')"
             @begin-move="beginCanvasNodeMove"
@@ -1519,9 +1526,12 @@ import {
   appendCcNode,
   appendHandlerNode,
   collectParallelRegionNodeKeys,
+  conditionBranchRemovalBlocker,
   insertConditionGateway,
   insertParallelGateway,
   linearNodeMoveTargets,
+  planConditionBranchRemoval,
+  removeConditionBranch,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
 import {
@@ -1591,6 +1601,7 @@ import {
   dateRangeVisibilityEndpointOptions,
   dateRangeVisibilityFieldId,
   visibilityReferenceBaseFieldId,
+  type RecordLinkAuthoringCatalog,
   type RecordLinkNamedOption,
 } from '../../approvals/recordLinkField'
 import { multitableClient } from '../../multitable/api/client'
@@ -1751,6 +1762,20 @@ function retryRecordLinkCatalog(): void {
 const recordLinkCatalogValidation = computed(() => ({
   loaded: recordLinkCatalogLoaded.value,
   sheets: recordLinkSheets.value,
+}))
+
+/**
+ * Delta §3.4 / parity ledger deferral (3): the Designer 2.0 inspector's typed base/sheet pickers
+ * render THIS view's catalog read-only (F0 gate #2 — this view stays the only fetch/state owner)
+ * and send a retry intent back to `retryRecordLinkCatalog`. Pin edits go through the builder's
+ * typed command path, never through the flag-OFF editor's direct field mutation below.
+ */
+const recordLinkAuthoringCatalog = computed<RecordLinkAuthoringCatalog>(() => ({
+  bases: recordLinkBases.value,
+  sheets: recordLinkSheets.value,
+  loading: recordLinkCatalogLoading.value,
+  loaded: recordLinkCatalogLoaded.value,
+  error: recordLinkCatalogError.value,
 }))
 
 function recordLinkBaseOptionsFor(field: FieldAuthoringDraft) {
@@ -2041,7 +2066,12 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
+    // T5b (test report 2026-10-08) — D0 §3.2: the card's (first) summary line states the lane COUNT
+    // and the join consequence ("3 个并行分支 · 全部完成后合并"), so an author can see that the lane
+    // count grows and is not fixed at two. The lane names stay on the next line.
+    const laneCount = Array.isArray(cfg.branches) ? cfg.branches.length : 0
     return [
+      `${laneCount} 个并行分支 · ${cfg.joinMode === 'any' ? '任一完成后继续' : '全部完成后合并'}`,
       `并行分支：${parallelBranchLabels(node)}`,
       `汇聚节点：${graphNodeDisplayName(cfg.joinNodeKey)}`,
       `汇聚模式：${cfg.joinMode ?? '（无）'}`,
@@ -2753,7 +2783,7 @@ function applySessionHistoryToDraft(next: AuthoringSessionHistory): void {
 function runTopologyOp(
   op: (graph: ApprovalGraph) => ApprovalGraph,
   selectionAfter?: ApprovalCanvasSelection,
-): void {
+): boolean {
   const result = applyTopologyOpToSession(
     canvasAuthoringHistory.value,
     draft.value,
@@ -2762,13 +2792,14 @@ function runTopologyOp(
   )
   if (!result.ok) {
     loadError.value = result.errorMessage ?? '该拓扑操作不适用于当前流程结构'
-    return
+    return false
   }
   draft.value = result.draft
   canvasAuthoringHistory.value = result.history
   if (result.history.selection.kind === 'node') {
     selectedCanvasNode.value = result.history.selection.nodeKey
   }
+  return true
 }
 
 function onCanvasUndo(): void {
@@ -2795,6 +2826,38 @@ function onCanvasRedo(): void {
 function onAddConditionBranch(nodeKey: string): void {
   runTopologyOp((graph) => addConditionBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
+// T5a (test report 2026-10-08): delete a NON-default condition branch through the SAME typed
+// topology-op path every structural edit uses, so it is one entry in the unified undo history
+// (D0 §7.1). Refusals are decided BEFORE mutation by a dry run of the same command and surfaced as a
+// business-language reason (D0 §4.2); the default branch is never offered (D0 §4.1). Deleting the
+// last non-default branch removes the gateway and keeps the default path in its place.
+const canvasAuthoringActive = computed(() => canvasV2Enabled.value)
+function conditionBranchRemovalReason(nodeKey: string, edgeKey: string): string | null {
+  return conditionBranchRemovalBlocker(canvasEffectiveGraph.value, nodeKey, edgeKey)
+}
+function onRemoveConditionBranch(nodeKey: string, edgeKey: string): void {
+  if (readOnly.value || !canvasAuthoringActive.value) return
+  const blocker = conditionBranchRemovalReason(nodeKey, edgeKey)
+  if (blocker) {
+    ElMessage.warning(blocker)
+    return
+  }
+  const plan = planConditionBranchRemoval(canvasEffectiveGraph.value, nodeKey, edgeKey)
+  const applied = runTopologyOp(
+    (graph) => removeConditionBranch(graph, nodeKey, edgeKey),
+    plan.removedGateway ? { kind: 'none' } : { kind: 'node', nodeKey },
+  )
+  if (!applied) return
+  if (plan.removedGateway) {
+    // The gateway is gone: close its inspector and hand focus to the node now in its slot
+    // (D0 §5 "returns focus ... to the nearest surviving neighbor").
+    clearCanvasSelection()
+    if (plan.replacementNodeKey) focusCanvasNodeSelector(plan.replacementNodeKey)
+  }
+  ElMessage.success(plan.removedGateway
+    ? '已删除分支并移除条件节点（保留默认分支流程），可点击「撤销」恢复'
+    : '已删除分支，可点击「撤销」恢复')
+}
 function onAddParallelBranch(nodeKey: string): void {
   runTopologyOp((graph) => addParallelBranch(graph, nodeKey), { kind: 'node', nodeKey })
 }
@@ -2817,11 +2880,32 @@ function onInsertHandlerAfter(nodeKey: string): void {
   runTopologyOp((graph) => appendHandlerNode(graph, nodeKey), { kind: 'none' })
   selectInsertedNode(beforeKeys)
 }
+// T5b (test report 2026-10-08) — D0 §3.4: an insertion "selects/focuses the new node with the
+// inspector open". Gateway inserts used to leave the SOURCE node selected, so the gateway's own
+// 「+添加分支」 never appeared and a second +并行 built a second two-lane gateway in series. The
+// gateway key is resolved by a dry run of the SAME deterministic op on the SAME effective graph
+// the session applies it to, and passed as `selectionAfter` so undo/redo history stays coherent.
+function insertedNodeKeyOfType(
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+  type: ApprovalNode['type'],
+): string | undefined {
+  try {
+    const before = canvasEffectiveGraph.value
+    const beforeKeys = new Set(before.nodes.map((node) => node.key))
+    return op(before).nodes.find((node) => node.type === type && !beforeKeys.has(node.key))?.key
+  } catch {
+    return undefined // the real run reports the refusal; selection simply stays put
+  }
+}
 function onInsertConditionAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
+  const op = (graph: ApprovalGraph) => insertConditionGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'condition')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onInsertParallelAfter(nodeKey: string): void {
-  runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
+  const op = (graph: ApprovalGraph) => insertParallelGateway(graph, nodeKey)
+  const gatewayKey = insertedNodeKeyOfType(op, 'parallel')
+  runTopologyOp(op, { kind: 'node', nodeKey: gatewayKey ?? nodeKey })
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
@@ -2911,12 +2995,16 @@ const canvasStageStyle = computed<CSSProperties>(() => {
   const scaledW = Math.round(canvasLayout.value.width * canvasZoom.value)
   const scaledH = Math.round(canvasLayout.value.height * canvasZoom.value)
   const vpW = canvasViewportState.value.width
-  const vpH = canvasViewportState.value.height
+  // T5c (test report 2026-10-08) — stage min-height ratchet: the viewport's height is content-driven
+  // (no cap since #4917), so feeding its own `clientHeight` back in as the stage's pixel
+  // min-height/height made every enlargement permanent — a zoom-in, a tall inspector stretching
+  // the row, any sync — and the page only ever grew until reload. The stage now sizes from the
+  // canvas content alone; the viewport keeps its own CSS min-height, so short flows look the same.
   return {
     minWidth: '100%',
-    minHeight: vpH ? `${vpH}px` : '100%',
+    minHeight: '100%',
     width: `${Math.max(vpW, scaledW)}px`,
-    height: `${Math.max(vpH, scaledH + 56)}px`,
+    height: `${scaledH + 56}px`,
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'flex-start',
@@ -2980,6 +3068,24 @@ async function selectCanvasNode(nodeKey: string): Promise<void> {
 }
 function clearCanvasSelection(): void {
   selectedCanvasNode.value = null
+}
+/** D0 §5: "closing ... returns focus to the canvas node" — the inspector unmounts on close, which
+ *  would otherwise drop focus to <body>. */
+function closeCanvasInspector(): void {
+  const nodeKey = selectedCanvasNode.value
+  clearCanvasSelection()
+  if (nodeKey) focusCanvasNodeSelector(nodeKey)
+}
+/** Move keyboard focus to a canvas node's selector without scrolling the page (D0 §5 focus
+ *  return). No-op when the node is not rendered (e.g. the flag-off rollback list). */
+function focusCanvasNodeSelector(nodeKey: string): void {
+  void nextTick(() => {
+    if (typeof document === 'undefined') return
+    // Match by attribute VALUE (no selector interpolation — node keys are data, never CSS).
+    const card = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="approval-canvas-node"]'))
+      .find((candidate) => candidate.getAttribute('data-canvas-node') === nodeKey)
+    card?.querySelector<HTMLElement>('[data-testid="approval-canvas-node-select"]')?.focus({ preventScroll: true })
+  })
 }
 // Inspector node for the right-side panel. Selection is preserved across list/canvas toggles while
 // the key still exists; once the graph no longer carries that key, selection clears.
@@ -3488,6 +3594,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   conditionFormulaDryRunLoading,
   dryRunConditionFormula,
   conditionOutgoingEdgeKeys,
+  // T5a/T5b: Canvas-hosted editor (branch delete + add-lane hint) — see canvasAuthoringActive.
+  canvasAuthoringActive,
+  conditionBranchRemovalBlocker: conditionBranchRemovalReason,
+  removeConditionBranch: onRemoveConditionBranch,
   conditionEdgeLabel,
   graphEdgeTargetLabel,
   graphNodeLabel,
@@ -4035,11 +4145,29 @@ async function persistDraft() {
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '保存表单失败')
+    loadError.value = describeTemplateAuthoringError(error, '保存表单失败', authoringErrorContext)
+    // T5b: the failure banner sits at the top of the page — bring it into view (a long flow leaves
+    // the author scrolled far below it, so the save looked like it silently did nothing).
+    void revealAuthoringFailure()
     return null
   } finally {
     saving.value = false
   }
+}
+
+// T5b (test report 2026-10-08): business labels for the nodes a failed write's values-free
+// `details` names. Resolved against the graph the failed request carried (a failed save leaves the
+// draft untouched; a failed publish runs right after a successful save of the same keys). Never
+// returns a key — an unknown key yields `undefined`, i.e. the unattributed copy.
+function authoringErrorNodeLabel(nodeKey: string): string | undefined {
+  const node = canvasEffectiveGraph.value.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return undefined
+  return node.name?.trim() || nodeTypeLabel(node.type)
+}
+const authoringErrorContext = { nodeLabel: authoringErrorNodeLabel }
+async function revealAuthoringFailure(): Promise<void> {
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
 }
 
 async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
@@ -4121,7 +4249,8 @@ async function confirmPublish() {
     ElMessage.success('表单已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '发布表单失败')
+    loadError.value = describeTemplateAuthoringError(error, '发布表单失败', authoringErrorContext)
+    void revealAuthoringFailure()
   } finally {
     publishing.value = false
   }
@@ -4456,6 +4585,15 @@ onUnmounted(() => {
   border-color: var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   box-shadow: var(--ms-shadow-card);
+}
+
+/* T5c (test report 2026-10-08): Element Plus ships `.el-card { overflow: hidden }`. An
+   overflow:hidden ancestor becomes the sticky containing scroller (the card never scrolls, so the
+   canvas inspector's `position: sticky` never engaged) and also clips descendants' scroll-margin.
+   `clip` keeps the rounded-corner clipping without creating a scroll container. Scoped to the flow
+   card only. */
+.template-authoring__panel--flow {
+  overflow: clip;
 }
 
 .template-authoring__section-actions {

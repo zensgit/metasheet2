@@ -9,6 +9,7 @@ import {
 } from '../src/approvals/templateAuthoring'
 import {
   applyConditionEditsToGraph,
+  conditionDefaultEdgeKeyText,
   conditionEditsFromGraph,
   validateConditionEdits,
 } from '../src/approvals/conditionEdit'
@@ -554,5 +555,37 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
     const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(CONDITION_GRAPH))
     // only condition-edit errors are asserted absent; key/name are seeded so the draft is complete.
     expect(validateTemplateDraft(draft, null).filter((message) => message.includes('条件节点'))).toEqual([])
+  })
+})
+
+// T5a / verify X1 (gate r1 P3-8): the default-branch picker is clearable and Element Plus clears it to
+// `undefined`, so the edit model's `defaultEdgeKey` may hold a non-string. The conditionEdit layer
+// must treat ANY non-string as "no default" on its own — independently of the editor's
+// normalization — in both consumers (graph rebuild + validation), never `.trim()` it and throw.
+describe('T5a / verify X1 — a non-string defaultEdgeKey in the edit model means "no default"', () => {
+  const formSchema = buildTemplate(CONDITION_GRAPH).formSchema
+  const editsWithDefault = (defaultEdgeKey: unknown): ConditionEdits => {
+    const edits = conditionEditsFromGraph(CONDITION_GRAPH)
+    ;(edits.cond_1 as { defaultEdgeKey: unknown }).defaultEdgeKey = defaultEdgeKey
+    return edits
+  }
+
+  it('conditionDefaultEdgeKeyText: non-strings → "", strings → trimmed', () => {
+    expect(conditionDefaultEdgeKeyText(undefined)).toBe('')
+    expect(conditionDefaultEdgeKeyText(null)).toBe('')
+    expect(conditionDefaultEdgeKeyText(42)).toBe('')
+    expect(conditionDefaultEdgeKeyText('  edge-cond_1-low  ')).toBe('edge-cond_1-low')
+  })
+
+  it('applyConditionEditsToGraph and validateConditionEdits accept an undefined/null default without throwing and emit no defaultEdgeKey', () => {
+    for (const cleared of [undefined, null]) {
+      const edits = editsWithDefault(cleared)
+      let rebuilt: ApprovalGraph | undefined
+      expect(() => { rebuilt = applyConditionEditsToGraph(CONDITION_GRAPH, edits) }).not.toThrow()
+      const cond = rebuilt!.nodes.find((node) => node.key === 'cond_1')!
+      expect('defaultEdgeKey' in (cond.config as object)).toBe(false)
+      expect(() => validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).not.toThrow()
+      expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
+    }
   })
 })

@@ -94,6 +94,9 @@ const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
 const getApprovalSpy = vi.fn()
+// Pane mark-read (test report 2026-10-08): opening an item in the wide-screen pane records the read,
+// the same presence write the full detail page makes on load.
+const markApprovalReadSpy = vi.fn().mockResolvedValue({ ok: true })
 // member-display-identity (2026-08-19): defaults to "nothing resolves" — matches this file's
 // pre-existing raw-id-shaped fixtures (zero producers of `metadata.assigneeName`).
 const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
@@ -106,6 +109,7 @@ vi.mock('../src/approvals/api', () => ({
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
   getApproval: (...args: [string]) => getApprovalSpy(...args),
+  markApprovalRead: (...args: [string]) => markApprovalReadSpy(...args),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
 }))
 
@@ -458,6 +462,7 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     listTemplatesSpy.mockClear()
     getApprovalSpy.mockClear()
     getApprovalSpy.mockReset()
+    markApprovalReadSpy.mockReset().mockResolvedValue({ ok: true })
     resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     __resetResolvedDirectoryNamesForTests()
     mockRoute.name = 'approval-list'
@@ -1000,6 +1005,148 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-testid="approval-batch-approve"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-batch-reject"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-mark-all-read"]')).toBeTruthy()
+  })
+
+  // -------------------------------------------------------------------------
+  // Pane mark-read (test report 2026-10-08, T3/T6). Opening an item in the pane is opening it: the
+  // full detail page records the read on load, the pane did not, so a wide-screen user who only
+  // previewed items never cleared an unread dot or badge. These pin that the pane now records the
+  // read exactly once per rendered selection, and only for a selection it actually rendered.
+  // -------------------------------------------------------------------------
+  describe('pane selection records the read (test report 2026-10-08)', () => {
+    it('WIDE: selecting a row marks THAT item read exactly once, after the pane rendered it', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_1')
+    })
+
+    it('WIDE: the unread dot of the row read in the pane clears in place, and the badge is re-polled', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [
+        pendingRow('apv_1', '出差报销', { isRead: false }),
+        pendingRow('apv_2', '采购申请', { isRead: false }),
+      ]
+      await mountView()
+      const dotOf = (id: string) => container!
+        .querySelector(`[data-el-row="${id}"]`)
+        ?.querySelector('[data-testid="approval-row-unread-dot"]') ?? null
+      expect(dotOf('apv_1')).toBeTruthy()
+      expect(dotOf('apv_2')).toBeTruthy()
+      const pollsBefore = getPendingCountSpy.mock.calls.length
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(dotOf('apv_1')).toBeNull()
+      // Only the row that was read; its neighbour keeps the server's verdict.
+      expect(dotOf('apv_2')).toBeTruthy()
+      expect(getPendingCountSpy.mock.calls.length).toBeGreaterThan(pollsBefore)
+    })
+
+    it('WIDE: a failed mark-read is silent and leaves the dot as the server reported it', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      markApprovalReadSpy.mockRejectedValue(new Error('offline'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销', { isRead: false })]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-el-row="apv_1"] [data-testid="approval-row-unread-dot"]')).toBeTruthy()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    })
+
+    it('WIDE: a pane fetch that fails marks nothing (the item was never shown)', async () => {
+      getApprovalSpy.mockRejectedValue(new Error('boom'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+    })
+
+    it('WIDE: a selection superseded before its fetch settles marks only the row that ended up shown', async () => {
+      const d1 = deferred<any>()
+      getApprovalSpy.mockReturnValueOnce(d1.promise).mockResolvedValueOnce(pendingRow('apv_2', '采购申请'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      ;(container!.querySelector('[data-el-row="apv_2"]') as HTMLElement).click()
+      await flushUi()
+      d1.resolve(pendingRow('apv_1', '出差报销'))
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_2')
+    })
+
+    it('WIDE: Up/Down navigation marks each row it shows in the pane', async () => {
+      getApprovalSpy.mockImplementation((id: string) => Promise.resolve(pendingRow(id, id === 'apv_1' ? '出差报销' : '采购申请')))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }))
+      await flushUi(8)
+
+      expect(markApprovalReadSpy.mock.calls.map((call) => call[0])).toEqual(['apv_1', 'apv_2'])
+    })
+
+    it('WIDE: a fresh mount restoring `?detail=<id>` marks that item read once', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockRoute.query = { detail: 'apv_1' }
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_1')
+    })
+
+    it('WIDE: the pane refresh that follows a list reload does not mark the item again', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+
+      // A search (Enter in the search box) reloads the list through loadCurrentTab(), which re-runs
+      // the open pane's single fetch — the refresh must not record a second read.
+      const fetchesBefore = getApprovalSpy.mock.calls.length
+      const searchInput = container!.querySelector('[data-testid="approval-search-input"]') as HTMLInputElement
+      searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+      await flushUi(8)
+      expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+      expect(getApprovalSpy.mock.calls.length).toBe(fetchesBefore + 1)
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('DEFAULT (non-wide) width: a row click navigates to the detail page and the center itself marks nothing', async () => {
+      setViewport('default')
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_1' } })
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+    })
   })
 
   // -------------------------------------------------------------------------

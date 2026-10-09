@@ -1351,6 +1351,12 @@ describe('ApprovalCenterView', () => {
       })
       expect(exportQuery).not.toHaveProperty('page')
       expect(exportQuery).not.toHaveProperty('pageSize')
+      // T1: header mode and language travel BESIDE the feed's filters (second argument), never inside
+      // the snapshot — the snapshot is compared against the list's filters, and it is captured at
+      // list-load time while the language is read when the button is clicked.
+      expect(exportQuery).not.toHaveProperty('header')
+      expect(exportQuery).not.toHaveProperty('lang')
+      expect(exportApprovalsCsvSpy.mock.calls[0]![1]).toEqual({ header: 'label', lang: 'en' })
 
       // Same filters as the list request that produced the rows on screen — compared against the
       // real last list call, not against a second hand-written literal.
@@ -1379,6 +1385,32 @@ describe('ApprovalCenterView', () => {
       expect(exportNotice()!.textContent?.trim()).toBe('Exported 37 rows.')
     })
 
+    it('T1: asks the server for labelled headers in the language the page shows WHEN THE BUTTON IS CLICKED (en, then zh after a runtime switch)', async () => {
+      exportApprovalsCsvSpy.mockResolvedValue(exportResult())
+      await mountView()
+
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
+      expect(exportApprovalsCsvSpy.mock.calls[0]![1]).toEqual({ header: 'label', lang: 'en' })
+
+      // Switch the UI language WITHOUT reloading the list: the snapshot taken at list-load time is
+      // the same one, yet the next export must follow the language the page shows now.
+      const listLoadsBeforeSwitch = loadPendingSpy.mock.calls.length
+      await setLocale('zh-CN')
+      await flushUi()
+      await clickExport()
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
+      expect(exportApprovalsCsvSpy.mock.calls[1]![1]).toEqual({ header: 'label', lang: 'zh' })
+      expect(loadPendingSpy.mock.calls.length).toBe(listLoadsBeforeSwitch)
+      expect(exportApprovalsCsvSpy.mock.calls[1]![0]).toBe(exportApprovalsCsvSpy.mock.calls[0]![0])
+
+      // And back: the choice is not sticky.
+      await setLocale('en')
+      await flushUi()
+      await clickExport()
+      expect(exportApprovalsCsvSpy.mock.calls[2]![1]).toEqual({ header: 'label', lang: 'en' })
+    })
+
     it('exports the ACTIVE tab, and a search term only once it has been applied to the list', async () => {
       exportApprovalsCsvSpy.mockResolvedValue(exportResult())
       await mountView()
@@ -1393,14 +1425,20 @@ describe('ApprovalCenterView', () => {
       search.dispatchEvent(new Event('input'))
       await flushUi()
       await clickExport()
-      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(expect.objectContaining({ tab: 'mine', search: undefined }))
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ tab: 'mine', search: undefined }),
+        { header: 'label', lang: 'en' },
+      )
 
       // Submitted (Enter) ⇒ the list reloads with it ⇒ the export carries it.
       search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
       await flushUi()
       expect(loadMineSpy).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'PO-2026' }))
       await clickExport()
-      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(expect.objectContaining({ tab: 'mine', search: 'PO-2026' }))
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ tab: 'mine', search: 'PO-2026' }),
+        { header: 'label', lang: 'en' },
+      )
     })
 
     it('truncation: a capped export says the file is incomplete and names the limit (en / zh)', async () => {
@@ -1496,7 +1534,10 @@ describe('ApprovalCenterView', () => {
       expect(exportHint()!.textContent).toContain('fewer rows than the total the list shows')
       await clickExport()
       expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(1)
-      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(expect.objectContaining({ sourceSystem: 'all' }))
+      expect(exportApprovalsCsvSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sourceSystem: 'all' }),
+        { header: 'label', lang: 'en' },
+      )
     })
 
     it('a refused export saves nothing and says why (status / not-a-CSV / forbidden / PLM refusal)', async () => {
@@ -1685,7 +1726,8 @@ describe('ApprovalCenterView', () => {
         'utf-8',
       )
       // Positive controls first, so an emptied read cannot pass the negatives vacuously.
-      expect(source).toContain('exportApprovalsCsv(filters)')
+      // T1: the call now passes the header options as a second argument (`exportApprovalsCsv(filters, { … })`).
+      expect(source).toContain('exportApprovalsCsv(filters, ')
       expect(source).toContain('URL.createObjectURL(blob)')
       expect(source).not.toMatch(/new\s+Blob\s*\(/)
       expect(source).not.toMatch(/text\/csv/)

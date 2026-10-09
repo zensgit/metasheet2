@@ -192,11 +192,23 @@ assert.equal(
 // 3. Permissions: exactly the frozen set, and zero automatic holders.
 // ---------------------------------------------------------------------------
 
+// The manifest declares the ENTRY codes — the ones the App Center shows a card for (any-of over
+// `app.permissions`, routes/platform-apps.ts) and the role editor's install defaults list. The
+// frozen set has one more member since R-33 (2026-10-08): `stock-prep:pull`, a MODIFIER code that
+// confers nothing on its own (the PULL tier is pull ∧ operate ∧ read) and opens no page by itself.
+// Declaring it would make a card appear for a holder whose landing route (`/stock-prep`, READ)
+// then refuses them — the visible-but-blocked cell the entry-mismatch ledger pins exactly
+// (apps/web/tests/platform-app-entry-mismatch-inventory.spec.ts) and the platform-apps router test
+// pins by list (packages/core-backend/tests/unit/platform-apps-router.test.ts). So the manifest is
+// the frozen set MINUS the modifier code, and that exclusion is asserted rather than left implicit.
+const { STOCK_PREP_PULL } = require(path.join(PLUGIN_DIR, 'lib', 'stock-preparation-workbench-access.cjs'))
+assert.ok(STOCK_PREP_PERMISSION_CODES.includes(STOCK_PREP_PULL), 'the frozen set carries the pull modifier code')
 assert.deepEqual(
   [...manifest.permissions].sort(),
-  [...STOCK_PREP_PERMISSION_CODES].sort(),
-  'every declared permission code must exist in the workbench-access frozen set (and none may be missing)',
+  STOCK_PREP_PERMISSION_CODES.filter((code) => code !== STOCK_PREP_PULL).sort(),
+  'the manifest declares every ENTRY code of the workbench-access frozen set (none missing, none extra) and NOT the pull modifier code',
 )
+assert.ok(!manifest.permissions.includes(STOCK_PREP_PULL), 'stock-prep:pull is a modifier, not an entry code — it must not drive an App Center card')
 for (const code of manifest.permissions) {
   assert.ok(
     STOCK_PREP_PERMISSION_CODES.includes(code),

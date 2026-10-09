@@ -207,7 +207,7 @@ describeIfDatabase('P3-1 — GET /api/approvals?format=csv', () => {
     requesterId: string,
     status: string,
     orgId: string | null,
-    opts: { sourceSystem?: string; title?: string } = {},
+    opts: { sourceSystem?: string; title?: string; workflowKey?: string } = {},
   ): Promise<void> {
     await pool().query(
       `INSERT INTO approval_instances
@@ -219,7 +219,7 @@ describeIfDatabase('P3-1 — GET /api/approvals?format=csv', () => {
       [
         id,
         status,
-        `p31-wf-${suffix}`,
+        opts.workflowKey ?? `p31-wf-${suffix}`,
         `p31:${id}`,
         opts.title ?? `P31 ${id}`,
         JSON.stringify({ id: requesterId, name: requesterId }),
@@ -748,6 +748,142 @@ describeIfDatabase('P3-1 — GET /api/approvals?format=csv', () => {
       // a node with no `fieldPermissions` at all — comes through untouched.
       expect(visibleSnapshot).toHaveProperty('secret', 'classified')
       expect(visibleSnapshot).toHaveProperty('reason', 'trip')
+    })
+  })
+
+  // T1 (tester report 20261008, item 1) — `?header=label|code` and `?lang=zh|en` against REAL rows
+  // through the REAL route. Nested INSIDE the outer describe for the same reason as (D) below: one
+  // server/pool lifecycle. The unit suites pin the serializer and the HTTP contract with fake
+  // rows; this one proves the words come out for rows that really went through the DB, the list
+  // scope and the per-row admission check. Every expected line is hand-typed.
+  describe('(T1) header=label|code and lang — real rows through the real route', () => {
+    const tSuffix = randomUUID().slice(0, 8)
+    // The viewer STARTED these rows, so `tab=mine` lists them and the canonical per-instance read
+    // check admits them as the requester; no other instance in this file has this requester, so the
+    // `mine` feed is exactly these three rows.
+    const approvedId = `p31t-approved-${tSuffix}`
+    const rejectedId = `p31t-rejected-${tSuffix}`
+    const cancelRoundId = `p31t-cancel-round-${tSuffix}`
+    const tIds = [approvedId, rejectedId, cancelRoundId]
+
+    const CODE_ROW = 'id,sourceSystem,externalApprovalId,workflowKey,businessKey,requestNo,title,status,requesterId,requesterName,subject,currentStep,totalSteps,templateId,templateVersionId,currentNodeKey,formSnapshot,createdAt,updatedAt'
+    const ZH_ROW = '审批实例ID,来源系统,外部审批ID,流程标识,业务标识,审批编号,标题,状态,发起人ID,发起人,审批对象,当前步骤,总步骤数,审批表单ID,审批表单版本ID,当前节点标识,表单信息,发起时间（UTC）,更新时间（UTC）'
+    const EN_ROW = 'Instance ID,Source system,External approval ID,Workflow key,Business key,Request no.,Title,Status,Requester ID,Requester,Subject,Current step,Total steps,Form ID,Form version ID,Current node key,Form details,Submitted (UTC),Updated (UTC)'
+    const STATUS_COL = 7
+
+    beforeAll(async () => {
+      await seedInstance(approvedId, participantId, 'approved', orgA)
+      await seedInstance(rejectedId, participantId, 'rejected', orgA)
+      // The dedicated cancel-round runtime instance's workflow key (change-request lock §9-8).
+      await seedInstance(cancelRoundId, participantId, 'rejected', orgA, { workflowKey: 'approval.cancel-round' })
+    }, 120_000)
+
+    afterAll(async () => {
+      try {
+        const p = pool()
+        await p.query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [tIds])
+        await p.query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [tIds])
+        await p.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [tIds])
+      } catch {
+        /* best effort */
+      }
+    })
+
+    async function mineRows(qs: string): Promise<{ res: Response; rows: string[][] }> {
+      const token = await authToken(participantId, 'user', 'approvals:read')
+      const res = await exportCsv(token, `tab=mine${qs}`)
+      expect(res.status, await res.clone().text()).toBe(200)
+      const rows = parseCsv(await res.clone().text())
+      return { res, rows }
+    }
+
+    function statusOf(rows: string[][], id: string): string | undefined {
+      return rows.slice(1).find((r) => r[0] === id)?.[STATUS_COL]
+    }
+
+    it('default (no header / lang): the 19 keys and the RAW status — unchanged by T1', async () => {
+      const { rows } = await mineRows('')
+      expect(rows[0]!.join(',')).toBe(CODE_ROW)
+      expect(statusOf(rows, approvedId)).toBe('approved')
+      expect(statusOf(rows, rejectedId)).toBe('rejected')
+      expect(statusOf(rows, cancelRoundId)).toBe('rejected')
+    })
+
+    it('header=label&lang=zh: the zh label row, zh status words for ordinary rows, and the cancel-round row keeps the raw status', async () => {
+      const { rows } = await mineRows('&header=label&lang=zh')
+      expect(rows[0]!.join(',')).toBe(ZH_ROW)
+      expect(statusOf(rows, approvedId)).toBe('已通过')
+      expect(statusOf(rows, rejectedId)).toBe('已驳回')
+      // Not 「已驳回」: that word for a system-closed round is exactly what the cancel-round lock
+      // (§15.2 / P-2) forbids, and the close reason that would tell the two apart is not on the DTO.
+      expect(statusOf(rows, cancelRoundId)).toBe('rejected')
+    })
+
+    it('header=label with no lang is zh; header=label&lang=en is the en label row and en words', async () => {
+      const noLang = await mineRows('&header=label')
+      expect(noLang.rows[0]!.join(',')).toBe(ZH_ROW)
+
+      const en = await mineRows('&header=label&lang=en')
+      expect(en.rows[0]!.join(',')).toBe(EN_ROW)
+      expect(statusOf(en.rows, approvedId)).toBe('Approved')
+      expect(statusOf(en.rows, rejectedId)).toBe('Rejected')
+      expect(statusOf(en.rows, cancelRoundId)).toBe('rejected')
+    })
+
+    it('header=code&lang=en is still the keys and raw statuses (lang is only read in label mode)', async () => {
+      const { rows } = await mineRows('&header=code&lang=en')
+      expect(rows[0]!.join(',')).toBe(CODE_ROW)
+      expect(statusOf(rows, approvedId)).toBe('approved')
+    })
+
+    it('the three modes export the SAME rows: only the presentation differs, never the row set or its count', async () => {
+      const code = await mineRows('')
+      const zh = await mineRows('&header=label&lang=zh')
+      const en = await mineRows('&header=label&lang=en')
+      const ids = (rows: string[][]) => rows.slice(1).map((r) => r[0]).sort()
+      expect(ids(code.rows)).toEqual([...tIds].sort())
+      expect(ids(zh.rows)).toEqual(ids(code.rows))
+      expect(ids(en.rows)).toEqual(ids(code.rows))
+      for (const { res } of [code, zh, en]) {
+        expect(res.headers.get('x-approval-export-row-count')).toBe('3')
+      }
+    })
+
+    it('a label-mode export is still a UTF-8 attachment: BOM, then the UTF-8 bytes of the first label, fixed file name', async () => {
+      const token = await authToken(participantId, 'user', 'approvals:read')
+      const res = await exportCsv(token, 'tab=mine&header=label&lang=zh')
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toMatch(/^text\/csv/)
+      expect(res.headers.get('content-disposition')).toBe('attachment; filename="approvals-export.csv"')
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      // EF BB BF (BOM), then 审 = U+5BA1 = E5 AE A1 — the first character of the first zh label.
+      expect(Array.from(bytes.slice(0, 6))).toEqual([0xef, 0xbb, 0xbf, 0xe5, 0xae, 0xa1])
+    })
+
+    it('invalid values are a 400 JSON refusal from the real route, with none of the export headers', async () => {
+      const token = await authToken(participantId, 'user', 'approvals:read')
+      for (const [qs, code] of [
+        ['&header=bogus', 'APPROVAL_EXPORT_HEADER_INVALID'],
+        ['&header=Label', 'APPROVAL_EXPORT_HEADER_INVALID'],
+        ['&header=label&lang=fr', 'APPROVAL_EXPORT_LANG_INVALID'],
+      ] as const) {
+        const res = await exportCsv(token, `tab=mine${qs}`)
+        expect(res.status, qs).toBe(400)
+        expect(res.headers.get('content-type')).toMatch(/^application\/json/)
+        expect(res.headers.get('content-disposition')).toBeNull()
+        expect(res.headers.get('x-approval-export-row-count')).toBeNull()
+        expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe(code)
+      }
+    })
+
+    it('the JSON list ignores both parameters (no 400, no CSV)', async () => {
+      const token = await authToken(participantId, 'user', 'approvals:read')
+      const res = await fetch(`${baseUrl}/api/approvals?tab=mine&header=bogus&lang=bogus`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toMatch(/^application\/json/)
+      expect(((await res.json()) as { total: number }).total).toBe(3)
     })
   })
 

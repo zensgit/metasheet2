@@ -563,7 +563,10 @@ export async function createTemplate(
       approvalGraph: payload.approvalGraph,
     }
   }
-  return apiPost('/api/approval-templates', payload)
+  // T5b (test report 2026-10-08): template writes surface the server's machine code + values-free
+  // details (`ApprovalApiError`), so `describeTemplateAuthoringError` can map them; the generic
+  // `apiPost` throw kept only "API error: 400" and every failure read 「保存表单失败」.
+  return postApprovalJson<ApprovalTemplateDetailDTO>('/api/approval-templates', payload)
 }
 
 export async function updateTemplate(
@@ -587,14 +590,8 @@ export async function updateTemplate(
       latestVersionId: `ver_${templateId}_${Date.now()}`,
     }
   }
-  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(payload),
-  })
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`)
-  }
-  return response.json()
+  // T5b: see createTemplate — the failure keeps its code/details instead of a bare status line.
+  return patchApprovalJson<ApprovalTemplateDetailDTO>(`/api/approval-templates/${encodeURIComponent(templateId)}`, payload)
 }
 
 export async function publishTemplate(
@@ -613,7 +610,8 @@ export async function publishTemplate(
       updatedAt: new Date().toISOString(),
     }
   }
-  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
+  // T5b: see createTemplate.
+  return postApprovalJson<ApprovalTemplateVersionDetailDTO>(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
 }
 
 export interface ApprovalFormulaConditionDryRunRequest {
@@ -1059,6 +1057,18 @@ function approvalListSearchParams(query: ApprovalListQuery | undefined, includeP
 /** The filters the list is showing. Paging is deliberately not part of an export request. */
 export type ApprovalExportQuery = Omit<ApprovalListQuery, 'page' | 'pageSize'>
 
+/**
+ * How the SERVER should write the export's header row and status words (T1). Opt-in: with no
+ * options the request is exactly `?<filters>&format=csv` and the server answers with its default
+ * (`header=code`: the DTO keys, raw status values), so a caller that does not ask is unaffected.
+ * The approval center asks for `header=label` in the current UI language. The values are the
+ * server's exact literals; nothing here builds or rewrites any CSV text.
+ */
+export interface ApprovalExportCsvOptions {
+  header?: 'label' | 'code'
+  lang?: 'zh' | 'en'
+}
+
 /** Used when the response's `Content-Disposition` is absent, unreadable, or not a plain CSV name. */
 export const APPROVAL_EXPORT_DEFAULT_FILE_NAME = 'approvals-export.csv'
 
@@ -1124,9 +1134,16 @@ function readExportFileName(response: Response): string {
  * implement the CSV branch answers the same URL with the JSON list, and handing that to the user
  * as `approvals-export.csv` would look like a successful export.
  */
-export async function exportApprovalsCsv(query?: ApprovalExportQuery): Promise<ApprovalCsvExportResult> {
+export async function exportApprovalsCsv(
+  query?: ApprovalExportQuery,
+  options?: ApprovalExportCsvOptions,
+): Promise<ApprovalCsvExportResult> {
   const params = approvalListSearchParams(query, false)
   params.set('format', 'csv')
+  // Kept out of `query` on purpose: `query` is the feed's filters (shared with the JSON list, and
+  // compared against it), whereas header mode / language describe how this one file is written.
+  if (options?.header) params.set('header', options.header)
+  if (options?.lang) params.set('lang', options.lang)
   const response = await apiFetch(`/api/approvals?${params.toString()}`, {
     method: 'GET',
     headers: { Accept: 'text/csv' },
@@ -1224,12 +1241,16 @@ export class ApprovalApiError extends Error {
   readonly status: number
   /** Server-declared machine code, when present (`payload.error.code`). */
   readonly code?: string
+  /** Server-declared machine-readable details (`payload.error.details`), when a plain object.
+   *  T5b: lets authoring copy name the offending nodes/branches without echoing the message. */
+  readonly details?: Record<string, unknown>
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
     super(message)
     this.name = 'ApprovalApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -1243,12 +1264,16 @@ export class ApprovalApiError extends Error {
  * a server-supplied message is still shown verbatim.
  */
 export async function approvalRequestError(response: Response): Promise<never> {
-  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
+  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string; details?: unknown } } | null
   const rawMessage = payload?.error?.message
   const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
     ? rawMessage
     : (useLocale().isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`)
-  throw new ApprovalApiError(message, response.status, payload?.error?.code)
+  const rawDetails = payload?.error?.details
+  const details = rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)
+    ? rawDetails as Record<string, unknown>
+    : undefined
+  throw new ApprovalApiError(message, response.status, payload?.error?.code, details)
 }
 
 /**
@@ -1607,6 +1632,44 @@ export async function getPendingCount(
   }
   const qs = sourceSystem ? `?sourceSystem=${encodeURIComponent(sourceSystem)}` : ''
   return apiGet(`/api/approvals/pending-count${qs}`)
+}
+
+/**
+ * Badge count of one approval-center tab (test report 2026-10-08). Each badge has its own endpoint
+ * behind its own default-OFF server switch; the caller asks only when the matching session
+ * feature is on. `degraded` mirrors the pending-count contract (schema not ready ⇒ 0 + flag).
+ */
+export interface ApprovalTabBadgeCountResponse {
+  count: number
+  degraded?: boolean
+}
+
+/**
+ * 抄送我的 unread count — CC'd approvals the viewer has not opened since the newest CC targeting
+ * them, over the same feed the 抄送我的 tab lists for this `sourceSystem`. Never part of the
+ * 待办 counts.
+ */
+export async function getCcUnreadCount(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<ApprovalTabBadgeCountResponse> {
+  if (USE_MOCK) {
+    return { count: 0 }
+  }
+  return apiGet(`/api/approvals/cc-unread-count?sourceSystem=${encodeURIComponent(sourceSystem)}`)
+}
+
+/**
+ * 我发起的 new-outcome count — the viewer's own requests that reached a final status decided by
+ * someone else and were not opened since, over the same feed the 我发起的 tab lists for this
+ * `sourceSystem`. Never part of the 待办 counts.
+ */
+export async function getMineOutcomesUnseenCount(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<ApprovalTabBadgeCountResponse> {
+  if (USE_MOCK) {
+    return { count: 0 }
+  }
+  return apiGet(`/api/approvals/mine-outcomes/unseen-count?sourceSystem=${encodeURIComponent(sourceSystem)}`)
 }
 
 /**

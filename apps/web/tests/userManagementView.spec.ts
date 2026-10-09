@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
 
@@ -1606,7 +1607,7 @@ describe('UserManagementView', () => {
 
     const inputs = Array.from(container!.querySelectorAll('.user-admin__panel--create input'))
     const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名') as HTMLInputElement | undefined
-    const usernameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '用户名（可选）') as HTMLInputElement | undefined
+    const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）') as HTMLInputElement | undefined
     const mobileInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '手机号（可选）') as HTMLInputElement | undefined
     const employeeNoInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '员工号（可选）') as HTMLInputElement | undefined
     const departmentInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '部门（可选）') as HTMLInputElement | undefined
@@ -1697,6 +1698,119 @@ describe('UserManagementView', () => {
       },
     ])
     expect(container?.textContent).not.toContain('首次设置密码链接：')
+  })
+
+  describe('create-user validation copy (customer feedback 20261008 #1)', () => {
+    async function submitCreateUserAgainst(error: Record<string, unknown>, fields: { name: string; username: string; password: string }): Promise<void> {
+      const fallback = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (url.pathname === '/api/admin/users' && (init?.method || 'GET').toUpperCase() === 'POST') {
+          callLog.push(String(input))
+          return createJsonResponse({ ok: false, error }, 400)
+        }
+        return fallback(input, init)
+      })
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      const passwordInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '可选：初始密码')
+      if (!nameInput || !usernameInput || !passwordInput) throw new Error('Create-user form inputs not found')
+      for (const [input, value] of [[nameInput, fields.name], [usernameInput, fields.username], [passwordInput, fields.password]] as const) {
+        input.value = value
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => Boolean(container!.querySelector('.user-admin__status--error')))
+    }
+
+    function errorBannerText(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() || ''
+    }
+
+    it('states both rules in the create form and labels the login-name field', async () => {
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const loginNameRule = container!.querySelector('[data-create-user-rule="login-name"]')?.textContent || ''
+      const passwordRule = container!.querySelector('[data-create-user-rule="password"]')?.textContent || ''
+      expect(loginNameRule).toContain('小写字母、数字和 . _ -')
+      expect(loginNameRule).toContain('中文姓名请填「姓名」栏')
+      expect(passwordRule).toContain('8–128 位')
+      expect(passwordRule).toContain('大写字母、小写字母和数字')
+      expect(passwordRule).toContain('不能包含 123456、password')
+      const usernameInput = container!.querySelector<HTMLInputElement>('.user-admin__panel--create input[aria-label="登录名（可选）"]')
+      expect(usernameInput?.getAttribute('placeholder')).toBe('登录名（可选，小写字母/数字）')
+    })
+
+    it('renders the weak-pattern password failure as a Chinese sentence instead of the English server message', async () => {
+      await submitCreateUserAgainst({
+        code: 'PASSWORD_POLICY_FAILED',
+        message: 'Password does not meet requirements',
+        details: {
+          details: ['Password contains a common weak pattern'],
+          reasons: ['weak_pattern'],
+        },
+      }, { name: '测试员', username: 'operator.a', password: '123456Asd' })
+
+      expect(errorBannerText()).toBe('密码不符合要求：不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(errorBannerText()).not.toContain('Password')
+    })
+
+    it('renders the non-ASCII login-name failure as a Chinese sentence that points at the 姓名 field', async () => {
+      await submitCreateUserAgainst({
+        code: 'INVALID_USERNAME',
+        message: 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed',
+        details: { rule: 'login_name_ascii' },
+      }, { name: '测试员', username: '测试员', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏')
+      expect(errorBannerText()).not.toContain('Username')
+    })
+
+    it('falls back to the server message for an unmapped code', async () => {
+      await submitCreateUserAgainst({
+        code: 'USERNAME_ALREADY_EXISTS',
+        message: 'User with this username already exists',
+      }, { name: '测试员', username: 'operator.a', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('User with this username already exists')
+    })
+
+    it('maps every password reason in order, keeps an en variant, and falls back when it cannot map', () => {
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'too_long', 'no_lowercase', 'no_uppercase', 'no_digit', 'weak_pattern'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；不超过 128 位；要有小写字母；要有大写字母；要有数字；不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'no_digit'] },
+      }, 'en')).toBe('Password does not meet requirements: at least 8 characters; at least one number')
+      expect(describeCreateUserError({
+        code: 'INVALID_USERNAME',
+        details: { rule: 'login_name_ascii' },
+      }, 'en')).toContain('put a Chinese name in the Name field')
+      // An unknown reason next to a known one keeps the server's index-aligned English string.
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { details: ['Password must be at least 8 characters long', 'Some future rule'], reasons: ['too_short', 'future_rule'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；Some future rule')
+      // No mapping at all -> null, so the view keeps the server message.
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { details: ['x'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { reasons: ['future_rule'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME', details: { rule: 'something_else' } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'USER_ALREADY_EXISTS', message: 'x' }, 'zh')).toBeNull()
+      expect(describeCreateUserError(undefined, 'zh')).toBeNull()
+    })
   })
 
   it('can auto-focus a user from directory query params', async () => {

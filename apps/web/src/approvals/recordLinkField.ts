@@ -272,6 +272,44 @@ export function buildRecordLinkSheetSelectOptions(
 }
 
 /**
+ * Parent-owned record-link authoring catalog snapshot (FWB-0 Layer 2; delta §3.4 typed pickers).
+ * The authoring VIEW is the only fetch/state owner (F0 gate #2); form-builder children render this
+ * snapshot read-only and ask the owner to (re)load it by emitting an intent — they never fetch.
+ */
+export interface RecordLinkAuthoringCatalog {
+  readonly bases: readonly RecordLinkNamedOption[]
+  readonly sheets: readonly (RecordLinkNamedOption & { baseId?: string | null })[]
+  readonly loading: boolean
+  /** True only after a successful fetch — a failure must stay retriable. */
+  readonly loaded: boolean
+  /** Values-free failure copy; '' when ok / idle. */
+  readonly error: string
+}
+
+/**
+ * Sheet pin to keep when an author changes a record-link field's target BASE: the current sheet
+ * survives only when a loaded catalog row proves it belongs to the new base (same membership rule
+ * as the flag-OFF inline editor's base-change handler); otherwise it is cleared. Clearing the base
+ * always clears the sheet — a sheet pin without a base is never a valid target. Pure, so the
+ * caller can submit `{ baseId, sheetId }` as ONE committed edit (one history entry).
+ */
+export function recordLinkSheetAfterBaseChange(
+  sheets: readonly (RecordLinkNamedOption & { baseId?: string | null })[],
+  nextBaseId: string | null | undefined,
+  currentSheetId: string | null | undefined,
+): string {
+  const base = typeof nextBaseId === 'string' ? nextBaseId.trim() : ''
+  const sheet = typeof currentSheetId === 'string' ? currentSheetId.trim() : ''
+  if (!base || !sheet) return ''
+  const belongs = sheets.some(
+    (s) => typeof s.id === 'string'
+      && s.id.trim() === sheet
+      && (typeof s.baseId === 'string' ? s.baseId.trim() : '') === base,
+  )
+  return belongs ? sheet : ''
+}
+
+/**
  * When the multitable catalog has successfully loaded, prove a saved record-link pin is still
  * a sheet that belongs to the pinned base. Missing sheet or sheet.baseId mismatch → values-free
  * error (never echo raw ids). Server remains authority; this only blocks client save when the

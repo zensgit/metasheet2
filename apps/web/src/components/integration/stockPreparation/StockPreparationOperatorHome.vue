@@ -76,7 +76,7 @@
     >
       <template v-if="emptyState !== 'nothing_today'" #action>
         <button type="button" class="sp-home__link" @click="emit('focus-quick-open')">
-          {{ bi('拉一个新项目', 'Pull a new project in') }}
+          {{ canPull ? bi('拉一个新项目', 'Pull a new project in') : bi('打开一个项目', 'Open a project') }}
         </button>
       </template>
     </EmptyState>
@@ -239,7 +239,7 @@
          "不知道该点哪个" this redesign exists to remove. Its testids are therefore unchanged and the
          three existing specs that open a project through them keep working untouched. -->
     <div class="sp-home__quick-open" data-testid="stock-prep-operator-home-quick-open">
-      <h3 class="sp-home__quick-open-title">{{ bi('拉一个新项目', 'Pull a new project in') }}</h3>
+      <h3 class="sp-home__quick-open-title">{{ canPull ? bi('拉一个新项目', 'Pull a new project in') : bi('打开一个项目', 'Open a project') }}</h3>
       <p class="sp-home__quick-open-hint">
         {{ bi(
           '找不到号码?列表里有这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目(不论是谁拉进去的)。直接把号码打进去也一样能打开。',
@@ -315,8 +315,16 @@ const props = withDefaults(
     directoryLoaded?: boolean
     /** This browser's memory of projects it opened before, read ONCE by the parent (D1=A's local half). */
     memory?: readonly StockPrepRecentProjectEntry[]
+    /**
+     * R-33 (2026-10-08): whether THIS viewer may pull from PLM — the parent passes the same predicate
+     * its pull button renders on (`canRunStockPrepProjectSync`). `false` rewrites the three
+     * pull-inviting lines on this page (empty-state action, fallback heading, no_projects hint) to
+     * 「打开一个项目」 / 「由拉取人员拉取」, so a floor operator is never invited to do a step they
+     * cannot. Defaults to `true` so a parent without a principal keeps today's words.
+     */
+    canPull?: boolean
   }>(),
-  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [] },
+  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [], canPull: true },
 )
 
 const emit = defineEmits<{
@@ -427,6 +435,16 @@ const emptyStateText = computed(() => {
   const state = emptyState.value
   const entry = state ? EMPTY_STATE_TEXT[state] : null
   if (!entry) return { title: '', hint: '' }
+  // R-33: a viewer who cannot pull is told who does, not 「可以自己拉」.
+  if (state === 'no_projects' && !props.canPull) {
+    return {
+      title: bi(...entry.title),
+      hint: bi(
+        '备料从"把项目从 PLM 拉进来"开始,由拉取人员拉取。知道项目号可以直接打开查看。',
+        'Stock preparation starts by pulling a project in from PLM — a pull operator (拉取人员) does that. If you know the number you can open it directly.',
+      ),
+    }
+  }
   return { title: bi(...entry.title), hint: bi(...entry.hint) }
 })
 

@@ -7,6 +7,7 @@ import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
 import { recordInvite } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
+import { LOGIN_NAME_RULE_CODE, validateLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { getUserSession, listUserSessions, revokeUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
@@ -699,12 +700,10 @@ function todayUtcDate(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+// #6259: the login-name rule (regex + English message) lives in auth/login-name-rule.ts, shared
+// with the DingTalk directory admission writer; do not inline a copy here.
 function validateUsername(username: string | null): string | null {
-  if (!username) return null
-  if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
-    return 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
-  }
-  return null
+  return validateLoginName(username)
 }
 
 function resolveUserAccountLabel(options: {
@@ -3656,7 +3655,11 @@ export function adminUsersRouter(): Router {
 
       const usernameValidationError = validateUsername(cleanUsername)
       if (usernameValidationError) {
-        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError)
+        // `details.rule` is the stable machine-readable code clients localise by; the English
+        // message stays as-is for existing callers.
+        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError, {
+          rule: LOGIN_NAME_RULE_CODE,
+        })
       }
 
       if (cleanName.length < 2 || cleanName.length > 100) {
@@ -3683,6 +3686,7 @@ export function adminUsersRouter(): Router {
       if (!passwordValidation.valid) {
         return jsonError(res, 400, 'PASSWORD_POLICY_FAILED', 'Password does not meet requirements', {
           details: passwordValidation.errors,
+          reasons: passwordValidation.reasons,
         })
       }
 
