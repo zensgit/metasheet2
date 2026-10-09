@@ -1087,6 +1087,25 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('answers a fixed 500 when the delegated role read fails before the handler, instead of leaving the request unanswered', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockRejectedValueOnce(new Error('MARKER_rd_f3q7 connect ECONNREFUSED'))
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'ROLE_DELEGATION_CHECK_FAILED', message: 'Failed to verify delegated role-admin access' },
+    })
+    expect(JSON.stringify(response.body)).not.toContain('MARKER_rd_f3q7')
+    expect(JSON.stringify(response.body)).not.toContain('ECONNREFUSED')
+  })
+
   it('returns delegated role summary for a plugin admin', async () => {
     state.authUser = {
       id: 'crm-admin-1',
