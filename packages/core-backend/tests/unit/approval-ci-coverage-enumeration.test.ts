@@ -543,7 +543,10 @@ describe('T1 — apps/web/tests/{approval,cancelRound}*.{test,spec}.ts (FE unit/
   // glob to `^approval` would silently drop the eight `cancelRoundEntry*` specs and stay green (gate
   // mutation X13, 2026-10-09). Count the arm on its own.
   it('tier glob keeps the cancelRound arm (per-arm negative control)', () => {
-    expect(files.filter((name) => name.startsWith('cancelRound')).length).toBeGreaterThanOrEqual(8)
+    expect(
+      files.filter((name) => name.startsWith('cancelRound')).length,
+      'the cancelRound arm of the T1 glob must still see the eight cancelRoundEntry* specs (reviewer F4, 2026-10-08); if one was deleted on purpose, lower this floor in the same commit',
+    ).toBeGreaterThanOrEqual(8)
     expect(files.filter((name) => name.startsWith('approval')).length).toBeGreaterThan(0)
   })
 
