@@ -2162,14 +2162,17 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
 //       APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED;
 //   (c) the target is not in `ApprovalGraphExecutor.listVisitedApprovalNodeKeysUntil(current)`
 //       minus its last entry (packages/core-backend/src/services/ApprovalGraphExecutor.ts) →
-//       APPROVAL_RETURN_TARGET_INVALID. That walker passes THROUGH start / condition / cc / handler
-//       nodes, lets ONLY `approval` nodes join the trail, and jumps a `parallel` fork straight to its
-//       `joinNodeKey` — so a node inside a parallel branch is never a legal target, not even after
-//       the region has joined.
-// An option any of the three refuses can only ever 409, and a 退回 button whose every option 409s
-// is a dead button — so each is mirrored below and the list comes back empty (the button's `v-if`
-// already hides on an empty list). The server stays the authority; this only stops offering what
-// this instance's own graph and DTO say it will refuse.
+//       APPROVAL_RETURN_TARGET_INVALID. That walker starts at `start` and STOPS AT THE CURSOR. On
+//       the way it passes THROUGH start / condition / cc / handler nodes (a condition node along the
+//       ONE branch the form resolves), lets ONLY `approval` nodes join the trail, and jumps a
+//       `parallel` fork straight to its `joinNodeKey`. So a node inside a parallel branch is never a
+//       legal target, not even after the region has joined, and neither is anything at or after the
+//       cursor — which history still holds after an earlier 退回 or an admin backward jump.
+// An option one of the three refuses can only ever 409. Each check is mirrored below as far as this
+// instance's own DTO and frozen graph allow, and the list comes back empty when nothing is left (the
+// button's `v-if` already hides on an empty list). This is NOT a complete mirror — what a client
+// cannot mirror is listed at `returnEligibleGraphKeys` — and the server stays the authority: this
+// only stops offering what this instance's own graph and DTO say it will refuse.
 //
 // WHICH DTO FIELD CARRIES WHAT. The two builders do not ship the same fields, and the store
 // publishes an action response into the very slot the detail read fills:
@@ -2183,40 +2186,53 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
 // Hence (a) and (b) read whichever carrier is present, and the cursor's type falls back to this
 // instance's own graph when the DTO does not carry it.
 
-// The graph the candidates are judged by: this instance's OWN graph, or none. The template store is
-// app-wide and a failed load leaves the previous template in place (see the T4cd note on
-// `nodeLabel`), so `pinnedGraph` can hold ANOTHER template's graph whose nodes share default keys
-// (`approval_1`, …) — judging this instance's history by it would drop or keep the wrong nodes. The
-// frozen version is preferred (it is the shape the server walks); the live template is the
-// fallback, and for an ordinary member the ONLY source, because the version endpoint is
-// admin-guarded. DRIFT RISK on that fallback: `GET /api/approval-templates/:id` serves the
-// template's LATEST version (possibly an unpublished draft), so a node removed, retyped or moved
-// into a parallel region since this instance started is judged by its new shape. `pinnedGraph` is
-// deliberately left as it is — `upcomingTimelineNodes` reads it and is outside this slice. A graph
-// without node/edge arrays counts as no graph rather than throwing inside the action bar.
+// The graph the candidates are judged by: this instance's OWN frozen graph, or none. Two store
+// slots can hold it, and each is accepted only when it provably IS the version this instance is
+// pinned to (`templateVersionId`). Versions are immutable (every template edit inserts a new draft
+// version) and the runtime graph the server walks is a deep copy of its version's `approvalGraph`
+// (`buildRuntimeGraph` in ApprovalProductService.ts), so a match means node for node the server's
+// shape:
+//   * the pinned version (`templateStore.activeVersion`) iff its `id` and `templateId` match. Its
+//     endpoint is admin-guarded, so only template admins ever have it;
+//   * the template (`templateStore.activeTemplate`) iff its `latestVersionId` is the pinned
+//     version: `GET /api/approval-templates/:id` serves the template's LATEST version
+//     (`getTemplate` → `loadTemplateBundle(…, 'latest')`). For an ordinary member this is the ONLY
+//     source.
+// DRIFT. A template whose latest version is a later one (any edit since this instance started,
+// published or still a draft) is NOT this instance's graph. Judging by it would hide a target the
+// frozen graph still accepts (a node deleted, retyped, moved into a parallel region or reordered
+// since), so it counts as no graph — the legacy list below, exactly what was offered before this
+// filter. The cost, owner-visible: while a template has any version newer than an instance's, that
+// instance is not filtered for ordinary members. The clean fix is server-side (ship the frozen
+// graph, or the legal targets, on the instance DTO).
+// IDENTITY. The template store is app-wide and a failed load leaves the previous template in place
+// (see the T4cd note on `nodeLabel`), and another template's nodes share default keys
+// (`approval_1`, …) — hence the `id` checks. With no pinned version id on the DTO nothing can be
+// proven, so no graph (an older template DTO without `latestVersionId` must not match it as
+// `undefined === undefined`). `pinnedGraph` is deliberately left as it is — `upcomingTimelineNodes`
+// reads it and is outside this slice. The node/edge arrays are the wire contract
+// (`normalizeApprovalGraph` refuses a stored graph without them), and this view's `nodeLabel` and
+// `upcomingTimelineNodes` already rely on it, so no shape guard is added here.
 const ownApprovalGraph = computed<ApprovalGraph | null>(() => {
   const detail = approval.value
-  if (!detail?.templateId) return null
-  const usable = (graph: ApprovalGraph | null | undefined): graph is ApprovalGraph =>
-    !!graph && Array.isArray(graph.nodes) && Array.isArray(graph.edges)
+  const pinnedVersionId = detail?.templateVersionId
+  if (!detail?.templateId || !pinnedVersionId) return null
   const version = templateStore.activeVersion
-  if (
-    version
-    && version.templateId === detail.templateId
-    && version.id === detail.templateVersionId
-    && usable(version.approvalGraph)
-  ) {
+  if (version && version.templateId === detail.templateId && version.id === pinnedVersionId) {
     return version.approvalGraph
   }
   const template = templateStore.activeTemplate
-  if (template && template.id === detail.templateId && usable(template.approvalGraph)) {
+  if (template && template.id === detail.templateId && template.latestVersionId === pinnedVersionId) {
     return template.approvalGraph
   }
   return null
 })
 
 // The cursor's node type: the DTO's own answer when it carries one (the frozen runtime graph — the
-// detail read), else this instance's graph (an action response does not carry the field).
+// detail read), else this instance's graph (an action response does not carry the field). With no
+// own graph (unreachable, foreign or drifted template) an action response leaves the type unknown,
+// read as not-a-handler: at a handler cursor the legacy options come back until the next detail
+// read, and the server answers them with APPROVAL_HANDLER_ACTION_NOT_ALLOWED.
 const returnCursorNodeType = computed<ApprovalNodeType | null>(() => {
   const detail = approval.value
   if (!detail) return null
@@ -2235,30 +2251,65 @@ const returnBlockedByParallelRegion = computed(
   () => parallelBranchNodeKeys.value.length > 0 || returnCursorNodeType.value === 'parallel',
 )
 
-// (c), the part a client can mirror from the graph alone: an `approval` node outside every parallel
-// region (`collectParallelRegionNodeKeys`, the FE mirror of the backend's region definition: branch
-// nodes up to, excluding, the join). A key the graph does not carry is dropped too. NOT mirrored —
-// recorded here rather than implied: the walker also resolves condition branches against the form
-// and stops at the cursor, so a node lying DOWNSTREAM of the cursor (visited before an earlier 退回)
-// is still offered and still answered with APPROVAL_RETURN_TARGET_INVALID.
+// Every node with an edge path INTO `cursor` (reverse BFS over `graph.edges`; the cursor itself is
+// not included). The walker's fork → join jump needs no edge of its own: the branch edges into the
+// join already lead back to the fork. `null` — no upstream filter — when there is no cursor or the
+// cursor is not a node of the graph: there is nothing to anchor the walk to, and an inconsistent
+// cursor must not empty the list on its own (the server stays the authority).
+function upstreamNodeKeys(graph: ApprovalGraph, cursor: string | null | undefined): Set<string> | null {
+  if (!cursor || !graph.nodes.some((node) => node.key === cursor)) return null
+  const upstream = new Set<string>()
+  const queue = [cursor]
+  while (queue.length > 0) {
+    const key = queue.shift()!
+    for (const edge of graph.edges) {
+      if (edge.target === key && !upstream.has(edge.source)) {
+        upstream.add(edge.source)
+        queue.push(edge.source)
+      }
+    }
+  }
+  return upstream
+}
+
+// (c), the part a client can mirror from this instance's frozen graph alone. A visited key stays a
+// candidate only when it is
+//   * a node of the graph at all — the trail holds nothing else;
+//   * an `approval` node — the only type that joins the trail;
+//   * outside every parallel region (`collectParallelRegionNodeKeys`, the FE mirror of the
+//     backend's region definition: branch nodes up to, excluding, the join);
+//   * UPSTREAM of the cursor (`upstreamNodeKeys`) — the walker stops at the cursor, so a node that
+//     history still holds from before an earlier 退回 (or an admin backward jump) and that lies at
+//     or after the cursor is never on the trail.
+// NOT mirrored — recorded here rather than implied:
+//   * the walker follows ONE branch of each condition node, the one the form (and the requester)
+//     resolve to; this filter accepts every branch. An approval node on a branch the form no longer
+//     resolves to (a field edited since it was visited) is still offered and still answered with
+//     APPROVAL_RETURN_TARGET_INVALID;
+//   * the other direction: candidates come from history, so a node the trail holds but nobody
+//     visited (an admin forward jump skipped it) is legal on the server and never offered.
 const returnEligibleGraphKeys = computed<Set<string> | null>(() => {
   const graph = ownApprovalGraph.value
   if (!graph) return null
   const parallelRegion = collectParallelRegionNodeKeys(graph)
+  const upstream = upstreamNodeKeys(graph, approval.value?.currentNodeKey)
   return new Set(
     graph.nodes
       .filter((node) => node.type === 'approval' && !parallelRegion.has(node.key))
+      .filter((node) => !upstream || upstream.has(node.key))
       .map((node) => node.key),
   )
 })
 
 // NO graph — the template is not reachable for this viewer (outside its visibility scope, a failed
-// load) or the store holds another template: the list is exactly what it was before this filter
-// existed, every visited key but the cursor / start / end, in first-visit order. A deliberate,
-// owner-visible choice: hiding 退回 whenever the template cannot be loaded would silently take the
-// verb away from a member who may hold a perfectly legal target, and the server's (c) check still
-// answers an illegal one with its own typed 409. (a) and (b) need no graph when the DTO carries
-// their field.
+// load), the store holds another template, or the template has moved on to a later version than
+// this instance's (drift, see `ownApprovalGraph`): the list is exactly what it was before this
+// filter existed, every visited key but the cursor / start / end, in `store.history` order. A
+// deliberate, owner-visible choice: hiding 退回 whenever this instance's own graph cannot be had
+// would silently take the verb away from a member who may hold a perfectly legal target, and the
+// server's (c) check still answers an illegal one with its own typed 409. (a) and (b) need no graph
+// when the DTO carries their field. Until the template load settles the list is this legacy one
+// too, so the button can show briefly before it is filtered.
 const returnableNodes = computed(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
   if (returnCursorNodeType.value === 'handler') return []
