@@ -501,7 +501,7 @@ const WINDOWS_ACL_SUITE = 'scripts/ops/__tests__/multitable-onprem-s6a-artifact-
 const WINDOWS_JOB_HEADER_CODE = `
   stock-prep-powershell51:
     name: stock-prep PowerShell 5.1 acceptance
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, ms2-win]
     steps:
 `
 const WINDOWS_ACL_STEP_NAME = '      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)'
@@ -630,7 +630,7 @@ test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite u
   const winJobMatch = workflow.match(/\n {2}stock-prep-powershell51:\n[\s\S]*?(?=\n {2}\S|\n*$)/)
   assert.ok(winJobMatch, 'the stock-prep-powershell51 job must exist in stock-prep-powershell51.yml')
   const winJob = winJobMatch[0]
-  // The job itself: runs on windows-latest, and nothing at job level can skip it or
+  // The job itself: runs on the native ms2-win runner, and no job-level key can skip it or
   // make its failure non-blocking (if, continue-on-error, needs, strategy, env, ...).
   const winJobHeader = winJob.slice(0, winJob.indexOf('\n    steps:\n') + '\n    steps:\n'.length)
   assert.deepEqual(psCodeLines(winJobHeader), psCodeLines(WINDOWS_JOB_HEADER_CODE), 'the Windows job header is pinned verbatim')
@@ -4489,4 +4489,3 @@ for (const [patternName, patternBody] of Object.entries(FORBIDDEN_PATTERNS)) {
     }
   })
 }
-
