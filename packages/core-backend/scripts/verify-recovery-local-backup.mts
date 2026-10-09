@@ -720,6 +720,7 @@ async function runFailClosedNegatives(input: {
   }
 
   const wrongSecretSession = createLocalCustodySession(input.runtime.depth)
+  custodySessions.add(wrongSecretSession)
   const wrongSecret = randomBytes(32)
   try {
     await assert.rejects(async () => wrongSecretSession.unlock({
@@ -738,6 +739,7 @@ async function runFailClosedNegatives(input: {
   await unchanged()
 
   const missingKeySession = createLocalCustodySession(input.runtime.depth)
+  custodySessions.add(missingKeySession)
   const unrelatedBackup = createLocalCustodyBackup({
     custodyId: input.custodyId,
     recoverySecret: input.recoverySecret,
