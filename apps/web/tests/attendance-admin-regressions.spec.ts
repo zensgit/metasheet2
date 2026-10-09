@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import { routerKey } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
@@ -167,6 +168,51 @@ function emptyAttendanceResponse(): Response {
   })
 }
 
+// A router-less AttendanceView mount hits useRouter()'s bare inject(routerKey). Vue warns
+// on every mount, and vitest ships each warn to the main thread on the worker RPC. This file
+// is one worker's whole job (144 mounts). On a slow runner those calls, plus the 1s hero-clock
+// re-render, sit unanswered longer than birpc's 60s onTaskUpdate timeout — the guard goes red
+// with every assertion green. Providing the key as undefined keeps the location.assign fallback.
+function createAttendanceApp(...args: Parameters<typeof createApp>): ReturnType<typeof createApp> {
+  const instance = createApp(...args)
+  instance.provide(routerKey, undefined)
+  return instance
+}
+
+// Vitest debounces onTaskUpdate by 10ms and the worker only reads the ack on a macrotask.
+// flushUi() is microtasks, so a stretch of mounts can pass 60s of wall clock without a poll
+// phase. Yielding here lets the previous test's update ack land before the next mount.
+const WORKER_RPC_DRAIN_MS = 20
+
+function drainWorkerRpc(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, WORKER_RPC_DRAIN_MS)
+  })
+}
+
+const nativeSetInterval = window.setInterval.bind(window)
+let heroClockSilenced = false
+
+function silenceAttendanceHeroClock(): void {
+  if (heroClockSilenced) return
+  heroClockSilenced = true
+  window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (typeof handler === 'function' && timeout === 1000) {
+      const source = String(handler)
+      if (source.includes('heroClockNow')) {
+        return 0 as unknown as ReturnType<typeof setInterval>
+      }
+    }
+    return nativeSetInterval(handler, timeout as number, ...(args as []))
+  }) as typeof window.setInterval
+}
+
+function restoreAttendanceHeroClock(): void {
+  if (!heroClockSilenced) return
+  window.setInterval = nativeSetInterval
+  heroClockSilenced = false
+}
+
 describe('Attendance admin regressions', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -199,7 +245,9 @@ describe('Attendance admin regressions', () => {
   let autoShiftAutoWriteRunsData: Record<string, unknown> | null = null
   let attendanceNotificationDeliveriesData: Record<string, unknown> | null = null
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await drainWorkerRpc()
+    silenceAttendanceHeroClock()
     vi.clearAllMocks()
     pluginHarness.initialPlugins = [{ name: 'plugin-attendance', status: 'active' }]
     if (pluginHarness.plugins) pluginHarness.plugins.value = pluginHarness.initialPlugins
@@ -897,6 +945,7 @@ describe('Attendance admin regressions', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     if (app) app.unmount()
+    restoreAttendanceHeroClock()
     if (container) container.remove()
     if (originalScrollIntoView) {
       Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -959,7 +1008,7 @@ describe('Attendance admin regressions', () => {
   }
 
   async function mountShiftAdmin(): Promise<HTMLElement> {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const shiftsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
@@ -1129,7 +1178,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('does not preload admin-only attendance data on the employee overview surface', async () => {
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
 
@@ -1194,7 +1243,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1236,7 +1285,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1285,7 +1334,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1357,7 +1406,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1400,7 +1449,7 @@ describe('Attendance admin regressions', () => {
   ) {
     attendanceSettingsData = settings
     attendanceAnomaliesData = rows
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
     // Probe admin capability through the batch toolbar → checkboxes become enabled.
@@ -1494,7 +1543,7 @@ describe('Attendance admin regressions', () => {
   it('#3531 owed-punch filter defaults to all anomalies without sending a filter', async () => {
     attendanceAnomaliesData = [makeBatchAnomaly('record-a')]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1509,7 +1558,7 @@ describe('Attendance admin regressions', () => {
   it('#3531 owed-punch filter clears stale rows while loading and preserves pending request chips', async () => {
     attendanceAnomaliesData = [makeBatchAnomaly('record-late')]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(12)
 
@@ -1568,7 +1617,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(10)
     const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
@@ -1591,7 +1640,7 @@ describe('Attendance admin regressions', () => {
       return defaultImpl(input, init)
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(32)
 
@@ -1605,7 +1654,7 @@ describe('Attendance admin regressions', () => {
     // closed; clicking Management home must propagate clear-section through AdminCenter to its
     // parent. A regression that drops the template re-emit turns exactly this leg red.
     const onClearSection = vi.fn()
-    app = createApp(AttendanceAdminCenter, {
+    app = createAttendanceApp(AttendanceAdminCenter, {
       initialSectionId: 'attendance-admin-groups',
       onClearSection,
     })
@@ -1683,7 +1732,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -1746,7 +1795,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -1791,7 +1840,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('renders scheduler scopes as a read-only registry under scheduling admin', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1842,7 +1891,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1883,7 +1932,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1931,7 +1980,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -1970,7 +2019,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2015,7 +2064,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8) // loadSettings() on admin init must hydrate the policy form (no manual Reload)
 
@@ -2074,7 +2123,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2115,7 +2164,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -2164,7 +2213,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2198,7 +2247,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2227,7 +2276,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2269,7 +2318,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2302,7 +2351,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2339,7 +2388,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2386,7 +2435,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/leave-balances/me')) return jsonResponse(200, balanceSummaryPayload('annual', 'self'))
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'overview' })
+      app = createAttendanceApp(AttendanceView, { mode: 'overview' })
       app.mount(container!)
       await flushUi(10)
       const meCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.includes('/leave-balances/me'))
@@ -2402,7 +2451,7 @@ describe('Attendance admin regressions', () => {
         }
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'overview' })
+      app = createAttendanceApp(AttendanceView, { mode: 'overview' })
       const vm: any = app.mount(container!)
       await flushUi(10) // let the mount-time default ('annual') auto-fetch settle first
       vi.mocked(apiFetch).mockClear()
@@ -2422,7 +2471,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
@@ -2448,7 +2497,7 @@ describe('Attendance admin regressions', () => {
         }
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       const vm: any = app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
@@ -2473,7 +2522,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       const section = await openOpsSection()
@@ -2497,7 +2546,7 @@ describe('Attendance admin regressions', () => {
         if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
         return emptyAttendanceResponse()
       })
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       const vm: any = app.mount(container!)
       await flushUi(8)
       const section = await openOpsSection()
@@ -2535,7 +2584,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2569,7 +2618,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2600,7 +2649,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2637,7 +2686,7 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2694,7 +2743,7 @@ describe('Attendance admin regressions', () => {
       }
       return emptyAttendanceResponse()
     })
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     const section = await openOpsSection()
@@ -2728,7 +2777,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2807,7 +2856,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2886,7 +2935,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2912,7 +2961,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('clears the scheduler scope subject ref when the subject type changes', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -2958,7 +3007,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3021,7 +3070,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3061,7 +3110,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3099,7 +3148,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-scheduler-scopes"]')!.click()
@@ -3116,7 +3165,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -3183,7 +3232,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -3243,7 +3292,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -3516,7 +3565,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -3664,7 +3713,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
 
@@ -3784,7 +3833,7 @@ describe('Attendance admin regressions', () => {
       pluginHarness.plugins!.value = [{ name: 'plugin-attendance', status: 'active' }]
     })
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -3846,7 +3895,7 @@ describe('Attendance admin regressions', () => {
         })
       },
     })
-    app = createApp(Root)
+    app = createAttendanceApp(Root)
     app.mount(container!)
     await flushUi(8)
 
@@ -3896,7 +3945,7 @@ describe('Attendance admin regressions', () => {
     attendanceGroupsData = [routeGroup, staleGroup]
     const openGroupRoute = vi.fn()
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -3963,7 +4012,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, {
+      app = createAttendanceApp(AttendanceView, {
         mode: 'admin',
         routeGroupContext: {
           group: { ...routeGroup },
@@ -4042,7 +4091,7 @@ describe('Attendance admin regressions', () => {
       return fallback(input, init)
     })
 
-    app = createApp(AttendanceView, {
+    app = createAttendanceApp(AttendanceView, {
       mode: 'admin',
       routeGroupContext: {
         group: routeGroup,
@@ -4192,7 +4241,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(10)
 
@@ -4229,7 +4278,7 @@ describe('Attendance admin regressions', () => {
   })
 
   async function openAttendanceGroupPunchCard(): Promise<HTMLElement> {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
@@ -4347,7 +4396,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 480, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     // Drain BOTH admin loads — fetchPlugins→loadAdminData and the orgId-watch reload — before reading or
     // editing, so settingsLoading has settled (a late load would otherwise disable the save button and
@@ -4400,7 +4449,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       overtimeBankPolicy: { enabled: true, pooledSources: ['restday'], maxMinutesPerPeriod: 600, validityDays: 90 },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4455,7 +4504,7 @@ describe('Attendance admin regressions', () => {
         rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4506,7 +4555,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       attendanceBonusPolicy: { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: false },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4548,7 +4597,7 @@ describe('Attendance admin regressions', () => {
         },
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4633,7 +4682,7 @@ describe('Attendance admin regressions', () => {
         requireAttachment: true,
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4743,7 +4792,7 @@ describe('Attendance admin regressions', () => {
         requireAttachment: false,
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4785,7 +4834,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4887,7 +4936,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -4964,7 +5013,7 @@ describe('Attendance admin regressions', () => {
         minConfidenceToApply: 'medium',
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5046,7 +5095,7 @@ describe('Attendance admin regressions', () => {
         { userId: 'user-2', workDate: '2026-06-03', reason: 'already_scheduled' },
       ],
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5146,7 +5195,7 @@ describe('Attendance admin regressions', () => {
       applied: [{ userId: 'user-1', workDate: '2026-06-03', candidateShiftId: 'shift-1' }],
       skipped: [{ userId: 'user-2', workDate: '2026-06-03', candidateShiftId: 'shift-2', reason: 'already_scheduled' }],
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5205,7 +5254,7 @@ describe('Attendance admin regressions', () => {
 
   it('shows disabled feedback when the auto shift preview endpoint rejects the preview gate', async () => {
     autoShiftPreviewStatus = 403
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5251,7 +5300,7 @@ describe('Attendance admin regressions', () => {
         },
       },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5315,7 +5364,7 @@ describe('Attendance admin regressions', () => {
       page: 1,
       pageSize: 5,
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5373,7 +5422,7 @@ describe('Attendance admin regressions', () => {
       counters: { pending: 1, sending: 0, sent: 1, retrying: 2, failed: 1, skipped: 0 },
     }
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5422,7 +5471,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5454,7 +5503,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5478,7 +5527,7 @@ describe('Attendance admin regressions', () => {
     attendanceSettingsData = {
       punchPolicy: { merge: { internalWinsOnIn: true, externalWinsOnOut: true } },
     }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5503,7 +5552,7 @@ describe('Attendance admin regressions', () => {
 
   it('toggles one merge key from off and PUTs the exact partial body (asymmetric, default-off)', async () => {
     attendanceSettingsData = { punchPolicy: { merge: { internalWinsOnIn: false, externalWinsOnOut: false } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5526,7 +5575,7 @@ describe('Attendance admin regressions', () => {
 
   it('enabling outdoor approval from off PUTs requireApproval/requireNote=true + auto (empty) flow', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5548,7 +5597,7 @@ describe('Attendance admin regressions', () => {
 
   it('disabling requireApproval PUTs requireApproval=false (default-off, no regression)', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5572,7 +5621,7 @@ describe('Attendance admin regressions', () => {
       { id: 'flow-leave', name: 'Leave Flow', requestType: 'leave', isActive: true, steps: [] },
     ]
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: '' } } }
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
 
@@ -5640,7 +5689,7 @@ describe('Attendance admin regressions', () => {
 
   it('navigates from attendance group summary cards without issuing API writes', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5688,7 +5737,7 @@ describe('Attendance admin regressions', () => {
 
   it('opens the Holidays surface from the fixed-shift work-time drawer without writes', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5720,7 +5769,7 @@ describe('Attendance admin regressions', () => {
 
   it('routes the fixed-shift drawer and schedule-stage controls through the group route event', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5785,7 +5834,7 @@ describe('Attendance admin regressions', () => {
   // sets" / "Open Holidays" — that silently did nothing on an unsaved group.
   it('surfaces a visible message when a group-editing drawer jump-off button is used on an unsaved group (A3, narrowed)', async () => {
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5834,7 +5883,7 @@ describe('Attendance admin regressions', () => {
       memberCount: 1,
     }]
     const openGroupRoute = vi.fn()
-    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
     app.mount(container!)
     await flushUi(8)
 
@@ -5965,7 +6014,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6125,7 +6174,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6294,7 +6343,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6454,7 +6503,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -6479,7 +6528,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6510,7 +6559,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('renders the production quick-add panel and appends a longer-rest date range row', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6555,7 +6604,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6631,7 +6680,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6670,7 +6719,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6708,7 +6757,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6744,7 +6793,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6783,7 +6832,7 @@ describe('Attendance admin regressions', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     try {
-      app = createApp(AttendanceView, { mode: 'reports' })
+      app = createAttendanceApp(AttendanceView, { mode: 'reports' })
       app.mount(container!)
       await flushUi()
 
@@ -6810,7 +6859,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('shows the active record report field config fingerprint', async () => {
-    app = createApp(AttendanceView, { mode: 'reports' })
+    app = createAttendanceApp(AttendanceView, { mode: 'reports' })
     app.mount(container!)
     await flushUi()
 
@@ -6824,7 +6873,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('keeps edit buttons visible for the active section while focused mode hides inactive sections', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6863,7 +6912,7 @@ describe('Attendance admin regressions', () => {
         isActive: true,
       },
     ]
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -6952,7 +7001,7 @@ describe('Attendance admin regressions', () => {
       pageSize: 200,
     }
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7075,7 +7124,7 @@ describe('Attendance admin regressions', () => {
       },
     ]
 
-    app = createApp(AttendanceView, { mode: 'overview' })
+    app = createAttendanceApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7203,7 +7252,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7367,7 +7416,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7464,7 +7513,7 @@ describe('Attendance admin regressions', () => {
     })
 
     try {
-      app = createApp(AttendanceView, { mode: 'admin' })
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
       app.mount(container!)
       await flushUi(8)
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
@@ -7484,7 +7533,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -7603,7 +7652,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -7706,7 +7755,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -7766,7 +7815,7 @@ describe('Attendance admin regressions', () => {
   }
 
   async function mountBulkApplyAdmin() {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
@@ -8062,7 +8111,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -8167,7 +8216,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
 
@@ -8272,7 +8321,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(10)
 
@@ -8360,7 +8409,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8438,7 +8487,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8533,7 +8582,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8657,7 +8706,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8765,7 +8814,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8833,7 +8882,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -8927,7 +8976,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9039,7 +9088,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9105,7 +9154,7 @@ describe('Attendance admin regressions', () => {
       return emptyAttendanceResponse()
     })
 
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9148,7 +9197,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
@@ -9213,7 +9262,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('restores template version details and import batch diagnostics from the split admin sections', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
