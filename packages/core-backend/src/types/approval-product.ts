@@ -965,8 +965,11 @@ export interface UnifiedApprovalDTO {
   /**
    * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
    * (start → cursor) — `computeReturnableNodeKeys` (services/approval-return-targets.ts): the
-   * FROZEN runtime graph walked exactly as `dispatchAction`'s `return` arm walks it, after its
-   * handler-cursor and parallel-region refusals. `[]` = nothing is legal (a client hides 退回).
+   * FROZEN runtime graph walked exactly as `dispatchAction`'s `return` arm walks it, after every
+   * VIEWER-INDEPENDENT refusal that arm applies (cancel-round instance kind, handler cursor, the
+   * cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region); the per-actor seat
+   * checks are NOT folded in (`nodeOperations` / `canDecideCurrentNode` answer those for THIS
+   * viewer). `[]` = nothing is legal (a client hides 退回).
    * ABSENT = not computed: an older server, a non-pending instance, a bridged / legacy instance
    * with no frozen graph, or a graph the walker could not evaluate — a client keeps its own
    * fallback. Carried by the detail read and by every action response; never by list rows.

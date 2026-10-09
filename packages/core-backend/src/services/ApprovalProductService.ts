@@ -4799,6 +4799,7 @@ export function toUnifiedApprovalDTO(
     runtimeGraph,
     formSnapshot: row.form_snapshot,
     requesterSnapshot: row.requester_snapshot,
+    workflowKey: row.workflow_key,
     currentNodeKey: row.current_node_key,
     status: row.status,
     metadata: row.metadata,

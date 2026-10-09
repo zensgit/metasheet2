@@ -535,9 +535,12 @@ export interface UnifiedApprovalDTO {
   currentNodeKeys?: string[] | null
   /**
    * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
-   * (start → cursor), computed server-side from the instance's FROZEN runtime graph with the same
-   * three checks the action endpoint applies to a `return` (handler cursor, parallel region, target
-   * on the walker's trail before the cursor). `[]` = nothing is legal (hide 退回). `undefined` /
+   * (start → cursor), computed server-side from the instance's FROZEN runtime graph with every
+   * viewer-independent check the action endpoint applies to a `return` (cancel-round instance kind,
+   * handler cursor, the cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region,
+   * target on the walker's trail before the cursor); the per-viewer seat checks are NOT folded in
+   * (`nodeOperations.allowReturn` / `canDecideCurrentNode` answer those, and the button still
+   * requires both). `[]` = nothing is legal (hide 退回). `undefined` /
    * `null` = not computed (an older server, a non-pending instance, a bridged / legacy instance
    * with no frozen graph, or a graph the server could not walk) — fall back to the client-side
    * candidate logic, never read absence as empty. Carried by the detail read and by every action

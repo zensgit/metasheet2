@@ -1,6 +1,9 @@
 import { Logger } from '../core/logger'
+import { isCancelRoundInstance } from '../attendance/w4c3b-central-approval-hooks'
+import { ACTION_POLICY_KEYS } from '../types/approval-product'
 import type { ApprovalNode, RuntimeGraph } from '../types/approval-product'
 import type { RequesterFormulaContext } from './ApprovalConditionFormula'
+import { isOperationAllowedAtNode, type NodeOperationGraphView } from './approval-effective-node-operations'
 // Deliberately a VALUE import that is read inside the function body only, never while this module
 // loads: `ApprovalGraphExecutor` imports `ServiceError` from `ApprovalBridgeService`, and the bridge
 // imports THIS module for its detail-read DTO builder, so the three form an import cycle. Every
@@ -26,15 +29,24 @@ const logger = new Logger('ApprovalReturnTargets')
  * client either hides a legal target or keeps an illegal one. The server walks the very graph the
  * gate itself walks.
  *
- * THE THREE CHECKS — the `return` arm of `ApprovalProductService.dispatchAction`, in the order that
- * arm applies them (every target it refuses can only ever 409 there):
- *   (a) the cursor node's type is `handler` — Lock-3 §2.2's verb gate, `currentNodeType` in
+ * THE FIVE CHECKS — every VIEWER-INDEPENDENT refusal `ApprovalProductService.dispatchAction` applies
+ * to a `return` (its seat / authorization checks are per-actor and are NOT mirrored here; the
+ * detail read's `nodeOperations` / `canDecideCurrentNode` carriers answer those), in the order
+ * `dispatchAction` applies them. Every target this list omits can only ever 409 there:
+ *   (a) the instance KIND — `assertCancelRoundActionAllowed`: a cancel-round instance
+ *       (`isCancelRoundInstance`, `workflow_key = 'approval.cancel-round'`) refuses `return`
+ *       outright, BEFORE the gate reads any graph (CANCEL_ROUND_OUTLET_FORBIDDEN) → `[]`;
+ *   (b) the cursor node's type is `handler` — Lock-3 §2.2's verb gate, `currentNodeType` in
  *       `dispatchAction` (APPROVAL_HANDLER_ACTION_NOT_ALLOWED) → `[]`;
- *   (b) the instance is inside a parallel region — `dispatchAction`'s `isInParallelRegion`: parallel
+ *   (c) the cursor node's NODE-OPERATION POLICY — Lock-5 §2.1's choke: `ACTION_POLICY_KEYS.return`
+ *       names the policy key (`allowReturn`) and `isOperationAllowedAtNode` reads it off the SAME
+ *       frozen graph; only an explicit `false` denies (absent ≡ allowed, OD-L5-3(a))
+ *       (APPROVAL_NODE_OPERATION_DISABLED) → `[]`;
+ *   (d) the instance is inside a parallel region — `dispatchAction`'s `isInParallelRegion`: parallel
  *       branch state present (`readParallelBranchStates`, the door's own STRICT parser; malformed
  *       state reads as linear there too) AND the stored cursor is the fork's `parallelNodeKey`
  *       (APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED) → `[]`;
- *   (c) otherwise exactly `executor.listVisitedApprovalNodeKeysUntil(currentNodeKey).slice(0, -1)`
+ *   (e) otherwise exactly `executor.listVisitedApprovalNodeKeysUntil(currentNodeKey).slice(0, -1)`
  *       (APPROVAL_RETURN_TARGET_INVALID for anything else). That walker starts at `start`, follows
  *       the ONE condition branch the form data and the requester context resolve to, passes through
  *       cc and handler nodes without listing them, jumps a parallel fork straight to its
@@ -65,6 +77,11 @@ export interface ReturnableNodeKeysInput {
    * condition branch resolves here to the branch the gate resolves to.
    */
   requesterSnapshot?: unknown
+  /**
+   * `approval_instances.workflow_key` — read ONLY through `isCancelRoundInstance`, the same
+   * predicate `assertCancelRoundActionAllowed` applies (check (a)). Absent ⇒ not a cancel round.
+   */
+  workflowKey?: string | null
   /** `approval_instances.current_node_key` — the STORED cursor (the fork inside a parallel region). */
   currentNodeKey: string | null | undefined
   /** `approval_instances.status` — only a pending instance can be returned. */
@@ -79,19 +96,31 @@ export function computeReturnableNodeKeys(input: ReturnableNodeKeysInput): strin
     ? input.currentNodeKey
     : null
   if (!currentNodeKey) return undefined
+  // (a) — the instance KIND refuses the verb before `dispatchAction` reads any graph, so the answer
+  // needs none either: a cancel round has NO legal target, whatever its graph says.
+  if (isCancelRoundInstance({ workflow_key: input.workflowKey ?? null })) return []
   const runtimeGraph = asWalkableRuntimeGraph(input.runtimeGraph)
   if (!runtimeGraph) return undefined
 
   try {
-    // (a) — `dispatchAction` reads the type of the node at its effective cursor; outside a parallel
-    // region that cursor IS the stored one, and inside one (b) answers first regardless.
+    // (b) — `dispatchAction` reads the type of the node at its effective cursor; outside a parallel
+    // region that cursor IS the stored one, and inside one (d) answers first regardless.
     if (nodeTypeAt(runtimeGraph, currentNodeKey) === 'handler') return []
 
-    // (b) — the same predicate `dispatchAction` names `isInParallelRegion`.
+    // (c) — the Lock-5 choke, verbatim: the policy key comes from the `ACTION_POLICY_KEYS` table the
+    // choke iterates (never a hand-named verb), and `isOperationAllowedAtNode` is the ONE predicate
+    // both doors share (§2.3). Same effective-cursor remark as (b).
+    const returnPolicyKey = ACTION_POLICY_KEYS.return
+    if (
+      returnPolicyKey !== null
+      && !isOperationAllowedAtNode(runtimeGraph as NodeOperationGraphView, currentNodeKey, returnPolicyKey)
+    ) return []
+
+    // (d) — the same predicate `dispatchAction` names `isInParallelRegion`.
     const parallelState = readParallelBranchStates(input.metadata)
     if (parallelState && currentNodeKey === parallelState.parallelNodeKey) return []
 
-    // (c) — the executor built as `dispatchAction` builds its `executor`, for the options the walk
+    // (e) — the executor built as `dispatchAction` builds its `executor`, for the options the walk
     // reads: the form data (rule and formula branches) and the requester context (`requester.*`
     // formula attributes). The assignment and designated-fallback resolvers it also passes are
     // read only by assignment resolution, which `listVisitedApprovalNodeKeysUntil` never performs.

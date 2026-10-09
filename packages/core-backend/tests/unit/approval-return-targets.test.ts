@@ -4,10 +4,13 @@ import type { ApprovalEdge, ApprovalNode, RuntimeGraph } from '../../src/types/a
 
 /**
  * `computeReturnableNodeKeys` — the server-computed 退回 target list (`returnableNodeKeys`), pinned
- * against the three checks `ApprovalProductService.dispatchAction`'s `return` arm applies:
- *   (a) handler cursor → `[]`;
- *   (b) parallel region (branch state present AND the stored cursor is the fork) → `[]`;
- *   (c) otherwise `ApprovalGraphExecutor.listVisitedApprovalNodeKeysUntil(cursor).slice(0, -1)`.
+ * against every viewer-independent check `ApprovalProductService.dispatchAction`'s `return` arm
+ * applies, in its order:
+ *   (a) cancel-round instance kind (`isCancelRoundInstance`) → `[]`;
+ *   (b) handler cursor → `[]`;
+ *   (c) the cursor node's `nodeOperationPolicy.allowReturn === false` (Lock-5 choke) → `[]`;
+ *   (d) parallel region (branch state present AND the stored cursor is the fork) → `[]`;
+ *   (e) otherwise `ApprovalGraphExecutor.listVisitedApprovalNodeKeysUntil(cursor).slice(0, -1)`.
  * Plus the contract's `undefined` arm: not pending, no cursor, no graph, or the walk threw.
  *
  * Pure: graphs are built inline, no database, no module mocks. Fixtures are generic and values-free.
@@ -150,7 +153,13 @@ function conditionGraph(formula?: string): RuntimeGraph {
 function compute(
   runtimeGraph: unknown,
   currentNodeKey: string | null,
-  overrides: Partial<{ status: string | null; formSnapshot: unknown; requesterSnapshot: unknown; metadata: unknown }> = {},
+  overrides: Partial<{
+    status: string | null
+    formSnapshot: unknown
+    requesterSnapshot: unknown
+    workflowKey: string | null
+    metadata: unknown
+  }> = {},
 ) {
   return computeReturnableNodeKeys({
     runtimeGraph,
@@ -162,7 +171,7 @@ function compute(
   })
 }
 
-describe('computeReturnableNodeKeys — (c) the executor trail before the cursor', () => {
+describe('computeReturnableNodeKeys — (e) the executor trail before the cursor', () => {
   it('linear graph, cursor at the third approval: the two upstream approval keys, in trail order', () => {
     expect(compute(linearGraph(), 'approval_3')).toEqual(['approval_1', 'approval_2'])
   })
@@ -208,7 +217,7 @@ describe('computeReturnableNodeKeys — (c) the executor trail before the cursor
   })
 })
 
-describe('computeReturnableNodeKeys — (a) handler cursor and (b) parallel region → []', () => {
+describe('computeReturnableNodeKeys — (b) handler cursor and (d) parallel region → []', () => {
   it('handler cursor → [] (APPROVAL_HANDLER_ACTION_NOT_ALLOWED), even with an approval before it', () => {
     expect(compute(ccHandlerGraph(), 'handler_1')).toEqual([])
   })
@@ -221,6 +230,55 @@ describe('computeReturnableNodeKeys — (a) handler cursor and (b) parallel regi
 
   it('parallel state whose fork is not the stored cursor does not block (the door reads that as linear)', () => {
     expect(compute(linearGraph(), 'approval_2', { metadata: parallelBranchStates({ p1: true, p2: true }) })).toEqual(['approval_1'])
+  })
+})
+
+/** `linearGraph()` with `nodeOperationPolicy` set on ONE approval node. */
+function linearGraphWithPolicy(nodeKey: string, policy: Record<string, unknown>): RuntimeGraph {
+  const graph = linearGraph()
+  graph.nodes = graph.nodes.map((node) => (
+    node.key === nodeKey ? { ...node, config: { ...node.config, nodeOperationPolicy: policy } } as ApprovalNode : node
+  ))
+  return graph
+}
+
+describe('computeReturnableNodeKeys — (a) cancel-round instance kind and (c) node-operation policy → []', () => {
+  it("(a) a cancel-round instance (workflow_key 'approval.cancel-round') → [] — the kind refuses `return` before any graph is read", () => {
+    // Gate r1 P3-1: `assertCancelRoundActionAllowed` 409s `return` on a cancel round
+    // (CANCEL_ROUND_OUTLET_FORBIDDEN) before `dispatchAction` loads the published definition, so the
+    // list is empty whatever the graph says — legal-looking trail included — and needs no graph at all.
+    expect(compute(linearGraph(), 'approval_3', { workflowKey: 'approval.cancel-round' })).toEqual([])
+    expect(compute(null, 'approval_3', { workflowKey: 'approval.cancel-round' })).toEqual([])
+    // Any other workflow key (or none) is not a cancel round: the trail answers as before.
+    expect(compute(linearGraph(), 'approval_3', { workflowKey: 'attendance.request' })).toEqual(['approval_1', 'approval_2'])
+    expect(compute(linearGraph(), 'approval_3', { workflowKey: null })).toEqual(['approval_1', 'approval_2'])
+    // The `undefined` arm still precedes it: a closed cancel round is "not computed", not "nothing legal".
+    expect(compute(linearGraph(), 'approval_3', { workflowKey: 'approval.cancel-round', status: 'approved' })).toBeUndefined()
+  })
+
+  it('(c) the cursor node\'s nodeOperationPolicy.allowReturn === false → [] (APPROVAL_NODE_OPERATION_DISABLED)', () => {
+    // Gate r1 P3-1: the Lock-5 choke refuses `return` at a node whose policy carries an explicit
+    // `allowReturn: false`, reading the SAME frozen graph through `isOperationAllowedAtNode`.
+    expect(compute(linearGraphWithPolicy('approval_3', { allowReturn: false }), 'approval_3')).toEqual([])
+  })
+
+  it('(c) only an explicit false denies — absent / true / another verb\'s false / a sequential node keep the trail', () => {
+    expect(compute(linearGraphWithPolicy('approval_3', { allowReturn: true }), 'approval_3')).toEqual(['approval_1', 'approval_2'])
+    expect(compute(linearGraphWithPolicy('approval_3', {}), 'approval_3')).toEqual(['approval_1', 'approval_2'])
+    expect(compute(linearGraphWithPolicy('approval_3', { allowTransfer: false, allowAddSign: false }), 'approval_3'))
+      .toEqual(['approval_1', 'approval_2'])
+    // `isOperationAllowedAtNode`'s sequential-mode clause denies add/reduce-sign only, never return.
+    const sequential = linearGraph()
+    sequential.nodes = sequential.nodes.map((node) => (
+      node.key === 'approval_3' ? { ...node, config: { ...node.config, approvalMode: 'sequential' } } as ApprovalNode : node
+    ))
+    expect(compute(sequential, 'approval_3')).toEqual(['approval_1', 'approval_2'])
+  })
+
+  it('(c) reads the policy of the CURSOR node only — an upstream target with allowReturn: false is still offered', () => {
+    // The choke judges the node the instance is stopped on; a target's own policy never enters the
+    // return arm (returning TO a node is not an operation AT that node).
+    expect(compute(linearGraphWithPolicy('approval_1', { allowReturn: false }), 'approval_3')).toEqual(['approval_1', 'approval_2'])
   })
 })
 
