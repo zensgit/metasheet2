@@ -35,6 +35,14 @@
 //        and BEFORE it registers — so a failed install leaves no registered row; the REPLAY heals the
 //        G1 grant before it plans or heals the packs.
 //   C-01 also rejects `projectNo: undefined` (key present, no value — E2e).
+//   C-10 (S4, R-38) the two lifecycle handlers: PULL gate → switch → no IO before the switch; the
+//        typed confirmation is checked (pure) BEFORE the scope and every await; the tenant comes
+//        from the host-vouched scope; the store transition precedes the ONE audit append with the
+//        088 action; and neither handler reaches the host — no provisioning, no records, no grant,
+//        no table-action lookup — because archiving never touches the sheet.
+//   C-11 (S4) the confirm route hands `confirmConfirmationDecision` the archived-project hook only
+//        while the switch is on, the hook refuses 409 ARCHIVED from the registry keyed by the
+//        verified tenant, and the module calls it on the located row BEFORE any state check or patch.
 //
 // Mutation: delete `projectNo` from any one lookup, or change a `'source'` to `'write'`, or drop a
 // wall call, and the corresponding check reds naming the handler.
@@ -204,7 +212,9 @@ check('C-05 the registry wires the overlay through resolveProjectTargetForAction
 
 check('C-06 (R1) the three snapshot-driven large-BOM routes refuse a stale job target before any IO on it', () => {
   const ROUTES = {
-    tableActionLargeBomExpansionJobPlan: { projectNo: 'job.parameters && job.parameters.projectNo', purpose: 'read', targets: ['action.target'] },
+    // S4 (R-38): the plan's lookup became a WRITE purpose — ADR §6 puts 大 BOM with dry-run / apply,
+    // so an archived project refuses 409 ARCHIVED at the plan instead of planning a write.
+    tableActionLargeBomExpansionJobPlan: { projectNo: 'job.parameters && job.parameters.projectNo', purpose: 'write', targets: ['action.target'] },
     tableActionLargeBomApplyJobStart: { projectNo: 'expansionJob.parameters && expansionJob.parameters.projectNo', purpose: 'write', targets: ['snapshotAction.target'] },
     tableActionLargeBomApplyJobRun: { projectNo: 'runExpansionJob.parameters && runExpansionJob.parameters.projectNo', purpose: 'write', targets: ['runSnapshotAction.target', 'pendingJob.target'] },
   }
@@ -262,8 +272,8 @@ check('C-08 (E2b) projectSheetGateFor reads the switch per call and the registry
   assert.match(body, /deploymentTargetObjectId: typeof action\.projectTarget\.deploymentTargetObjectId === 'string'/)
 })
 
-check('the three S1 routes check the switch BEFORE any IO and the create route is PULL-gated', () => {
-  for (const handler of ['stockPreparationProjectTargetGet', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetList']) {
+check('the five project-sheet routes check the switch BEFORE any IO and the create route is PULL-gated', () => {
+  for (const handler of ['stockPreparationProjectTargetGet', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetList', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore']) {
     const start = CODE.indexOf(`    async ${handler}(req, res) {`)
     const body = CODE.slice(start, CODE.indexOf('\n    },', start))
     const gateAt = body.indexOf('requireAccess(req, ')
@@ -285,6 +295,58 @@ check('the three S1 routes check the switch BEFORE any IO and the create route i
   // create leg it still runs only after the registry row exists.
   assert.ok(createBody.indexOf('store.create(') < createBody.indexOf('if (!grant) grant = await healGrant(registered)'), 'register before the create leg\'s grant')
   assert.match(createBody, /roleIds: resolveProjectSheetGrantRoleIds\(process\.env\)/, 'roles from server config, never the request')
+})
+
+check('C-10 (S4) archive / restore: PULL gate → switch → pure confirmation → scope → transition → one audit row; no host IO', () => {
+  const EXPECTED = {
+    stockPreparationProjectTargetArchive: { call: 'store.archive(', action: 'STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION' },
+    stockPreparationProjectTargetRestore: { call: 'store.restore(', action: 'STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION' },
+  }
+  for (const [handler, spec] of Object.entries(EXPECTED)) {
+    const start = CODE.indexOf(`    async ${handler}(req, res) {`)
+    assert.notEqual(start, -1, `${handler} exists`)
+    const body = CODE.slice(start, CODE.indexOf('\n    },', start))
+    assert.match(body, /^ {4}async [A-Za-z]+\(req, res\) \{\n {6}const user = requireAccess\(req, STOCK_PREP_PULL\)\n {6}requireProjectSheetsEnabled\(\)\n/, `${handler}: the PULL gate is the first statement and the switch the second`)
+    const switchAt = body.indexOf('requireProjectSheetsEnabled()')
+    const confirmAt = body.indexOf('stockPreparationProjectTargetLifecycleRequest(req)')
+    const scopeAt = body.indexOf('resolveOperatorValueScope({')
+    const firstAwait = body.indexOf('await ')
+    const transitionAt = body.indexOf(spec.call)
+    const appendAt = body.indexOf('audit.append(')
+    assert.ok(confirmAt > switchAt, `${handler}: the confirmation is checked after the switch`)
+    assert.ok(confirmAt < firstAwait && confirmAt < scopeAt, `${handler}: the confirmation is checked before ANY IO and before the scope`)
+    assert.ok(scopeAt !== -1 && scopeAt < transitionAt, `${handler}: the tenant comes from the host-vouched scope, before the transition`)
+    assert.match(body, /store\.(archive|restore)\(\{ tenantId, projectNo, actorId: actor \}\)/, `${handler}: the transition is keyed by the scope's tenant and the path number only`)
+    assert.ok(transitionAt !== -1 && appendAt > transitionAt, `${handler}: the audit row follows the transition`)
+    assert.equal((body.match(/audit\.append\(/g) || []).length, 1, `${handler}: exactly ONE audit row`)
+    assert.ok(body.includes(`action: ${spec.action},`), `${handler}: audited under the 088 action`)
+    assert.ok(body.includes(`requireStockPreparationAuditVocabulary(audit, ${spec.action}, '088', tenantId)`), `${handler}: the vocabulary is probed before the transition`)
+    for (const forbidden of ['provisioning', 'getMultitableRecordsApi(', 'getMultitableProvisioning(', 'grantProjectSheetRoles(', 'getTableAction(', 'resolveTenantId(', 'user.tenantId']) {
+      assert.ok(!body.includes(forbidden), `${handler}: must not reach ${forbidden} — archiving never touches the sheet, its grants or a request-steerable tenant`)
+    }
+  }
+  const request = CODE.slice(CODE.indexOf('function stockPreparationProjectTargetLifecycleRequest(req) {'), CODE.indexOf('function stockPreparationProjectTargetLifecycleResponse('))
+  assert.match(request, /VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS/, 'the body is the closed allowlist')
+  assert.match(request, /if \(confirmProjectNo !== projectNo\) \{/, 'the confirmation must equal the path number exactly')
+  assert.match(CODE, /const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set\(\['confirmProjectNo'\]\)/, 'the allowlist is the one key')
+})
+
+check('C-11 (S4) confirm: the archived-project hook is wired only with the switch on and runs inside the write, before the patch', () => {
+  const start = CODE.indexOf('    async stockPreparationConfirmationDecisionsConfirm(req, res) {')
+  const body = CODE.slice(start, CODE.indexOf('\n    },', start))
+  assert.match(body, /const assertProjectWritable = stockPreparationProjectSheetsEnabled\(process\.env\)\s*\?/, 'the hook exists only while the switch is on')
+  assert.match(body, /requireStockPreparationProjectTargets\(\)\.get\(\{ tenantId, projectNo: ledgerProjectNo \}\)/, 'the registry is read under the VERIFIED tenant and the ledger row\'s own project')
+  assert.match(body, /registered && registered\.status === 'archived'[\s\S]*?409, 'STOCK_PREPARATION_PROJECT_ARCHIVED'/, 'archived refuses 409 ARCHIVED')
+  assert.match(body, /\.\.\.\(assertProjectWritable \? \{ assertProjectWritable \} : \{\}\)/, 'handed to the write')
+  const MODULE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'), 'utf8').replace(/\r\n/g, '\n'))
+  const fnStart = MODULE.indexOf('async function confirmConfirmationDecision(')
+  const fn = MODULE.slice(fnStart, MODULE.indexOf('\n}\n', fnStart))
+  const hookAt = fn.indexOf('await assertProjectWritable(optionalString(readCell(record, \'projectNo\')))')
+  assert.notEqual(hookAt, -1, 'the module calls the hook with the located row\'s project cell')
+  assert.ok(hookAt > fn.indexOf('const record = matches[0]'), 'after the row is located')
+  for (const later of ["readCell(record, 'status')", 'scoped.patchRecord(']) {
+    assert.ok(hookAt < fn.indexOf(later), `the hook runs before ${later}`)
+  }
 })
 
 check('C-09 (S2) create: plan + pre-flight before provisioning, install before register; replay: grant heal before the pack heal', () => {

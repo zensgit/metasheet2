@@ -71,6 +71,14 @@ function makeMemoryDb() {
       return [stored]
     },
     async countRows(table, where) { calls.push(`countRows:${table}`); return rowsOf(table).filter((r) => matches(r, where)).length },
+    // S4: the lifecycle transitions read the row FOR UPDATE and write with a compare-and-set where.
+    async selectOneForUpdate(table, where) { calls.push(`selectOneForUpdate:${table}`); return rowsOf(table).find((r) => matches(r, where)) || null },
+    async updateRow(table, set, where) {
+      calls.push(`updateRow:${table}`)
+      const hit = rowsOf(table).filter((r) => matches(r, where))
+      for (const row of hit) Object.assign(row, set)
+      return hit.map((row) => ({ ...row }))
+    },
     async upsertOne(table, row, { conflictColumns = [], updateColumns = [] } = {}) {
       calls.push(`upsertOne:${table}`)
       const rows = rowsOf(table)
@@ -279,7 +287,10 @@ function baseServices(sourceAdapter) {
  *   ledger               — [{ packId, packVersion, objectId?, status? }] seeded install-ledger rows;
  *   fieldPermissions     — the host's field-permission port (or null: no port);
  *   sourceBindingStore   — optional `stockPreparationSourceBindingStore` (a throwing one models an
- *                          unreachable binding table behind the deployment lookup).
+ *                          unreachable binding table behind the deployment lookup);
+ *   configExtras / serviceExtras — S4: merged into the plugin config / the services (a handoff
+ *                          chain and store, a reconcile lease, an xlsx exporter) so the §6 route
+ *                          table can drive every route on one substrate.
  */
 function mountProjectSheetRoutes({
   tenantId,
@@ -293,6 +304,8 @@ function mountProjectSheetRoutes({
   ledger = [],
   fieldPermissions = null,
   sourceBindingStore = null,
+  configExtras = {},
+  serviceExtras = {},
 } = {}) {
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
@@ -317,9 +330,10 @@ function mountProjectSheetRoutes({
       }],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envObjectId || 'plm_stock_preparation_sandbox_synthetic_env'] },
       stockPreparationCustomerPacks: packs,
+      ...configExtras,
     },
   }
-  const services = baseServices(source.adapter)
+  const services = Object.assign(baseServices(source.adapter), serviceExtras)
   services.stockPreparationAuditStore = {
     async append(entry) {
       auditInternals.assertValuesFreeDetail(entry.detail)
@@ -356,6 +370,26 @@ function mountProjectSheetRoutes({
     routes, auditAppends, provisioning, records, source, db, context, staging,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
     registryRows: () => db.rowsOf(PROJECT_TARGET_TABLE),
+    /**
+     * S4: register `no` directly (no route, no audit) — its sheet provisioned on the fake host with
+     * the template's columns, the row active or archived (`archived_at` set iff archived, as 087's
+     * CHECK requires). Clears the host call log so a test sees only what IT caused.
+     */
+    seedRegistryRow(no = projectNo, { archived = false, tenant = tenantId } = {}) {
+      const projectIdFor = `${tenant}:integration-core`
+      const objectId = deriveProjectSheetObjectId(tenant, no)
+      seedObject(provisioning, projectIdFor, objectId)
+      const sheetId = provisioning.sheetIdOf(projectIdFor, objectId)
+      db.rowsOf(PROJECT_TARGET_TABLE).push({
+        id: `seed-${tenant}-${no}`, tenant_id: tenant, project_no: no, sheet_id: sheetId, object_id: objectId,
+        status: archived ? 'archived' : 'active', created_by: 'seed', created_at: new Date('2026-10-08T00:00:00Z'),
+        archived_at: archived ? new Date('2026-10-09T00:00:00Z') : null, archived_by: archived ? 'seed' : null,
+        restored_at: null, restored_by: null, updated_at: new Date('2026-10-08T00:00:00Z'),
+      })
+      provisioning.calls.length = 0
+      db.calls.length = 0
+      return { sheetId, objectId }
+    },
     ledgerRowsOn: (objectId) => db.rowsOf(PACK_INSTALL_TABLE).filter((row) => row.object_id === objectId),
     restore() { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }

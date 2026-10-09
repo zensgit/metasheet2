@@ -24,6 +24,15 @@
 //
 // NO `origin` COLUMN (Q3): the old mixed sheet is never registered; every row names a sheet THIS
 // plugin created. NO workspace dimension, as with 084.
+//
+// THE LIFECYCLE (S4, ADR §6, register R-38): `archive` and `restore` are the only two state
+// transitions, and archiving REPLACES deletion (Q2): neither touches the sheet, its grants, its rows,
+// the confirmation ledger or the handoff cursor — they change THIS row's `status` and its outcome
+// columns, nothing else, so they need no host port at all. Each runs in ONE transaction under the
+// same per-tenant advisory lock `create` takes, reads the row FOR UPDATE, refuses a transition whose
+// precondition does not hold (typed 409, never a silent no-op), and writes with a compare-and-set
+// `where` that repeats the precondition. Migration 087's CHECK ties `archived_at` to the status, so
+// archive sets it and restore clears it in the same statement.
 
 const crypto = require('node:crypto')
 
@@ -40,6 +49,13 @@ const PROJECT_TARGET_STATUSES = Object.freeze(['active', 'archived'])
 // concurrent creates ended at 202. Under `pg_advisory_xact_lock` the count and the insert of one
 // tenant run one at a time, and the lock is released with the transaction.
 const PROJECT_TARGET_CREATE_LOCK_PREFIX = 'stock-prep-project-target:'
+
+// S4: the three typed refusals of a lifecycle transition. ABSENT is the resolver's own code (the same
+// fact, the same words); the other two are distinct so a client can say "someone already archived it"
+// / "it is not archived" instead of a generic conflict.
+const PROJECT_TARGET_ABSENT_CODE = 'STOCK_PREPARATION_PROJECT_ABSENT'
+const PROJECT_TARGET_ALREADY_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED'
+const PROJECT_TARGET_NOT_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED'
 
 class StockPreparationProjectTargetStoreError extends Error {
   constructor(status, code, message, details = {}) {
@@ -114,7 +130,7 @@ function rowToPublicTarget(row) {
   }
 }
 
-function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.randomUUID } = {}) {
+function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.randomUUID, now = () => new Date() } = {}) {
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
@@ -233,13 +249,81 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     }
   }
 
-  return { get, list, count, create }
+  /**
+   * ONE lifecycle transition (S4). Order pinned by the store suite: transaction → the tenant's
+   * advisory lock (the SAME key `create` takes) → the row FOR UPDATE → the precondition → the
+   * compare-and-set update, all on the transaction handle.
+   *
+   * THE PRECONDITION IS THE GUARD. `from` is the only status this transition may start from; any
+   * other status is the typed `conflictCode`, a missing row is ABSENT. The update's `where` repeats
+   * `status: from`, so even a caller that somehow bypassed the read could not move a row out of a
+   * state it did not start in — an empty RETURNING is the same typed refusal, never a silent success.
+   *
+   * THE CAP IS NOT RE-CHECKED (restore): the row already counts against the 200 — `count` includes
+   * archived rows — so moving it back to active changes nothing the cap measures.
+   */
+  async function transition(input, { from, conflictCode, conflictMessage, set }) {
+    const { tenantId, projectNo } = scope(input)
+    const actorId = optionalString(input.actorId)
+    const at = now()
+    return db.transaction(async (trx) => {
+      if (!trx || typeof trx.advisoryXactLock !== 'function' || typeof trx.selectOneForUpdate !== 'function' || typeof trx.updateRow !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock, selectOneForUpdate and updateRow')
+      }
+      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      const key = { tenant_id: tenantId, project_no: projectNo }
+      const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, key)
+      if (!current) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ABSENT_CODE, 'this project has no registered stock-preparation sheet', { field: 'projectNo' })
+      }
+      if (current.status !== from) {
+        throw new StockPreparationProjectTargetStoreError(409, conflictCode, conflictMessage, { field: 'projectNo' })
+      }
+      const updated = firstRow(await trx.updateRow(PROJECT_TARGET_TABLE, set(at, actorId), { ...key, status: from }))
+      if (!updated) {
+        throw new StockPreparationProjectTargetStoreError(409, conflictCode, conflictMessage, { field: 'projectNo' })
+      }
+      return rowToPublicTarget(updated)
+    })
+  }
+
+  /**
+   * ARCHIVE (Q2: 归档代替删除). active → archived, `archived_at` / `archived_by` stamped. The sheet is
+   * not this store's to touch and it does not: no soft delete, no rename, no grant change.
+   */
+  async function archive(input = {}) {
+    return transition(input, {
+      from: 'active',
+      conflictCode: PROJECT_TARGET_ALREADY_ARCHIVED_CODE,
+      conflictMessage: 'this project\'s stock-preparation sheet is already archived',
+      set: (at, actorId) => ({ status: 'archived', archived_at: at, archived_by: actorId, updated_at: at }),
+    })
+  }
+
+  /**
+   * RESTORE. archived → active, `restored_at` / `restored_by` stamped. `archived_at` is cleared in
+   * the same statement because migration 087's CHECK ties it to the status; `archived_by` keeps the
+   * last archiver as a fact (the audit trail keeps every transition).
+   */
+  async function restore(input = {}) {
+    return transition(input, {
+      from: 'archived',
+      conflictCode: PROJECT_TARGET_NOT_ARCHIVED_CODE,
+      conflictMessage: 'this project\'s stock-preparation sheet is not archived',
+      set: (at, actorId) => ({ status: 'active', archived_at: null, restored_at: at, restored_by: actorId, updated_at: at }),
+    })
+  }
+
+  return { get, list, count, create, archive, restore }
 }
 
 module.exports = {
   PROJECT_TARGET_TABLE,
   PROJECT_TARGET_STATUSES,
   PROJECT_TARGET_CREATE_LOCK_PREFIX,
+  PROJECT_TARGET_ABSENT_CODE,
+  PROJECT_TARGET_ALREADY_ARCHIVED_CODE,
+  PROJECT_TARGET_NOT_ARCHIVED_CODE,
   SCOPE_CONSTRAINT,
   SHEET_CONSTRAINT,
   StockPreparationProjectTargetStoreError,

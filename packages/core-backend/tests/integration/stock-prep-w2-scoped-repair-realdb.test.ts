@@ -26,6 +26,7 @@ import {
   ensureMissingObjectFields,
   ensureObject,
   buildObjectFieldsRepairSurface,
+  resolveObjectFieldIds,
 } from '../../src/multitable/provisioning'
 import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
 import { MetaSheetServer } from '../../src/index'
@@ -332,7 +333,7 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 // Role ids and project ids are synthetic and random per run; everything is cleaned up afterwards.
 // ---------------------------------------------------------------------------------------------
 import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
-import { listSheetPermissionEntries } from '../../src/multitable/permission-service'
+import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -587,5 +588,123 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       .rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT' })
     const after = await pool.query('SELECT COUNT(*)::int AS n FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId])
     expect(Number((after.rows[0] as { n: number }).n)).toBe(1)
+  })
+
+  // S4 (ADR §6 / §10 S4 「真库」, register R-38): ARCHIVE AND RESTORE against real PostgreSQL, through the
+  // REAL store over the plugin's REAL db helper (advisory lock, FOR UPDATE, compare-and-set update):
+  //   * archive flips ONLY the registry row — migration 087's CHECK accepts the write — and the sheet
+  //     is untouched at the HOST level: `meta_sheets.deleted_at` stays NULL, the G1 role grant rows and
+  //     their history are byte-identical, and a user holding the granted role resolves the SAME
+  //     capabilities on the sheet's grid (read + record write) before and after;
+  //   * while archived the overlay refuses a WRITE lookup 409 ARCHIVED and still resolves a READ one;
+  //   * restore puts the row back (archived_at cleared in the same statement — 087's CHECK again) and
+  //     the write lookup — the one every pull route makes — resolves the same sheet again;
+  //   * the typed 409s hold on the real row, and 087's CHECK is real: an UPDATE that breaks the
+  //     status / archived_at pairing is refused by PostgreSQL itself (23514).
+  it('S4 archive keeps the grid readable and writable for a G1-granted role; restore makes the write lookup resolve again', async () => {
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    const registryRow = async () => (await pool.query(
+      'SELECT status, archived_at, archived_by, restored_at, restored_by, sheet_id FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2',
+      [tenantId, PROJECT_A],
+    )).rows[0] as { status: string; archived_at: Date | null; archived_by: string | null; restored_at: Date | null; restored_by: string | null; sheet_id: string }
+
+    // Project A's sheet (provisioned and claimed in beforeAll) registered, with G1 granted to ROLE_A
+    // (idempotent if the earlier case already did), and a floor user holding ROLE_A and NO global
+    // multitable code — the grant alone is what opens the grid.
+    await store.create({ tenantId, projectNo: PROJECT_A, sheetId: sheetA, objectId: objectA, createdBy: 'u_s4_pull', maxPerTenant: 200 })
+    await scopedApi().provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetA, objectId: objectA, roleIds: [ROLE_A], actorId: 'u_s4_pull' })
+    const floorUser = `s4floor_${suffix}`
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [floorUser, ROLE_A])
+    const grid = async () => {
+      const resolved = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: floorUser, permissions: [], isAdminRole: false })
+      return {
+        liveness: resolved.sheetLiveness,
+        canRead: resolved.capabilities.canRead,
+        canCreateRecord: resolved.capabilities.canCreateRecord,
+        canEditRecord: resolved.capabilities.canEditRecord,
+      }
+    }
+    const gridBefore = await grid()
+    expect(gridBefore).toEqual({ liveness: 'live', canRead: true, canCreateRecord: true, canEditRecord: true })
+    const grantsBefore = await permissionRows(sheetA)
+    const historyBefore = await revisionCount(sheetA)
+    expect(grantsBefore.some((row) => row.subject_type === 'role' && row.subject_id === ROLE_A && row.perm_code === 'spreadsheet:write')).toBe(true)
+
+    const lookup = (targetPurpose: 'write' | 'read') => projectTargets.resolveProjectTargetForAction({
+      store,
+      provisioning: {
+        resolveFieldIds: async ({ projectId: p, objectId: o, fieldIds }: { projectId: string; objectId: string; fieldIds: string[] }) => resolveObjectFieldIds(p, o, fieldIds),
+      },
+      projectId,
+      tenantId,
+      projectNo: PROJECT_A,
+      targetPurpose,
+      env: { [projectTargets.PROJECT_SHEETS_ENABLED_ENV]: 'true' },
+    })
+
+    // ARCHIVE.
+    const archived = await store.archive({ tenantId, projectNo: PROJECT_A, actorId: 'u_s4_pull' })
+    expect(archived.status).toBe('archived')
+    const archivedRow = await registryRow()
+    expect(archivedRow.status).toBe('archived')
+    expect(archivedRow.archived_at).not.toBeNull()
+    expect(archivedRow.archived_by).toBe('u_s4_pull')
+    expect(archivedRow.sheet_id).toBe(sheetA)
+    // The sheet, at the host level, is exactly as it was.
+    const sheetRow = await pool.query('SELECT deleted_at FROM meta_sheets WHERE id = $1', [sheetA])
+    expect((sheetRow.rows[0] as { deleted_at: Date | null }).deleted_at).toBeNull()
+    expect(await permissionRows(sheetA)).toEqual(grantsBefore)
+    expect(await revisionCount(sheetA)).toBe(historyBefore)
+    expect(await grid()).toEqual(gridBefore)
+    // The overlay: a write lookup refuses, a read lookup still resolves the same sheet.
+    await expect(lookup('write')).rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_ARCHIVED' })
+    await expect(lookup('read')).resolves.toMatchObject({ status: 'archived', target: { sheetId: sheetA, objectId: objectA } })
+    await expect(store.archive({ tenantId, projectNo: PROJECT_A, actorId: 'u_s4_pull' })).rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED' })
+    // 087's CHECK is real: breaking the status / archived_at pairing is refused by PostgreSQL.
+    await expect(pool.query(
+      'UPDATE integration_stock_prep_project_target SET archived_at = NULL WHERE tenant_id = $1 AND project_no = $2',
+      [tenantId, PROJECT_A],
+    )).rejects.toMatchObject({ code: '23514' })
+
+    // RESTORE.
+    const restored = await store.restore({ tenantId, projectNo: PROJECT_A, actorId: 'u_s4_pull' })
+    expect(restored.status).toBe('active')
+    const restoredRow = await registryRow()
+    expect(restoredRow.status).toBe('active')
+    expect(restoredRow.archived_at).toBeNull()
+    expect(restoredRow.restored_by).toBe('u_s4_pull')
+    expect(restoredRow.restored_at).not.toBeNull()
+    await expect(lookup('write')).resolves.toMatchObject({ status: 'active', target: { sheetId: sheetA, objectId: objectA } })
+    await expect(store.restore({ tenantId, projectNo: PROJECT_A, actorId: 'u_s4_pull' })).rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED' })
+    expect(await grid()).toEqual(gridBefore)
+    expect(await permissionRows(sheetA)).toEqual(grantsBefore)
   })
 })

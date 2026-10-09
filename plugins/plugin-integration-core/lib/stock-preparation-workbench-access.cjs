@@ -264,6 +264,26 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/project-targets',
     control: 'stock-prep-project-target-list',
   }),
+  // S4 (ADR §6, register R-38) — 归档代替删除 (Q2): the two lifecycle routes, PULL tier like the
+  // create (S0; `stock-prep:admin` and the platform admin pass through the ladder). Both change the
+  // registry row only — never the sheet, its rows or its grants — and both answer 404 DISABLED while
+  // the default-OFF switch is off, after the gate. Their controls live on 项目备料页's sheet-state
+  // line and render only for the PULL tier, on the state the server says the action fits
+  // (`may.archive` / `may.restore`); StockPreparationProjectArchive.spec.ts asserts the alignment.
+  Object.freeze({
+    capability: 'projectTarget.archive',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/archive',
+    control: 'stock-prep-project-target-archive',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.restore',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/restore',
+    control: 'stock-prep-project-target-restore',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
