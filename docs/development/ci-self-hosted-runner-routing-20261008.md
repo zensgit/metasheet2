@@ -1,13 +1,14 @@
 # 必需检查经 `MS2_PLUGIN_RUNNER` 切到自托管 runner
 
 - 日期: 2026-10-08
-- 基线: `origin/main` `8f90307d5a5c36c7b9958b88b0b8cf0d6f9110cb`（2026-10-09 merge 对齐；上一基线 `9c34e1a002ce99ca089e379e4f8b899a1aab2c23`，再上一基线 `fc139c868ea9ceba8c15eb133437342bfcedbbe9`，原先从 `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` 开出）
+- 基线: `origin/main` `804bb35a55c4b59a726c111a8c942bef9fd44f19`（2026-10-09 merge 对齐；上一基线 `8f90307d5a5c36c7b9958b88b0b8cf0d6f9110cb`，原先从 `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` 开出）
 - 参照: `afd32b704`（`ci(plugin-tests): route the test job through the MS2_PLUGIN_RUNNER variable`，#6247）
 - 性质: Draft。只改必需检查的 `runs-on`。不合并。
 - 2026-10-09 协调修订：移除与 #6272 重叠的 `web-tests.yml` 修改；前端由 #6272 独立使用 `MS2_WEB_RUNNER`，本 PR 不改它。
 - 2026-10-09 对齐：merge `fc139c868`，不 rebase。main 上多出的 4 个提交没有改本 PR 路由的 8 个 workflow，merge 无冲突。
 - 2026-10-09 再对齐：merge `9c34e1a002`，不 rebase。该提交只改审批前端 9 个文件，没有敏感路径，merge 无冲突。
 - 2026-10-09 再对齐：merge `8f90307d5a`，不 rebase。`5a7e7897b` 改的是 `plugin-tests.yml`（本 PR 不改这个文件）和 decision-register；`8f90307d5a` 只加两份 stock-prep ADR。都没有碰到本 PR 的 8 个 workflow，merge 无冲突。
+- 2026-10-09 再对齐：merge `804bb35a55`，不 rebase。`11a00d9ded` 与 `804bb35a55` 都没有敏感路径，merge 无冲突。Harold 同意对这 2 个无敏感路径的提交不重跑整套检查；push 仍会由 GitHub 自动触发 CI，本轮只做定向补验，不额外手动重跑。
 
 `9d65b8318` 之后、合入前的 main 提交：
 
@@ -20,8 +21,10 @@
 | `9c34e1a002` | 审批人员字段显示名，不显示成员 id | 无。只改 `apps/web` 审批相关 9 个文件 |
 | `5a7e7897b` | 迁移前重建 `metasheet_test`，`test` job 超时 150 分钟 | workflow：`plugin-tests.yml`（不是本 PR 改的 8 个文件）。decision-register。无迁移、pins、drain、checkpoint、`vitest.config.ts`、timemachine |
 | `8f90307d5a` | stock-prep 项目备料表 ADR | 无。两份 ADR 文档 |
+| `11a00d9ded` | 审批历史节点名 | 无。8 个审批相关文件和测试 |
+| `804bb35a55` | dispatch loop 心跳证明改看 claim/renew 时间 | 无。只改 `multitable-automation-dispatch-loop-realdb.test.ts` |
 
-这 3 个 workflow 与本 PR 改的 8 个文件不重叠。`9c34e1a002`、`5a7e7897b`、`8f90307d5a` 也不碰这 8 个文件。
+这 3 个 workflow 与本 PR 改的 8 个文件不重叠。`9c34e1a002`、`5a7e7897b`、`8f90307d5a`、`11a00d9ded`、`804bb35a55` 也不碰这 8 个文件。
 
 变量未设置时，表达式求值为 `ubuntu-latest`，与改前的托管 runner 相同。仓库变量 `MS2_PLUGIN_RUNNER` 设成一个自托管 runner 标签后，下面列出的 job 改到该标签。删掉变量即回到 `ubuntu-latest`。
 
@@ -232,3 +235,5 @@ sealed-export-package-provenance.test.cjs OK
 2026-10-09 对齐 `9c34e1a002` 之后再算一次：不一致仍是 0 条，63 个 SHA-256、66 个叶子字段。同一 provenance 测试输出 `sealed-export-package-provenance.test.cjs OK`。
 
 2026-10-09 对齐 `8f90307d5a` 之后再算一次：不一致仍是 0 条，63 个 SHA-256、66 个叶子字段。同一 provenance 测试输出 `sealed-export-package-provenance.test.cjs OK`。
+
+2026-10-09 对齐 `804bb35a55` 的定向补验：相对新 main 的文件仍是这 8 个 workflow 加本文，与对齐前相对 `8f90307d5a` 的文件清单相同；8 个 workflow blob 与对齐前 head 逐字节相同。PyYAML 解析后，除 `runs-on` 外文档结构一致，检查名不变。文本 diff 每个文件只多一行注释并把 `runs-on: ubuntu-latest` 换成同一表达式。actionlint 1.7.7 对这 8 个文件（`-shellcheck=`）退出码 0。pins 不一致 0 条，63 个 SHA-256、66 个叶子字段。provenance 测试输出 `sealed-export-package-provenance.test.cjs OK`。Harold 同意对这 2 个无敏感路径的提交不重跑整套检查。
