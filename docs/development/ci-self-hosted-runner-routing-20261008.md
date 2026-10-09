@@ -1,10 +1,22 @@
 # 必需检查经 `MS2_PLUGIN_RUNNER` 切到自托管 runner
 
 - 日期: 2026-10-08
-- 基线: `origin/main` `9d65b8318f3d5cbc323b458cb5c96c2240a144f7`
+- 基线: `origin/main` `fc139c868ea9ceba8c15eb133437342bfcedbbe9`（2026-10-09 merge 对齐；原先从 `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` 开出）
 - 参照: `afd32b704`（`ci(plugin-tests): route the test job through the MS2_PLUGIN_RUNNER variable`，#6247）
 - 性质: Draft。只改必需检查的 `runs-on`。不合并。
 - 2026-10-09 协调修订：移除与 #6272 重叠的 `web-tests.yml` 修改；前端由 #6272 独立使用 `MS2_WEB_RUNNER`，本 PR 不改它。
+- 2026-10-09 对齐：merge `fc139c868`，不 rebase。main 上多出的 4 个提交没有改本 PR 路由的 8 个 workflow，merge 无冲突。
+
+`9d65b8318` 之后、合入前的 main 提交：
+
+| SHA | 说明 | 敏感路径 |
+|---|---|---|
+| `7723d950d` | directory create-and-bind 对登录名规则返回 400 | 无 workflow、迁移、pins、drain、checkpoint、`vitest.config.ts`、timemachine |
+| `64bf18b5e` | attendance-web-guard worker 超时 | 无 workflow。只改 `attendance-admin-regressions.spec.ts` 和一篇验证文档 |
+| `65e8ee7c7` | 审批未读/结果角标，默认关 | workflow：`approval-realdb-list-scope.yml`、`approval-web-guard.yml`。`packages/core-backend/vitest.config.ts`。无迁移、pins、drain、checkpoint、timemachine |
+| `fc139c868` | staging window smoke 打进 runner bundle | workflow：`attendance-staging-window-runner.yml`。无迁移、pins、drain、checkpoint、`vitest.config.ts`、timemachine |
+
+这 3 个 workflow 与本 PR 改的 8 个文件不重叠。
 
 变量未设置时，表达式求值为 `ubuntu-latest`，与改前的托管 runner 相同。仓库变量 `MS2_PLUGIN_RUNNER` 设成一个自托管 runner 标签后，下面列出的 job 改到该标签。删掉变量即回到 `ubuntu-latest`。
 
@@ -209,3 +221,5 @@ sealed-export-package-provenance.test.cjs OK
 ```
 
 2026-10-09 协调修订复核：8 个 workflow 解析后仅 `runs-on` 不同，触发条件、步骤、条件、矩阵和检查名全部保持；`web-tests.yml` 与基线逐字节相同。actionlint 1.7.12 的 workflow 检查（不运行 shellcheck）通过；带 shellcheck 的完整检查有 12 条既有诊断，与基线逐项相同，新增 0 条，不声称完整 lint 全绿。integration-guard 接线契约及全局 flag manifest 测试合计 99/99，package-provenance 测试通过。远端 CI 需以修订后 SHA 重新验证。
+
+2026-10-09 对齐 `fc139c868` 之后再算一次：`computePackageProvenancePinSet` 与冻结清单不一致 0 条。冻结清单与现场重算都是 63 个 SHA-256、66 个叶子字段。`node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 输出 `sealed-export-package-provenance.test.cjs OK`。
