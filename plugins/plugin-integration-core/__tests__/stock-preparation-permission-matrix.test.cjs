@@ -369,6 +369,12 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // switch-off 404 for the same reason the three above do — not on a 400 about the body.
   'projectTarget.archive': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
   'projectTarget.restore': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
+  // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
+  // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
+  'projectFields.read': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectFields.update': () => ({ params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' } }),
+  'projectOverview.refresh': () => ({ body: {} }),
 })
 
 async function callCapability(routes, capability, user, extra = {}) {
@@ -411,6 +417,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -429,6 +438,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -447,6 +459,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -465,6 +480,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -483,6 +501,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -501,6 +522,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -519,6 +543,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -537,6 +564,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -558,6 +588,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -576,6 +609,9 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -1052,6 +1088,12 @@ async function orphanOperateGrantConfersNothing() {
       // both appear here and neither appears for the orphan-operate grant above.
       'handoff.advance',
       'handoff.read',
+      // S3 (R-37): the O2(a) project-level columns and the overview refresh are OPERATE (ADR §5) —
+      // the floor sets 负责人 / 备注 / 计划完成 and rebuilds the read-only overview; none of the
+      // three pulls anything or creates a project sheet.
+      'projectFields.read',
+      'projectFields.update',
+      'projectOverview.refresh',
       // 一个项目一张备料表 (S2, R-36): the floor reads its project's sheet state and the tenant's
       // registry list (both OPERATE); creating a sheet is PULL and is NOT here.
       'projectTarget.list',
@@ -1857,8 +1899,14 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
     // S4 (R-38): each lifecycle route against the one state it may start from — a registered ACTIVE
     // row for archive, an ARCHIVED one for restore — with its typed confirmation. 200 = the
     // transition happened, which is the only honest meaning of "served" for these two.
-    'projectTarget.archive': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/archive', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'active', okStatuses: [200] },
-    'projectTarget.restore': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/restore', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'archived', okStatuses: [200] },
+    'projectTarget.archive': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/archive', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'active', flips: true, okStatuses: [200] },
+    'projectTarget.restore': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/restore', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'archived', flips: true, okStatuses: [200] },
+    // S3 (R-37): the project-fields read (absent project → 200 absent), the update against a seeded
+    // ACTIVE row (200, the row stays active — a fields update is not a lifecycle transition), and the
+    // overview refresh over an empty registry (200: the sheet is created, zero rows projected).
+    'projectFields.read': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    'projectFields.update': { method: 'PUT', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' }, seed: 'active', flips: false, okStatuses: [200] },
+    'projectOverview.refresh': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/refresh', params: {}, body: {}, okStatuses: [200] },
   }
   let served = 0
   for (const [actorName, expectations] of Object.entries(MATRIX)) {
@@ -1883,8 +1931,8 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
             `M-12: ${actorName} must be SERVED at ${capabilityId} with the switch on (expected ${shape.okStatuses.join('/')}), got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`,
           )
           if (shape.seed) {
-            const flipped = shape.seed === 'active' ? 'archived' : 'active'
-            assert.equal(harness.registryRows()[0].status, flipped, `M-12: ${actorName} moved the registry row to ${flipped} at ${capabilityId}`)
+            const expectedStatus = shape.flips ? (shape.seed === 'active' ? 'archived' : 'active') : shape.seed
+            assert.equal(harness.registryRows()[0].status, expectedStatus, `M-12: ${actorName} left the registry row ${expectedStatus} at ${capabilityId}`)
             assert.deepEqual(harness.provisioning.calls, [], `M-12: ${capabilityId} makes no host call — the sheet and its grants are not touched`)
           }
           served += 1
@@ -1894,9 +1942,9 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       }
     }
   }
-  // Anti-vacuity: puller, workbench admin and platform admin are served all five; the confirming
-  // operator the two reads. 5 + 5 + 5 + 2.
-  assert.equal(served, 17, 'M-12: the served cells are exactly the matrix\'s pass cells for the five routes')
+  // Anti-vacuity: puller, workbench admin and platform admin are served all eight; the confirming
+  // operator the two reads plus the three S3 OPERATE routes. 8 + 8 + 8 + 5.
+  assert.equal(served, 29, 'M-12: the served cells are exactly the matrix\'s pass cells for the eight routes')
 }
 
 async function main() {

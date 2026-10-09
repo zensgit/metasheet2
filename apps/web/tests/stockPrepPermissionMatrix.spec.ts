@@ -297,6 +297,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
   'stock-prep-project-target-archive',
   'stock-prep-project-target-restore',
+  // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
+  // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
+  // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
+  // those surfaces in apps/web/tests/StockPreparationProjectOverview.spec.ts (PO-ALIGN).
+  'stock-prep-project-fields',
+  'stock-prep-project-fields-save',
+  'stock-prep-project-overview-refresh',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

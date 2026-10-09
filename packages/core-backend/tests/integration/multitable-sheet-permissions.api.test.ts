@@ -3,6 +3,7 @@ import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { configRevisionNoop } from './config-revision-mock'
+import { answerNotStockPrepOverview, isStockPrepOverviewKindQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -16,6 +17,8 @@ function createMockPool(
   userPermissionMap: Record<string, string[]> = {},
 ) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // S3: no fixture here is the stock-preparation overview — see ./sheet-liveness-mock.ts.
+    if (isStockPrepOverviewKindQuery(sql)) return answerNotStockPrepOverview()
     // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` now reads `meta_sheets.deleted_at`
     // before any sheet-addressed work, and these fixtures predate that query — they answer only the
     // EXISTENCE form. Rather than enumerate sheet ids here (which would let a fixture drift out of

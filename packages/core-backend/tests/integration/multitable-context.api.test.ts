@@ -14,6 +14,7 @@ import {
   losslessRetypeTargets,
 } from '../../src/multitable/field-retype-whitelist'
 import { configRevisionNoop } from './config-revision-mock'
+import { answerNotStockPrepOverview, isStockPrepOverviewKindQuery } from './sheet-liveness-mock'
 import { handleTemplateInstallDedupeSql } from '../utils/template-install-dedupe-sql'
 
 type QueryResult = {
@@ -25,6 +26,8 @@ type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<Q
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // S3: no fixture here is the stock-preparation overview — see ./sheet-liveness-mock.ts.
+    if (isStockPrepOverviewKindQuery(sql)) return answerNotStockPrepOverview()
     // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` now reads `meta_sheets.deleted_at`
     // before any sheet-addressed work, and these fixtures predate that query — they answer only the
     // EXISTENCE form. Rather than enumerate sheet ids here (which would let a fixture drift out of

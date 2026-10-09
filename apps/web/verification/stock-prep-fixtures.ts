@@ -760,6 +760,14 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
   },
   {
+    // S3 (R-37): 今天要处理's 「刷新项目总览」. Rendered only once the list above answered (switch on), so the
+    // switch-off lanes never press it — answered anyway with the same switch-off refusal, so a component
+    // that grows a first-render call to it stays on the old surface instead of hitting VERIFY_UNMOCKED_ROUTE.
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -793,7 +801,9 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 ]
 
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
-const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore))?$/
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields))?$/
+/** S3 (R-37): the project-level columns — GET and PUT on `…/target/project-fields`. */
+const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
@@ -801,8 +811,11 @@ function resolveResponder(method: string, path: string): Responder | null {
   for (const entry of ROUTES) {
     if (entry.method === method && path === entry.path) return entry.respond
   }
-  if ((method === 'GET' || method === 'POST') && PROJECT_TARGET_PATTERN.test(path)) {
-    // Switch off in the acceptance deployment: every project-sheet route answers the same refusal (S1 §8).
+  if (((method === 'GET' || method === 'POST') && PROJECT_TARGET_PATTERN.test(path))
+    || (method === 'PUT' && PROJECT_FIELDS_PATTERN.test(path))) {
+    // Switch off in the acceptance deployment: every project-sheet route answers the same refusal (S1 §8),
+    // the S3 project-fields pair included (GET is lazy — only after the sheet state said active/archived —
+    // so the switch-off lanes never reach it; it is answered all the same).
     return ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
   }
   if (method === 'GET' && BOARD_PATTERN.test(path)) {

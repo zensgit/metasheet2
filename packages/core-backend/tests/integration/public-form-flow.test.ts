@@ -6,7 +6,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
-import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
+import { answerNotStockPrepOverview, answerSheetLiveness, isSheetLivenessQuery, isStockPrepOverviewKindQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -155,6 +155,8 @@ function createMockPool(queryHandler: QueryHandler) {
     // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
     // this fixture keeps its own notion of which sheets exist.
     if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
+    // S3: no fixture here is the stock-preparation overview — see ./sheet-liveness-mock.ts.
+    if (isStockPrepOverviewKindQuery(sql)) return answerNotStockPrepOverview()
     if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
     if (sql.includes('FROM spreadsheet_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM field_permissions')) return { rows: [], rowCount: 0 }

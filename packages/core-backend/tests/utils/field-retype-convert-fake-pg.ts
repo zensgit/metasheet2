@@ -343,6 +343,12 @@ export class FieldRetypeConvertFakePg {
         system_kind: s.system_kind,
       }))
     }
+    // S3: the stock-preparation overview clamp's kind lookup — answered by the sheet's own system_kind,
+    // exactly as PostgreSQL would. Must precede the generic id-list handler below, which ignores the kind.
+    if (sql.includes("FROM meta_sheets WHERE id = ANY($1::text[]) AND (to_jsonb(meta_sheets) ->> 'system_kind') = $2")) {
+      const ids = Array.isArray(p[0]) ? p[0].map(String) : []
+      return w.sheets.filter((s) => ids.includes(s.id) && s.system_kind === p[1]).map((s) => ({ id: s.id }))
+    }
     if (sql.includes('FROM meta_sheets WHERE id = ANY($1::text[])')) {
       const ids = Array.isArray(p[0]) ? p[0].map(String) : []
       return w.sheets

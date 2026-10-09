@@ -1254,12 +1254,18 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       'confirmationQueue.projectDirectory',
       'confirmationQueue.valueEntry',
       'handoff.advance',
+      // S3 (R-37): the O2(a) project-level columns (read / update) and the overview refresh are
+      // OPERATE as the ADR writes them (§5) — a floor operator sets 负责人 / 备注 / 计划完成 on the
+      // project they work and rebuilds the read-only overview; none of the three pulls anything.
+      'projectFields.read',
+      'projectFields.update',
+      'projectOverview.refresh',
       // 一个项目一张备料表 (S2, R-36): the floor READS its project's sheet state and the registry
       // list; creating a sheet is the PULL tier and is not in this list.
       'projectTarget.list',
       'projectTarget.read',
     ],
-    'P-14: the eight OPERATE capabilities the floor holds (six kept by the owner + the two project-sheet reads)',
+    'P-14: the eleven OPERATE capabilities the floor holds (six kept by the owner + the two project-sheet reads + the three S3 routes)',
   )
   for (const entry of keptByTheFloor) {
     assert.equal(

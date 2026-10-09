@@ -836,6 +836,33 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '请照页面上显示的项目号原样再输入一次(字母大小写也要一致)。',
     enNext: 'Type the project number exactly as the page shows it (letter case included) and try again.',
   }),
+  // S3 (ADR §5, register R-37): the project-level columns and the overview refresh. The 422 names
+  // the FIELD (the page adds which one), never the value; the three overview refusals are deployment
+  // states a retry does not clear.
+  STOCK_PREPARATION_PROJECT_FIELDS_INVALID: Object.freeze({
+    zh: '负责人、备注、计划完成里有一项不符合要求,这次没有保存,什么都没有改动。',
+    en: 'One of owner, note or planned finish does not meet the rules, so nothing was saved and nothing changed.',
+    zhNext: '改一下再保存:负责人最多 80 个字,备注最多 500 个字,计划完成要填一个真实的日期。',
+    enNext: 'Fix it and save again: owner is at most 80 characters, note at most 500, and planned finish must be a real date.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED: Object.freeze({
+    zh: '系统没能确认项目总览表是只读的,为保护数据这次没有刷新,什么都没有改动。',
+    en: 'The system could not confirm the project overview sheet is read-only, so it was not refreshed, to protect the data; nothing changed.',
+    zhNext: '这不是您操作的问题,再点也一样 —— 请把这条报错代码给平台管理员(服务器需要升级)。',
+    enNext: 'This is not something you did, and pressing again will not change it — give a platform administrator this error code (the server needs an upgrade).',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SCHEMA_INCOMPLETE: Object.freeze({
+    zh: '项目总览表缺了几列,这次没有刷新,什么都没有改动。',
+    en: 'The project overview sheet is missing some columns, so it was not refreshed; nothing changed.',
+    zhNext: '再点也一样 —— 请把这条报错代码给平台管理员核对总览表。各项目自己的备料表不受影响。',
+    enNext: 'Pressing again will not change it — give a platform administrator this error code to check the overview sheet. Each project’s own sheet is unaffected.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE: Object.freeze({
+    zh: '这套系统还建不了项目总览表,这次没有刷新,什么都没有改动。',
+    en: 'This system cannot create the project overview sheet yet, so nothing was refreshed and nothing changed.',
+    zhNext: '需要平台管理员升级服务器;这不是您能修的,请把这条报错代码给管理员。',
+    enNext: 'A platform administrator has to upgrade the server — this is not something you can fix; give an administrator this error code.',
+  }),
   STOCK_PREPARATION_PROJECT_NO_REQUIRED: Object.freeze({
     zh: '这一步需要先填项目号。',
     en: 'This step needs a project number first.',
@@ -2387,6 +2414,112 @@ export function stockPrepProjectTargetWritePreviewText(planned: {
     zh: `预览:这次将写入 ${writes} 行(新增 ${planned.add}、更新 ${planned.update}、标成无效 ${planned.inactive}),${planned.skip} 行已经是最新的。确认后才会写入。`,
     en: `Preview: this will write ${writes} rows (${planned.add} added, ${planned.update} updated, ${planned.inactive} marked inactive); ${planned.skip} rows are already current. Nothing is written until you confirm.`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// 项目总览表 + 项目级列 (ADR adr-stock-prep-project-sheets-20261008 §5; S3, register R-37)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every sentence the S3 surfaces say: the three project-level fields on 项目备料页's sheet-state line
+ * (labels, 保存, 已保存, the archived read-only line, the per-field 422 lines), the home page's
+ * 刷新项目总览 / 打开项目总览 and its 「已归档（N）」 section, and 项目查询's 含已归档 toggle and
+ * 已归档 tag. Front-end ids only (nothing server-side emits them).
+ *
+ * TWO RULES. (1) The 422 lines name the FIELD and its rule — never the value the operator typed.
+ * (2) S4's fix round 1 holds here too: archiving freezes these three columns (the route answers 409),
+ * NOT the grid — the archived lines say the sheet can still be opened and filled in.
+ */
+export const STOCK_PREP_PROJECT_OVERVIEW_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  fields_title: Object.freeze({ zh: '项目级信息', en: 'Project-level details' }),
+  field_responsibleLabel: Object.freeze({ zh: '负责人', en: 'Owner' }),
+  field_note: Object.freeze({ zh: '备注', en: 'Note' }),
+  field_plannedFinishOn: Object.freeze({ zh: '计划完成', en: 'Planned finish' }),
+  fields_hint: Object.freeze({
+    zh: '这三项只在这里改,项目总览表里只读显示;不会写进物料行。',
+    en: 'These three are edited only here and shown read-only on the project overview; they are never written into the material rows.',
+  }),
+  fields_save_action: Object.freeze({ zh: '保存', en: 'Save' }),
+  fields_saving: Object.freeze({ zh: '正在保存…', en: 'Saving…' }),
+  fields_saved: Object.freeze({ zh: '已保存', en: 'Saved' }),
+  fields_archived_readonly: Object.freeze({
+    zh: '已归档，不能改这三项;表里仍可以打开和照常填写。',
+    en: 'Archived — these three cannot be changed; the sheet itself can still be opened and filled in.',
+  }),
+  fields_archived_refused: Object.freeze({
+    zh: '这个项目已归档,负责人、备注、计划完成不能再改,这次什么都没有改动。',
+    en: 'This project is archived, so owner, note and planned finish can no longer be changed; nothing changed.',
+    zhNext: '表里仍可以打开和照常填写;要改这三项,请拉取人员先恢复这张表。',
+    enNext: 'The sheet can still be opened and filled in; to change these three, ask a pull operator to restore it first.',
+  }),
+  fields_invalid_responsibleLabel: Object.freeze({
+    zh: '「负责人」最多 80 个字,这次没有保存。',
+    en: '"Owner" is at most 80 characters; nothing was saved.',
+  }),
+  fields_invalid_note: Object.freeze({
+    zh: '「备注」最多 500 个字,这次没有保存。',
+    en: '"Note" is at most 500 characters; nothing was saved.',
+  }),
+  fields_invalid_plannedFinishOn: Object.freeze({
+    zh: '「计划完成」要填一个真实的日期(年-月-日),这次没有保存。',
+    en: '"Planned finish" must be a real date (year-month-day); nothing was saved.',
+  }),
+  overview_refresh_action: Object.freeze({ zh: '刷新项目总览', en: 'Refresh the project overview' }),
+  overview_refreshing: Object.freeze({ zh: '正在刷新…', en: 'Refreshing…' }),
+  overview_open_action: Object.freeze({ zh: '打开项目总览', en: 'Open the project overview' }),
+  overview_truncated: Object.freeze({
+    zh: '项目太多,这次只刷新到上限。',
+    en: 'There are too many projects; this refresh stopped at the limit.',
+  }),
+  archived_tag: Object.freeze({ zh: '已归档', en: 'Archived' }),
+  home_archived_section: Object.freeze({ zh: '已归档', en: 'Archived' }),
+  query_include_archived: Object.freeze({ zh: '含已归档', en: 'Include archived' }),
+})
+
+export function stockPrepProjectOverviewPlain(id: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_PROJECT_OVERVIEW_PLAIN, id)
+}
+
+/** 「已归档（N）」 / "Archived (N)" — the home page's collapsed section heading. */
+export function stockPrepHomeArchivedHeading(count: number): StockPrepPlainText {
+  const base = STOCK_PREP_PROJECT_OVERVIEW_PLAIN.home_archived_section
+  return { zh: `${base.zh}（${count}）`, en: `${base.en} (${count})` }
+}
+
+/** 「截至 hh:mm」's clock, in the reader's local time. Null when the stamp is not a time. */
+export function stockPrepClockText(iso: string): string | null {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return null
+  const hh = String(parsed.getHours()).padStart(2, '0')
+  const mm = String(parsed.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+/**
+ * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus a clause for the projects whose
+ * sheet could not be read this time and one for a refresh that stopped at its bound. Counts only.
+ */
+export function stockPrepProjectOverviewRefreshText(result: {
+  projectCount: number
+  unreadableCount: number | null
+  truncated: boolean
+  countsAt: string
+}): StockPrepPlainText {
+  const clock = stockPrepClockText(result.countsAt)
+  let zh = clock ? `已刷新 ${result.projectCount} 个项目（截至 ${clock}）` : `已刷新 ${result.projectCount} 个项目`
+  let en = clock ? `Refreshed ${result.projectCount} project(s) (as of ${clock})` : `Refreshed ${result.projectCount} project(s)`
+  const unreadable = result.unreadableCount ?? 0
+  if (unreadable > 0) {
+    zh += `;其中 ${unreadable} 个项目的表这次没读到,数字没有更新`
+    en += `; ${unreadable} project sheet(s) could not be read this time and keep their old numbers`
+  }
+  zh += '。'
+  en += '.'
+  if (result.truncated) {
+    zh += STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.zh
+    en += ` ${STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.en}`
+  }
+  return { zh, en }
 }
 
 /**

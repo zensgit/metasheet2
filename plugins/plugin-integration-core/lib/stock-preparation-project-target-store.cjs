@@ -60,6 +60,27 @@ const PROJECT_TARGET_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ARCHIVED'
 const PROJECT_TARGET_ALREADY_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED'
 const PROJECT_TARGET_NOT_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED'
 
+// S3 (ADR §5 O2(a), register R-37): THE THREE PROJECT-LEVEL COLUMNS, a CLOSED whitelist. These are
+// the only free-text columns of the registry and `updateProjectFields` is the only writer; a fourth
+// key is a 400 at the route and a throw here, never a silent extra column. Length caps bound what a
+// cell may carry (the overview projects them into a sheet column, so they must stay cell-sized).
+const PROJECT_FIELD_KEYS = Object.freeze(['responsibleLabel', 'note', 'plannedFinishOn'])
+const PROJECT_FIELD_COLUMNS = Object.freeze({
+  responsibleLabel: 'responsible_label',
+  note: 'note',
+  plannedFinishOn: 'planned_finish_on',
+})
+const PROJECT_FIELD_TEXT_LIMITS = Object.freeze({ responsibleLabel: 80, note: 500 })
+const PROJECT_FIELDS_INVALID_CODE = 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID'
+// `planned_finish_on` is a DATE column: a calendar day, never a timestamp, never free text.
+const PLANNED_FINISH_ON_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+// S3: the closed outcome enum migration 087's CHECK admits on `last_pull_outcome`, and the shape a
+// `last_pull_code` must have (a closed error code — the same shape the pack-install wrapper admits —
+// never a message, never a value).
+const PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused'])
+const PROJECT_TARGET_PULL_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
+
 class StockPreparationProjectTargetStoreError extends Error {
   constructor(status, code, message, details = {}) {
     super(message)
@@ -126,11 +147,95 @@ function rowToPublicTarget(row) {
     lastPullAt: isoOrNull(row.last_pull_at),
     lastPullOutcome: row.last_pull_outcome ?? null,
     lastPullCode: row.last_pull_code ?? null,
-    rowCount: row.row_count === null || row.row_count === undefined ? null : Number(row.row_count),
-    activeRowCount: row.active_row_count === null || row.active_row_count === undefined ? null : Number(row.active_row_count),
+    rowCount: intOrNull(row.row_count),
+    activeRowCount: intOrNull(row.active_row_count),
     countsBounded: row.counts_bounded === null || row.counts_bounded === undefined ? null : Boolean(row.counts_bounded),
+    // S3: the three remaining bounded counts the overview projects (ADR §1.2 / §5).
+    missingComponentsCount: intOrNull(row.missing_components_count),
+    procurementOpenCount: intOrNull(row.procurement_open_count),
+    warehouseOpenCount: intOrNull(row.warehouse_open_count),
     countsAt: isoOrNull(row.counts_at),
   }
+}
+
+function intOrNull(value) {
+  if (value === null || value === undefined) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+/** A DATE column as the calendar day it holds (`YYYY-MM-DD`), or null. */
+function dayOrNull(value) {
+  if (value === null || value === undefined) return null
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10)
+  const text = String(value)
+  return PLANNED_FINISH_ON_PATTERN.test(text) ? text : text.slice(0, 10)
+}
+
+/**
+ * S3: THE ONE PROJECTION THAT CARRIES THE THREE PROJECT-LEVEL TEXTS (O2(a)). Read by the
+ * project-fields routes and by the overview refresh — and by nothing else: `rowToPublicTarget`
+ * above deliberately omits them, so no S1 / S4 surface (GET target, the list, a refusal, an audit
+ * row) can carry a free-text value by accident.
+ */
+function rowToProjectFields(row) {
+  if (!row) return null
+  return {
+    projectNo: row.project_no,
+    status: row.status,
+    sheetId: row.sheet_id,
+    responsibleLabel: typeof row.responsible_label === 'string' && row.responsible_label ? row.responsible_label : null,
+    note: typeof row.note === 'string' && row.note ? row.note : null,
+    plannedFinishOn: dayOrNull(row.planned_finish_on),
+    projectFieldsUpdatedBy: row.project_fields_updated_by ?? null,
+    projectFieldsUpdatedAt: isoOrNull(row.project_fields_updated_at),
+  }
+}
+
+/**
+ * S3: normalize ONE project-fields patch against the closed whitelist. Returns the column set to
+ * write (at least one key). Each value: a trimmed string within its cap, `null` (= clear), or — for
+ * the date — a `YYYY-MM-DD` calendar day that really exists. An unknown key, an empty patch, an
+ * over-long text or a malformed day is a typed 422 that names the FIELD and never echoes the value.
+ */
+function normalizeProjectFieldsPatch(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'project fields must be an object', { field: 'body' })
+  }
+  const set = {}
+  const changed = []
+  for (const key of Object.keys(input)) {
+    if (!PROJECT_FIELD_KEYS.includes(key)) {
+      throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'unknown project field', { field: key })
+    }
+  }
+  for (const key of PROJECT_FIELD_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue
+    const raw = input[key]
+    let value = null
+    if (raw !== null && raw !== undefined) {
+      if (typeof raw !== 'string') {
+        throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'project field must be a string or null', { field: key })
+      }
+      const trimmed = raw.trim()
+      if (trimmed) {
+        if (key === 'plannedFinishOn') {
+          if (!PLANNED_FINISH_ON_PATTERN.test(trimmed) || Number.isNaN(Date.parse(`${trimmed}T00:00:00Z`)) || new Date(`${trimmed}T00:00:00Z`).toISOString().slice(0, 10) !== trimmed) {
+            throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'plannedFinishOn must be a calendar day (YYYY-MM-DD)', { field: key })
+          }
+        } else if (trimmed.length > PROJECT_FIELD_TEXT_LIMITS[key]) {
+          throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'project field exceeds its length limit', { field: key, limit: PROJECT_FIELD_TEXT_LIMITS[key] })
+        }
+        value = trimmed
+      }
+    }
+    set[PROJECT_FIELD_COLUMNS[key]] = value
+    changed.push(key)
+  }
+  if (changed.length === 0) {
+    throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'at least one project field is required', { field: 'body' })
+  }
+  return { set, changed }
 }
 
 function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.randomUUID, now = () => new Date() } = {}) {
@@ -349,7 +454,126 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     })
   }
 
-  return { get, list, count, create, archive, restore, withActiveRowLocked }
+  /**
+   * S3 (ADR §5 O2(a); register R-37): WRITE THE PROJECT-LEVEL COLUMNS. The ONLY writer of the three
+   * free-text columns. Same discipline as a lifecycle transition: one transaction, the SAME per-tenant
+   * advisory lock, the row FOR UPDATE, then the precondition — an absent row is ABSENT, an ARCHIVED
+   * row is 409 STOCK_PREPARATION_PROJECT_ARCHIVED (ADR §6 route table: 「项目级列修改 | 同一个 409」)
+   * — then a compare-and-set update whose `where` repeats `status: 'active'`. Returns the project
+   * fields projection and WHICH keys changed (names only; the route audits the names, never a value).
+   */
+  async function updateProjectFields(input = {}) {
+    const { tenantId, projectNo } = scope(input)
+    const actorId = optionalString(input.actorId)
+    const { set, changed } = normalizeProjectFieldsPatch(input.fields)
+    const at = now()
+    return db.transaction(async (trx) => {
+      if (!trx || typeof trx.advisoryXactLock !== 'function' || typeof trx.selectOneForUpdate !== 'function' || typeof trx.updateRow !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock, selectOneForUpdate and updateRow')
+      }
+      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      const key = { tenant_id: tenantId, project_no: projectNo }
+      const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, key)
+      if (!current) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ABSENT_CODE, 'this project has no registered stock-preparation sheet', { field: 'projectNo' })
+      }
+      if (current.status !== 'active') {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ARCHIVED_CODE, 'this project\'s stock-preparation sheet is archived; restore it before changing its project-level fields', { field: 'projectNo' })
+      }
+      const updated = firstRow(await trx.updateRow(
+        PROJECT_TARGET_TABLE,
+        { ...set, project_fields_updated_by: actorId, project_fields_updated_at: at, updated_at: at },
+        { ...key, status: 'active' },
+      ))
+      if (!updated) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ARCHIVED_CODE, 'this project\'s stock-preparation sheet is archived; restore it before changing its project-level fields', { field: 'projectNo' })
+      }
+      return { fields: rowToProjectFields(updated), changed }
+    })
+  }
+
+  /** S3: the project-level columns of ONE row (null when absent). The only read that carries them. */
+  async function getProjectFields(input = {}) {
+    const { tenantId, projectNo } = scope(input)
+    return rowToProjectFields(await db.selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
+  }
+
+  /** S3: the project-level columns of EVERY row of the tenant, keyed by project number (the overview refresh). */
+  async function listProjectFields(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const rows = allRows(await db.select(PROJECT_TARGET_TABLE, {
+      where: { tenant_id: tenantId },
+      orderBy: ['created_at', 'ASC'],
+      limit: 1000,
+    }))
+    const out = new Map()
+    for (const row of rows) {
+      const fields = rowToProjectFields(row)
+      if (fields) out.set(fields.projectNo, fields)
+    }
+    return out
+  }
+
+  /**
+   * S3 (ADR §1.2 `last_pull_*`): stamp the outcome of ONE pull (dry-run = previewed, apply = applied,
+   * a typed refusal = refused + its code). A bare UPDATE keyed by (tenant, project) — the last pull
+   * wins, no lock needed, no precondition: an archived row may legitimately record the refusal that
+   * archiving caused. `missingComponentsCount`, when given, is the run's distinct count (the board's
+   * number). Values-free by shape: the outcome is a closed enum, the code must have error-code shape.
+   * Returns whether a row was stamped (false = no registry row; never a throw for that).
+   */
+  async function recordPullOutcome(input = {}) {
+    const { tenantId, projectNo } = scope(input)
+    if (typeof db.updateRow !== 'function') return false
+    const outcome = input.outcome
+    if (!PROJECT_TARGET_PULL_OUTCOMES.includes(outcome)) {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'outcome must be applied, previewed or refused', { field: 'outcome' })
+    }
+    const code = optionalString(input.code)
+    if (code !== null && !PROJECT_TARGET_PULL_CODE_PATTERN.test(code)) {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'code must be a closed error code', { field: 'code' })
+    }
+    const at = input.at instanceof Date ? input.at : now()
+    const set = { last_pull_at: at, last_pull_outcome: outcome, last_pull_code: code, updated_at: at }
+    if (Number.isInteger(input.missingComponentsCount) && input.missingComponentsCount >= 0) {
+      set.missing_components_count = input.missingComponentsCount
+    }
+    const rows = allRows(await db.updateRow(PROJECT_TARGET_TABLE, set, { tenant_id: tenantId, project_no: projectNo }))
+    return rows.length > 0
+  }
+
+  /**
+   * S3 (ADR §5 「截至」): stamp the BOUNDED counts of ONE project's sheet, as the overview refresh
+   * measured them. Integers ≥ 0 (or null = not counted), `countsBounded` says whether they are a
+   * floor, `countsAt` is the server clock of the measurement. Keyed by (tenant, project), no lock —
+   * a refresh racing another refresh writes the same facts twice.
+   */
+  async function recordCounts(input = {}) {
+    const { tenantId, projectNo } = scope(input)
+    if (typeof db.updateRow !== 'function') return false
+    const count = (value, field) => {
+      if (value === null || value === undefined) return null
+      if (!Number.isInteger(value) || value < 0) {
+        throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', `${field} must be a non-negative integer`, { field })
+      }
+      return value
+    }
+    const at = input.countsAt instanceof Date ? input.countsAt : now()
+    const set = {
+      row_count: count(input.rowCount, 'rowCount'),
+      active_row_count: count(input.activeRowCount, 'activeRowCount'),
+      counts_bounded: input.countsBounded === true,
+      procurement_open_count: count(input.procurementOpenCount, 'procurementOpenCount'),
+      warehouse_open_count: count(input.warehouseOpenCount, 'warehouseOpenCount'),
+      counts_at: at,
+      updated_at: at,
+    }
+    if (input.missingComponentsCount !== undefined) set.missing_components_count = count(input.missingComponentsCount, 'missingComponentsCount')
+    const rows = allRows(await db.updateRow(PROJECT_TARGET_TABLE, set, { tenant_id: tenantId, project_no: projectNo }))
+    return rows.length > 0
+  }
+
+  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts }
 }
 
 module.exports = {
@@ -362,10 +586,17 @@ module.exports = {
   PROJECT_TARGET_NOT_ARCHIVED_CODE,
   SCOPE_CONSTRAINT,
   SHEET_CONSTRAINT,
+  // S3 (R-37): the project-level column whitelist, its caps and codes; the pull-outcome enum.
+  PROJECT_FIELD_KEYS,
+  PROJECT_FIELD_TEXT_LIMITS,
+  PROJECT_FIELDS_INVALID_CODE,
+  PROJECT_TARGET_PULL_OUTCOMES,
   StockPreparationProjectTargetStoreError,
   createStockPreparationProjectTargetStore,
+  normalizeProjectFieldsPatch,
   __internals: {
     rowToPublicTarget,
+    rowToProjectFields,
     isUniqueViolation,
   },
 }

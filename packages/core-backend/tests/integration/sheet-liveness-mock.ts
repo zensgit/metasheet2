@@ -39,6 +39,26 @@ export function isSheetLivenessQuery(sql: string): boolean {
 }
 
 /**
+ * S3 (ADR adr-stock-prep-project-sheets-20261008 §5) — every capability resolver now also asks whether
+ * the sheet is the stock-preparation project overview (`loadStockPreparationOverviewSheetIds`,
+ * src/multitable/stock-preparation-overview-contract.ts). No mock-pool fixture declares an overview, and
+ * before S3 nothing asked, so the faithful answer is "no sheet is the overview" — `{ rows: [] }`. Left to
+ * the fixtures, the question fails BOTH ways this file's header describes: a throwing handler 500s, and a
+ * catch-all `FROM meta_sheets WHERE id` branch answers an id and silently clamps every write to 403.
+ */
+export const STOCK_PREP_OVERVIEW_KIND_SQL =
+  "SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND (to_jsonb(meta_sheets) ->> 'system_kind') = $2"
+
+export function isStockPrepOverviewKindQuery(sql: string): boolean {
+  return sql.includes(STOCK_PREP_OVERVIEW_KIND_SQL)
+}
+
+/** "None of these sheets is the stock-preparation overview" — the pre-S3 answer. */
+export function answerNotStockPrepOverview(): MockQueryResult {
+  return { rows: [], rowCount: 0 }
+}
+
+/**
  * The existence forms fixtures actually answer, in the order they are tried:
  * `loadSheetRow`'s projection first (the commonest), then the bare id probe.
  */

@@ -687,7 +687,11 @@ test('R-07 LIST: this tenant\'s rows only, handles and enums', async () => {
     assert.equal(res.body.data.count, 2)
     assert.equal(res.body.data.limit, MAX_PROJECT_TARGETS_PER_TENANT)
     assert.deepEqual(res.body.data.items.map((i) => [i.projectNo, i.status]), [['PRJ-S1-L1', 'active'], ['PRJ-S1-L2', 'archived']])
-    assert.deepEqual(Object.keys(res.body.data.items[0]).sort(), ['activeRowCount', 'archivedAt', 'countsAt', 'countsBounded', 'createdAt', 'lastPullAt', 'lastPullOutcome', 'objectId', 'projectNo', 'rowCount', 'sheetId', 'status'])
+    // S3 (R-37): the three remaining bounded counts and the last pull's closed code join the item;
+    // the response carries the overview's handles (null sheet id until the first refresh created it).
+    assert.deepEqual(Object.keys(res.body.data.items[0]).sort(), ['activeRowCount', 'archivedAt', 'countsAt', 'countsBounded', 'createdAt', 'lastPullAt', 'lastPullCode', 'lastPullOutcome', 'missingComponentsCount', 'objectId', 'procurementOpenCount', 'projectNo', 'rowCount', 'sheetId', 'status', 'warehouseOpenCount'])
+    assert.deepEqual(Object.keys(res.body.data.overview).sort(), ['activeViewId', 'archivedViewId', 'sheetId'])
+    assert.equal(res.body.data.overview.sheetId, null, 'no refresh has created the overview sheet yet')
     assert.equal((await listTargets(h.routes, READ_ONLY)).statusCode, 403)
   } finally { h.restore() }
 })

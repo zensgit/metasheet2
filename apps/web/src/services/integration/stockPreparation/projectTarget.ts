@@ -6,8 +6,11 @@
 //   GET  /api/integration/stock-preparation/project-targets              OPERATE
 //   POST /api/integration/stock-preparation/projects/:projectNo/target/archive   PULL (S4, R-38)
 //   POST /api/integration/stock-preparation/projects/:projectNo/target/restore   PULL (S4, R-38)
+//   GET  /api/integration/stock-preparation/projects/:projectNo/target/project-fields   OPERATE (S3, R-37)
+//   PUT  /api/integration/stock-preparation/projects/:projectNo/target/project-fields   OPERATE (S3, R-37)
+//   POST /api/integration/stock-preparation/project-overview/refresh                    OPERATE (S3, R-37)
 //
-// All five answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
+// All eight answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
 // switch is off. That answer is how this module knows the switch is off — and with it off, the pull
 // panel walks EXACTLY the flow it walked before S2 (`kind: 'legacy'` below): no confirmation, no
 // create, no extra sentence.
@@ -42,8 +45,15 @@
 // offers a puller 「修复项目表（重装客户包）」: the create route's 200 replay re-installs the pack
 // (server-side heal), then the four steps run again.
 //
-// VALUES-FREE: states, handles, counts and clamped codes. The one business string is the project
-// number the OPERATOR typed, which is sent in the path and never read back from a response.
+// PROJECT-LEVEL COLUMNS AND THE OVERVIEW (S3, ADR §5 O2(a) / Q5, register R-37). Three texts per
+// project — 负责人 / 备注 / 计划完成 — read and written through their own pair of routes, and a refresh
+// of the host-read-only overview sheet. The PUT body is the server's CLOSED whitelist and carries
+// ONLY the keys the operator changed (`stockPrepProjectFieldsChangedPatch`); a 422 names the FIELD
+// (`details.field`, clamped to the whitelist here) and never echoes the value.
+//
+// VALUES-FREE: states, handles, counts and clamped codes. The business strings are the project
+// number the OPERATOR typed, which is sent in the path and never read back from a response, and —
+// on the S3 fields routes only — the three project-level texts the operator reads and edits.
 import { apiFetch } from '../../../utils/api'
 import { buildQueryString, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
 import {
@@ -90,7 +100,77 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED',
   'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED',
   'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH',
+  // S3 (R-37): the project-fields and overview-refresh refusals.
+  'STOCK_PREPARATION_PROJECT_FIELDS_INVALID',
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED',
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_SCHEMA_INCOMPLETE',
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE',
 ])
+
+/**
+ * S3 (ADR §5 O2(a)): the three project-level columns — the server's CLOSED whitelist, in its order.
+ * A fourth key is a 400 at the route; this client never sends one.
+ */
+export const STOCK_PREP_PROJECT_FIELD_KEYS = Object.freeze(['responsibleLabel', 'note', 'plannedFinishOn'] as const)
+export type StockPrepProjectFieldKey = (typeof STOCK_PREP_PROJECT_FIELD_KEYS)[number]
+
+/** The server's length caps (the date is a calendar day, not free text). Used for `maxlength` only — the server re-checks. */
+export const STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS: Readonly<Record<'responsibleLabel' | 'note', number>> = Object.freeze({
+  responsibleLabel: 80,
+  note: 500,
+})
+
+export interface StockPrepProjectFields {
+  responsibleLabel: string | null
+  note: string | null
+  /** A calendar day `YYYY-MM-DD`, or null. */
+  plannedFinishOn: string | null
+}
+
+/** GET …/target/project-fields — the sheet state, the three texts (null while absent), and `may.update`. */
+export interface StockPrepProjectFieldsState {
+  status: StockPrepProjectTargetStatus
+  fields: StockPrepProjectFields | null
+  updatedAt: string | null
+  /** True only while the sheet is ACTIVE. Advisory — the PUT re-checks. */
+  may: { update: boolean }
+}
+
+/** PUT …/target/project-fields — the row after the write, and which keys the server changed. */
+export interface StockPrepProjectFieldsSaved {
+  status: StockPrepProjectTargetStatus
+  fields: StockPrepProjectFields
+  updatedAt: string | null
+  changed: StockPrepProjectFieldKey[]
+}
+
+/** Only the keys being changed; `null` (or an empty string) clears a field. */
+export type StockPrepProjectFieldsPatch = Partial<Record<StockPrepProjectFieldKey, string | null>>
+
+/** The overview sheet's deep-link handles, as the registry list carries them. All null until the first refresh. */
+export interface StockPrepProjectOverviewHandles {
+  sheetId: string | null
+  activeViewId: string | null
+  archivedViewId: string | null
+}
+
+/** POST …/project-overview/refresh — handles, counts and booleans only. */
+export interface StockPrepProjectOverviewRefreshResult {
+  sheetId: string
+  sheetCreated: boolean
+  activeViewId: string | null
+  archivedViewId: string | null
+  projectCount: number
+  countedCount: number | null
+  unreadableCount: number | null
+  boundedCount: number | null
+  rowsCreated: number | null
+  rowsUpdated: number | null
+  rowsUnchanged: number | null
+  truncated: boolean
+  ledgerReady: boolean | null
+  countsAt: string
+}
 
 export interface StockPrepProjectTargetState {
   status: StockPrepProjectTargetStatus
@@ -134,12 +214,23 @@ export interface StockPrepProjectTargetListItem {
   rowCount: number | null
   activeRowCount: number | null
   countsBounded: boolean | null
+  /** S3 (R-37): the registry's other bounded counts, null until stamped. Optional so an older double still type-checks. */
+  missingComponentsCount?: number | null
+  procurementOpenCount?: number | null
+  warehouseOpenCount?: number | null
+  /** The last pull's clamped error code (never a message), or null. */
+  lastPullCode?: string | null
 }
 
 export interface StockPrepProjectTargetList {
   count: number
   limit: number | null
   items: StockPrepProjectTargetListItem[]
+  /**
+   * S3 (R-37): the overview sheet's handles — all null until the first refresh created it. Always
+   * set by the clamp; optional only so an older test double still type-checks.
+   */
+  overview?: StockPrepProjectOverviewHandles
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +337,136 @@ export function clampStockPrepProjectTargetList(raw: unknown): StockPrepProjectT
       rowCount: countOf(entry.rowCount),
       activeRowCount: countOf(entry.activeRowCount),
       countsBounded: boolOrNull(entry.countsBounded),
+      missingComponentsCount: countOf(entry.missingComponentsCount),
+      procurementOpenCount: countOf(entry.procurementOpenCount),
+      warehouseOpenCount: countOf(entry.warehouseOpenCount),
+      lastPullCode: clampErrorCode(entry.lastPullCode),
     })
   }
-  return { count: items.length, limit: countOf(raw.limit), items }
+  // S3: tolerant — an older server sends no `overview`; that reads as 「还没有总览表」, never as an error.
+  const overview = isRecord(raw.overview) ? raw.overview : {}
+  return {
+    count: items.length,
+    limit: countOf(raw.limit),
+    items,
+    overview: {
+      sheetId: handleOf(overview.sheetId),
+      activeViewId: handleOf(overview.activeViewId),
+      archivedViewId: handleOf(overview.archivedViewId),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// S3 — the project-level columns and the overview refresh (ADR §5, register R-37)
+// ---------------------------------------------------------------------------
+
+function textOrNull(value: unknown, max: number): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= max ? value : null
+}
+
+function dayOrNull(value: unknown): string | null {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null
+}
+
+function fieldsOf(value: unknown): StockPrepProjectFields | null {
+  if (!isRecord(value)) return null
+  return {
+    responsibleLabel: textOrNull(value.responsibleLabel, STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.responsibleLabel),
+    note: textOrNull(value.note, STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.note),
+    plannedFinishOn: dayOrNull(value.plannedFinishOn),
+  }
+}
+
+/** The GET project-fields payload, or null. Strict like the state clamp: a known status and `may.update` a boolean. */
+export function clampStockPrepProjectFieldsState(raw: unknown): StockPrepProjectFieldsState | null {
+  if (!isRecord(raw)) return null
+  const status = statusOf(raw.status)
+  const may = isRecord(raw.may) ? raw.may : null
+  if (!status || !may || typeof may.update !== 'boolean') return null
+  const fields = fieldsOf(raw.fields)
+  // A sheet that exists always has a fields object (each key possibly null); only ABSENT may lack one.
+  if (status !== 'absent' && !fields) return null
+  return {
+    status,
+    fields: status === 'absent' ? null : fields,
+    updatedAt: timestampOf(raw.updatedAt),
+    // Advisory, and never true off an active sheet whatever the payload says.
+    may: { update: status === 'active' && may.update },
+  }
+}
+
+/** The PUT project-fields payload, or null. The write only ever lands on an ACTIVE sheet. */
+export function clampStockPrepProjectFieldsSaved(raw: unknown): StockPrepProjectFieldsSaved | null {
+  if (!isRecord(raw)) return null
+  const status = statusOf(raw.status)
+  const fields = fieldsOf(raw.fields)
+  if (status !== 'active' || !fields || !Array.isArray(raw.changed)) return null
+  const changed = STOCK_PREP_PROJECT_FIELD_KEYS.filter((key) => (raw.changed as unknown[]).includes(key))
+  return { status, fields, updatedAt: timestampOf(raw.updatedAt), changed }
+}
+
+/** The refresh summary, or null. Strict on the four facts the page states: the sheet, the count, the clock, truncation. */
+export function clampStockPrepProjectOverviewRefresh(raw: unknown): StockPrepProjectOverviewRefreshResult | null {
+  if (!isRecord(raw)) return null
+  const sheetId = handleOf(raw.sheetId)
+  const projectCount = countOf(raw.projectCount)
+  const countsAt = timestampOf(raw.countsAt)
+  if (!sheetId || projectCount === null || !countsAt || typeof raw.sheetCreated !== 'boolean' || typeof raw.truncated !== 'boolean') return null
+  return {
+    sheetId,
+    sheetCreated: raw.sheetCreated,
+    activeViewId: handleOf(raw.activeViewId),
+    archivedViewId: handleOf(raw.archivedViewId),
+    projectCount,
+    countedCount: countOf(raw.countedCount),
+    unreadableCount: countOf(raw.unreadableCount),
+    boundedCount: countOf(raw.boundedCount),
+    rowsCreated: countOf(raw.rowsCreated),
+    rowsUpdated: countOf(raw.rowsUpdated),
+    rowsUnchanged: countOf(raw.rowsUnchanged),
+    truncated: raw.truncated,
+    ledgerReady: boolOrNull(raw.ledgerReady),
+    countsAt,
+  }
+}
+
+/** The editable form of the three texts: strings, '' for null. */
+export type StockPrepProjectFieldsDraft = Record<StockPrepProjectFieldKey, string>
+
+export function stockPrepProjectFieldsDraft(fields: StockPrepProjectFields | null): StockPrepProjectFieldsDraft {
+  return {
+    responsibleLabel: fields?.responsibleLabel ?? '',
+    note: fields?.note ?? '',
+    plannedFinishOn: fields?.plannedFinishOn ?? '',
+  }
+}
+
+/**
+ * THE PATCH: ONLY the keys whose trimmed value differs from what the server last said, in whitelist
+ * order; an emptied field is sent as `null` (= clear). An untouched field is never sent — a save
+ * must not overwrite a colleague's change to a column this operator did not edit. Empty object =
+ * nothing to save (the page does not send it).
+ */
+export function stockPrepProjectFieldsChangedPatch(
+  original: StockPrepProjectFields | null,
+  draft: StockPrepProjectFieldsDraft,
+): StockPrepProjectFieldsPatch {
+  const patch: StockPrepProjectFieldsPatch = {}
+  for (const key of STOCK_PREP_PROJECT_FIELD_KEYS) {
+    const before = (original?.[key] ?? '').trim()
+    const after = (draft[key] ?? '').trim()
+    if (after !== before) patch[key] = after === '' ? null : after
+  }
+  return patch
+}
+
+/** The overview's deep link, or null when either handle is missing (never a half link). */
+export function stockPrepProjectOverviewOpenTarget(
+  handles: { sheetId: string | null; activeViewId: string | null } | null | undefined,
+): { sheetId: string; viewId: string } | null {
+  if (!handles || !handles.sheetId || !handles.activeViewId) return null
+  return { sheetId: handles.sheetId, viewId: handles.activeViewId }
 }
 
 /** The fill-view deep link a state carries, in the board's own handle shape — or null. */
@@ -261,19 +479,42 @@ export function stockPrepProjectTargetFillTarget(state: StockPrepProjectTargetSt
 // the client
 // ---------------------------------------------------------------------------
 
-/** HTTP status + clamped error code of a failed call. Never carries a server message. */
+/**
+ * HTTP status + clamped error code of a failed call. Never carries a server message. `field` (S3) is
+ * the refusal's `details.field` when it names one of the three project-level columns (or the body) —
+ * a closed key, never the value.
+ */
 export class StockPreparationProjectTargetCallError extends Error {
   status: number
   code: string | null
   malformed: boolean
+  field: StockPrepProjectFieldKey | 'body' | null
 
-  constructor(status: number, route: string, options: { code?: string | null; malformed?: boolean } = {}) {
+  constructor(
+    status: number,
+    route: string,
+    options: { code?: string | null; malformed?: boolean; field?: StockPrepProjectFieldKey | 'body' | null } = {},
+  ) {
     super(`stock-preparation project target call failed (${route} -> ${status})`)
     this.name = 'StockPreparationProjectTargetCallError'
     this.status = status
     this.code = options.code ?? null
     this.malformed = options.malformed === true
+    this.field = options.field ?? null
   }
+}
+
+/** `details.field` clamped to the closed whitelist (plus the body itself) — anything else is null. */
+function refusalFieldOf(details: unknown): StockPrepProjectFieldKey | 'body' | null {
+  const field = isRecord(details) ? details.field : null
+  if (field === 'body') return 'body'
+  return typeof field === 'string' && (STOCK_PREP_PROJECT_FIELD_KEYS as readonly string[]).includes(field)
+    ? (field as StockPrepProjectFieldKey)
+    : null
+}
+
+export function projectTargetErrorField(error: unknown): StockPrepProjectFieldKey | 'body' | null {
+  return error instanceof StockPreparationProjectTargetCallError ? error.field : null
 }
 
 export function projectTargetErrorStatus(error: unknown): number {
@@ -296,6 +537,10 @@ export interface StockPreparationProjectTargetApi {
   /** S4 (R-38). Optional so an older test double still type-checks; the real client has both. */
   archive?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
   restore?(projectNo: string, confirmProjectNo: string): Promise<StockPrepProjectTargetLifecycleResult>
+  /** S3 (R-37). Optional for the same reason; a double without them simply shows no fields / no refresh. */
+  getProjectFields?(projectNo: string): Promise<StockPrepProjectFieldsState>
+  updateProjectFields?(projectNo: string, patch: StockPrepProjectFieldsPatch): Promise<StockPrepProjectFieldsSaved>
+  refreshOverview?(): Promise<StockPrepProjectOverviewRefreshResult>
 }
 
 async function readEnvelope<T>(response: Response | undefined, route: string, clamp: (raw: unknown) => T | null): Promise<T> {
@@ -308,7 +553,10 @@ async function readEnvelope<T>(response: Response | undefined, route: string, cl
   const status = typeof response?.status === 'number' ? response.status : 0
   const envelope = isRecord(payload) ? (payload as unknown as IntegrationApiEnvelope<unknown>) : null
   if (!response?.ok || envelope?.ok === false) {
-    throw new StockPreparationProjectTargetCallError(status, route, { code: clampErrorCode(envelope?.error?.code) })
+    throw new StockPreparationProjectTargetCallError(status, route, {
+      code: clampErrorCode(envelope?.error?.code),
+      field: refusalFieldOf(envelope?.error?.details),
+    })
   }
   const clamped = envelope && envelope.ok === true ? clamp(envelope.data) : null
   if (!clamped) throw new StockPreparationProjectTargetCallError(status, route, { malformed: true })
@@ -361,6 +609,37 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
         body: JSON.stringify({ confirmProjectNo }),
       })
       return readEnvelope(response, route, clampStockPrepProjectTargetLifecycle)
+    },
+    // S3: the read carries the scope query like the GET target; the write, like every write here,
+    // carries NO query and a body of the server's closed whitelist — ONLY the keys in `patch`.
+    async getProjectFields(projectNo: string) {
+      const route = 'GET …/projects/:projectNo/target/project-fields'
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/project-fields${suffix}`)
+      return readEnvelope(response, route, clampStockPrepProjectFieldsState)
+    },
+    async updateProjectFields(projectNo: string, patch: StockPrepProjectFieldsPatch) {
+      const route = 'PUT …/projects/:projectNo/target/project-fields'
+      const body: StockPrepProjectFieldsPatch = {}
+      for (const key of STOCK_PREP_PROJECT_FIELD_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(patch, key)) continue
+        const value = patch[key]
+        body[key] = typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+      }
+      const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/project-fields`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectFieldsSaved)
+    },
+    async refreshOverview() {
+      const route = 'POST …/project-overview/refresh'
+      const response = await apiFetch(`${TARGET_BASE}/project-overview/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectOverviewRefresh)
     },
   }
 }
@@ -534,6 +813,53 @@ export async function changeStockPreparationProjectTargetLifecycle(
     return { kind: 'refused', action, status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
   }
   return { kind: 'done', action, state: await rereadCounts(api, projectNo) }
+}
+
+// ---------------------------------------------------------------------------
+// S3 — save the project-level columns, refresh the overview (ADR §5, register R-37)
+// ---------------------------------------------------------------------------
+
+export type StockPrepProjectFieldsSaveOutcome =
+  /** Nothing differs from what the server last said: NOTHING was sent. */
+  | { kind: 'unchanged' }
+  /** The write landed; `saved` is the row as the server now holds it. */
+  | { kind: 'saved'; saved: StockPrepProjectFieldsSaved }
+  /** The server refused (ARCHIVED / ABSENT / FIELDS_INVALID naming `field` / DISABLED / a gate…). */
+  | { kind: 'refused'; status: number; code: string | null; field: StockPrepProjectFieldKey | 'body' | null }
+
+/**
+ * Save the three project-level texts — ONLY the changed keys (`stockPrepProjectFieldsChangedPatch`).
+ * The server re-checks the gate, the sheet's state and every value; this decides only what is sent.
+ */
+export async function saveStockPreparationProjectFields(
+  api: StockPreparationProjectTargetApi | null,
+  projectNo: string,
+  original: StockPrepProjectFields | null,
+  draft: StockPrepProjectFieldsDraft,
+): Promise<StockPrepProjectFieldsSaveOutcome> {
+  const patch = stockPrepProjectFieldsChangedPatch(original, draft)
+  if (Object.keys(patch).length === 0) return { kind: 'unchanged' }
+  if (!api || typeof api.updateProjectFields !== 'function') return { kind: 'refused', status: 0, code: null, field: null }
+  try {
+    return { kind: 'saved', saved: await api.updateProjectFields(projectNo.trim(), patch) }
+  } catch (error) {
+    return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error), field: projectTargetErrorField(error) }
+  }
+}
+
+export type StockPrepProjectOverviewRefreshOutcome =
+  | { kind: 'done'; result: StockPrepProjectOverviewRefreshResult }
+  | { kind: 'refused'; status: number; code: string | null }
+
+export async function refreshStockPreparationProjectOverview(
+  api: StockPreparationProjectTargetApi | null,
+): Promise<StockPrepProjectOverviewRefreshOutcome> {
+  if (!api || typeof api.refreshOverview !== 'function') return { kind: 'refused', status: 0, code: null }
+  try {
+    return { kind: 'done', result: await api.refreshOverview() }
+  } catch (error) {
+    return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
+  }
 }
 
 /**

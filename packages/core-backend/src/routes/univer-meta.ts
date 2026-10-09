@@ -117,11 +117,13 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import {
+  STOCK_PREP_OVERVIEW_SHEET_KIND,
   SYSTEM_PEOPLE_SHEET_DESCRIPTION,
   SYSTEM_PEOPLE_SHEET_KIND,
   isHiddenSystemSheet,
   isSystemPeopleSheetDescription,
 } from '../multitable/system-sheet-predicate'
+import { restrictStockPreparationOverviewCapabilities } from '../multitable/stock-preparation-overview-contract'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
 // bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
 import {
@@ -9265,13 +9267,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const selectedSheetScope = effectiveSheetId
         ? sheetPermissionScopeMap.get(effectiveSheetId)
         : undefined
-      const capabilities = effectiveSheetId
-        ? applyContextSheetSchemaWriteGrant(
-            baseCapabilities,
-            selectedSheetScope,
-            access.isAdminRole,
-          )
-        : baseCapabilities
+      // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): /context composes its OWN
+      // capability object (it never ran the projection fences — see the gate comment above), so the
+      // stock-preparation overview clamp is applied here as well, or the Workbench would offer edit
+      // affordances that every write route's capability resolver then refuses. The kind comes from
+      // the row this handler ALREADY loaded for the effective sheet (both reads carry the column-tolerant
+      // `system_kind`): no extra round trip, the statement sequence is unchanged. Every person, admins
+      // included; canRead / canExport pass through exactly as resolved.
+      const effectiveSheetKindRow = effectiveSheetId
+        ? (sheetRow && String(sheetRow.id) === effectiveSheetId ? sheetRow : null)
+          ?? readableSheetRows.find((row) => String(row.id) === effectiveSheetId)
+          ?? null
+        : null
+      const capabilities = restrictStockPreparationOverviewCapabilities(
+        effectiveSheetId
+          ? applyContextSheetSchemaWriteGrant(
+              baseCapabilities,
+              selectedSheetScope,
+              access.isAdminRole,
+            )
+          : baseCapabilities,
+        effectiveSheetKindRow?.system_kind === STOCK_PREP_OVERVIEW_SHEET_KIND,
+      )
       const capabilityOrigin = deriveCapabilityOrigin(
         baseCapabilities,
         capabilities,

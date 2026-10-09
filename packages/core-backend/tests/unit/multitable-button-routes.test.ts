@@ -66,6 +66,10 @@ function createMockPool() {
     if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) {
       return { rows: [] }
     }
+    // S3: the stock-preparation overview kind lookup — this test's sheet is not the overview either.
+    if (/FROM meta_sheets WHERE id = ANY[\s\S]*'system_kind'/i.test(sql)) {
+      return { rows: [] }
+    }
     if (/FROM meta_sheets WHERE id/i.test(sql)) {
       return { rows: [{ id: SHEET_ID }] }
     }
@@ -183,6 +187,10 @@ function createNotifyMockPool(state: NotifyState) {
     // A (projection visibility): the read-guard's projection-sheet lookup — this test's sheet is NOT a
     // projection sheet, so it belongs to no admin-only base. Must precede the generic meta_sheets handler.
     if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) {
+      return { rows: [] }
+    }
+    // S3: the stock-preparation overview kind lookup — this test's sheet is not the overview either.
+    if (/FROM meta_sheets WHERE id = ANY[\s\S]*'system_kind'/i.test(sql)) {
       return { rows: [] }
     }
     if (/FROM meta_sheets WHERE id/i.test(sql)) {
@@ -410,6 +418,7 @@ function createWebhookMockPool(state: WebhookState) {
     if (/FROM meta_records WHERE id/i.test(sql)) return { rows: [{ id: RECORD_ID, sheet_id: SHEET_ID }] }
     if (/FROM meta_fields WHERE sheet_id/i.test(sql)) return { rows: FIELDS.map((f) => ({ ...f })) }
     if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] } // A: not a projection sheet
+    if (/FROM meta_sheets WHERE id = ANY[\s\S]*'system_kind'/i.test(sql)) return { rows: [] } // S3: not the stock-prep overview
     if (/FROM meta_sheets WHERE id/i.test(sql)) return { rows: [{ id: SHEET_ID }] }
     // Claim with outcome='pending'. UNIQUE(dedup_key): a repeat key inserts 0 rows.
     if (/INSERT INTO multitable_button_run_dedup/i.test(sql)) {

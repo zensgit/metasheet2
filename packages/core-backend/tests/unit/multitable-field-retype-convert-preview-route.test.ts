@@ -106,7 +106,11 @@ function createStore(w: World) {
 }
 
 const WRITE_RE = /\b(BEGIN|COMMIT|ROLLBACK|INSERT|UPDATE|DELETE|TRUNCATE|FOR\s+UPDATE|FOR\s+SHARE|pg_advisory\w*|LOCK\s+TABLE)\b/i
-const SCOPE_OR_SCAN_RE = /plugin_multitable_object_registry|integration_pipelines|approval_record_projection|meta_records|to_jsonb\(meta_sheets\)|SELECT property FROM meta_fields/
+// `to_jsonb(meta_sheets)` is the (b) system-managed scope read. The ONE exclusion is the capability
+// resolver's S3 stock-preparation overview kind lookup (`(to_jsonb(meta_sheets) ->> 'system_kind') = $2`,
+// stock-preparation-overview-contract.ts), which runs in the AUTHORITY phase for every request — it is not
+// a scope/scan query. Any other `to_jsonb(meta_sheets)` read still counts.
+const SCOPE_OR_SCAN_RE = /plugin_multitable_object_registry|integration_pipelines|approval_record_projection|meta_records|to_jsonb\(meta_sheets\)(?! ->> 'system_kind'\) = \$2)|SELECT property FROM meta_fields/
 
 const ADMIN_PERMS = ['multitable:read', 'multitable:write', 'multitable:manage-schema']
 
@@ -442,7 +446,7 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
 
   test('first hit wins and stops: (a) refuses without asking (b)-(e)', async () => {
     const log = await expect422(world({ pluginRegistry: true, approvalProjection: true }), 'plugin_managed_sheet')
-    expect(log.filter((sql) => /integration_pipelines|approval_record_projection|to_jsonb\(meta_sheets\)/.test(sql))).toEqual([])
+    expect(log.filter((sql) => /integration_pipelines|approval_record_projection|to_jsonb\(meta_sheets\)(?! ->> 'system_kind'\) = \$2)/.test(sql))).toEqual([])
   })
 
   // ── size ────────────────────────────────────────────────────────────────────────────────────────────

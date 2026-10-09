@@ -19,10 +19,13 @@
       :memory="recentProjects"
       :can-pull="canRunPull"
       :project-targets="projectTargetList"
+      :can-refresh-overview="canRefreshOverview"
+      :target-api="projectTargetApi"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
-      @open-multitable="openFillTarget"
+      @open-multitable="onHomeOpenMultitable"
+      @overview-refreshed="loadProjectTargetList"
     />
 
     <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
@@ -264,6 +267,86 @@
         <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
         <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
       </p>
+      <!-- S3 (ADR §5 O2(a), register R-37) — 负责人 / 备注 / 计划完成. The projectFields.read control of the
+           workbench manifest (OPERATE): read LAZILY, only once this line knows the sheet exists (active or
+           archived — never on absent), and only for a holder of the capability. 「保存」 is the
+           projectFields.update control: rendered only for its holder AND when the server says the sheet
+           takes the write (`may.update`, i.e. active). Saving sends ONLY the fields the operator changed.
+           Archived: the three show read-only with 「已归档，不能改」 — the grid itself stays fillable. -->
+      <div
+        v-if="projectFields"
+        class="sp-board__fields"
+        role="group"
+        data-testid="stock-prep-project-fields"
+        :data-fields-status="projectFields.status"
+        :aria-label="bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en)"
+      >
+        <p class="sp-board__fields-title">{{ bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en) }}</p>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_responsibleLabel').zh, fieldsPlain('field_responsibleLabel').en) }}</span>
+          <input
+            v-model="fieldsDraft.responsibleLabel"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-responsible"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.responsibleLabel"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field sp-board__fields-field--grow">
+          <span>{{ bi(fieldsPlain('field_note').zh, fieldsPlain('field_note').en) }}</span>
+          <input
+            v-model="fieldsDraft.note"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-note"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.note"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_plannedFinishOn').zh, fieldsPlain('field_plannedFinishOn').en) }}</span>
+          <input
+            v-model="fieldsDraft.plannedFinishOn"
+            type="date"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-planned-finish"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <button
+          v-if="canSaveProjectFields"
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-fields-save"
+          :disabled="fieldsBusy || !fieldsChanged"
+          @click="saveProjectFields"
+        >
+          {{ fieldsBusy
+            ? bi(fieldsPlain('fields_saving').zh, fieldsPlain('fields_saving').en)
+            : bi(fieldsPlain('fields_save_action').zh, fieldsPlain('fields_save_action').en) }}
+        </button>
+        <p
+          v-if="projectFields.status === 'archived'"
+          class="sp-board__hint"
+          data-testid="stock-prep-project-fields-archived"
+        >
+          {{ bi(fieldsPlain('fields_archived_readonly').zh, fieldsPlain('fields_archived_readonly').en) }}
+        </p>
+        <p v-else class="sp-board__hint">{{ bi(fieldsPlain('fields_hint').zh, fieldsPlain('fields_hint').en) }}</p>
+        <p
+          v-if="fieldsNotice"
+          class="sp-board__hint"
+          role="status"
+          data-testid="stock-prep-project-fields-result"
+          :data-result="fieldsNotice.kind"
+          :data-field="fieldsNotice.kind === 'refused' ? (fieldsNotice.field ?? '') : ''"
+        >
+          {{ bi(fieldsNoticeText.zh, fieldsNoticeText.en) }}
+          <span v-if="fieldsNoticeText.zhNext">{{ bi(fieldsNoticeText.zhNext, fieldsNoticeText.enNext ?? '') }}</span>
+          <code v-if="fieldsNotice.kind === 'refused' && fieldsNotice.code" class="sp-board__token">{{ fieldsNotice.code }}</code>
+        </p>
+      </div>
     </section>
 
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
@@ -569,7 +652,9 @@
 //
 // IT HAS NO EDITABLE CELL, on purpose. Filling stays in the multitable grid, where the column-level
 // write permissions and the human-field wall already live. A cell here would be a second write path
-// into the same rows with none of that behind it.
+// into the same rows with none of that behind it. (S3's three project-level fields — 负责人 / 备注 /
+// 计划完成 — are not cells of any sheet: they live on the server's registry row and have their own
+// OPERATE route, ADR §5 O2(a); the overview only projects them, read-only.)
 //
 // THE DEEP LINK IS A LINK, NOT A PERMISSION CHECK. The board returns a handle only when the sheet
 // exists; whether this operator may open it is multitable's answer, given when they land. The page
@@ -607,8 +692,15 @@ import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport 
 import {
   changeStockPreparationProjectTargetLifecycle,
   createStockPreparationProjectTargetApi,
+  saveStockPreparationProjectFields,
+  stockPrepProjectFieldsChangedPatch,
+  stockPrepProjectFieldsDraft,
   stockPrepProjectNumbersMatch,
   stockPrepProjectTargetFillTarget,
+  STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS,
+  type StockPrepProjectFieldsDraft,
+  type StockPrepProjectFieldsSaveOutcome,
+  type StockPrepProjectFieldsState,
   type StockPrepProjectLifecycleAction,
   type StockPrepProjectLifecycleOutcome,
   type StockPrepProjectTargetList,
@@ -621,6 +713,7 @@ import {
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
   STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS,
   stockPrepBoardErrorPlain,
+  stockPrepProjectOverviewPlain,
   stockPrepProjectTargetPlain,
   stockPrepProjectTargetRowCountText,
   stockPrepErrorCopyText,
@@ -1705,6 +1798,20 @@ function openFillTarget(): void {
 }
 
 /**
+ * The home page's two multitable entries. 「打开备料多维表」 sends no target and resolves through
+ * `openFillTarget` exactly as before; S3's 「打开项目总览」 sends the overview's own handles (the
+ * overview is not the fill sheet, so `composedFillTarget` must not answer for it), which go to the
+ * shell unchanged — the shell's `handleOpenFillTarget` pushes `/multitable/<sheetId>/<viewId>`.
+ */
+function onHomeOpenMultitable(target?: { sheetId: string; viewId: string }): void {
+  if (target && typeof target.sheetId === 'string' && target.sheetId && typeof target.viewId === 'string' && target.viewId) {
+    emit('open-multitable', { sheetId: target.sheetId, viewId: target.viewId })
+    return
+  }
+  openFillTarget()
+}
+
+/**
  * The shell's `?projectNo=` is the state bit for 首页 ⇄ 工作区 (§2.3), so it has to be followed in
  * BOTH directions. The empty case used to early-return, which meant browser Back — and the shell's
  * own 「返回今天要处理」 — left the workspace on screen with no way out.
@@ -1796,6 +1903,17 @@ function openProjectTargetSheet(): void {
 // the server compares it again.
 
 function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'projectTarget.restore'): boolean {
+  return holdsWorkbenchCapability(capability)
+}
+
+/**
+ * ONE resolver for every manifest-gated control on this page: the caller's capabilities as the
+ * workbench manifest mirror computes them (F-01 keeps the mirror byte-equal to the plugin's rows).
+ * S4's archive / restore and S3's project-fields / overview-refresh all go through it.
+ */
+function holdsWorkbenchCapability(
+  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh',
+): boolean {
   return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
 }
 
@@ -1857,6 +1975,109 @@ const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
   if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
   if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
   if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+// ── S3 (ADR §5 O2(a) / Q5, register R-37) — the project-level columns and the overview refresh ─────
+//
+// 「刷新项目总览」 lives on the home page; this page only resolves whether the caller holds it.
+const canRefreshOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.refresh'))
+
+/** This project's three project-level texts; null = no form (not loaded, absent, switch off, no right, unreadable). */
+const projectFields = ref<StockPrepProjectFieldsState | null>(null)
+const fieldsDraft = ref<StockPrepProjectFieldsDraft>(stockPrepProjectFieldsDraft(null))
+const fieldsBusy = ref(false)
+const fieldsNotice = ref<StockPrepProjectFieldsSaveOutcome | null>(null)
+let projectFieldsGeneration = 0
+
+function fieldsPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+function setProjectFields(state: StockPrepProjectFieldsState | null): void {
+  projectFields.value = state
+  fieldsDraft.value = stockPrepProjectFieldsDraft(state?.fields ?? null)
+}
+
+/**
+ * LAZY: read only once the sheet-state line knows the sheet EXISTS (active / archived — never on
+ * absent, never with the switch off), and only for a holder of `projectFields.read`. Silent on
+ * failure — a predread nobody asked for; the line simply shows no form.
+ */
+async function loadProjectFields(projectNo: string): Promise<void> {
+  const mine = ++projectFieldsGeneration
+  const api = projectTargetClient()
+  if (typeof api.getProjectFields !== 'function') return
+  try {
+    const state = await api.getProjectFields(projectNo)
+    if (mine !== projectFieldsGeneration || openedProjectNo.value !== projectNo) return
+    setProjectFields(state.status === 'absent' ? null : state)
+  } catch {
+    if (mine === projectFieldsGeneration) setProjectFields(null)
+  }
+}
+
+/** Re-read on a change of PROJECT or of the sheet's STATUS (archive / restore) — not on every re-read of the same state. */
+watch(
+  // Multi-source on purpose: Vue compares each source on its own, so replacing `projectTarget` with
+  // an equal-status state (every board re-read does) does not re-read the fields.
+  [openedProjectNo, () => projectTarget.value?.status ?? null],
+  ([projectNo, status], previous) => {
+    if (!previous || previous[0] !== projectNo) fieldsNotice.value = null
+    if (!projectNo || (status !== 'active' && status !== 'archived') || !holdsWorkbenchCapability('projectFields.read')) {
+      projectFieldsGeneration += 1
+      setProjectFields(null)
+      return
+    }
+    void loadProjectFields(projectNo)
+  },
+)
+
+/** Editable iff the caller holds `projectFields.update` AND the server says the sheet takes it (`may.update`, active). */
+const canSaveProjectFields = computed<boolean>(() => {
+  const state = projectFields.value
+  return Boolean(state && state.status === 'active' && state.may.update && holdsWorkbenchCapability('projectFields.update'))
+})
+
+const fieldsEditable = computed<boolean>(() => canSaveProjectFields.value)
+
+const fieldsChanged = computed<boolean>(() =>
+  Object.keys(stockPrepProjectFieldsChangedPatch(projectFields.value?.fields ?? null, fieldsDraft.value)).length > 0)
+
+async function saveProjectFields(): Promise<void> {
+  const projectNo = openedProjectNo.value
+  const state = projectFields.value
+  if (!projectNo || !state || fieldsBusy.value || !canSaveProjectFields.value) return
+  fieldsBusy.value = true
+  fieldsNotice.value = null
+  try {
+    const outcome = await saveStockPreparationProjectFields(projectTargetClient(), projectNo, state.fields, fieldsDraft.value)
+    if (openedProjectNo.value !== projectNo) return
+    fieldsNotice.value = outcome
+    if (outcome.kind === 'saved') {
+      projectFieldsGeneration += 1
+      setProjectFields({ status: outcome.saved.status, fields: outcome.saved.fields, updatedAt: outcome.saved.updatedAt, may: state.may })
+    } else if (outcome.kind === 'refused' && outcome.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
+      // A colleague archived it meanwhile: re-read the sheet's state; the form follows it.
+      void loadProjectTarget(projectNo)
+    }
+  } finally {
+    fieldsBusy.value = false
+  }
+}
+
+/** The one result line: 已保存, or the refusal's plain sentence — naming the FIELD for a 422, never its value. */
+const fieldsNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = fieldsNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'saved') return fieldsPlain('fields_saved')
+  if (notice.kind === 'unchanged') return { zh: '', en: '' }
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') return fieldsPlain('fields_archived_refused')
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID') {
+    const specific = notice.field && notice.field !== 'body' ? stockPrepProjectOverviewPlain(`fields_invalid_${notice.field}`) : null
+    const general = stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
+    return specific ? { zh: specific.zh, en: specific.en, zhNext: general.zhNext, enNext: general.enNext } : general
+  }
   return stockPrepErrorPlain(notice.code ?? '')
 })
 
@@ -2093,6 +2314,41 @@ onMounted(async () => {
 
 .sp-board__lifecycle-input {
   min-width: 10em;
+}
+
+/* S3: 负责人 / 备注 / 计划完成, inside the sheet-state line — a small inline form, never a grid. */
+.sp-board__fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__fields-title {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field--grow {
+  flex: 1 1 16em;
+}
+
+.sp-board__fields-input {
+  padding: 4px 6px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  font: inherit;
 }
 
 /* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */

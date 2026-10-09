@@ -29,6 +29,11 @@
  * narrower than the probe this PR removed (which also split live from soft-deleted, on every base),
  * so it is a residual, not a regression.
  *
+ * S3 (ADR adr-stock-prep-project-sheets-20261008 §5) added a SECOND `meta_sheets` read to the resolver:
+ * the stock-preparation overview kind lookup (`loadStockPreparationOverviewSheetIds`, no `deleted_at`
+ * filter, issued for every actor). It adds no round trip on a hit, so the statement-count constancy still
+ * holds everywhere; only (b) recurs on an overview id — pinned by the S3 RESIDUAL cases at the bottom.
+ *
  * The prelude is pre-403 BY DESIGN (see the comment at the PUT handler): the shared authority locks
  * and the row-auth advisory must be held before the capability read so a concurrent approval-create
  * final recheck serialises against a deny INSERT. It is therefore pinned here as a KNOWN constant
@@ -128,6 +133,12 @@ const LIVENESS_SQL = 'SELECT deleted_at FROM meta_sheets WHERE id = $1'
 const SHEET_FOR_SHARE_SQL = 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE'
 /** The resolver's approval-projection fence (`loadApprovalProjectionSheetIds`). No `deleted_at` filter. */
 const PROJECTION_FENCE_SQL = 'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2'
+/**
+ * S3: the resolver's stock-preparation overview kind lookup (`loadStockPreparationOverviewSheetIds`,
+ * stock-preparation-overview-contract.ts). Issued for EVERY actor (admins included), no `deleted_at`
+ * filter — the same posture as the projection fence. See the S3 RESIDUAL cases at the bottom.
+ */
+const OVERVIEW_KIND_SQL = "SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND (to_jsonb(meta_sheets) ->> 'system_kind') = $2"
 
 /**
  * Lock / transaction-control forms are EXEMPT from the beyond-capability rule: they are the pinned
@@ -179,6 +190,11 @@ interface FakeOpts {
    * ordinary sheet). On, the resolver's own fence hits — see the SCOPE section of the file docblock.
    */
   projection?: boolean
+  /**
+   * S3: whether this sheet id carries the server-owned `stock_prep_overview` kind. Off by default. On,
+   * the resolver's overview clamp strips `canManageSheetAccess` — see the S3 RESIDUAL cases.
+   */
+  overview?: boolean
 }
 
 /**
@@ -225,6 +241,13 @@ function createFake(opts: FakeOpts): Fake {
     // Participant probe — only reached on a fence hit. The actor is never a participant, so the
     // fence stays at its full admin-only shape.
     if (q.startsWith('SELECT DISTINCT s.id')) return { rows: [] }
+    // S3 overview kind lookup. Like the projection fence it has no `deleted_at` filter: a soft-deleted
+    // overview still hits, an absent id never does.
+    if (q === OVERVIEW_KIND_SQL) {
+      if (!opts.overview || opts.state === 'absent' || params[1] !== 'stock_prep_overview') return { rows: [] }
+      const ids = Array.isArray(params[0]) ? (params[0] as unknown[]) : []
+      return { rows: ids.filter(isThisSheet).map((id) => ({ id })) }
+    }
 
     // ── lock prelude ────────────────────────────────────────────────────────
     if (q === 'SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE') return { rows: [] }
@@ -327,7 +350,7 @@ async function statementsOf(
 async function callsAnsweredDifferently(
   recorded: readonly RecordedCall[],
   states: readonly [SheetState, SheetState],
-  opts: { canShare: boolean; projection?: boolean },
+  opts: { canShare: boolean; projection?: boolean; overview?: boolean },
 ): Promise<string[]> {
   const differing: string[] = []
   for (const call of recorded) {
@@ -493,9 +516,12 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
         expect(s.sql, `${s.state} issued a different statement list`).toEqual(expected)
       }
       // The resolver walks admin_role → permission_codes (+ legacy) → sheet_scope → approval
-      // projection. The query-bound resolver has NO e-learning segment; assert that, so a future
-      // addition has to come here and say so.
-      expect(resolverSql).toHaveLength(5)
+      // projection → (S3) the stock-preparation overview kind lookup. The query-bound resolver has NO
+      // e-learning segment; assert that, so a future addition has to come here and say so.
+      // S3 came here and said so: 5 → 6, the one added statement is the overview kind lookup, issued
+      // for the addressed sheet, and its answer is state-independent for an ordinary sheet (see (e)).
+      expect(resolverSql).toHaveLength(6)
+      expect(resolverSql[resolverSql.length - 1]).toBe(OVERVIEW_KIND_SQL)
       expect(resolverSql.some((s) => s.includes(ELEARNING_STATS_MULTITABLE_SHEETS_TABLE))).toBe(false)
 
       // (d) The prelude prefix is byte-identical across the states — it does not branch or 404.
@@ -698,6 +724,56 @@ describe('#5839 B4 — record_permissions PUT/DELETE: authority before existence
         // The fence never hits an id with no row, so the share grant survives the 403 and the
         // liveness check answers. This is the residual — narrower than the removed probe, which
         // ALSO told live apart from soft-deleted, and on every base.
+        { state: 'absent', status: 404, code: 'NOT_FOUND' },
+      ])
+    })
+  }
+
+  /**
+   * ── S3 RESIDUAL: the stock-preparation project overview ─────────────────────
+   * The resolver's overview clamp (ADR adr-stock-prep-project-sheets-20261008 §5) reads `meta_sheets`
+   * by id with no `deleted_at` filter and, on a hit, strips `canManageSheetAccess` for EVERY actor. Unlike
+   * the projection fence it adds NO extra round trip on a hit, so for a caller without the share code the
+   * pre-403 statement list stays constant across live / deleted / absent even on an overview sheet. What
+   * remains is the same narrow split as the projection base: a `multitable:share` holder — refused by
+   * the clamp, not by the sheet — gets 403 / 403 / 404 on an overview id. Pinned so it cannot widen
+   * unnoticed, and so nobody reports it later as a new hole.
+   */
+  for (const route of ROUTES) {
+    it(`${route.name}: S3 RESIDUAL — on an overview sheet the refusal and its pre-403 statement list stay constant for a non-sharer`, async () => {
+      const seen: Array<{ state: SheetState; status: number; body: unknown; sql: string[] }> = []
+      for (const state of STATES) {
+        const fake = createFake({ state, canShare: false, overview: true })
+        pinned.setApp(installApp(fake))
+        const res = await route.send()
+        seen.push({ state, status: res.status, body: res.body, sql: [...fake.sqlLog] })
+        vi.restoreAllMocks()
+      }
+      for (const s of seen) {
+        expect(s.status, `${s.state} answered ${s.status}`).toBe(403)
+        expect(s.body, `${s.state} body differs`).toEqual(FORBIDDEN.body)
+        expect(s.sql.includes(LIVENESS_SQL), `${s.state} resolved liveness`).toBe(false)
+      }
+      expect(seen[1]!.sql).toEqual(seen[0]!.sql)
+      expect(seen[2]!.sql).toEqual(seen[0]!.sql)
+      expect(seen[0]!.sql.includes(OVERVIEW_KIND_SQL)).toBe(true)
+    })
+
+    it(`${route.name}: S3 RESIDUAL — on an overview sheet a multitable:share caller is clamped (403) where present and reaches liveness (404) where absent`, async () => {
+      const answers: Array<{ state: SheetState; status: number; code: unknown }> = []
+      for (const state of STATES) {
+        const fake = createFake({ state, canShare: true, overview: true })
+        pinned.setApp(installApp(fake))
+        const res = await route.send()
+        answers.push({ state, status: res.status, code: (res.body as { error?: { code?: string } })?.error?.code })
+        vi.restoreAllMocks()
+      }
+      expect(answers).toEqual([
+        // The clamp removes canManageSheetAccess for every person on the overview, so the grant
+        // write is refused on a live AND on a soft-deleted overview…
+        { state: 'live', status: 403, code: 'FORBIDDEN' },
+        { state: 'deleted', status: 403, code: 'FORBIDDEN' },
+        // …while an id with no row is not an overview, so the share grant survives and liveness answers.
         { state: 'absent', status: 404, code: 'NOT_FOUND' },
       ])
     })

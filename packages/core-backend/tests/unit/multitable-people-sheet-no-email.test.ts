@@ -268,7 +268,11 @@ function createMockPool(store: Store) {
     if (isWrite) store.writes.push({ sql, params: [...params] })
 
     if (store.sheetsLackSystemKind && /\bmeta_sheets\b/i.test(sql)) {
-      const withoutTolerantRead = sql.replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s+AS\s+system_kind/gi, '')
+      // S3: the tolerant COMPARISON form (`(to_jsonb(x) ->> 'system_kind') = $n`, the stock-preparation
+      // overview clamp's lookup) is as safe on a column-less database as the projected read.
+      const withoutTolerantRead = sql
+        .replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s+AS\s+system_kind/gi, '')
+        .replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s*=\s*\$\d+/gi, '')
       if (/\bsystem_kind\b/i.test(withoutTolerantRead)) {
         throw Object.assign(new Error('column "system_kind" does not exist'), { code: '42703' })
       }

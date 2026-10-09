@@ -142,7 +142,8 @@ function makeProvisioning() {
     async findObjectSheet({ projectId, objectId }) {
       calls.push(['findObjectSheet', objectId])
       const object = objects.get(keyOf(projectId, objectId))
-      return object ? { id: sheetIdOf(projectId, objectId), baseId: object.baseId, name: object.name, description: null } : null
+      // S3: the host reports the server-owned `system_kind` it stamped at provisioning (null otherwise).
+      return object ? { id: sheetIdOf(projectId, objectId), baseId: object.baseId, name: object.name, description: null, systemKind: object.systemKind ?? null } : null
     },
     async resolveFieldIds({ objectId, fieldIds }) {
       calls.push(['resolveFieldIds', objectId])
@@ -162,14 +163,18 @@ function makeProvisioning() {
       for (const id of fieldIds) if (object.fields.has(id)) out[id] = clone(object.fields.get(id))
       return out
     },
-    async ensureObject({ projectId, baseId, descriptor }) {
+    async ensureObject({ projectId, baseId, descriptor, systemKind }) {
       calls.push(['ensureObject', descriptor.id])
       const fields = new Map()
       descriptor.fields.forEach((field, order) => fields.set(field.id, { name: field.name, type: field.type, property: clone(field.property || {}), order }))
-      objects.set(keyOf(projectId, descriptor.id), { baseId: baseId ?? null, name: descriptor.name, fields })
+      // S3: the host-owned stamp, stored on INSERT only (an existing object keeps whatever it had)
+      // and reported back on the sheet — exactly what the real host does (provisioning.ts).
+      const existing = objects.get(keyOf(projectId, descriptor.id))
+      const stamped = existing ? (existing.systemKind ?? null) : (typeof systemKind === 'string' && systemKind ? systemKind : null)
+      objects.set(keyOf(projectId, descriptor.id), { baseId: baseId ?? null, name: descriptor.name, fields, systemKind: stamped })
       return {
         baseId: baseId ?? null,
-        sheet: { id: sheetIdOf(projectId, descriptor.id), baseId: baseId ?? null, name: descriptor.name, description: null },
+        sheet: { id: sheetIdOf(projectId, descriptor.id), baseId: baseId ?? null, name: descriptor.name, description: null, systemKind: stamped },
         fields: descriptor.fields.map((field, order) => ({ id: fieldIdOf(descriptor.id, field.id), sheetId: sheetIdOf(projectId, descriptor.id), name: field.name, type: field.type, property: {}, order })),
       }
     },

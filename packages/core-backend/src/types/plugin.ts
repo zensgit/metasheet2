@@ -384,6 +384,8 @@ export interface MultitableRepairTransactionSurface {
     baseId: string | null
     name: string
     description: string | null
+    /** Server-owned `meta_sheets.system_kind` (null when unset). See MultitableProvisioningAPI.findObjectSheet. */
+    systemKind: string | null
   } | null>
   resolveExistingObjectFieldIds(input: {
     projectId: string
@@ -457,6 +459,13 @@ export interface MultitableProvisioningAPI {
     baseId: string | null
     name: string
     description: string | null
+    /**
+     * S3: the server-owned `meta_sheets.system_kind` (null when unset, or on a database without the
+     * column). A plugin that relies on a host-owned stamp (the stock-preparation overview) reads it here
+     * and FAILS CLOSED when it is not the kind it asked for — e.g. a sheet created before the stamp
+     * existed keeps NULL forever, because the host never rewrites an existing row's kind.
+     */
+    systemKind: string | null
   } | null>
   resolveFieldIds(input: {
     projectId: string
@@ -523,6 +532,14 @@ export interface MultitableProvisioningAPI {
      * the columns it re-derives; prefer ensureMissingObjectFields for additive repair.
      */
     overwriteMode?: 'refuse' | 'overwrite' | 'observe' | 'preserve'
+    /**
+     * S3 (ADR adr-stock-prep-project-sheets-20261008 §5): a HOST-OWNED `meta_sheets.system_kind` stamp,
+     * written at INSERT only (an existing sheet's kind is never changed). Admitted for exactly one caller —
+     * plugin-integration-core provisioning its project overview object with the `stock_prep_overview` kind;
+     * the plugin-scope wrapper refuses every other combination with 403 MULTITABLE_SYSTEM_KIND_FORBIDDEN
+     * before any IO. Omit it (every other caller) for the unchanged behaviour.
+     */
+    systemKind?: string | null
   }): Promise<{
     baseId: string
     sheet: {
@@ -530,6 +547,8 @@ export interface MultitableProvisioningAPI {
       baseId: string | null
       name: string
       description: string | null
+      /** Server-owned `meta_sheets.system_kind` as stored (null when unset). See findObjectSheet. */
+      systemKind: string | null
     }
     fields: Array<{
       id: string

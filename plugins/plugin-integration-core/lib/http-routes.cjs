@@ -241,6 +241,16 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/archive', 'stockPreparationProjectTargetArchive'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/restore', 'stockPreparationProjectTargetRestore'],
+  // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
+  // three OPERATE, as the ADR writes them; all three 404 DISABLED after the gate while the switch is
+  // off. The GET / PUT are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成)
+  // — the registry stores them, the overview projects them, nothing audits them (the audit names
+  // the columns changed, never a value). The PUT body is the closed whitelist of those three keys;
+  // an archived project answers the §6 409. The refresh rebuilds the read-only overview sheet from
+  // the registry and the project sheets within bounds; it is audited `project_overview_refresh`.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsGet'],
+  ['PUT', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsUpdate'],
+  ['POST', '/api/integration/stock-preparation/project-overview/refresh', 'stockPreparationProjectOverviewRefresh'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -518,7 +528,19 @@ const {
   preflightProjectSheetCustomerPacks,
   installProjectSheetCustomerPacks,
 } = require('./stock-preparation-project-targets.cjs')
-const { StockPreparationProjectTargetStoreError } = require('./stock-preparation-project-target-store.cjs')
+const {
+  StockPreparationProjectTargetStoreError,
+  // S3: the closed project-fields whitelist (the PUT body's allowlist) and its pure normalizer.
+  PROJECT_FIELD_KEYS: STOCK_PREP_PROJECT_FIELD_KEYS,
+  normalizeProjectFieldsPatch,
+} = require('./stock-preparation-project-target-store.cjs')
+// S3 (ADR §5, register R-37): the project overview — ensure-if-absent of the host-stamped read-only
+// sheet, the bounded projection, and the view handles the list route hands the home page.
+const {
+  refreshProjectOverview,
+  projectOverviewViewHandles,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+} = require('./stock-preparation-project-overview.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
 // yet" condition and names the literal fix for each. It reuses the inspection functions the four
 // readiness routes already call — it re-derives no notion of "ready" — and it writes nothing.
@@ -1799,6 +1821,43 @@ const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set(['con
 const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
 const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
 const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH'
+// S3 (register R-37): the two remaining 088 actions. `project_fields_update` records WHICH of the three
+// O2(a) columns changed (a count map keyed by column name) and never a value; `project_overview_refresh`
+// records counts only.
+const STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION = 'project_fields_update'
+const STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION = 'project_overview_refresh'
+// The PUT body's closed allowlist IS the store's whitelist — one list, not two.
+const VALID_STOCK_PREPARATION_PROJECT_FIELDS_BODY_KEYS = new Set(STOCK_PREP_PROJECT_FIELD_KEYS)
+
+/** S3: the project number of a project-fields request — pure, before any IO. */
+function stockPreparationProjectFieldsProjectNo(req) {
+  const projectNo = firstString(requestParams(req).projectNo)
+  if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+  }
+  return projectNo
+}
+
+/**
+ * S3: what the two project-fields routes answer. The ONE response shape that carries the three free
+ * texts; `may.update` is the state alone (the caller already passed the OPERATE gate).
+ */
+function stockPreparationProjectFieldsResponse(projectNo, fields) {
+  if (!fields) {
+    return { projectNo, status: 'absent', fields: null, updatedAt: null, may: { update: false } }
+  }
+  return {
+    projectNo,
+    status: fields.status,
+    fields: {
+      responsibleLabel: fields.responsibleLabel,
+      note: fields.note,
+      plannedFinishOn: fields.plannedFinishOn,
+    },
+    updatedAt: fields.projectFieldsUpdatedAt,
+    may: { update: fields.status === 'active' },
+  }
+}
 
 /**
  * S4: the archive / restore REQUEST — pure, no IO, so a malformed or mismatched request costs nothing.
@@ -4037,6 +4096,54 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot archive or restore here')
     }
     return store
+  }
+  // S3: the project-fields routes need the store's O2(a) surface; the overview refresh needs the
+  // list, the project-fields map and the count stamp. Same posture as the lifecycle check above: an
+  // older store binding serves the older routes and these fail closed (501).
+  function requireStockPreparationProjectFields() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.getProjectFields !== 'function' || typeof store.updateProjectFields !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot read or write project-level fields here')
+    }
+    return store
+  }
+  function requireStockPreparationProjectOverview() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.listProjectFields !== 'function' || typeof store.recordCounts !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here')
+    }
+    return store
+  }
+  /**
+   * S3 (ADR §1.2 `last_pull_*`; §5 「最近拉取」): stamp a pull's outcome on the registry row the overlay
+   * resolved. NEVER FAILS THE PULL: the registry row is a projection input, the pull result is the
+   * fact, so a stamp that cannot be written is logged (values-free) and the response stands. A no-op
+   * when no overlay was applied (switch off / env target) or the store cannot stamp.
+   */
+  async function stampProjectPullOutcome(action, tenantId, { outcome, code, missingComponentsCount } = {}) {
+    if (!action || !isPlainObject(action.projectTarget) || !stockPreparationProjectTargets || typeof stockPreparationProjectTargets.recordPullOutcome !== 'function') return
+    try {
+      await stockPreparationProjectTargets.recordPullOutcome({
+        tenantId,
+        projectNo: action.projectTarget.projectNo,
+        outcome,
+        code: typeof code === 'string' ? code : null,
+        ...(Number.isInteger(missingComponentsCount) && missingComponentsCount >= 0 ? { missingComponentsCount } : {}),
+      })
+    } catch (error) {
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep pull outcome could not be stamped on the project registry; the pull result stands')
+      }
+    }
+  }
+  /** The run's DISTINCT missing-component count, off the result's values-free evidence (the board's number). */
+  function distinctMissingComponentCount(result) {
+    if (!isPlainObject(result)) return undefined
+    if (isPlainObject(result.missingComponents) && Number.isInteger(result.missingComponents.distinctCount)) return result.missingComponents.distinctCount
+    const evidence = isPlainObject(result.evidence) ? result.evidence : {}
+    const dryRunEvidence = isPlainObject(evidence.dryRun) ? evidence.dryRun : evidence
+    const expansion = isPlainObject(dryRunEvidence.expansion) ? dryRunEvidence.expansion : null
+    return expansion && Number.isInteger(expansion.missingComponentDistinctCount) ? expansion.missingComponentDistinctCount : undefined
   }
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
@@ -6392,45 +6499,56 @@ function requireStockPreparationAudit() {
       // W-5: same stanza, forwarded so a `data-source:sql-readonly` source enforces its two SQL
       // Server read floors for this run (see loadTableActionSourceAdapter / the adapter's read()).
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: dryRunB2aAuthorization })
-      return sendOk(res, await dryRunStockPreparationAction({
-        action,
-        parameters: body.parameters,
-        sourceAdapter,
-        recordsApi: getMultitableRecordsApi(),
-        tokenStore: context.storage,
-        policyStore: context.storage,
-        conflictPolicyReview: body.conflictPolicyReview,
-        // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
-        // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
-        // tenant" a property of the code rather than of the caller's good manners.
-        includeMissingComponents,
-        // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
-        // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
-        // The apply route below resolves it the SAME way so the two agree on the plan revision.
-        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-        // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
-        targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
-        // The source->`ext_` mapping, from server config. null when unconfigured, which
-        // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
-        // Configured: the SAME object the apply route passes, so both routes expand the same rows
-        // and agree on the dry-run revision. It is never request-influenced.
-        extFieldMapping: stockPreparationExtFieldMapping,
-        // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
-        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-        // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
-        // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
-        // gate checks and the tenant whose source is about to be read are one value, not two that
-        // could disagree.
-        b2aTrialRegistry,
-        b2aClaimStore: context.storage,
-        b2aOperationClaim,
-        b2aRunId: dryRunB2aRunId,
-        // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
-        // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
-        b2aSourceObjects: dryRunB2aSourceObjects,
-        tenantId: dryRunTenantId,
-        now: Date.now(),
-      }))
+      // S3 (ADR §5 「谁更新、什么时候更新」: dry-run 结束): the registry row the overlay resolved gets
+      // `last_pull_*` stamped — `previewed` with the run's distinct missing-component count, or
+      // `refused` with the typed code of a run that threw. A stamp that fails never fails the run.
+      let dryRunResult
+      try {
+        dryRunResult = await dryRunStockPreparationAction({
+          action,
+          parameters: body.parameters,
+          sourceAdapter,
+          recordsApi: getMultitableRecordsApi(),
+          tokenStore: context.storage,
+          policyStore: context.storage,
+          conflictPolicyReview: body.conflictPolicyReview,
+          // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+          // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+          // tenant" a property of the code rather than of the caller's good manners.
+          includeMissingComponents,
+          // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
+          // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
+          // The apply route below resolves it the SAME way so the two agree on the plan revision.
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
+          targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
+          // The source->`ext_` mapping, from server config. null when unconfigured, which
+          // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
+          // Configured: the SAME object the apply route passes, so both routes expand the same rows
+          // and agree on the dry-run revision. It is never request-influenced.
+          extFieldMapping: stockPreparationExtFieldMapping,
+          // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
+          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+          // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
+          // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
+          // gate checks and the tenant whose source is about to be read are one value, not two that
+          // could disagree.
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: dryRunB2aRunId,
+          // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+          // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+          b2aSourceObjects: dryRunB2aSourceObjects,
+          tenantId: dryRunTenantId,
+          now: Date.now(),
+        })
+      } catch (error) {
+        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
+        throw error
+      }
+      await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
+      return sendOk(res, dryRunResult)
     },
 
     // B-stage ledger WRITE: repeat the readonly table-action plan server-side and persist ONLY
@@ -6798,52 +6916,62 @@ function requireStockPreparationAudit() {
       // W-5: same stanza, forwarded — see the dry-run route above for why.
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
-      return sendOk(res, await applyStockPreparationAction({
-        action,
-        parameters: body.parameters,
-        dryRunToken: confirm.dryRunToken,
-        acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
-        acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
-        permission: applyPermissionForUser(user),
-        sourceAdapter,
-        // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
-        // plan and compares revisions, so the two routes must read the bands from one seam.
-        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-        // Same probe input the dry-run route threaded, from the same tenant derivation.
-        targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
-        // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
-        // compares its revision against the token. A mapping on one route and not the other would
-        // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
-        extFieldMapping: stockPreparationExtFieldMapping,
-        // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
-        // decision confirmed/superseded between dry-run and apply changes the recomputed revision
-        // and fails the token check — fail-closed. Production Apply remains off this line entirely
-        // (sandbox/production gates above are untouched).
-        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-        recordsApi: getMultitableRecordsApi(),
-        tokenStore: context.storage,
-        policyStore: context.storage,
-        // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
-        // Absent (e.g. prod default) → undefined → apply fail-closed.
-        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
-        // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
-        // → sandbox gate (canonical rejected). Request body never supplies it.
-        productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
-        // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
-        // nothing in the request; undefined when no overlay was applied.
-        projectSheetGate: projectSheetGateFor(action),
-        // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
-        // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
-        // right — it does not inherit the dry-run's authorization through the token.
-        b2aTrialRegistry,
-        b2aClaimStore: context.storage,
-        b2aOperationClaim,
-        b2aRunId: applyB2aRunId,
-        // R-02 (contract half): same list as the guard above — see the dry-run route.
-        b2aSourceObjects: applyB2aSourceObjects,
-        tenantId: applyTenantId,
-        now: Date.now(),
-      }))
+      // S3 (ADR §5: apply 结束): the registry row the overlay resolved gets `last_pull_*` stamped —
+      // `applied` with the run's distinct missing-component count, or `refused` with the typed code.
+      let applyResult
+      try {
+        applyResult = await applyStockPreparationAction({
+          action,
+          parameters: body.parameters,
+          dryRunToken: confirm.dryRunToken,
+          acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+          acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
+          permission: applyPermissionForUser(user),
+          sourceAdapter,
+          // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
+          // plan and compares revisions, so the two routes must read the bands from one seam.
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          // Same probe input the dry-run route threaded, from the same tenant derivation.
+          targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
+          // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
+          // compares its revision against the token. A mapping on one route and not the other would
+          // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+          extFieldMapping: stockPreparationExtFieldMapping,
+          // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
+          // decision confirmed/superseded between dry-run and apply changes the recomputed revision
+          // and fails the token check — fail-closed. Production Apply remains off this line entirely
+          // (sandbox/production gates above are untouched).
+          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+          recordsApi: getMultitableRecordsApi(),
+          tokenStore: context.storage,
+          policyStore: context.storage,
+          // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+          // Absent (e.g. prod default) → undefined → apply fail-closed.
+          sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+          // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
+          // → sandbox gate (canonical rejected). Request body never supplies it.
+          productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+          // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
+          // nothing in the request; undefined when no overlay was applied.
+          projectSheetGate: projectSheetGateFor(action),
+          // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
+          // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
+          // right — it does not inherit the dry-run's authorization through the token.
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: applyB2aRunId,
+          // R-02 (contract half): same list as the guard above — see the dry-run route.
+          b2aSourceObjects: applyB2aSourceObjects,
+          tenantId: applyTenantId,
+          now: Date.now(),
+        })
+      } catch (error) {
+        await stampProjectPullOutcome(action, applyTenantId, { outcome: 'refused', code: error && error.code })
+        throw error
+      }
+      await stampProjectPullOutcome(action, applyTenantId, { outcome: 'applied', missingComponentsCount: distinctMissingComponentCount(applyResult) })
+      return sendOk(res, applyResult)
     },
 
     async tableActionLargeBomExpansionJobStart(req, res) {
@@ -9232,9 +9360,27 @@ function requireStockPreparationAudit() {
       })
       const store = requireStockPreparationProjectTargets()
       const rows = await store.list({ tenantId: scope.tenantId })
+      // S3: the overview's handles for the home page — the sheet id only once the sheet exists (the
+      // first refresh creates it; ensure-if-absent by the derived objectId), the two view ids derived.
+      // One read-only lookup, values-free, in the caller's own staging project.
+      let overview = { sheetId: null, activeViewId: null, archivedViewId: null }
+      try {
+        const provisioning = getMultitableProvisioning()
+        const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+        const sheet = typeof provisioning.findObjectSheet === 'function'
+          ? await provisioning.findObjectSheet({ projectId: targetProjectId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
+          : null
+        overview = {
+          sheetId: sheet && sheet.id ? String(sheet.id) : null,
+          ...projectOverviewViewHandles({ provisioning, projectId: targetProjectId }),
+        }
+      } catch (error) {
+        overview = { sheetId: null, activeViewId: null, archivedViewId: null }
+      }
       return sendOk(res, {
         count: rows.length,
         limit: MAX_PROJECT_TARGETS_PER_TENANT,
+        overview,
         items: rows.map((row) => ({
           projectNo: row.projectNo,
           status: row.status,
@@ -9244,12 +9390,136 @@ function requireStockPreparationAudit() {
           archivedAt: row.archivedAt,
           lastPullAt: row.lastPullAt,
           lastPullOutcome: row.lastPullOutcome,
+          lastPullCode: row.lastPullCode,
           rowCount: row.rowCount,
           activeRowCount: row.activeRowCount,
           countsBounded: row.countsBounded,
+          // S3: the three remaining bounded counts the overview projects.
+          missingComponentsCount: row.missingComponentsCount,
+          procurementOpenCount: row.procurementOpenCount,
+          warehouseOpenCount: row.warehouseOpenCount,
           countsAt: row.countsAt,
         })),
       })
+    },
+
+    // ── S3 (ADR §5, register R-37): THE O2(a) PROJECT-LEVEL COLUMNS ───────────────────────────────
+    //
+    // 负责人 / 备注 / 计划完成 live in the REGISTRY ROW (migration 087), are read and written ONLY here,
+    // and are projected into the read-only overview on its next refresh. They do not sync to the
+    // material rows and `responsibleLabel` is free text, never a user id and never an authorization
+    // input (ADR §9). ORDER as on every S1/S4 route: gate → switch → pure request checks → scope →
+    // store → (write: audit vocabulary → transition under the tenant lock → ONE audit row that names
+    // the columns changed, never a value).
+    async stockPreparationProjectFieldsGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const store = requireStockPreparationProjectFields()
+      const fields = await store.getProjectFields({ tenantId: scope.tenantId, projectNo })
+      return sendOk(res, stockPreparationProjectFieldsResponse(projectNo, fields))
+    },
+
+    async stockPreparationProjectFieldsUpdate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const body = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_PROJECT_FIELDS_BODY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      // PURE, before any IO: the whitelist, the caps and the calendar-day shape (422 names the FIELD).
+      normalizeProjectFieldsPatch(body)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectFields()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const updated = await store.updateProjectFields({ tenantId, projectNo, actorId: actor, fields: body })
+      const fields = {}
+      for (const key of updated.changed) fields[key] = 1
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION,
+        subjectId: updated.fields.sheetId,
+        mode: 'updated',
+        actor,
+        // WHICH columns changed, as a count map keyed by column name — never a value.
+        detail: { updatedFieldCount: updated.changed.length, fields },
+      })
+      return sendOk(res, { ...stockPreparationProjectFieldsResponse(projectNo, updated.fields), changed: updated.changed })
+    },
+
+    // ── S3 (ADR §5, register R-37): THE PROJECT OVERVIEW REFRESH (Q5) ─────────────────────────────
+    //
+    // Rebuilds the host-level read-only overview sheet from the registry + the project sheets within
+    // bounds (stock-preparation-project-overview.cjs holds the projection and its bounds), stamping
+    // the registry's count columns on the way. OPERATE (ADR §5 「OPERATE 档」). Ensure-if-absent: the
+    // first refresh creates the sheet (stamped by the host, with its two views) in the pair's base;
+    // every later refresh finds it. Audited `project_overview_refresh` with counts only.
+    async stockPreparationProjectOverviewRefresh(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      normalizeStockPreparationConfirmBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REQUEST_INVALID')
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectOverview()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION, '088', tenantId)
+      // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const actor = user.id || user.email
+      const result = await refreshProjectOverview({
+        provisioning: getMultitableProvisioning(),
+        recordsApi: getMultitableRecordsApi(),
+        store,
+        tenantId,
+        projectId: targetProjectId,
+        env: process.env,
+      })
+      await audit.append({
+        tenantId,
+        action: STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION,
+        subjectId: result.sheetId,
+        mode: result.sheetCreated ? 'sheet_created' : 'refreshed',
+        actor,
+        detail: {
+          projectCount: result.projectCount,
+          countedCount: result.countedCount,
+          unreadableCount: result.unreadableCount,
+          boundedCount: result.boundedCount,
+          rowsCreated: result.rowsCreated,
+          rowsUpdated: result.rowsUpdated,
+          rowsUnchanged: result.rowsUnchanged,
+          truncated: result.truncated,
+          ledgerReady: result.ledgerReady,
+        },
+      })
+      return sendOk(res, result)
     },
 
     // #3751 MVP W5b (#3890): values-free audit trail read — entries are values-free BY CONSTRUCTION
@@ -10009,6 +10279,19 @@ function requireStockPreparationAudit() {
           boundTarget = null
         }
       }
+      // S3 (ADR §5 「首页与项目查询」): with the switch ON the floor's projects are enumerated from the
+      // project-sheet REGISTRY (one row per registered project, archived flag and bounded counts),
+      // under the same union opt-in the bound-sheet scan rides. Keyed by the VERIFIED tenant. A
+      // registry that cannot be read degrades to "not enumerated" — the landing page must open.
+      let projectTargetRows = null
+      if (includePullTargets && stockPreparationProjectSheetsEnabled(process.env)
+        && stockPreparationProjectTargets && typeof stockPreparationProjectTargets.list === 'function') {
+        try {
+          projectTargetRows = await stockPreparationProjectTargets.list({ tenantId: scope.tenantId })
+        } catch {
+          projectTargetRows = null
+        }
+      }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -10016,6 +10299,7 @@ function requireStockPreparationAudit() {
         // which tenant A's caller addresses tenant B's staging project.
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         scope,
+        projectTargets: projectTargetRows,
         // 设计稿 N1, BEHIND THE OPT-IN. The module reads `boundTarget` and `audit` only under this
         // flag, so opting out is one decision here rather than four conditionals spread downstream.
         includePullTargets,

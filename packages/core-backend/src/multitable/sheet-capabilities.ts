@@ -17,6 +17,10 @@ import {
   restrictElearningProjectionCapabilities,
 } from './elearning-projection-constants'
 import { deriveCanManageFields } from './manage-schema-permission'
+import {
+  loadStockPreparationOverviewSheetIds,
+  restrictStockPreparationOverviewCapabilities,
+} from './stock-preparation-overview-contract'
 import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
@@ -336,6 +340,13 @@ export async function resolveSheetCapabilitiesForUser(
       true,
       authorized,
     )
+  }
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5): the same overview clamp as the REST resolver
+  // (permission-service.ts resolveSheetCapabilitiesForAccess). This resolver fronts the Yjs record-write
+  // flush, the collab rooms, API-token capability checks and the FWB rule-save gates, so without it a
+  // person could still WRITE the overview through the collab channel. Every person, admins included.
+  if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
+    capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
   return {
     capabilities,

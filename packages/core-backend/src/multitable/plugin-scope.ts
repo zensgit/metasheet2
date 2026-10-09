@@ -11,6 +11,12 @@ import {
   normalizeStockPreparationGrantRoleIds,
 } from './stock-preparation-project-sheet-grant-contract'
 import {
+  STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+  StockPreparationOverviewSystemKindError,
+} from './stock-preparation-overview-contract'
+import {
   getMultitableRequestMetadataCache,
   runWithMultitableRequestMetadataCache,
 } from './request-metadata-cache'
@@ -589,24 +595,55 @@ export function createPluginScopedMultitableApi(
             },
           }
         : {}),
+      // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5): `systemKind` is a HOST-OWNED stamp — the
+      // server-owned `meta_sheets.system_kind` that makes a sheet a system sheet (undeletable, clamped to
+      // read/export for every person). A plugin may ask for it in exactly one case, checked here BEFORE any
+      // hook or host call: the plugin is `plugin-integration-core` (the G1 port's least-privilege posture),
+      // the kind is the overview kind, and the descriptor is the overview object. Anything else that names a
+      // kind is 403 MULTITABLE_SYSTEM_KIND_FORBIDDEN with nothing written. Each value is read ONCE and the
+      // checked values are what the hook / host receive (a getter cannot show the gate one object and the
+      // host another). A call without `systemKind` takes the pre-S3 path unchanged.
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        let forwarded = input
+        const systemKind = input.systemKind
+        if (systemKind !== undefined && systemKind !== null) {
+          const projectId = input.projectId
+          const descriptor = input.descriptor
+          const objectId = descriptor?.id
+          if (pluginName !== STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN) {
+            throw new StockPreparationOverviewSystemKindError('plugin')
+          }
+          if (systemKind !== STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND) {
+            throw new StockPreparationOverviewSystemKindError('kind')
+          }
+          if (objectId !== STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+            throw new StockPreparationOverviewSystemKindError('object')
+          }
+          assertProjectIdAllowedForPlugin(pluginName, projectId)
+          forwarded = {
+            ...input,
+            projectId,
+            descriptor: { ...descriptor, id: objectId },
+            systemKind,
+          }
+        }
         if (hooks.ensureObjectInScope) {
           return hooks.ensureObjectInScope({
             pluginName,
-            ...input,
+            ...forwarded,
           })
         }
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.descriptor.id,
+          projectId: forwarded.projectId,
+          objectId: forwarded.descriptor.id,
         })
-        const result = await multitable.provisioning.ensureObject(input)
+        const result = await multitable.provisioning.ensureObject(forwarded)
         await hooks.claimObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.descriptor.id,
+          projectId: forwarded.projectId,
+          objectId: forwarded.descriptor.id,
           sheetId: result.sheet.id,
         })
         return result

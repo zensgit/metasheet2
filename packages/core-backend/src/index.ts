@@ -880,7 +880,9 @@ export class MetaSheetServer {
           // forward it). Dropping it here silently downgraded a caller's explicit
           // opt-in to the fail-closed default, i.e. an advertised API option
           // (types/plugin.ts EnsureObjectInput) was inert on this path.
-          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
+          // S3: `systemKind` likewise — the host-owned stamp the plugin-scope gate admitted (only
+          // plugin-integration-core's overview object); provisioning re-checks it is a known kind.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode, systemKind }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -896,6 +898,7 @@ export class MetaSheetServer {
                 baseId,
                 descriptor,
                 overwriteMode,
+                systemKind,
               })
             })
           },
@@ -2287,7 +2290,9 @@ export class MetaSheetServer {
             // destructive-reconcile opt-in, and this hook is the shipped host path for every
             // plugin ensureObject — dropping it here would silently re-arm the fail-closed
             // default for callers that legitimately own the columns they re-derive.
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
+            // S3: `systemKind` MUST stay in it too — the overview stamp the scope gate admitted; dropping
+            // it here would provision the overview as an ordinary, writable, deletable sheet.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode, systemKind }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -2311,6 +2316,7 @@ export class MetaSheetServer {
                   baseId,
                   descriptor,
                   overwriteMode,
+                  systemKind,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,

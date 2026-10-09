@@ -469,6 +469,7 @@ StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
 StockPreparationProjectArchive
 StockPreparationProjectBoard
+StockPreparationProjectOverview
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts

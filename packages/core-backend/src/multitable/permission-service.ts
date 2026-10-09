@@ -58,6 +58,10 @@ import {
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
 import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import {
+  loadStockPreparationOverviewSheetIds,
+  restrictStockPreparationOverviewCapabilities,
+} from './stock-preparation-overview-contract'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -1814,6 +1818,13 @@ export async function resolveSheetCapabilitiesForAccess(
         elearningProjectionOrg.get(sheetId) ?? null,
       ),
     )
+  }
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): the stock-preparation project
+  // overview is plugin-maintained. Whatever the grants resolved, a person keeps read/export only — for
+  // EVERY access, administrators included (no isAdminRole short-circuit, unlike the projection fence).
+  // Readability and listing are untouched: canRead passes through as resolved.
+  if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
+    capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
   return {
     access,
