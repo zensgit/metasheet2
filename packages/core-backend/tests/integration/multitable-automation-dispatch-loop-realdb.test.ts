@@ -531,25 +531,46 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
 
   // [#4334 review P1-B] The heartbeat period must be strictly INSIDE the lease (leaseMs/3), not a fixed 1s
   // floor that can equal/exceed a short lease. At the loop minimum lease (1000ms) the heartbeat fires at
-  // ~333ms and renews BEFORE the old 1s floor would have — provable by the lease still having ample margin.
+  // ~333ms and renews BEFORE the old 1s floor would have.
+  //
+  // Proof shape (2026-10-09): observe the loop through the pool — the same seam P2-C uses — and stamp the
+  // wall clock when the claim UPDATE and the first renew UPDATE are ISSUED. The earlier probe slept a fixed
+  // 600 ms and then required the lease to still have > 500 ms left, which races a timer against a DB
+  // round-trip with a ~270 ms margin: on a shared self-hosted runner it failed twice with the 'never
+  // renewed' signature (400 ms, then 0 ms) while the heartbeat itself was correct. Issue-time stamps are
+  // unaffected by store latency and tolerate event-loop stalls of up to ~650 ms before a false failure.
   test('P1-B: at the minimum lease the heartbeat renews well before the old 1s floor', async () => {
     const key = `ck_${RUN}_hbmin`
     const id = await seedRow(key)
+    const real = db()
+    let claimIssuedAt: number | null = null
+    const renewIssuedAt: number[] = []
+    const observed: Queryable = {
+      query: async (sql, params) => {
+        // claimDueConsumers: the only statement that decides between dead_letter and in_progress in a CASE.
+        if (claimIssuedAt === null && /THEN 'dead_letter' ELSE 'in_progress'/.test(sql)) claimIssuedAt = Date.now()
+        // renewConsumerLease: the only `SET lease_expires_at` with no `last_error` (see P2-C).
+        if (/SET\s+lease_expires_at/.test(sql) && !/last_error/.test(sql)) renewIssuedAt.push(Date.now())
+        return real.query(sql, params)
+      },
+    }
     const r = new ConsumerAdapterRegistry()
     r.register(
       adapter(key, async () => {
-        await new Promise((res2) => setTimeout(res2, 1_200))
+        await new Promise((res2) => setTimeout(res2, 1_200)) // runs past the 1000ms lease: only the heartbeat keeps it
         return { outcome: 'success' }
       }),
     )
-    const tick = runDispatchTick(db(), r, { leaseMs: 1_000, adapterTimeoutMs: 9_000 })
-    await new Promise((res2) => setTimeout(res2, 600)) // t≈600ms: after the ~333ms heartbeat, before 1000ms
-    const mid = await readRow(id, key)
-    expect(mid.status).toBe('in_progress')
-    // renewed at ~333ms → lease≈1333 → remaining≈733; a fixed-1s-floor heartbeat would NOT have fired yet (≈400).
-    expect(Number(mid.lease_remaining_ms)).toBeGreaterThan(500)
-    const res = await tick
+    const res = await runDispatchTick(observed, r, { leaseMs: 1_000, adapterTimeoutMs: 9_000 })
     expect(res.completed).toBe(1)
+    expect(claimIssuedAt).not.toBeNull()
+    expect(renewIssuedAt.length).toBeGreaterThan(0) // the heartbeat renewed during the 1.2 s adapter
+    const firstRenewAfterClaimMs = renewIssuedAt[0] - (claimIssuedAt as number)
+    // A fixed-1s-floor heartbeat would issue its first renew at >= 1000 ms (if ever, before the lease lapsed);
+    // leaseMs/3 issues it at ~333 ms. Timers never fire early, so the first renew cannot precede leaseMs/3.
+    expect(firstRenewAfterClaimMs).toBeLessThan(1_000)
+    expect(firstRenewAfterClaimMs).toBeGreaterThanOrEqual(300)
+    expect((await readRow(id, key)).status).toBe('done')
   }, 15_000)
 
   // [#4334 review P1-B] Two REAL dispatchers (not manual fence++): while A runs a long adapter under a legal
