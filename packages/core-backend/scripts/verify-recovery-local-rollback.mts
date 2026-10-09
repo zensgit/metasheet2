@@ -1,8 +1,11 @@
 /** Test-only ordinary-server flag-OFF witness for the owned APFS backup driver. */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
+import { lstat, open, readdir } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { connect } from 'node:net'
+import { join } from 'node:path'
 import type { Pool } from 'pg'
 
 const require = createRequire(import.meta.url)
@@ -30,9 +33,9 @@ async function snapshot(pool: Pool, sheetId: string) {
     assert.ok(names.includes(required), 'RECOVERY_LOCAL_ROLLBACK_TABLE_MISSING')
   }
   const result: Array<{ table: string; count: number; digest: string }> = []
-  for (const table of [...names, 'meta_records', 'meta_record_revisions']) {
-    assert.match(table, /^meta_[a-z0-9_]+$/)
-    const scoped = table === 'meta_records' || table === 'meta_record_revisions'
+  for (const table of [...names, 'meta_records', 'meta_record_revisions', 'multitable_attachments']) {
+    assert.match(table, /^(?:meta|multitable)_[a-z0-9_]+$/)
+    const scoped = table === 'meta_records' || table === 'meta_record_revisions' || table === 'multitable_attachments'
     const rows = await pool.query(
       `SELECT to_jsonb(entry) AS value FROM public."${table}" entry
         ${scoped ? 'WHERE sheet_id=$1' : ''} ORDER BY to_jsonb(entry)::text`,
@@ -44,10 +47,43 @@ async function snapshot(pool: Pool, sheetId: string) {
   return result
 }
 
+async function snapshotAttachmentFiles(root: string) {
+  try {
+    assert.equal((await lstat(root)).isDirectory(), true, 'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_ENTRY_REFUSED')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false, count: 0, digest: '' }
+    throw error
+  }
+  const entries: Array<Record<string, string>> = []
+  async function visit(path: string, relative: string): Promise<void> {
+    const stat = await lstat(path, { bigint: true })
+    assert.equal(stat.isDirectory() || stat.isFile(), true, 'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_ENTRY_REFUSED')
+    const entry: Record<string, string> = { path: relative, kind: stat.isDirectory() ? 'directory' : 'file',
+      dev: String(stat.dev), ino: String(stat.ino), mode: String(stat.mode),
+      mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs) }
+    entries.push(entry)
+    if (stat.isDirectory()) {
+      for (const name of (await readdir(path)).sort()) await visit(join(path, name), relative ? `${relative}/${name}` : name)
+    } else {
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const opened = await handle.stat({ bigint: true })
+        assert.equal(opened.isFile(), true, 'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_ENTRY_REFUSED')
+        assert.deepEqual([opened.dev, opened.ino], [stat.dev, stat.ino], 'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_ENTRY_REFUSED')
+        entry.digest = createHash('sha256').update(await handle.readFile()).digest('hex')
+      } finally { await handle.close() }
+    }
+  }
+  await visit(root, '')
+  return { exists: true, count: entries.filter(entry => entry.kind === 'file').length,
+    digest: createHash('sha256').update(JSON.stringify(entries)).digest('hex') }
+}
+
 async function run(input: ManualRollbackInput): Promise<ManualRollbackResult> {
   assert.equal(process.env.NODE_ENV, 'test')
   assert.equal(process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED, 'false')
   assert.equal(process.env.MULTITABLE_ENABLE_WRITER_FENCE, 'false')
+  assert.equal(typeof process.env.ATTACHMENT_PATH, 'string')
   const { Pool: PgPool } = require('pg') as typeof import('pg')
   const pool = new PgPool({ connectionString: process.env.DATABASE_URL, max: 2,
     application_name: 'tm_local_rollback', connectionTimeoutMillis: 1000 })
@@ -56,6 +92,7 @@ async function run(input: ManualRollbackInput): Promise<ManualRollbackResult> {
     assert.deepEqual((await pool.query('SELECT current_database() AS name')).rows,
       [{ name: input.databaseName }], 'RECOVERY_LOCAL_ROLLBACK_DATABASE_MISMATCH')
     const before = await snapshot(pool, input.identity.sheetId)
+    const beforeAttachmentFiles = await snapshotAttachmentFiles(process.env.ATTACHMENT_PATH!)
     const { MetaSheetServer } = require('../src/index.ts') as typeof import('../src/index')
     server = new MetaSheetServer({ host: '127.0.0.1', port: 0, manageProcessSignals: false })
     await server.start()
@@ -101,6 +138,8 @@ async function run(input: ManualRollbackInput): Promise<ManualRollbackResult> {
     assert.equal(listening, false, 'RECOVERY_LOCAL_ROLLBACK_LISTENER_RESIDUE')
     assert.deepEqual(await snapshot(pool, input.identity.sheetId), before,
       'RECOVERY_LOCAL_ROLLBACK_UNEXPECTED_WRITE')
+    assert.deepEqual(await snapshotAttachmentFiles(process.env.ATTACHMENT_PATH!), beforeAttachmentFiles,
+      'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_FILES_CHANGED')
     return { responses, tableCount: before.length }
   } finally {
     try { await server?.stop('RECOVERY_LOCAL_ROLLBACK_CLEANUP') }
