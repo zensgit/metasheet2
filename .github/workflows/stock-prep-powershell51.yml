@@ -55,7 +55,7 @@ jobs:
       # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
       # different native-stderr semantics and cannot stand in for the target shell contract.
       - name: Run target-shell smoke capture regression
-        shell: powershell
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
@@ -76,7 +76,7 @@ jobs:
       # here. Both shells are exercised: the deploy path runs under whichever PowerShell the operator
       # host provides, and 5.1's native-stderr semantics differ from pwsh 7's.
       - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
-        shell: powershell
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `

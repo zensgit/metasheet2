@@ -507,7 +507,7 @@ const WINDOWS_JOB_HEADER_CODE = `
 const WINDOWS_ACL_STEP_NAME = '      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)'
 const WINDOWS_ACL_STEP_CODE = String.raw`
       - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
-        shell: powershell
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File ${'`'}
