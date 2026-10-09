@@ -178,6 +178,14 @@ on:
       - 'apps/web/tests/useAuth.spec.ts'
       - 'apps/web/tests/useSessionOrg.spec.ts'
       - 'apps/web/tests/AttendanceSessionOrgSwitcher.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryApproverList.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryAttendancePanel.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryCenterRoute.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryContract.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryCore.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryDetailView.spec.ts'
+      - 'apps/web/tests/cancelRoundEntrySurfaces.spec.ts'
+      - 'apps/web/tests/cancelRoundEntryTodoCenter.spec.ts'
       - 'apps/web/tests/useAttendanceSessionGuard.spec.ts'
       - 'apps/web/tests/api.spec.ts'
       - 'apps/web/src/views/AttendanceView.vue'
@@ -339,6 +347,14 @@ jobs:
               apps/web/tests/attendance-import-header-recognition.spec.ts|\
               apps/web/tests/attendance-import-xlsx-convert.spec.ts|\
               apps/web/tests/useAttendanceAdminImportBatches.spec.ts|\
+              apps/web/tests/cancelRoundEntryApproverList.spec.ts|\
+              apps/web/tests/cancelRoundEntryAttendancePanel.spec.ts|\
+              apps/web/tests/cancelRoundEntryCenterRoute.spec.ts|\
+              apps/web/tests/cancelRoundEntryContract.spec.ts|\
+              apps/web/tests/cancelRoundEntryCore.spec.ts|\
+              apps/web/tests/cancelRoundEntryDetailView.spec.ts|\
+              apps/web/tests/cancelRoundEntrySurfaces.spec.ts|\
+              apps/web/tests/cancelRoundEntryTodoCenter.spec.ts|\
               apps/web/src/utils/dingtalkContainer.ts|\
               apps/web/tests/dingtalk-container.spec.ts|\
               apps/web/tests/attendance-bulk-balance-adjust.spec.ts|\
@@ -460,7 +476,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot cancelRoundEntryApproverList cancelRoundEntryAttendancePanel cancelRoundEntryCenterRoute cancelRoundEntryContract cancelRoundEntryCore cancelRoundEntryDetailView cancelRoundEntrySurfaces cancelRoundEntryTodoCenter
 
       - name: Install Chromium for makeup request browser regression
         if: steps.changes.outputs.relevant == 'true'
