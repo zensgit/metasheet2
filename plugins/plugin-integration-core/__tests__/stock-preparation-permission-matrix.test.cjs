@@ -116,9 +116,9 @@ const OPERATOR_CONFIRM = Object.freeze({ id: 'u_op_confirm', tenantId: TENANT_ID
 const OPERATOR_ORPHAN_OPERATE = Object.freeze({ id: 'u_op_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_OPERATE] })
 const WORKBENCH_ADMIN = Object.freeze({ id: 'u_wb_admin', tenantId: TENANT_ID, permissions: [STOCK_PREP_ADMIN] })
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
-// R-33 (2026-10-08): the 拉取人员 — read + operate + pull. On THIS manifest (the confirmation-queue
-// control set) the pull code adds nothing: the pull routes are not manifest members (see the
-// operator-pull-gate suite), so this actor must answer exactly as `operatorConfirm` does.
+// R-33 (2026-10-08): the 拉取人员 — read + operate + pull. The pull-bom routes are not manifest
+// members (see the operator-pull-gate suite); since S2 (R-36) the manifest carries ONE pull-tier
+// capability, `projectTarget.create`, so this actor answers as `operatorConfirm` plus exactly that.
 const PULLER = Object.freeze({ id: 'u_puller', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
 // The DEGENERATE pull grant: pull alone. Must confer nothing — it is a pull code, not a value code.
 const PULL_ORPHAN = Object.freeze({ id: 'u_pull_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_PULL] })
@@ -353,6 +353,14 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // read and then 404s downstream (the shared mount()'s provisioning knows only the LEDGER object),
   // which is exactly the "gate let it through, something else happened" case M-01 measures.
   'confirmationQueue.projectBoard': () => ({ params: { projectNo: PROJECT_NO } }),
+  // 一个项目一张备料表 (S2, R-36). The shared mount() leaves MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  // unset, so a 'pass' actor lands PAST the gate on 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED —
+  // a refusal by CONFIG, not by permission (the routes check the gate first, the switch second), which
+  // is exactly the "gate let it through, something else happened" case M-01 measures. The routes
+  // themselves, switch on, are driven tier by tier in stock-preparation-project-target-routes.test.cjs.
+  'projectTarget.read': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.create': () => ({ params: { projectNo: PROJECT_NO }, body: {} }),
+  'projectTarget.list': () => ({ query: {} }),
 })
 
 async function callCapability(routes, capability, user, extra = {}) {
@@ -390,6 +398,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -403,6 +414,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -416,6 +430,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -429,6 +446,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -442,6 +462,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -455,6 +478,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -468,6 +494,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -481,11 +510,14 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
-  // R-33: the 拉取人员 answers exactly as the confirming operator on THIS manifest — the pull code
-  // opens the pull routes (not members here) and nothing in the queue control set.
+  // R-33 / R-36: the 拉取人员 answers as the confirming operator plus the ONE pull-tier member of
+  // this manifest, the project-sheet create (S2). The pull-bom routes stay non-members.
   puller: Object.freeze({
     'confirmationQueue.readiness': 'pass',
     'confirmationQueue.list': 'pass',
@@ -496,6 +528,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'pass',
     'handoff.advance': 'pass',
     'confirmationQueue.projectBoard': 'pass',
+    'projectTarget.read': 'pass',
+    'projectTarget.create': 'pass',
+    'projectTarget.list': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -509,6 +544,9 @@ const MATRIX = Object.freeze({
     'handoff.read': 'gate',
     'handoff.advance': 'gate',
     'confirmationQueue.projectBoard': 'gate',
+    'projectTarget.read': 'gate',
+    'projectTarget.create': 'gate',
+    'projectTarget.list': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -883,17 +921,9 @@ function stockPrepGatedHandlersInSource(src) {
 const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze([
   'stockPreparationPreflight',
   'stockPreparationManagedTableRelabel',
-  // 一个项目一张备料表 S1 (ADR adr-stock-prep-project-sheets-20261008 §10): the three project-sheet
-  // routes are exempt FOR NOW, for a reason that expires with S2. They sit behind the default-OFF
-  // switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED and answer 404 DISABLED without it, so no
-  // control on the confirmation-queue view can be alive for them in this slice — S2 (R-36) adds the
-  // 「新建备料表并拉取」 / 「直接打开」 controls and MUST then move all three into the manifest (with
-  // control ids) and delete these three lines. Their gates are pinned on their own below:
-  // Create is PULL (the R-35 exception), Get and List are OPERATE (the board's tier), and the
-  // project-target routes suite drives every tier through them.
-  'stockPreparationProjectTargetCreate',
-  'stockPreparationProjectTargetGet',
-  'stockPreparationProjectTargetList',
+  // (S1's three project-sheet handlers were exempt here until S2 shipped their controls; S2 / R-36
+  // moved them into STOCK_PREP_WORKBENCH_CAPABILITIES as projectTarget.read / .create / .list and
+  // deleted the exemption, as the S1 note required.)
 ])
 
 function everyStockPrepGatedRouteIsInTheManifest() {
@@ -951,10 +981,12 @@ async function orphanOperateGrantConfersNothing() {
   assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_READ), false, 'M-05: pull alone does not satisfy read')
   assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_OPERATE), false, 'M-05: pull alone does not satisfy operate')
   assert.deepEqual(grantedStockPrepCapabilities([STOCK_PREP_PULL]), [], 'M-05: pull alone renders nothing')
+  // S2 (R-36): the pull code adds EXACTLY the project-sheet create to the operator tier on this
+  // manifest — the one PULL-gated member — and nothing else.
   assert.deepEqual(
     grantedStockPrepCapabilities([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
-    grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
-    'M-05: on this manifest the pull code adds no capability to the operator tier',
+    [...grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]), 'projectTarget.create'].sort(),
+    'M-05: on this manifest the pull code adds exactly projectTarget.create to the operator tier',
   )
   // And the conjunction is the ONLY thing standing between that grant and a misaligned actor: adding
   // read turns it into the full operator tier.
@@ -979,6 +1011,10 @@ async function orphanOperateGrantConfersNothing() {
       // both appear here and neither appears for the orphan-operate grant above.
       'handoff.advance',
       'handoff.read',
+      // 一个项目一张备料表 (S2, R-36): the floor reads its project's sheet state and the tenant's
+      // registry list (both OPERATE); creating a sheet is PULL and is NOT here.
+      'projectTarget.list',
+      'projectTarget.read',
     ],
     'M-05: operate + read is the full operator tier',
   )
@@ -1432,6 +1468,10 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'confirmationQueue.projectBoard',
   'handoff.read',
   'handoff.advance',
+  // 一个项目一张备料表 (S2): all three derive the tenant through `resolveOperatorValueScope`.
+  'projectTarget.read',
+  'projectTarget.create',
+  'projectTarget.list',
 ])
 
 function outcomeOf(res) {
