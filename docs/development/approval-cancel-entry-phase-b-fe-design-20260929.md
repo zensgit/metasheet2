@@ -89,7 +89,7 @@
 | `status_resolving` | —(非 V 词) | 撤销结果读取中 | Loading cancellation result | neutral | — |
 | `status_unavailable` | —(非 V 词) | 撤销结果暂时无法读取 | Cancellation result unavailable | neutral | — |
 
-- 自助面在 V1 / V3–V6 旁另写「请假仍然有效」,V2 不写(词本身是「请假已取消」)。
+- 自助面在 V1 / V3–V6 旁另写「请假仍然有效」,V2 不写(词本身是「请假已取消」)。**限定(2026-10-08 审阅方 F2,修复于 #6274):** 只在请假行仍为 `approved`、且块码不是 `CANCEL_ROUND_DOCUMENT_NOT_APPROVED` 时写这句;请假已取消或该块码出现时,V1 / V3–V6 旁不写。
 - **系统终结与审批人驳回的判据** = 锁 lock:131 那一条(系统终结身份 + `cancelRoundCloseReason`):
   - 自助面:摘要的 `status` / `outcome`(`expired` / `blocked` 与 `rejected` 是不同 outcome)。
   - 审批详情(`getApproval`):DTO 白名单投影 `cancelRoundCloseReason`;有 ⇒ V5 / V6,无 ⇒ V3。

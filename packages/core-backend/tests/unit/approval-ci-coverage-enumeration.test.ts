@@ -539,6 +539,14 @@ describe('T1 — apps/web/tests/{approval,cancelRound}*.{test,spec}.ts (FE unit/
     expect(files.length).toBeGreaterThan(0)
   })
 
+  // Per-arm negative control: the union count above is satisfied by `approval*` alone, so reverting the
+  // glob to `^approval` would silently drop the eight `cancelRoundEntry*` specs and stay green (gate
+  // mutation X13, 2026-10-09). Count the arm on its own.
+  it('tier glob keeps the cancelRound arm (per-arm negative control)', () => {
+    expect(files.filter((name) => name.startsWith('cancelRound')).length).toBeGreaterThanOrEqual(8)
+    expect(files.filter((name) => name.startsWith('approval')).length).toBeGreaterThan(0)
+  })
+
   for (const file of files) {
     it(`is wired: apps/web/tests/${file}`, () => {
       const repoPath = `apps/web/tests/${file}`

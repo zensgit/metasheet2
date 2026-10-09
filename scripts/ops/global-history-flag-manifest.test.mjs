@@ -244,7 +244,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
   for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
 })
 
-test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
+test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src and plugins/plugin-attendance', () => {
   const sourceGH = globalHistoryFlagsInSource()
   assert.ok(
     sourceGH.length >= 20,
