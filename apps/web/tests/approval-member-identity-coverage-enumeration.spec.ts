@@ -186,6 +186,29 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustNotContain: ['item.actorName ?? item.actorId', 'item.actorName || item.actorId'],
     }],
   },
+  // Test report 2026-10-08 T4b: the 表单信息 「人员」 (user) value — the site the 2026-08-19 sweep missed,
+  // because it rendered through a helper (`formatDisplayValue`'s `default: String(value)`), the
+  // census's documented KNOWN EVASION shape. Every surface that formats a form `user` value (the
+  // detail page's top-level fields and 明细 columns, and the list summary line) now goes through
+  // `formatUserFieldValue` with the directory lookup.
+  {
+    site: 'detailField.ts / ApprovalDetailView.vue / useApprovalListFieldSummary.ts — form user (人员) values (formatUserFieldValue)',
+    coverage: ['src/approvals/detailField.ts', 'approval-detail-record-table.spec.ts', 'the 表单信息 人员 field shows the directory-resolved name, and the stored id appears nowhere on the page'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/detailField.ts',
+        mustContain: ['export function formatUserFieldValue', "case 'user':", 'return formatUserFieldValue(value, resolveUserName, isZh)'],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: ['resolveUserName: getResolvedUserName', "if (column?.type === 'user') return formatUserFieldValue(value, getResolvedUserName, isZh.value)"],
+      },
+      {
+        file: 'src/approvals/useApprovalListFieldSummary.ts',
+        mustContain: ['summaryFields(schema, row.formSnapshot, limit, isZh, getResolvedUserName)'],
+      },
+    ],
+  },
   // raw-id-render fix (2026-08-19; census 3rd missed site) — the requester-choice submit-time
   // approver picker (Lock-1 §K2). The site the hand-list had NO entry for at all. Fixed to the
   // same contract as ApprovalUserPicker (values-free ordinal + disabled-when-unidentifiable), plus
@@ -450,6 +473,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'conditionFormulaDryRunResult(node.key, branch.edgeKey)'],
+    // T5a (test report 2026-10-08): the branch-delete refusal reason — the node/edge keys are only
+    // the lookup arguments; the rendered text is a fixed business-language sentence
+    // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],

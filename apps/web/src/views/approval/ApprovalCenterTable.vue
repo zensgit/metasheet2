@@ -28,9 +28,10 @@
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
         <!-- B3-02 (行级未读): a dot ONLY when the caller opts in (pending tab) AND the server
              resolved this row as unread (`isRead === false`, never a guessed/inverted default —
-             `undefined` on every other tab renders no dot). -->
+             `undefined` on every other tab renders no dot). Test report 2026-10-08: OR when the
+             caller's own `unreadDotFor` predicate says so (抄送我的 while its badge is on). -->
         <span
-          v-if="showUnreadDot && row.isRead === false"
+          v-if="(showUnreadDot && row.isRead === false) || (unreadDotFor && unreadDotFor(row))"
           class="approval-center__unread-dot"
           data-testid="approval-row-unread-dot"
         />
@@ -136,6 +137,12 @@ const props = withDefaults(
      */
     showUnreadDot?: boolean
     /**
+     * Test report 2026-10-08 — the same dot for a tab whose unread rule is NOT `isRead`
+     * (抄送我的: `ccUnread`). The caller passes the predicate only while that tab's badge switch
+     * is on; `undefined` (the default, and every tab before this) renders no extra dot.
+     */
+    unreadDotFor?: (row: UnifiedApprovalDTO) => boolean
+    /**
      * UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail
      * pane's currently-selected row id. `undefined`/`null` (every caller before UI-7, and every
      * caller on narrower widths/mobile) renders no marker class at all — purely additive.
@@ -148,6 +155,7 @@ const props = withDefaults(
     showWaitColumn: false,
     actionsWidth: 150,
     showUnreadDot: false,
+    unreadDotFor: undefined,
     selectedRowId: null,
   },
 )

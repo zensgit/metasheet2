@@ -92,6 +92,40 @@ describe('date-only cells show YYYY-MM-DD', () => {
   })
 })
 
+// #6204 (#6181 edges 2–4): ONE rule with the server's formatDateOnlyValue (core-backend date-time-wall-clock.ts) —
+// the server spec (multitable-datetime-wall-clock.test.ts) carries the same inputs with the same expectations.
+describe('date-only edge inputs: the same day (or no day) as the server', () => {
+  const field: MetaField = { id: 'due', name: 'Due', type: 'date' }
+
+  it('an ISO-ish day with a designator glued on (`2026-09-18Z`) names no day — never the browser day', () => {
+    // Date.parse reads it as UTC midnight; the old fallback then took the BROWSER's calendar day of that instant
+    // (09-17 west of UTC). No time part, so it is not an instant either: the cell shows the raw text.
+    expect(formatDateOnlyValue('2026-09-18Z')).toBeNull()
+    expect(formatDateOnlyValue('2026-09-18z')).toBeNull()
+    expect(formatFieldDisplay({ field, value: '2026-09-18Z' })).toBe('2026-09-18Z')
+    // With a time it IS an instant (both sides): its business day.
+    expect(formatDateOnlyValue('2026-09-17T16:00Z')).toBe('2026-09-18')
+  })
+
+  it('PostgreSQL text form with an hour-only offset is an instant on its business day', () => {
+    expect(formatDateOnlyValue('2026-09-17 16:00:00+00')).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-17 15:59:59+00')).toBe('2026-09-17')
+    expect(formatDateOnlyValue('2026-09-17 16:00:00.123456+00')).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-18 00:00:00+08')).toBe('2026-09-18')
+  })
+
+  it('a string that is just a number names no day (never a year, a 2001 month, a yyyymmdd or an epoch)', () => {
+    for (const text of ['2026', '5', '0', '-1', '+5', '20260918', '1758211200000', '46283.5', '2026.9']) {
+      expect(formatDateOnlyValue(text)).toBeNull()
+    }
+    expect(formatFieldDisplay({ field, value: '2026' })).toBe('2026')
+  })
+
+  it('an epoch-ms NUMBER stays an instant (both sides): its business day', () => {
+    expect(formatDateOnlyValue(Date.parse('2026-09-17T16:00:00.000Z'))).toBe('2026-09-18')
+  })
+})
+
 // The same `YYYY-MM-DD` on the text surfaces that do not go through formatFieldDisplay: group header / client
 // export (dateTimeExportText) and a lookup of a `date` column (display + export).
 describe('date-only text surfaces beyond the cell', () => {

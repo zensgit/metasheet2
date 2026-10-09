@@ -204,7 +204,7 @@
             {{ postureLabel(defaults.permissions.posture) }}
           </em>
           <small class="stock-prep-install__hint">
-            {{ bi('这三项的名字与含义由应用固定,安装过程不会改动。', 'The three are fixed by the application; installing does not change them.') }}
+            {{ bi('这些权限的名字与含义由应用固定,安装过程不会改动。', 'These are fixed by the application; installing does not change them.') }}
           </small>
         </li>
       </ul>

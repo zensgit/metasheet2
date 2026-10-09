@@ -14,8 +14,7 @@ import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
 import {
   businessTodayKey,
-  calendarDayFromText,
-  formatBusinessTimestamp,
+  formatDateOnlyValue,
   formatDateTimeInZone,
   getBusinessTimezone,
   parseDateTimeInput,
@@ -23,34 +22,10 @@ import {
 } from './business-timezone'
 import { getLookupTargetField } from './lookup-target-fields'
 
-// Text that carries a time of day (`2026-09-18T16:00:00.000Z`, `2026-09-18 08:00`): an instant, not a day as
-// written. A bare day (`2026-09-18`, `2026/9/18`, `2026年9月18日`) has none.
-const DATE_TIME_TEXT_RE = /[T\s]\d{1,2}:\d{2}/
-
-/**
- * R61 上机观察 2026-09-30 (客户反馈 #4c follow-up): a `date` cell is a calendar day and is shown as `YYYY-MM-DD`
- * — the same spelling as the day half of a `dateTime` cell — never the browser locale's month name
- * (`18 Sept 2026` under zh-CN, `Sep 18, 2026` under en-US). Two stored shapes exist: a day as written (the
- * `<input type="date">` editor stores `YYYY-MM-DD`) keeps that day; an instant (the PLM refresh writes ISO
- * instants into the managed table's date columns) is the day it falls on in the business timezone, so every
- * viewer sees the same day. `null` when the value is empty or names no day (callers keep their own fallback).
- */
-export function formatDateOnlyValue(value: unknown): string | null {
-  if (value === null || value === undefined || value === '') return null
-  const text = typeof value === 'string' ? value.trim() : value
-  if (typeof text === 'string' && !DATE_TIME_TEXT_RE.test(text)) {
-    const day = calendarDayFromText(text)
-    if (day) return day
-  }
-  // A spelling the business-timezone parser refuses but `Date.parse` accepts (`9/18/2026 16:00`) still names a
-  // day: keep it as written rather than echoing the raw text. A value outside the `Date` range (a stray epoch
-  // like 1e20) must not throw out of a cell renderer — it names no day.
-  try {
-    return formatBusinessTimestamp(text, { precision: 'day' }) ?? (typeof text === 'string' ? calendarDayFromText(text) : null)
-  } catch {
-    return null
-  }
-}
+// #6204: the date-only day key lives in ./business-timezone.ts (beside the parsers it is built on) so the
+// conditional-formatting rules — which this module imports — can use the SAME function as the grid without an
+// import cycle. Re-exported here: every existing `field-display` import keeps working.
+export { formatDateOnlyValue }
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'

@@ -47,6 +47,14 @@ const props = defineProps<{
   nodeTypeLabel: (type: string) => string
   canvasNodeByKey: (nodeKey: string) => ApprovalNode | undefined
   canMoveCanvasNode: (nodeKey: string) => boolean
+  /**
+   * T5b (test report 2026-10-08) — D0 §3.4 / §15: an insertion menu lists only the node types valid
+   * at that slot. A gateway's fork edge (its source has several outgoing edges) accepts NO insert
+   * command today, so its 「+」 used to open a menu whose every item failed ("当前连线不能插入这种
+   * 节点"). Edges for which this returns false render no insertion control at all. Optional so
+   * harnesses that mount the canvas alone keep every control (absent ⇒ insertable).
+   */
+  canInsertOnEdge?: (edgeKey: string) => boolean
   canInsertParallelOnEdge: (edgeKey: string) => boolean
   // Lock-3 §1.3/§1.5: hide 办理人 on any edge inside a parallel region (a handler is linear-only in v1).
   canInsertHandlerOnEdge: (edgeKey: string) => boolean
@@ -85,6 +93,10 @@ function onViewportScroll(): void {
 defineExpose({
   getViewportEl: (): HTMLElement | null => canvasViewportRef.value,
 })
+
+function edgeAcceptsInsert(edgeKey: string): boolean {
+  return props.canInsertOnEdge ? props.canInsertOnEdge(edgeKey) : true
+}
 
 function nodePosStyle(pos: NodeLayout): CSSProperties {
   return {
@@ -326,99 +338,100 @@ function canvasNodeAccName(nodeKey: string): string {
                 </div>
               </el-tooltip>
             </div>
-            <div
-              v-for="line in canvasEdgeLines"
-              v-show="!readOnly && !movingCanvasNode"
-              :key="`edge-insert-${line.key}`"
-              class="template-authoring__canvas-edge-insert"
-              :class="{ 'is-open': edgeInsertMenuEdgeKey === line.key }"
-              :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
-              data-testid="approval-canvas-edge-insert"
-              :data-edge-key="line.key"
-            >
-              <button
-                type="button"
-                class="template-authoring__canvas-edge-insert-btn"
-                aria-label="在此连线插入节点"
-                title="在此连线插入节点"
-                :aria-expanded="edgeInsertMenuEdgeKey === line.key"
-                :data-testid="`approval-canvas-edge-insert-${line.key}`"
-                @click.stop="emit('toggle-edge-insert', line.key)"
-              >
-                +
-              </button>
+            <template v-for="line in canvasEdgeLines" :key="`edge-insert-${line.key}`">
               <div
-                v-if="edgeInsertMenuEdgeKey === line.key"
-                class="template-authoring__canvas-edge-insert-menu"
-                role="menu"
-                data-testid="approval-canvas-edge-insert-menu"
-                @click.stop
-                @pointerdown.stop
+                v-if="edgeAcceptsInsert(line.key)"
+                v-show="!readOnly && !movingCanvasNode"
+                class="template-authoring__canvas-edge-insert"
+                :class="{ 'is-open': edgeInsertMenuEdgeKey === line.key }"
+                :style="{ left: `${line.dropX}px`, top: `${line.dropY}px` }"
+                data-testid="approval-canvas-edge-insert"
+                :data-edge-key="line.key"
               >
                 <button
                   type="button"
-                  role="menuitem"
-                  aria-label="插入审批节点"
-                  data-testid="approval-canvas-edge-insert-approval"
-                  @click.stop="emit('edge-insert-approval', line.key)"
+                  class="template-authoring__canvas-edge-insert-btn"
+                  aria-label="在此连线插入节点"
+                  title="在此连线插入节点"
+                  :aria-expanded="edgeInsertMenuEdgeKey === line.key"
+                  :data-testid="`approval-canvas-edge-insert-${line.key}`"
+                  @click.stop="emit('toggle-edge-insert', line.key)"
                 >
-                  <span class="template-authoring__canvas-edge-insert-icon is-approval" aria-hidden="true">
-                    <el-icon><User /></el-icon>
-                  </span>
-                  审批人
+                  +
                 </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-label="插入抄送节点"
-                  data-testid="approval-canvas-edge-insert-cc"
-                  @click.stop="emit('edge-insert-cc', line.key)"
+                <div
+                  v-if="edgeInsertMenuEdgeKey === line.key"
+                  class="template-authoring__canvas-edge-insert-menu"
+                  role="menu"
+                  data-testid="approval-canvas-edge-insert-menu"
+                  @click.stop
+                  @pointerdown.stop
                 >
-                  <span class="template-authoring__canvas-edge-insert-icon is-cc" aria-hidden="true">
-                    <el-icon><Promotion /></el-icon>
-                  </span>
-                  抄送人
-                </button>
-                <button
-                  v-if="canInsertHandlerOnEdge(line.key)"
-                  type="button"
-                  role="menuitem"
-                  aria-label="插入办理节点"
-                  data-testid="approval-canvas-edge-insert-handler"
-                  @click.stop="emit('edge-insert-handler', line.key)"
-                >
-                  <span class="template-authoring__canvas-edge-insert-icon is-handler" aria-hidden="true">
-                    <el-icon><Tickets /></el-icon>
-                  </span>
-                  办理人
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-label="插入条件分支"
-                  data-testid="approval-canvas-edge-insert-condition"
-                  @click.stop="emit('edge-insert-condition', line.key)"
-                >
-                  <span class="template-authoring__canvas-edge-insert-icon is-condition" aria-hidden="true">
-                    <el-icon><Share /></el-icon>
-                  </span>
-                  条件分支
-                </button>
-                <button
-                  v-if="canInsertParallelOnEdge(line.key)"
-                  type="button"
-                  role="menuitem"
-                  aria-label="插入并行分支"
-                  data-testid="approval-canvas-edge-insert-parallel"
-                  @click.stop="emit('edge-insert-parallel', line.key)"
-                >
-                  <span class="template-authoring__canvas-edge-insert-icon is-parallel" aria-hidden="true">
-                    <el-icon><Connection /></el-icon>
-                  </span>
-                  并行分支
-                </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label="插入审批节点"
+                    data-testid="approval-canvas-edge-insert-approval"
+                    @click.stop="emit('edge-insert-approval', line.key)"
+                  >
+                    <span class="template-authoring__canvas-edge-insert-icon is-approval" aria-hidden="true">
+                      <el-icon><User /></el-icon>
+                    </span>
+                    审批人
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label="插入抄送节点"
+                    data-testid="approval-canvas-edge-insert-cc"
+                    @click.stop="emit('edge-insert-cc', line.key)"
+                  >
+                    <span class="template-authoring__canvas-edge-insert-icon is-cc" aria-hidden="true">
+                      <el-icon><Promotion /></el-icon>
+                    </span>
+                    抄送人
+                  </button>
+                  <button
+                    v-if="canInsertHandlerOnEdge(line.key)"
+                    type="button"
+                    role="menuitem"
+                    aria-label="插入办理节点"
+                    data-testid="approval-canvas-edge-insert-handler"
+                    @click.stop="emit('edge-insert-handler', line.key)"
+                  >
+                    <span class="template-authoring__canvas-edge-insert-icon is-handler" aria-hidden="true">
+                      <el-icon><Tickets /></el-icon>
+                    </span>
+                    办理人
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label="插入条件分支"
+                    data-testid="approval-canvas-edge-insert-condition"
+                    @click.stop="emit('edge-insert-condition', line.key)"
+                  >
+                    <span class="template-authoring__canvas-edge-insert-icon is-condition" aria-hidden="true">
+                      <el-icon><Share /></el-icon>
+                    </span>
+                    条件分支
+                  </button>
+                  <button
+                    v-if="canInsertParallelOnEdge(line.key)"
+                    type="button"
+                    role="menuitem"
+                    aria-label="插入并行分支"
+                    data-testid="approval-canvas-edge-insert-parallel"
+                    @click.stop="emit('edge-insert-parallel', line.key)"
+                  >
+                    <span class="template-authoring__canvas-edge-insert-icon is-parallel" aria-hidden="true">
+                      <el-icon><Connection /></el-icon>
+                    </span>
+                    并行分支
+                  </button>
+                </div>
               </div>
-            </div>
+            </template>
           </div>
         </div>
       </div>

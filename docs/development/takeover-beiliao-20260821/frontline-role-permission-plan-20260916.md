@@ -141,3 +141,15 @@ Claude 不接触凭据，这一步必须由 owner 或客户执行。每步一个
 
 - 备料 base 下第二张表要不要一并授权。
 - **产品层面**：一线日常用的是备料插件自己的页面（走 `stock-prep:read|operate`，从不查多维表权限，今天就能用）。把一线放进多维表网格的唯一理由，是阶段二的送审入口与进度卡片长在记录抽屉里。如果希望一线只待在备料页面，更该做的是把送审入口搬过去，而不是给他们网格权限——那样 §6 的"每新建一张表补一行"也一并消失。
+
+## 10. 2026-10-08 补注：拉取权限移到单独的码（R-33，ADR `adr-stock-prep-project-sheets-20261008` 附录 A）
+
+owner 2026-10-08 裁定：**一线不能从 PLM 拉取，只能填表和做确认**；拉取、新建项目表、归档/恢复由「拉取人员」负责。S0 切片把这一裁决落成代码：
+
+- 新增权限码 `stock-prep:pull`，由迁移 `zzzz20261008120000_add_stock_prep_pull_permission` 播种（只加权限行，不播种角色）。
+- 拉取门从 OPERATE 档改为 PULL 档：`pull` ∧ `operate` ∧ `read` 三码同持才成立；`stock-prep:admin` 与平台管理员不变。覆盖 dry-run、apply、大 BOM 8 个后台路由、reconcile；mvp-persist 仍只给平台管理员。
+- 一线角色 `备料一线操作员`（§1：恰好 `stock-prep:read` + `stock-prep:operate`）**不用改**，仍保留：今天要处理 / 项目备料看板 / 项目查询、确认队列与「等您拿主意」、录入值回读、按项目导出、交接状态与「通知下一步」。失去：项目接入面板的拉取（界面上按钮消失，显示「请联系拉取人员」）。
+- **顺序（演示机 / 任何现场）**：角色**不能在升级前建**——`roles.ts` 对权限目录里没有的码回 400 `UNKNOWN_PERMISSION_CODE`，而 `stock-prep:pull` 的目录行正是本切片的迁移播种的。真实顺序：① 升级（迁移跑，拉取门即时生效，不跟开关走）→ ② 立刻在「角色管理」新建「备料拉取人员」，权限码 `stock-prep:read` + `stock-prep:operate` + `stock-prep:pull`（`PUT /api/roles/:id` 自 #5802 起写入权限集），并把拉取人员账号分配进去 → ③ 若拉取人员是**新账号**，还要给它「开通插件使用」`stock-prep`（`rbac/service.ts` 按命名空间准入过滤有效权限，三个码一起进入；既有一线账号已开通，不用再做）。不要用 SQL 或迁移写角色。只授 `stock-prep:pull` 而不授另外两个码的角色，在两侧都什么也开不了。
+- **窗口期**：从升级到建好角色之间，只有平台管理员 / `stock-prep:admin` / `integration:*` 持有者能拉；一线与未来的拉取人员都不能拉。定时试拉脚本（`scripts/ops/stock-preparation-scheduled-pull.mjs`，只调 dry-run / apply，legacy 门 `integration:read` / `integration:write`）若走 admin 令牌不受影响；若用的是一线账号的 token，升级后会 403，把该账号加进「备料拉取人员」角色，或改用持有 legacy `integration:*` 的账号。
+- **回滚**：迁移的 `down()` 会删掉 `stock-prep:pull` 的**全部**角色绑定与用户绑定；之后重跑 `up()` 只恢复目录行，不恢复绑定。回滚再升级后，须回到「角色管理」给「备料拉取人员」重新勾上这个码。
+- §4 的授权 SQL 与 §8 的实测清单不受影响；给拉取人员的表级授权与一线同形（§4.3），需要时按同一方式补行。

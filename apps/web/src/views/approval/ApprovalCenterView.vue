@@ -360,6 +360,27 @@
       </el-tab-pane>
 
       <el-tab-pane :label="t.tabMine" name="mine">
+        <!-- Test report 2026-10-08 (T6): new-outcome badge — the viewer's own requests decided by
+             someone else and not opened since — ONLY while the server's outcome-badge switch is on
+             (session feature `approvalMineOutcomeBadge`); off ⇒ the plain `t.tabMine` label above
+             and no count request. Its own count — never folded into 待办/未读 (lock B). -->
+        <template v-if="mineOutcomeBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabMine }}</span>
+            <el-tooltip
+              v-if="mineOutcomeUnseenCount > 0"
+              :content="mineOutcomeBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="mineOutcomeUnseenCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-mine-outcome-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
@@ -379,6 +400,7 @@
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'mine' ? selectedApprovalId : null"
           :actions-width="170"
+          :unread-dot-for="mineOutcomeBadgeEnabled ? isOutcomeUnseenRow : undefined"
           @row-click="handleRowClick"
         >
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
@@ -415,6 +437,26 @@
       </el-tab-pane>
 
       <el-tab-pane :label="t.tabCc" name="cc">
+        <!-- Test report 2026-10-08 (T3): unread-CC badge, ONLY while the server's CC-badge switch is
+             on (session feature `approvalCcUnreadBadge`); off ⇒ the plain `t.tabCc` label above, and
+             no count request at all. Its own count — never folded into 待办/未读 above (lock B). -->
+        <template v-if="ccUnreadBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabCc }}</span>
+            <el-tooltip
+              v-if="ccUnreadCount > 0"
+              :content="ccUnreadBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="ccUnreadCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-cc-unread-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
@@ -433,6 +475,7 @@
           :empty-text="tabEmptyText.cc"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'cc' ? selectedApprovalId : null"
+          :unread-dot-for="ccUnreadBadgeEnabled ? isCcUnreadRow : undefined"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -663,8 +706,11 @@ import {
   dispatchAction,
   exportApprovalsCsv,
   getApproval,
+  getCcUnreadCount,
+  getMineOutcomesUnseenCount,
   getPendingCount,
   markAllApprovalsRead,
+  markApprovalRead,
   remindApproval,
   listTemplates,
   type ApprovalCsvExportResult,
@@ -682,6 +728,7 @@ import {
 } from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { ensureUserNamesResolved } from '../../approvals/directoryResolve'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
 import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -705,7 +752,7 @@ const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 // `templateSchemas` cache as a prop). See `useApprovalListFieldSummary.ts` for the full rationale
 // (live-template substitute for the list DTO's missing frozen formSchema, the live-label drift
 // tradeoff, and the session-scoped negative caching on fetch failure).
-const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor } = useApprovalListFieldSummary()
+const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor } = useApprovalListFieldSummary()
 const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.pendingApprovals,
   ...store.myApprovals,
@@ -729,6 +776,12 @@ watch(allVisibleApprovals, (rows) => {
 const { hasFeature } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+
+// Test report 2026-10-08 (T3): the 抄送我的 unread badge + row dots. Mirrors the server switch the
+// count endpoint is gated on; while false nothing below issues a request or renders anything.
+const ccUnreadBadgeEnabled = computed(() => hasFeature('approvalCcUnreadBadge'))
+// Test report 2026-10-08 (T6): the 我发起的 new-outcome badge + row dots, same discipline.
+const mineOutcomeBadgeEnabled = computed(() => hasFeature('approvalMineOutcomeBadge'))
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
 // Reuses the SAME matchMedia-based composable/pattern as `isMobileLayout` above (a second,
@@ -801,6 +854,17 @@ const paneShowQuickActions = computed(() => {
   return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row)
 })
 const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(paneDisplayRow.value) : ''))
+// Test report 2026-10-08 T4b (gate r1 P3-4): the pane's row is not always a list row. A `?detail=`
+// deep link to an instance that is not on the loaded page renders the single-fetch `paneApproval`,
+// which `allVisibleApprovals` (and so `ensureLoadedForRows`' resolve) never sees, so its summary's
+// 人员 ids were never queued. This reads the pane row against the CACHED schema only: it re-fires when
+// a list row sharing the template loads that schema after the pane opened, and it never fetches a
+// template for the pane (the B2-01 summary stays cache-only).
+watch(
+  () => summaryUserIdsFor(paneDisplayRow.value),
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 // Reuses the EXACT same shared gate the row-level inline approve button already reads
 // (`inlineApprovingId`) — never a second, independently-tracked loading flag. This is also the
 // mechanism that makes a "pane bypasses the shared handler" mutation mechanically detectable: if
@@ -890,6 +954,8 @@ const { isZh } = useLocale()
 const t = computed(() => (isZh.value ? CENTER_ZH : CENTER_EN))
 const filterSummaryText = computed(() => (isZh.value ? `已启用 ${activeFilterCount.value} 项筛选` : `${activeFilterCount.value} filter(s) active`))
 const pendingBadgeTooltip = computed(() => (isZh.value ? `待办 ${pendingTotalCount.value} / 其中 ${pendingBadgeCount.value} 未读` : `${pendingTotalCount.value} to-do / ${pendingBadgeCount.value} unread`))
+const ccUnreadBadgeTooltip = computed(() => `${ccUnreadCount.value} ${t.value.ccUnreadBadgeSuffix}`)
+const mineOutcomeBadgeTooltip = computed(() => `${mineOutcomeUnseenCount.value} ${t.value.mineOutcomeBadgeSuffix}`)
 const newTodoPillText = computed(() => (isZh.value ? `${newTodoPill.value.delta} 条新待办 · 点击刷新` : `${newTodoPill.value.delta} new to-do(s) · click to refresh`))
 const selectionCountText = computed(() => (isZh.value ? `已选 ${selectedPending.value.length} 项` : `${selectedPending.value.length} selected`))
 const batchRejectSummaryText = computed(() => (isZh.value ? `将驳回所选的 ${selectedPending.value.length} 项审批。` : `The ${selectedPending.value.length} selected approval(s) will be rejected.`))
@@ -1295,6 +1361,65 @@ function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): voi
   // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
   // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
+  // The tab badges have no event of their own (test report 2026-10-08: no new realtime event in
+  // this slice). An existing counts frame — e.g. the one the server sends this user after their
+  // own mark-read — is used as a cue to re-ask; the frame's payload is never read for them.
+  void refreshTabBadgeCounts()
+}
+
+// Test report 2026-10-08 — tab read-state badges. Each is its OWN count from its own endpoint,
+// requested only while its session feature is on, and never mixed into 待办 / 未读 above (todo-center
+// lock B keeps those on active seats). Refreshed on every list (re)load, on tab switch (both go
+// through loadCurrentTab), after a pane read, and on an existing approval counts frame — there is
+// no dedicated realtime event, so a CC that arrives while the page sits idle shows on the next of
+// those. Decorative like the pending badge: a failed or disabled count hides the badge (0).
+// The NEWEST request wins: several refreshes can be in flight at once (a list reload, a counts
+// frame, a pane read, a source change), and an older answer that lands last — e.g. the previous
+// source's count arriving after a source change — must not overwrite the newer one.
+const ccUnreadCount = ref(0)
+let ccUnreadCountRequest = 0
+async function refreshCcUnreadCount(): Promise<void> {
+  const request = ++ccUnreadCountRequest
+  if (!ccUnreadBadgeEnabled.value) {
+    ccUnreadCount.value = 0
+    return
+  }
+  try {
+    // Read through a closure (never at setup): several approval-center specs mock the api module
+    // with an explicit export list that does not name this function.
+    const result = await Promise.resolve().then(() => getCcUnreadCount(sourceSystemFilter.value))
+    if (request !== ccUnreadCountRequest) return
+    ccUnreadCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    if (request !== ccUnreadCountRequest) return
+    ccUnreadCount.value = 0
+  }
+}
+const mineOutcomeUnseenCount = ref(0)
+let mineOutcomeUnseenCountRequest = 0
+async function refreshMineOutcomeUnseenCount(): Promise<void> {
+  const request = ++mineOutcomeUnseenCountRequest
+  if (!mineOutcomeBadgeEnabled.value) {
+    mineOutcomeUnseenCount.value = 0
+    return
+  }
+  try {
+    const result = await Promise.resolve().then(() => getMineOutcomesUnseenCount(sourceSystemFilter.value))
+    if (request !== mineOutcomeUnseenCountRequest) return
+    mineOutcomeUnseenCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    if (request !== mineOutcomeUnseenCountRequest) return
+    mineOutcomeUnseenCount.value = 0
+  }
+}
+async function refreshTabBadgeCounts(): Promise<void> {
+  await Promise.all([refreshCcUnreadCount(), refreshMineOutcomeUnseenCount()])
+}
+function isCcUnreadRow(row: UnifiedApprovalDTO): boolean {
+  return row.ccUnread === true
+}
+function isOutcomeUnseenRow(row: UnifiedApprovalDTO): boolean {
+  return row.outcomeUnseen === true
 }
 
 useApprovalCountsRealtime({
@@ -1520,7 +1645,10 @@ async function handleExportCsv(): Promise<void> {
   // file itself is still saved: it is exactly what was asked for at click time.
   const stillSameFeed = () => appliedListFilters.value === filters
   try {
-    const result = await exportApprovalsCsv(filters)
+    // T1: ask the server for user-facing column labels and status words in the language the page
+    // shows RIGHT NOW (read at click time, not captured with the filter snapshot, so a runtime
+    // locale switch is honoured). The file is still the server's bytes, saved as they arrive.
+    const result = await exportApprovalsCsv(filters, { header: 'label', lang: isZh.value ? 'zh' : 'en' })
     saveExportFile(result.blob, result.fileName)
     if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
   } catch (error) {
@@ -1588,6 +1716,7 @@ function loadCurrentTab() {
   // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
   // reload had already fetched. A choke point cannot be forgotten by the next call site.
   void refreshPendingBadgeCount({ resnapshot: true })
+  void refreshTabBadgeCounts()
   // UI-7: this is also the ONE place every list reload passes through — including a pane-triggered
   // 通过/驳回 (`handleInlineApprove`/`submitRowReject` both call `loadCurrentTab()` on success), and
   // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
@@ -1769,13 +1898,54 @@ watch(
   [selectedApprovalId, masterDetailEnabled],
   ([id, enabled]) => {
     if (enabled && id) {
-      void paneController.select(id)
+      void paneController.select(id).then(() => markPaneSelectionRead(id))
     } else {
       paneController.clear()
     }
   },
   { immediate: true },
 )
+
+// Opening an item in the wide-screen pane IS opening it. The full detail page records the read on
+// every load (ApprovalDetailView's `loadDetailPage` → `markApprovalRead`); the pane never did, so
+// a user at >= 1440px who only ever previewed items there produced no `approval_reads` row at all
+// and the 待我处理 unread dot / header 未读 count never cleared for them.
+//
+// Called ONLY from the selection watcher above, once the pane has actually rendered THIS
+// selection: a failed fetch, or one superseded by a later selection or a close, marks nothing.
+// The post-reload pane refresh inside `loadCurrentTab()` goes through `paneController.select`
+// directly and does not re-mark. Every selection made with Up/Down marks its row read too — it is
+// shown in the pane exactly like a clicked one. Fire-and-forget like the detail page: this is
+// presence data, a failure is silent and never a toast. On success the row's own dot is cleared in
+// place and the badge re-polled, so neither waits for the next list reload.
+function markPaneSelectionRead(id: string): void {
+  // The selection check is subsumed by the rendered-id check below today (the pane controller nulls
+  // `paneApproval` synchronously on every select/clear, and only a still-current fetch commits).
+  // Kept as the statement of intent, and for a controller that would keep the previous detail on
+  // screen while the next one loads.
+  if (selectedApprovalId.value !== id) return
+  if (paneApproval.value?.id !== id) return
+  void Promise.resolve()
+    .then(() => markApprovalRead(id))
+    .then(() => {
+      clearRowUnreadMarkers(id)
+      void refreshPendingBadgeCount()
+      void refreshTabBadgeCounts()
+    })
+    .catch(() => {})
+}
+
+// Clears the read-state marker(s) of the row just read in the pane, on the active tab's loaded
+// page, without reloading the list (a reload would drop the 批量 selection). Only ever flips a
+// marker the server set to "unread" to "read"; a row the server left unannotated stays so.
+function clearRowUnreadMarkers(id: string): void {
+  for (const row of activeTabRows.value) {
+    if (row.id !== id) continue
+    if (row.isRead === false) row.isRead = true
+    if (row.ccUnread === true) row.ccUnread = false
+    if (row.outcomeUnseen === true) row.outcomeUnseen = false
+  }
+}
 
 // B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
 // raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the

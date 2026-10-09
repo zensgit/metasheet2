@@ -75,6 +75,7 @@ const LIB = path.join(__dirname, '..', 'lib')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   STOCK_PREP_OPERATE,
+  STOCK_PREP_PULL,
   STOCK_PREP_READ,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
@@ -146,6 +147,9 @@ const SHEETS = Object.freeze({
 
 const OPERATOR_A = Object.freeze({ id: 'u_op_a', tenantId: TENANT_A, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const OPERATOR_B = Object.freeze({ id: 'u_op_b', tenantId: TENANT_B, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+// R-33 (2026-10-08): the dry-run is PULL-tier now. The W block (the dry-run's value-bearing read)
+// runs as tenant A's 拉取人员; the V block keeps the floor operators above, whose routes did not move.
+const PULLER_A = Object.freeze({ id: 'u_pull_a', tenantId: TENANT_A, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
 /**
  * THE SPOOF, in exactly the shape the middleware produces. The token carried NO tenant claim (so
  * `req.authenticatedTenantId` is absent), and `x-tenant-id: tenant-b` was copied onto `user.tenantId`.
@@ -165,6 +169,8 @@ const PLATFORM_ADMIN_TENANTLESS = Object.freeze({ id: 'u_adm_platform', roles: [
 const MEMBERSHIPS = Object.freeze({
   u_op_a: [TENANT_A],
   u_op_b: [TENANT_B],
+  // R-33: tenant A's 拉取人员, a member of tenant A and nothing else, like its floor operator.
+  u_pull_a: [TENANT_A],
   u_adm_platform: [],
 })
 
@@ -707,14 +713,15 @@ const LEGACY_READER = Object.freeze({ id: 'u_int_r', tenantId: TENANT_A, permiss
 /** The middleware's shape for a platform admin: no verified claim, `x-tenant-id` copied onto the user. */
 const PLATFORM_ADMIN_HEADER_TENANT = Object.freeze({ id: 'u_adm_platform', roles: ['admin'], tenantId: TENANT_A, permissions: ['integration:admin'] })
 /**
- * THE WORST CASE: a platform admin who ALSO holds the stock-prep operator tier (so the tier check
+ * THE WORST CASE: a platform admin who ALSO holds the stock-prep pull tier (so the tier check
  * cannot be what saves us) but has no tenant of their own. Before the scope, `resolveTenantId` would
- * have let them name any tenant they liked.
+ * have let them name any tenant they liked. (Carries `stock-prep:pull` since R-33 for the same
+ * reason it carried operate before: the tier must not be what refuses them.)
  */
 const PLATFORM_ADMIN_TENANTLESS_OPERATOR = Object.freeze({
   id: 'u_adm_platform',
   roles: ['admin'],
-  permissions: ['integration:admin', STOCK_PREP_READ, STOCK_PREP_OPERATE],
+  permissions: ['integration:admin', STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL],
 })
 
 let failures = 0
@@ -944,7 +951,7 @@ async function main() {
 
   await run('W-01 dry-run without the flag carries no part number, and is byte-identical to the pre-W3a response', async () => {
     const harness = mountDryRun()
-    const res = await dryRun(harness, { user: OPERATOR_A })
+    const res = await dryRun(harness, { user: PULLER_A })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     // The trial DID find the missing component — otherwise this guard is vacuous.
     assert.equal(res.body.data.status, 'manual_confirm_required', 'a missing component holds the whole project')
@@ -961,7 +968,7 @@ async function main() {
     assert.equal('missingComponents' in res.body.data, false, 'W-01: and carries no key at all')
 
     // `false` and "absent" must produce the SAME response — no key, no scope check, nothing moved.
-    const explicitlyOff = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: false } })
+    const explicitlyOff = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: false } })
     const strip = (response) => {
       const data = JSON.parse(JSON.stringify(response.body.data))
       delete data.dryRunToken // freshly minted per call, and deliberately not derived from the flag
@@ -972,7 +979,7 @@ async function main() {
 
   await run('W-02 with the flag, an operator gets their OWN tenant\'s missing parts and nothing else', async () => {
     const harness = mountDryRun()
-    const res = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: true } })
+    const res = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: true } })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
 
     const list = res.body.data.missingComponents
@@ -993,13 +1000,13 @@ async function main() {
     // The host was asked to vouch for the (principal, tenant) pairing — the gate ran, it did not
     // merely happen to pass.
     assert.ok(
-      harness.tenantPrincipalDirectory.calls.some((entry) => entry.userId === OPERATOR_A.id && entry.tenantId === TENANT_A),
+      harness.tenantPrincipalDirectory.calls.some((entry) => entry.userId === PULLER_A.id && entry.tenantId === TENANT_A),
       'W-02: the opt-in went through resolveOperatorValueScope',
     )
 
     // AND THE DURABLE SURFACES DID NOT MOVE. Same revision as the values-free call, no key inside
     // evidence — the four "does not enter" claims, asserted at the route.
-    const valuesFree = await dryRun(harness, { user: OPERATOR_A })
+    const valuesFree = await dryRun(harness, { user: PULLER_A })
     assert.equal(res.body.data.revision, valuesFree.body.data.revision, 'W-02: the opt-in does not move the dry-run revision')
     assert.deepEqual(res.body.data.evidence, valuesFree.body.data.evidence, 'W-02: evidence is byte-identical either way')
     assert.equal(JSON.stringify(res.body.data.evidence).includes(A_MISSING_PART), false, 'W-02: evidence never carries the value')
@@ -1055,13 +1062,27 @@ async function main() {
 
   await run('W-05 the opt-in is type-checked, and an unknown key still 400s ahead of the scope', async () => {
     const harness = mountDryRun()
-    const wrongType = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: 'true' } })
+    const wrongType = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: 'true' } })
     assert.equal(wrongType.statusCode, 400, 'a string is not an opt-in')
     assert.equal(errorCode(wrongType), 'TABLE_ACTION_REQUEST_INVALID')
 
     const unknown = await dryRun(harness, { user: LEGACY_READER, body: { missingComponents: true } })
     assert.equal(unknown.statusCode, 400, 'the closed body allowlist is unchanged')
     assert.equal(errorCode(unknown), 'TABLE_ACTION_REQUEST_INVALID')
+  })
+
+  await run('W-06 (R-33) the floor operator is refused the dry-run outright — the opt-in cannot buy them a part number', async () => {
+    // The actor the 2026-10-08 ruling is about: read + operate, no pull. Before the ruling this was
+    // W-02's actor; now the pull gate refuses them before the body is even validated, so neither the
+    // values-free trial nor the value-bearing one is theirs — and no source binding is opened.
+    const harness = mountDryRun()
+    const refused = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: true } })
+    assert.equal(refused.statusCode, 403, `W-06: the floor operator no longer pulls (got ${JSON.stringify(refused.body)})`)
+    assert.equal(errorCode(refused), 'FORBIDDEN')
+    assert.equal(everythingSent(refused).includes(A_MISSING_PART), false, 'W-06: nothing leaked with the refusal')
+    assert.deepEqual(harness.adapterTenants, [], 'W-06: refused before any source lookup')
+    const valuesFree = await dryRun(harness, { user: OPERATOR_A })
+    assert.equal(valuesFree.statusCode, 403, 'W-06: the values-free trial is refused too — the gate is the pull tier, not the opt-in')
   })
 
   if (failures > 0) {

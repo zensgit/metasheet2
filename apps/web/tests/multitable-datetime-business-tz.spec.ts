@@ -1099,6 +1099,24 @@ describe('XLSX import — Excel native date cells (review must-fix 1) and date-o
     })
     expect(built.records).toEqual([{ a: '2026-09-24', b: '2026-09-24', c: '2026-09-24', d: 'whenever' }])
   })
+
+  it('date-only import (#6204): an ISO instant lands on the business day the grid shows, not on its UTC day', async () => {
+    resetBusinessTimezone()
+    const built = await buildImportedRecords({
+      // 2026-09-17T16:00Z is 2026-09-18 00:00 北京时间 (its UTC day is 09-17); 15:59:59Z is still 09-17 there.
+      parsedRows: [['2026-09-17T16:00:00.000Z', '2026-09-17T15:59:59.000Z', '2026-09-17 16:00:00+00', '2026-09-18Z', '2026', '2026-09-18(五)', '2026/9/18(周五)']],
+      fieldMapping: { 0: 'a', 1: 'b', 2: 'c', 3: 'd', 4: 'e', 5: 'f', 6: 'g' },
+      fields: [
+        { id: 'a', name: 'A', type: 'date' }, { id: 'b', name: 'B', type: 'date' }, { id: 'c', name: 'C', type: 'date' },
+        { id: 'd', name: 'D', type: 'date' }, { id: 'e', name: 'E', type: 'date' }, { id: 'f', name: 'F', type: 'date' },
+        { id: 'g', name: 'G', type: 'date' },
+      ] as MetaField[],
+    })
+    expect(built.failures).toEqual([])
+    // Text that names no day (a designator glued onto a day, a bare number) is kept as written, as before for junk.
+    // A weekday in brackets after the day (Chinese spreadsheet export) still reads as the day written (#6254 review).
+    expect(built.records).toEqual([{ a: '2026-09-18', b: '2026-09-17', c: '2026-09-18', d: '2026-09-18Z', e: '2026', f: '2026-09-18', g: '2026-09-18' }])
+  })
 })
 
 describe('S4: the automation editor and the dateTime cells read ONE business zone; the two "UTC"s stay distinct', () => {
