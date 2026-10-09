@@ -41,7 +41,10 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 // compute [approval_1]); `server-list-wins` and the drifted server-list row are the two that can.
 //
 // Every scenario first proves the action bar is there (the 转交 button: same `canDecide` /
-// desktop gates as 退回), so a missing 退回 button can only mean an empty candidate list.
+// desktop gates as 退回, and a verb the server accepts at a handler cursor too), so a missing 退回
+// button can only mean an empty candidate list. 通过 is deliberately NOT a control: at a handler
+// cursor the server refuses approve (APPROVAL_HANDLER_ACTION_NOT_ALLOWED) while the view still
+// renders the button, so asserting it would pin that gap rather than the action bar.
 
 const HARNESS = '/verification/approval-return-candidates-harness.html'
 
@@ -113,8 +116,8 @@ async function expectReturnOptions(page: Page, query: string, expected: string[]
 }
 
 async function expectNoReturnButton(page: Page, query: string): Promise<void> {
+  // The positive control is `openHarness`'s 转交 assertion, not 通过 (see the header).
   await openHarness(page, query)
-  await expect(page.getByTestId('approval-approve-button')).toBeVisible()
   await expect(page.getByTestId('approval-return-button')).toHaveCount(0)
 }
 
