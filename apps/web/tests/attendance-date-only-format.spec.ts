@@ -100,9 +100,10 @@ describe('formatCalendarDate (timezone-safe date-only rendering)', () => {
     // unreachable in production — but the divergence is real and worth pinning explicitly
     // rather than leaving as an implied-but-unchecked case.
     expect(formatCalendarDate('0001-01-01', 'en-US')).toBe('1/1/1901') // new path: local-parts construction hits the remap
-    expect(new Date('0001-01-01').toLocaleDateString('en-US')).toBe('1/1/1') // old path: ISO string parse does NOT remap
+    // Pin the ISO parse comparison to UTC: this case tests year remapping, not host-timezone rendering.
+    expect(new Date('0001-01-01').toLocaleDateString('en-US', { timeZone: 'UTC' })).toBe('1/1/1') // old path: ISO string parse does NOT remap
     // No divergence once the year reaches 100 (outside the constructor's 0-99 remap window).
     expect(formatCalendarDate('0100-01-01', 'en-US')).toBe('1/1/100')
-    expect(new Date('0100-01-01').toLocaleDateString('en-US')).toBe('1/1/100')
+    expect(new Date('0100-01-01').toLocaleDateString('en-US', { timeZone: 'UTC' })).toBe('1/1/100')
   })
 })

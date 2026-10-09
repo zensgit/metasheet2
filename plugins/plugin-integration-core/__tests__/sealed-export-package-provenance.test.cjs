@@ -415,13 +415,13 @@ const S6A_PS51_WORKFLOW_TAMPERS = Object.freeze([
   )],
   ['T6 job made non-blocking', (text) => replaceExactlyOnce(
     text,
-    '    runs-on: windows-latest\n',
-    '    runs-on: windows-latest\n    continue-on-error: true\n',
+    "    runs-on: ${{ vars.MS2_WINDOWS_RUNNER || 'windows-latest' }}\n",
+    "    runs-on: ${{ vars.MS2_WINDOWS_RUNNER || 'windows-latest' }}\n    continue-on-error: true\n",
   )],
   ['T6 job skipped', (text) => replaceExactlyOnce(
     text,
-    '    runs-on: windows-latest\n',
-    '    if: false\n    runs-on: windows-latest\n',
+    "    runs-on: ${{ vars.MS2_WINDOWS_RUNNER || 'windows-latest' }}\n",
+    "    if: false\n    runs-on: ${{ vars.MS2_WINDOWS_RUNNER || 'windows-latest' }}\n",
   )],
   ['T6 pull_request trigger narrowed', (text) => replaceExactlyOnce(
     text,

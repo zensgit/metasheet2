@@ -36,7 +36,8 @@ concurrency:
 
 jobs:
   web-tests:
-    runs-on: ubuntu-latest
+    # Match the plugin-tests routing pilot; an unset variable keeps the existing default.
+    runs-on: ${{ vars.MS2_WEB_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

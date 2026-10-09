@@ -270,7 +270,7 @@ on:
 
 jobs:
   attendance-web-guard:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

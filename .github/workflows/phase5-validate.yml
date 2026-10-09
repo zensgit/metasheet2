@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   pr-validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
