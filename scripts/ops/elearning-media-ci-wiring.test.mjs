@@ -390,10 +390,9 @@ test('quota DB suite exists, is excluded, and is a post-Postgres whole-file vite
     `${DB_SUITE} must be an exact whole-file vitest argument`,
   )
   refusesNameFilters(run, 'quota DB step')
-  assert.match(
-    step,
-    /DATABASE_URL:\s*postgresql:\/\/postgres@localhost:5432\/metasheet_test/,
-    'DB step must provide DATABASE_URL with the same post-DB pattern as neighboring gates',
+  assert.ok(
+    isSuiteWiredInRealDbStep(wf, 'elearning-v01-media-quota-real-db', DB_SUITE),
+    'DB step must satisfy the same executable database URL contract as neighboring gates',
   )
 })
 

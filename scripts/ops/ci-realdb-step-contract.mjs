@@ -21,13 +21,15 @@
  *   (a) `if: matrix.node-version == '20.x'`   — it runs in the required 20.x leg
  *   (b) an `env.DATABASE_URL` key on the step whose value is a LITERAL PostgreSQL URL — the
  *       DB-gated suites do not skip-green (owner ruling 2026-07-21, round 6). Two refusals:
- *       - NO Actions expression anywhere in the value (any occurrence of `${{`): at runtime
+ *       - No arbitrary Actions expression in the value: at runtime
  *         GitHub resolves a missing secret/context to the EMPTY string, so
  *         `${{ secrets.DOES_NOT_EXIST }}` reads as non-empty text here while DATABASE_URL is ''
  *         in the job and every describeIfDatabase suite skips green (owner-reproduced bypass).
  *         Mixed literal+expression (`postgresql://user:${{ secrets.PW }}@host/db`) is refused
  *         too: the guard runs pre-install and cannot evaluate expressions, so it cannot prove
- *         the expression part resolves to anything at all.
+ *         the expression part resolves to anything at all. The sole exception is the exact
+ *         loopback URL using this job's isolated PostgreSQL service port, validated against
+ *         the parsed parent job by isIsolatedPostgresServiceUrl below.
  *       - the remaining literal must be scheme-anchored (`postgres://` / `postgresql://`, see
  *         LITERAL_POSTGRES_URL_RE) — `true`, `1`, `file.txt` are non-empty text but not a DB
  *         URL. Empty in ANY spelling thereby stays rejected as before: `''`, `""`, `"   "`, a
@@ -144,6 +146,8 @@ const PY_YAML_TO_JSON = [
 
 /** One parse per distinct workflow text per process (guards re-read the same file repeatedly). */
 const parseCache = new Map()
+// Keep parent-job context off the YAML object itself; copied/unbound steps cannot opt in.
+const stepJobContext = new WeakMap()
 
 /**
  * Parse YAML text into a plain JS document via the PyYAML bridge. Throws — fails CLOSED — when
@@ -191,6 +195,14 @@ export function parseYamlDocument(wf) {
     throw new Error(
       `real-DB step contract: failing CLOSED — the PyYAML bridge emitted unparseable JSON: ${err.message}`,
     )
+  }
+  if (isPlainObject(doc) && isPlainObject(doc.jobs)) {
+    for (const job of Object.values(doc.jobs)) {
+      if (!isPlainObject(job) || !Array.isArray(job.steps)) continue
+      for (const step of job.steps) {
+        if (isPlainObject(step)) stepJobContext.set(step, job)
+      }
+    }
   }
   parseCache.set(wf, doc)
   return doc
@@ -262,19 +274,39 @@ export function stepRunsOnNode20Matrix(step) {
  */
 const LITERAL_POSTGRES_URL_RE = /^postgres(?:ql)?:\/\/\S+$/
 
+const ISOLATED_POSTGRES_URL =
+  'postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/metasheet_test'
+
+function isIsolatedPostgresServiceUrl(step, value) {
+  if (value.trim() !== ISOLATED_POSTGRES_URL) return false
+  const job = stepJobContext.get(step)
+  if (!isPlainObject(job) || job.container != null) return false
+  const service = job.services?.postgres
+  return isPlainObject(service) &&
+    service.image === 'postgres:14' &&
+    service.env?.POSTGRES_USER === 'postgres' &&
+    service.env?.POSTGRES_PASSWORD === 'postgres' &&
+    service.env?.POSTGRES_DB === 'postgres' &&
+    service.volumes == null &&
+    Array.isArray(service.ports) &&
+    service.ports.length === 1 &&
+    service.ports[0] === '127.0.0.1::5432'
+}
+
 /**
  * Pin (b): the step has a real `env` mapping with a `DATABASE_URL` key whose PARSED value is a
  * LITERAL PostgreSQL URL (owner ruling 2026-07-21, round 6 — supersedes the round-5 "non-empty
  * string" contract, which had a skip-green bypass the owner reproduced live):
  *
- *   1. the value must be a string containing NO Actions expression — any occurrence of `${{` is
+ *   1. except for the exact, parent-job-validated isolated service URL above, the value must
+ *      be a string containing NO Actions expression — any occurrence of `${{` is
  *      refused, mixed literal+expression included. At runtime GitHub resolves a missing
  *      secret/context to the EMPTY string, so `${{ secrets.DOES_NOT_EXIST }}` is non-empty TEXT
  *      here but '' in the job: DATABASE_URL is empty, every describeIfDatabase suite skips, the
  *      run is skip-green. This guard executes pre-install and cannot evaluate expressions, so it
- *      cannot tell a resolving expression from a vanishing one — it must refuse them all. (The
- *      real workflow needs no expression: both guarded steps carry the literal
- *      `postgresql://postgres@localhost:5432/metasheet_test`.)
+ *      cannot tell a resolving expression from a vanishing one. The service exception has a
+ *      fixed URL skeleton and a proven port publication; the workflow also validates the
+ *      resolved port before creating the disposable test database.
  *   2. after trim, the value must match LITERAL_POSTGRES_URL_RE (rationale above) — `true`, `1`,
  *      `file.txt` are non-empty text but not a DB URL; a non-string scalar (YAML `true` / `1` /
  *      `~` / `null`) can never be one.
@@ -293,7 +325,7 @@ export function stepHasEnvDatabaseUrl(step) {
   if (!Object.prototype.hasOwnProperty.call(env, 'DATABASE_URL')) return false
   const value = env.DATABASE_URL
   if (typeof value !== 'string') return false
-  if (value.includes('${{')) return false
+  if (value.includes('${{')) return isIsolatedPostgresServiceUrl(step, value)
   return LITERAL_POSTGRES_URL_RE.test(value.trim())
 }
 
@@ -564,7 +596,8 @@ export function requireExecutableRealDbStep(wf, stepId) {
     throw new Error(
       `real-DB step id "${stepId}" must have env.DATABASE_URL as a real YAML key (not a comment) ` +
         `whose value is a LITERAL PostgreSQL URL (anchored postgres:// or postgresql://). ` +
-        `Actions expressions are refused — any \${{ … }} anywhere in the value, mixed ` +
+        `Only the exact isolated Postgres service URL is additionally allowed; arbitrary ` +
+        `Actions expressions are refused — \${{ … }} anywhere in the value, mixed ` +
         `literal+expression included: a missing secret/context resolves to the EMPTY string at ` +
         `runtime, so the suites skip green while the text reads non-empty, and this guard runs ` +
         `pre-install so it cannot evaluate expressions. Empty in any spelling ('' / "" / ` +
