@@ -898,25 +898,31 @@ async function runManualTargetChild(input: {
   readonly attachmentId: string
   readonly attachmentBytes: Uint8Array
 }, targetDatabaseUrl: URL): Promise<number> {
-  assert.equal(input.local.archivePath.startsWith(`${args.workRoot}/target/`), true)
-  assert.equal(input.local.custodyPath.startsWith(`${args.workRoot}/target/`), true)
-  const child = fork(manualTargetPath, [], {
-    execArgv: ['--require', require.resolve('tsx/cjs')],
-    serialization: 'advanced',
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      TMPDIR: process.env.TMPDIR,
-      NODE_ENV: 'test',
-      DATABASE_URL: targetDatabaseUrl.href,
-      ATTACHMENT_PATH: targetAttachmentPath,
-      JWT_SECRET: jwtSecret,
-      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
-      MULTITABLE_ENABLE_WRITER_FENCE: 'true',
-      MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
-    },
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-  })
+  let child: ChildProcess
+  try {
+    assert.equal(input.local.archivePath.startsWith(`${args.workRoot}/target/`), true)
+    assert.equal(input.local.custodyPath.startsWith(`${args.workRoot}/target/`), true)
+    child = fork(manualTargetPath, [], {
+      execArgv: ['--require', require.resolve('tsx/cjs')],
+      serialization: 'advanced',
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        NODE_ENV: 'test',
+        DATABASE_URL: targetDatabaseUrl.href,
+        ATTACHMENT_PATH: targetAttachmentPath,
+        JWT_SECRET: jwtSecret,
+        MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+        MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+        MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+      },
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    })
+  } catch (error) {
+    input.local.recoverySecret.fill(0)
+    throw error
+  }
   children.add(child)
   try {
     return await new Promise<number>((resolvePromise, reject) => {
