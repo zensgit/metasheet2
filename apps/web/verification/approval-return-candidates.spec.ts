@@ -10,7 +10,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //
 // Graph (identity-consistent with the instance: template tpl_1, latestVersionId = pinned ver_1_1):
 //   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ join_1 → approval_2 → approval_3 → end
-// Every fixture is a state the server can be in, in the wire's shape (see the harness header): the
+// Every fixture is a state the server can be in, and what the return path reads is in the wire's
+// shape (see the harness header for the display-only values it simplifies): the
 // main history holds approval_1, cc_1, handler_1, approval_p1, join_1, approval_2 and approval_3
 // (a 退回 from approval_3 back to approval_2), so every exclusion rule has a visited key to drop;
 // the handler and parallel scenarios carry the first pass that leads to their cursor.

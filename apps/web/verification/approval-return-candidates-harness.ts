@@ -23,7 +23,11 @@
 // approval_p1 法务专员, approval_3 总经理, and the viewer at handler_1, approval_p2 and approval_2 — so
 // the seats, the history actors and the graph agree.
 //
-// EVERY FIXTURE IS A STATE THE SERVER CAN BE IN, in the shape the wire carries:
+// EVERY FIXTURE IS A STATE THE SERVER CAN BE IN. What the return path and its positive controls
+// read is in the shape the wire carries. Display-only values are simplified, and nothing here reads
+// them: `currentStep` / `totalSteps` / `sourceStep` are fixed, `assignments` lists only the active
+// seats (a detail read also lists every inactive one), and history rows carry only the camelCase
+// fields (the wire adds snake_case twins).
 //   * the detail read (`GET /api/approvals/:id`, ApprovalBridgeService.getApproval) ships
 //     `currentNodeType` — the frozen graph's type at the stored cursor, which is THIS graph's type
 //     there, since the graph is the pinned version — plus `canDecideCurrentNode` /
