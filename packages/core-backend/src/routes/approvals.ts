@@ -51,6 +51,10 @@ import {
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import {
+  isApprovalCcUnreadBadgeEnabled,
+  isApprovalMineOutcomeBadgeEnabled,
+} from '../services/approval-notify-badge-flags'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
 import {
   assignmentMatchesActor,
@@ -422,6 +426,29 @@ interface ApprovalRouterOptions {
 // approval-instance-readability.ts (OD-S1-18(b): "the divergence of any one of them is a P1").
 export function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
+}
+
+/**
+ * How `GET /api/approvals` turns its validated `sourceSystem` query value into the feed's source
+ * options: `platform` / `plm` narrow to that source; `all` asks for the mixed feed AND switches the
+ * tab filters to their external-source branch; an absent value keeps the legacy rule that an
+ * explicitly supplied tab implies the platform feed (and no tab means the mixed feed).
+ *
+ * Exported so a count over a tab (the 抄送我的 / 我发起的 badges) maps the SAME query value onto
+ * the SAME list options as the tab it counts — a badge that read `all` differently from the list
+ * could count rows the tab never shows.
+ */
+export function resolveApprovalListSourceOptions(
+  rawSourceSystem: string,
+  tabProvided: boolean,
+): { sourceSystem: 'platform' | 'plm' | undefined; includeExternalTabSources: boolean } {
+  const explicit = rawSourceSystem === 'all' || rawSourceSystem === ''
+    ? undefined
+    : (rawSourceSystem as 'platform' | 'plm')
+  return {
+    sourceSystem: rawSourceSystem !== '' ? explicit : (tabProvided ? 'platform' : undefined),
+    includeExternalTabSources: rawSourceSystem === 'all',
+  }
 }
 
 function parsePaging(value: unknown, fallback: number, max: number = MAX_APPROVAL_PAGE_SIZE): number {
@@ -2583,7 +2610,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
         ? undefined
         : (rawSourceSystem as 'platform' | 'plm')
-      const sourceSystemProvided = rawSourceSystem !== ''
       // P3-1 — refuse `?format=csv&sourceSystem=plm` outright, BEFORE it can reach the
       // `sourceSystem === 'plm'` sync branch below. Two independent reasons converge on the same
       // 400, not one: (1) that branch calls `bridgeService.syncPlmApprovals({ status, limit,
@@ -2758,16 +2784,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // THIS EXPRESSION ALONE IS NOT ENOUGH, and saying otherwise was a defect in its own right:
       // `listApprovals`'s non-external branch used to push its own
       // `COALESCE(source_system, 'platform') = 'platform'` conjunct for ANY tab, so leaving
-      // `effectiveSourceSystem` undefined still produced a platform-only feed once `tab` always had
+      // the effective source undefined still produced a platform-only feed once `tab` always had
       // a value. `tabDefaulted` below is what actually keeps the tab-less request on the mixed
       // platform+plm feed; measured at the merge-base, a tab-less request returned both source
       // systems and an explicit `?tab=pending` returned platform rows only, and both still do.
-      const effectiveSourceSystem = sourceSystemProvided
-        ? sourceSystem
-        : (tabProvided ? 'platform' : undefined)
+      // (`resolveApprovalListSourceOptions` is that mapping, shared with the tab badge counts.)
+      const effectiveSource = resolveApprovalListSourceOptions(rawSourceSystem, tabProvided)
 
       const result = await bridgeService.listApprovals({
-        sourceSystem: effectiveSourceSystem,
+        sourceSystem: effectiveSource.sourceSystem,
         status,
         workflowKey,
         businessKey,
@@ -2780,12 +2805,17 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // own status filter is served NO tab, so the query is the scope plus that filter.
         tab: defaultTabSuppressedByStatusFilter ? undefined : tab,
         tabDefaulted: !tabProvided,
-        includeExternalTabSources: rawSourceSystem === 'all',
+        includeExternalTabSources: effectiveSource.includeExternalTabSources,
         actorId: actorId || undefined,
         actorRoles,
         actorPermissions: resolveApprovalActorPermissions(req),
         limit,
         offset,
+        // 抄送我的 per-row unread (test report 2026-10-08): only while its switch is on, and never
+        // for the CSV export (whose columns do not carry it). Off ⇒ the feed is byte-identical.
+        annotateCcUnread: !isCsvExport && isApprovalCcUnreadBadgeEnabled(),
+        // 我发起的 per-row new outcome: same rule — only while its own switch is on, never for CSV.
+        annotateMineOutcomeUnseen: !isCsvExport && isApprovalMineOutcomeBadgeEnabled(),
       })
 
       if (isCsvExport) {
@@ -3370,6 +3400,122 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_PENDING_COUNT_FAILED',
         'Failed to compute pending approval count',
         () => res.json({ count: 0, unreadCount: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 抄送我的 unread badge (test report 2026-10-08, T3). A DEDICATED count, never folded into
+  // `/pending-count`, `/api/todo/count` or the todo / approval socket counts: the ratified
+  // todo-center lock B fixes those to population ① (active seats), and being CC'd is not "waiting
+  // for me". Behind APPROVAL_CC_UNREAD_BADGE_ENABLED (default OFF, exact 'true'): while off this
+  // answers 404 with its own code — before touching the database — so a client cannot mistake a
+  // switched-off feature for "zero unread". The count is the 抄送我的 feed for the SAME
+  // `sourceSystem` mapping the list uses (`resolveApprovalListSourceOptions`) plus the unread
+  // conjunct (`ApprovalBridgeService.countCcUnreadForViewer`), so it never exceeds that tab's total.
+  // Registered before `GET /api/approvals/:id`, which would otherwise capture this literal path.
+  r.get('/api/approvals/cc-unread-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalCcUnreadBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_CC_UNREAD_BADGE_DISABLED', 'The CC unread badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countCcUnreadForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_CC_UNREAD_COUNT_FAILED',
+        'Failed to count unread CC approvals',
+        () => res.json({ count: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 我发起的 new-outcome badge (test report 2026-10-08, T6). Same contract and same placement rule as
+  // `/cc-unread-count` above: a dedicated count (never part of the lock-B 待办 counts or their socket
+  // events), behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED (default OFF, exact 'true'; off ⇒ 404 with its
+  // own code before any query), counting the 我发起的 feed for the list's own `sourceSystem` mapping
+  // plus the new-outcome conjunct (`ApprovalBridgeService.countMineOutcomesUnseenForViewer`). A
+  // requester gets no realtime frame when someone else decides their request (only the actor and
+  // the remaining seats are pushed); the badge refreshes on the next list load or tab switch.
+  r.get('/api/approvals/mine-outcomes/unseen-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalMineOutcomeBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_MINE_OUTCOME_BADGE_DISABLED', 'The new-outcome badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countMineOutcomesUnseenForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_MINE_OUTCOME_COUNT_FAILED',
+        'Failed to count unseen request outcomes',
+        () => res.json({ count: 0, degraded: true }),
       )
     }
   })
