@@ -1254,8 +1254,12 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       'confirmationQueue.projectDirectory',
       'confirmationQueue.valueEntry',
       'handoff.advance',
+      // 一个项目一张备料表 (S2, R-36): the floor READS its project's sheet state and the registry
+      // list; creating a sheet is the PULL tier and is not in this list.
+      'projectTarget.list',
+      'projectTarget.read',
     ],
-    'P-14: the six OPERATE capabilities the owner kept for the floor',
+    'P-14: the eight OPERATE capabilities the floor holds (six kept by the owner + the two project-sheet reads)',
   )
   for (const entry of keptByTheFloor) {
     assert.equal(

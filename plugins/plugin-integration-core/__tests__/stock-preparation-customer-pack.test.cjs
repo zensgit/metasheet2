@@ -77,6 +77,11 @@ function purityAndCoupling() {
   // copied rule is one that drifts. The module it pulls in is itself pure at
   // load time (its host calls all take a `context` argument), so the no-I/O
   // assertions below still hold — they are re-checked here rather than assumed.
+  //
+  // own-base joined it in S2 (R-36) for the same reason: `retargetCustomerPack` may place a pack on a
+  // per-project sheet ONLY, and the per-project objectId rule lives in own-base.cjs. The alternative
+  // was a copy of that regex here. own-base requires the templates module alone at load time (its
+  // target-provisioning edge is lazy) and performs no I/O at load.
   const source = fs.readFileSync(MODULE_PATH, 'utf8')
   const requireCalls = [...source.matchAll(/require\((['"])([^'"]+)\1\)/g)].map((match) => match[2])
   assert.deepEqual(
@@ -84,10 +89,11 @@ function purityAndCoupling() {
     [
       './stock-preparation-extension-namespace.cjs',
       './stock-preparation-option-sync.cjs',
+      './stock-preparation-own-base.cjs',
       './stock-preparation-target-provisioning.cjs',
       './stock-preparation-templates.cjs',
     ],
-    'pack module must require exactly the four schema authorities and nothing else',
+    'pack module must require exactly the five schema authorities and nothing else',
   )
   for (const forbidden of ['node:fs', 'node:http', 'node:https', 'node:child_process', 'pg', 'mssql']) {
     assert.ok(!requireCalls.includes(forbidden), `pack module must not require ${forbidden}`)

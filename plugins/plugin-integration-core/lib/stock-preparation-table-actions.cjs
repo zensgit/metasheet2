@@ -944,6 +944,13 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
       projectNo: optionalString(input.projectNo),
       targetPurpose: optionalString(input.targetPurpose) || 'write',
       actionId: action.actionId,
+      // S2 (ADR §2 「客户包」): the action's declared `ext_` band — server config, never request input
+      // — so the project binding maps those columns too and the completeness gate is satisfied by a
+      // sheet that carries them. Spread only when declared: an action without a band hands the
+      // resolver exactly the S1 input.
+      ...(Array.isArray(action.extensionFieldIds) && action.extensionFieldIds.length > 0
+        ? { extensionFieldIds: [...action.extensionFieldIds] }
+        : {}),
     })
     if (!resolved || !isPlainObject(resolved.target)) return action
     // Re-normalize through `normalizeTarget`, the ONE definition of a valid target, exactly as the

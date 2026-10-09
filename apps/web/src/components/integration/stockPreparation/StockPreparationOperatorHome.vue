@@ -66,6 +66,19 @@
       </span>
     </p>
 
+    <!-- 一个项目一张备料表 (S2, R-36) — the projectTarget.list control of the workbench manifest
+         (OPERATE). Rendered only when GET …/project-targets answered, i.e. the server's switch is on;
+         with it off the page says exactly what it said before. -->
+    <p
+      v-if="projectTargets"
+      class="sp-home__project-sheets"
+      data-testid="stock-prep-project-target-list"
+      :data-registered-count="projectTargets.count"
+    >
+      {{ bi(oneSheetPerProject.zh, oneSheetPerProject.en) }}
+      {{ bi(`已经有 ${projectTargets.count} 个项目建了表。`, `${projectTargets.count} project(s) have a sheet so far.`) }}
+    </p>
+
     <EmptyState
       v-if="emptyState"
       class="sp-home__empty"
@@ -172,6 +185,9 @@
             data-testid="stock-prep-operator-home-card-badge"
           >{{ bi(card.posture.zh, card.posture.en) }}</span>
         </header>
+        <p v-if="cardRowsText(card)" class="sp-home__card-note" data-testid="stock-prep-operator-home-card-rows">
+          {{ cardRowsText(card) }}
+        </p>
         <p v-if="card.postureFromMemory" class="sp-home__card-note">
           {{ bi('这台电脑上次打开时的状态', 'As last known on this computer') }}
         </p>
@@ -240,11 +256,16 @@
          three existing specs that open a project through them keep working untouched. -->
     <div class="sp-home__quick-open" data-testid="stock-prep-operator-home-quick-open">
       <h3 class="sp-home__quick-open-title">{{ canPull ? bi('拉一个新项目', 'Pull a new project in') : bi('打开一个项目', 'Open a project') }}</h3>
-      <p class="sp-home__quick-open-hint">
-        {{ bi(
-          '找不到号码?列表里有这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目(不论是谁拉进去的)。直接把号码打进去也一样能打开。',
-          'Cannot find the number? The list includes projects this computer recently opened, projects an administrator has archived, and projects that already have data in the stock-preparation table, whoever pulled them in — typing the number in directly always works too.',
-        ) }}
+      <!-- With the switch on (`projectTargets` answered) the old third clause — 「备料表里已经有数据的项目」,
+           read off the ONE env table — is no longer true, so the hint says what is: one sheet per
+           project. Q8: the `mvp` source is 「平台登记」, never 「归档过」 (「已归档」 is the project-sheet
+           lifecycle now). -->
+      <p class="sp-home__quick-open-hint" data-testid="stock-prep-operator-home-quick-open-hint">
+        <template v-if="projectTargets">{{ bi(oneSheetPerProject.zhNext ?? '', oneSheetPerProject.enNext ?? '') }}</template>
+        <template v-else>{{ bi(
+          '找不到号码?列表里有这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目(不论是谁拉进去的)。直接把号码打进去也一样能打开。',
+          'Cannot find the number? The list includes projects this computer recently opened, platform-registered projects, and projects that already have data in the stock-preparation table, whoever pulled them in — typing the number in directly always works too.',
+        ) }}</template>
       </p>
     </div>
   </div>
@@ -302,8 +323,12 @@ import {
 import {
   resolveStockPrepPullBanner,
   stockPrepExportTenantWallPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import type { StockPrepProjectTargetList } from '../../../services/integration/stockPreparation/projectTarget'
 
 const props = withDefaults(
   defineProps<{
@@ -323,8 +348,14 @@ const props = withDefaults(
      * cannot. Defaults to `true` so a parent without a principal keeps today's words.
      */
     canPull?: boolean
+    /**
+     * S2 (R-36): the tenant's project-sheet registry list, loaded by the parent with the directory.
+     * `null` = the server's switch is off (404 DISABLED) or the list was unreadable — the page then
+     * says exactly what it said before S2.
+     */
+    projectTargets?: StockPrepProjectTargetList | null
   }>(),
-  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [], canPull: true },
+  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [], canPull: true, projectTargets: null },
 )
 
 const emit = defineEmits<{
@@ -475,6 +506,29 @@ const guidance = computed<string | null>(() => {
 
 /** I-20: the 可以导出 filter chip's tooltip. */
 const readyTooltip = STOCK_PREP_TOOLTIP_READY_TO_EXPORT
+
+// ── 一个项目一张备料表 (S2, R-36) ────────────────────────────────────────────────────────────────
+
+const oneSheetPerProject: StockPrepPlainEntry = stockPrepProjectTargetPlain('home_one_sheet_per_project')
+  ?? { zh: '', en: '' }
+
+/**
+ * ADR §7 「首页卡片:共 N 行(有效 M 行)」 — from the registry row of THIS card's project, and only
+ * when the server counted (the registry's count columns are filled by the overview refresh, S3; until
+ * then they are null and the card says nothing rather than 「0 行」).
+ */
+function cardRowsText(card: StockPrepHomeCard): string {
+  const list = props.projectTargets
+  if (!list) return ''
+  const row = list.items.find((item) => item.projectNo === card.projectNo)
+  if (!row || row.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText({
+    rowCount: row.rowCount,
+    activeRowCount: row.activeRowCount,
+    rowCountBounded: row.countsBounded,
+  })
+  return text ? bi(text.zh, text.en) : ''
+}
 
 /**
  * U2 契约 (P0 补项 5)'s three-sentence priority chain — shared with 项目查询 (hardening wave, see
