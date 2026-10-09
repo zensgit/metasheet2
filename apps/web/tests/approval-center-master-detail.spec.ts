@@ -940,6 +940,38 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(getApprovalSpy).toHaveBeenCalledTimes(1)
   })
 
+  // Test report 2026-10-08 T4b (gate r1 P3-4): a `?detail=` deep link to an instance that is NOT on
+  // the loaded page renders the single-fetch detail, which the list's own summary resolve never sees.
+  // Its summary still names a 人员 (user) value once a list row sharing the template has loaded that
+  // template's schema — here the schema arrives only AFTER the pane opened — and the pane never
+  // fetches a template of its own (the summary stays cache-only).
+  it('T4b: a deep-linked pane row off the loaded page names its 人员 summary value once the shared schema loads', async () => {
+    const MEMBER_ID = '5b8e2f14-9c3a-4d71-a0e6-2f9d4c7b1a83'
+    const schemaFetch = deferred<any>()
+    getTemplateSpy.mockReset().mockReturnValue(schemaFetch.promise)
+    resolveApprovalDirectoryUsersSpy.mockReset().mockImplementation(async (ids: string[]) =>
+      (ids.includes(MEMBER_ID) ? [{ id: MEMBER_ID, name: '王五' }] : []))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_deep', '采购申请', { templateId: 'tpl_t4b', formSnapshot: { fld_owner: MEMBER_ID } }))
+    mockRoute.query = { detail: 'apv_deep' }
+    mockPendingApprovals.value = [pendingRow('apv_list', '出差报销', { templateId: 'tpl_t4b', formSnapshot: {} })]
+    await mountView()
+    await flushUi(8)
+
+    const pane = () => container!.querySelector('[data-testid="approval-detail-pane"]')
+    expect(pane()?.textContent).toContain('采购申请')
+    expect(container!.querySelector('[data-el-row="apv_deep"]')).toBeNull()
+    expect(pane()?.querySelector('.approval-detail-pane__summary')).toBeNull()
+
+    schemaFetch.resolve({ formSchema: { fields: [{ id: 'fld_owner', type: 'user', label: '人员' }] } })
+    await flushUi(12)
+
+    expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(MEMBER_ID)
+    expect(pane()?.querySelector('.approval-detail-pane__summary')?.textContent).toContain('人员：王五')
+    expect(pane()?.textContent).not.toContain(MEMBER_ID)
+    // One template fetch, for the list row; none for the pane.
+    expect(getTemplateSpy).toHaveBeenCalledTimes(1)
+  })
+
   // -------------------------------------------------------------------------
   // Zero regression: row selection must NOT reload the list or wipe an in-progress batch
   // selection. This is the exact incident the narrowed `route.query` watcher fix prevents — see

@@ -354,7 +354,11 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+      [
+        // advisoryXactLock: HANDLE-ONLY (asserted absent from the root surface in 7c.), the
+        // per-tenant "count then insert under a cap" mutex (stock-preparation-project-target-store.cjs).
+        'advisoryXactLock',
+        'commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
         // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
         // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
         'setTransactionIsolationLevel',
@@ -364,6 +368,35 @@ async function main() {
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })
   })
   assert.ok(mockDb9.calls.some((c) => c.tx && /INSERT INTO "integration_runs"/.test(c.sql)))
+
+  // --- 7c. advisoryXactLock (E1): ONE fixed literal, the key as its ONE parameter, on the tx connection
+  assert.equal(typeof db9.advisoryXactLock, 'undefined',
+    'advisoryXactLock is NOT on the root helper (pg_advisory_xact_lock in autocommit guards nothing)')
+  const mockDb9lock = mockDatabase()
+  const db9lock = createDb({ database: mockDb9lock })
+  await db9lock.transaction(async (trx) => {
+    await trx.advisoryXactLock('stock-prep-project-target:tenant-a')
+    await trx.advisoryXactLock("x'); DROP TABLE users; --")
+  })
+  assert.deepEqual(
+    mockDb9lock.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: ['stock-prep-project-target:tenant-a'], tx: true },
+      // Caller text NEVER reaches the SQL: a hostile key is just a parameter value.
+      { sql: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: ["x'); DROP TABLE users; --"], tx: true },
+    ],
+    'the lock statement is a fixed literal; the key is its only parameter; it runs on the transaction connection',
+  )
+  const mockDb9lockBad = mockDatabase()
+  const db9lockBad = createDb({ database: mockDb9lockBad })
+  for (const badKey of ['', '   ', null, undefined, 42, {}, ['k'], { toString: () => 'k' }]) {
+    await assert.rejects(
+      db9lockBad.transaction((trx) => trx.advisoryXactLock(badKey)),
+      (error) => error instanceof ScopeViolationError,
+      `advisoryXactLock refuses a non-string / blank key: ${JSON.stringify(badKey)}`,
+    )
+  }
+  assert.ok(!mockDb9lockBad.calls.some((c) => c.sql), 'a refused key issues no statement')
 
   // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
   assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',

@@ -2002,7 +2002,7 @@ export function stockPrepHandoffOutcomePlain(outcome: string): StockPrepPlainEnt
 // this module) renders the `其他动作(${code})` fallback, because that fallback needs the raw code
 // interpolated and this file never receives one it did not already look up.
 //
-// THE COUNT MUST STAY AT FOURTEEN. `StockPreparationOpsPanel.spec.ts` reads
+// THE COUNT MUST STAY AT TWENTY (14 + the six 一项目一张备料表 actions migration 088 lists). `StockPreparationOpsPanel.spec.ts` reads
 // `STOCK_PREP_AUDIT_ACTIONS` straight out of `stock-preparation-audit-store.cjs` (the DB CHECK
 // constraint's own source of truth, same anti-vacuity discipline as
 // `StockPreparationPosturePlainLanguage.spec.ts`'s manifest read) and asserts `Object.keys(...).length`
@@ -2025,6 +2025,15 @@ export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   project_directory_read: Object.freeze({ zh: '打开了项目清单', en: 'Opened the project list' }),
   handoff_advance: Object.freeze({ zh: '通知了下一步', en: 'Advanced the handoff to the next step' }),
   project_board_read: Object.freeze({ zh: '打开了一个项目的备料页', en: "Opened a project's 备料 page" }),
+  // 一个项目一张备料表 (migration 088; ADR adr-stock-prep-project-sheets-20261008 §1.2). S1 writes
+  // the first and the fourth; S3 / S4 write the rest, listed now so the vocabulary and this table
+  // move together exactly once.
+  project_target_create: Object.freeze({ zh: '为一个项目建了备料表', en: 'Created the 备料 sheet for a project' }),
+  project_target_archive: Object.freeze({ zh: '归档了一个项目的备料表', en: "Archived a project's 备料 sheet" }),
+  project_target_restore: Object.freeze({ zh: '恢复了一个项目已归档的备料表', en: "Restored a project's archived 备料 sheet" }),
+  project_target_grant: Object.freeze({ zh: '给备料角色授了一个项目备料表的写权限', en: "Granted the 备料 roles write access to a project's sheet" }),
+  project_fields_update: Object.freeze({ zh: '改了一个项目的项目级信息', en: "Updated a project's project-level fields" }),
+  project_overview_refresh: Object.freeze({ zh: '刷新了项目总览表', en: 'Refreshed the project overview sheet' }),
 })
 
 export function stockPrepAuditActionPlain(action: string): StockPrepPlainText | null {

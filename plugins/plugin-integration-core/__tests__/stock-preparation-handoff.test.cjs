@@ -3044,7 +3044,9 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // show up HERE, as a failure, rather than quietly becoming the nth thing the header does not
   // mention. It cuts both ways: a call site that DISAPPEARS lands here too, which is how this line
   // and the header list stayed in step through the deletion above.
-  assert.equal(callSites, 10, 'G9: ten call sites — if this changes, the header list must too')
+  // 一个项目一张备料表 (S1) added THREE — the project-target GET, CREATE and LIST (the scope header's
+  // section D, items 11–13): the registry they read is keyed by the tenant this scope proves.
+  assert.equal(callSites, 13, 'G9: thirteen call sites — if this changes, the header list must too')
   for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
