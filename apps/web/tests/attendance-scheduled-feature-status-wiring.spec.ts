@@ -161,7 +161,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(status.getAttribute('data-configured-state')).toBe('configured')
     expect(status.getAttribute('data-runnable-state')).toBe('closed')
     expect(textOf(status.querySelector('[data-scheduled-feature-configured]'))).toBe('Configured')
-    expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('No — the answering process reports server run switches off')
+    expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('No — not all server run switches are on in the answering process')
     const detail = textOf(status.querySelector('[data-scheduled-feature-detail]'))
     expect(detail).toContain('answering process reported')
     expect(detail).not.toMatch(/will not send/i)

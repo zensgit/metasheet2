@@ -193,7 +193,7 @@ describe('describeScheduledFeatureStatus', () => {
     expect(en.detail).not.toMatch(/will not send/i)
   })
 
-  it('accrual configured + gates closed: says it will not run automatically, names only the closed gates, and keeps the manual run out of it', () => {
+  it('accrual configured + gates closed: bounds the verdict to the answering process, names only the closed gates, and keeps the manual run out of it', () => {
     const closed: AttendanceRuntimeGateEntry = { gatesOpen: false, closedGates: ['scheduler'] }
     const zh = describeScheduledFeatureStatus(zhTr, { feature: 'annualLeaveAccrualScheduled', configured: 'configured', gate: closed })
     expect(zh.detail).toContain('应答进程的')
@@ -282,6 +282,30 @@ describe('scheduledFeatureSaveNotice / withScheduledFeatureSaveNotice', () => {
     for (const configured of ['not_configured', 'unknown'] as const) {
       expect(scheduledFeatureSaveNotice(enTr, { feature: 'reportDigest', configured, gate: CLOSED_DIGEST })).toBe('')
       expect(withScheduledFeatureSaveNotice(enTr, { feature: 'reportDigest', configured, gate: CLOSED_DIGEST }, 'Saved.')).toBe('Saved.')
+    }
+  })
+
+  it('every closed-state sentence, in both languages, is bounded to the answering process and never a whole-feature verdict (gate r5 P3-1)', () => {
+    const closedByFeature: Record<AttendanceScheduledFeatureKey, AttendanceRuntimeGateEntry> = {
+      reportDigest: CLOSED_DIGEST,
+      annualLeaveAccrualScheduled: { gatesOpen: false, closedGates: ['scheduler'] },
+    }
+    for (const feature of features) {
+      const gate = closedByFeature[feature]
+      for (const [tr, bound, cannot, forbidden] of [
+        [zhTr, '应答进程的', '不能确认其他实例', /不会发送|不会自动运行|之前不会/],
+        [enTr, 'answering process', 'cannot confirm other instances', /will not (send|run)/i],
+      ] as const) {
+        const notConfigured = describeScheduledFeatureStatus(tr, { feature, configured: 'not_configured', gate })
+        const configuredClosed = describeScheduledFeatureStatus(tr, { feature, configured: 'configured', gate })
+        const notice = scheduledFeatureSaveNotice(tr, { feature, configured: 'configured', gate })
+        for (const text of [notConfigured.detail, configuredClosed.detail, notice]) {
+          expect(text).toContain(bound)
+          expect(text).toContain(cannot)
+          expect(text).not.toMatch(forbidden)
+        }
+        expect(configuredClosed.runnableLabel).toContain(bound === '应答进程的' ? '应答进程的' : 'answering process')
+      }
     }
   })
 

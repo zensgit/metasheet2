@@ -6,9 +6,9 @@
 //   (a) the org-side policy saved in settings (this is what 「已配置」 reports), AND
 //   (b) the process-level env gates owned by ops (this is what 「当前是否可运行」 reports).
 //       `runtimeGates` is the switch snapshot of the ONE process that answered the request (当前响应进程的
-//       开关快照); another instance may be configured differently. The open-state hints say so explicitly. The
-//       closed-state copy (e.g. 「已保存，但当前不会发送」) predates this and still reads that one snapshot as the
-//       answer; the closed-state copy is now bounded the same way (reviewer finding, 2026-10-09).
+//       开关快照); another instance may be configured differently. Both the open-state and the closed-state hints
+//       say so explicitly (closed state bounded on a reviewer finding, 2026-10-09); the only whole-feature
+//       sentences left are the 'incomplete' ones, which describe the saved settings, not a gate.
 // Missing (b) is a byte-exact no-op at base 9d65b8318f - digest producer: plugins/plugin-attendance/index.cjs:16548-16550
 // read by runAttendanceReportDigestOnce (:17423); accrual: :19791-19793 read by
 // runAnnualLeaveAccrualScheduledTriggerOnce (:19893); the scheduler gate is packages/core-backend/src/services/
@@ -18,8 +18,8 @@
 // Honesty rules this module encodes (see the A1 report for the evidence):
 //   1. Configured state is derived from the SAVED settings the server last returned - never from a live,
 //      unsaved checkbox - so toggling a box cannot flip the status before anything is saved.
-//   2. The env half is bounded to the answering process on purpose: a closed gate means "this process will not run
-//      it" (another instance may differ); an OPEN gate only means "not
+//   2. The env half is bounded to the answering process on purpose: a closed gate means "the answering process
+//      reported it off" (another instance may differ, so the UI never says the feature will not run); an OPEN gate only means "not
 //      blocked by these gates" - never "running"/"in effect". Org policy, engine prerequisites and channel
 //      configuration are separate, and the settings read is cached up to 60 s per process
 //      (index.cjs:348 SETTINGS_CACHE_TTL_MS, :14970-14977 getSettings; a save refreshes only the writing
@@ -165,7 +165,7 @@ function configuredLabelOf(tr: TranslateFn, state: AttendanceConfiguredState): s
 function runnableLabelOf(tr: TranslateFn, state: AttendanceRunnableState): string {
   switch (state) {
     case 'open': return tr('Server run switches are on', '服务端运行开关已开启')
-    case 'closed': return tr('No — the answering process reports server run switches off', '否：应答进程的服务端运行开关未全部开启')
+    case 'closed': return tr('No — not all server run switches are on in the answering process', '否：应答进程的服务端运行开关未全部开启')
     default: return tr('Unknown — server run switches not reported', '未知：未取得服务端运行开关状态')
   }
 }
@@ -214,15 +214,11 @@ function closedDetail(
   list: string,
 ): string {
   if (configured === 'not_configured') {
-    return feature === 'reportDigest'
-      ? tr(
-        `Not configured. Even once switched on, the answering process reports ${list} off; this snapshot cannot confirm other instances or task execution.`,
-        `未配置。即使开启，应答进程的 ${list} 也未开启；此快照不能确认其他实例或任务执行状态。`,
-      )
-      : tr(
-        `Not configured. Even once switched on, the answering process reports ${list} off; this snapshot cannot confirm other instances or task execution.`,
-        `未配置。即使开启，应答进程的 ${list} 也未开启；此快照不能确认其他实例或任务执行状态。`,
-      )
+    // The same sentence for both features: the not-configured hint names only the switches, so it does not vary.
+    return tr(
+      `Not configured. Even once switched on, the answering process reports ${list} off; this snapshot cannot confirm other instances or task execution.`,
+      `未配置。即使开启，应答进程的 ${list} 也未开启；此快照不能确认其他实例或任务执行状态。`,
+    )
   }
   return feature === 'reportDigest'
     ? tr(
