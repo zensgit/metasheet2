@@ -19,6 +19,10 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //   ----------------------------------|--------------------------------------------|---------------------------------------------
 //   server-list                       | 退回 shown; options exactly [approval_1]    | the DTO's `returnableNodeKeys` is the list
 //   server-empty                      | no 退回 button                              | `[]` hides 退回 although the mirror would offer one
+//   server-list-wins                  | 退回 shown; options exactly [approval_1]    | the server list wins over a DISAGREEING mirror
+//                                     |                                            | with the graph present: after an admin forward
+//                                     |                                            | jump history never held approval_1 (mirror: no
+//                                     |                                            | candidates), the server's walker still lists it
 //   client-mirror                     | 退回 shown; options exactly [approval_1]    | no server field → mirror: own graph, approval
 //                                     |                                            | nodes only, outside parallel regions, upstream
 //                                     |                                            | of the cursor, cursor itself excluded
@@ -32,9 +36,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //   handler-cursor & template=drifted | no 退回 button                              | with no own graph, the DTO's `currentNodeType`
 //                                     |                                            | alone hides 退回
 //
-// The drifted server-list row is what makes a NON-empty server list discriminating: with the graph
-// in place the mirror computes the same [approval_1], so `server-list` alone cannot tell the two
-// paths apart.
+// `server-list` alone cannot tell the server list from the mirror (with the graph in place both
+// compute [approval_1]); `server-list-wins` and the drifted server-list row are the two that can.
 //
 // Every scenario first proves the action bar is there (the 转交 button: same `canDecide` /
 // desktop gates as 退回), so a missing 退回 button can only mean an empty candidate list.
@@ -120,6 +123,10 @@ test('server-list: the DTO\'s returnableNodeKeys is the 退回 option list, verb
 
 test('server-empty: returnableNodeKeys [] hides 退回 although the client mirror would offer approval_1', async ({ page }) => {
   await expectNoReturnButton(page, '?scenario=server-empty')
+})
+
+test('server-list-wins: after an admin forward jump history never held approval_1, and the server list still offers it', async ({ page }) => {
+  await expectReturnOptions(page, '?scenario=server-list-wins', [APPROVAL_1], 'rc-server-list-wins-1440.png')
 })
 
 test('client-mirror: without the server field only approval_1 survives (cc / handler / parallel-branch / downstream / cursor dropped)', async ({ page }) => {

@@ -33,10 +33,11 @@
 //     (ApprovalProductService.getApproval) ships `currentNodeKeys` and never `currentNodeType`;
 //   * `/history` rows carry only the whitelisted metadata keys (routes/approval-history.ts selects
 //     five single-key paths). Of those, this story writes just `nodeKey`: `targetNodeKey`,
-//     `nextNodeKey`, `targetType`, `handlerMode`, … never reach a client. Rows the server writes in
-//     ONE transaction share `occurred_at` (`DEFAULT now()`) and `ORDER BY occurred_at DESC` has no
-//     tiebreak, so the order among them below is one order the server may serve (newest insert
-//     first). The view keeps the order it is given.
+//     `nextNodeKey`, `targetType`, `handlerMode`, … never reach a client, and a row with no
+//     whitelisted key at all — the admin jump — has no `metadata` on the wire. Rows the server
+//     writes in ONE transaction share `occurred_at` (`DEFAULT now()`) and `ORDER BY occurred_at
+//     DESC` has no tiebreak, so the order among them below is one order the server may serve (newest
+//     insert first). The view keeps the order it is given.
 //
 // THE MAIN HISTORY (cursor approval_2), newest first: a 退回 @approval_3 back to approval_2; approve
 // @approval_2; the region's any-mode join in one transaction — cc @join_1, the system `sign`
@@ -49,6 +50,11 @@
 //   server-list      — detail read: cursor approval_2, the viewer's seat there, the main history,
 //                      `returnableNodeKeys: ['approval_1']` (what the walker yields here).
 //   server-empty     — server-list with `returnableNodeKeys: []`.
+//   server-list-wins — server-list, but the instance reached approval_2 by an ADMIN FORWARD JUMP from
+//                      approval_1 (`adminJump`): history is created @start plus the jump row, which
+//                      has no `nodeKey`. The mirror (history ∩ graph) has nothing to offer; the
+//                      server's walker reads the graph only and still lists approval_1. This is the
+//                      graph-present case where the server list and the mirror disagree.
 //   client-mirror    — server-list with the field DELETED (a server before #6293): the mirror decides.
 //   handler-cursor   — older-server detail read with the cursor AT handler_1 (so `currentNodeType:
 //                      'handler'` and this graph agree) and the viewer's seat there; history is the
@@ -103,6 +109,7 @@ declare global {
 const SCENARIOS = [
   'server-list',
   'server-empty',
+  'server-list-wins',
   'client-mirror',
   'handler-cursor',
   'parallel-state',
@@ -123,6 +130,7 @@ const REQUESTER: Person = { id: 'user_1', name: '张三' }
 const MANAGER: Person = { id: 'user_manager', name: '部门经理' }
 const LEGAL: Person = { id: 'user_legal', name: '法务专员' }
 const GM: Person = { id: 'user_gm', name: '总经理' }
+const FLOW_ADMIN: Person = { id: 'user_flow_admin', name: '流程管理员' }
 /** The engine's own actor for cc and aggregate-cancel `sign` rows (`insertCcEvents`). */
 const SYSTEM: Person = { id: 'system', name: 'System' }
 
@@ -181,8 +189,9 @@ function hoursIn(hours: number): string {
 }
 
 /**
- * One `/history` row as the platform wire serves it: `metadata` holds `nodeKey`, the only
- * whitelisted key this story writes.
+ * One `/history` row as the platform wire serves it: `metadata` holds `nodeKey` (the only
+ * whitelisted key this story writes) or is ABSENT when the stored row has none. The DTO type
+ * declares `metadata` as always present, which that wire does not honour, hence the one assertion.
  */
 function historyRow(
   id: string,
@@ -190,9 +199,9 @@ function historyRow(
   actor: Person,
   comment: string | null,
   hours: number,
-  nodeKey: string,
+  nodeKey: string | null,
 ): UnifiedApprovalHistoryDTO {
-  return {
+  const row: Omit<UnifiedApprovalHistoryDTO, 'metadata'> = {
     id,
     action,
     actorId: actor.id,
@@ -201,8 +210,8 @@ function historyRow(
     fromStatus: action === 'created' ? null : 'pending',
     toStatus: 'pending',
     occurredAt: hoursIn(hours),
-    metadata: { nodeKey },
   }
+  return nodeKey === null ? (row as UnifiedApprovalHistoryDTO) : { ...row, metadata: { nodeKey } }
 }
 
 // The first pass, oldest rows; every history below ends with (newest-first) a suffix of these.
@@ -227,6 +236,11 @@ const MAIN_HISTORY: UnifiedApprovalHistoryDTO[] = [
 const HANDLER_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [CC_1, APPROVE_1, CREATED]
 /** Cursor at the fork: the viewer's handle at handler_1 opened both branches. */
 const PARALLEL_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [HANDLE_1, CC_1, APPROVE_1, CREATED]
+/** An admin moved the instance from approval_1 straight to approval_2 (no `nodeKey` on that row). */
+const ADMIN_JUMP_HISTORY: UnifiedApprovalHistoryDTO[] = [
+  historyRow('rc_hist_jump', 'jump', FLOW_ADMIN, '部门经理长期休假，流程管理员跳过初审', 6, null),
+  CREATED,
+]
 
 /** An ordinary seat as the detail read lists it (`metadata` is the row's own, `{}` here). */
 function seat(person: Person, nodeKey: string): ApprovalAssignmentDTO {
@@ -283,6 +297,8 @@ function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): Fixture {
       return { approval: detailRead, history: MAIN_HISTORY }
     case 'server-empty':
       return { approval: { ...detailRead, returnableNodeKeys: [] }, history: MAIN_HISTORY }
+    case 'server-list-wins':
+      return { approval: detailRead, history: ADMIN_JUMP_HISTORY }
     case 'client-mirror':
       return { approval: olderServer, history: MAIN_HISTORY }
     case 'handler-cursor':
