@@ -943,9 +943,12 @@ async function runManualTargetChild(input: {
       })
     })
   } finally {
-    await waitForChildExit(child)
-    children.delete(child)
-    input.local.recoverySecret.fill(0)
+    try {
+      await waitForChildExit(child)
+      children.delete(child)
+    } finally {
+      input.local.recoverySecret.fill(0)
+    }
   }
 }
 
