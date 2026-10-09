@@ -16,7 +16,7 @@ import {
 
 // A1 「提示与实际状态」 - the report-digest subscription and the monthly annual-leave auto-accrual need BOTH an
 // org-side switch (saved in settings => 「已配置」) AND ops-owned env gates (=> 「当前是否可运行」). These specs pin
-// the derivation and the honesty rules: configured comes from saved settings; a closed gate means "will not run";
+// the derivation and the honesty rules: configured comes from saved settings; a closed gate means "this process will not run it";
 // an open gate NEVER reads as running/in effect; a missing report is fail-closed.
 
 const enTr: TranslateFn = (en) => en
@@ -175,24 +175,30 @@ describe('describeScheduledFeatureStatus', () => {
     expect(view.detail.replace(/ATTENDANCE_[A-Z_]+/g, '')).not.toMatch(/worker/i) // the env name itself says WORKER
   })
 
-  it('digest configured + gates closed: says it will not send and names every closed gate with its env name', () => {
+  it('digest configured + gates closed: bounds the verdict to the answering process and names every closed gate with its env name', () => {
     const zh = describeScheduledFeatureStatus(zhTr, { feature: 'reportDigest', configured: 'configured', gate: CLOSED_DIGEST })
     expect(zh.runnable).toBe('closed')
     expect(zh.warn).toBe(true)
-    expect(zh.runnableLabel).toBe('否：服务端运行开关未开启')
-    expect(zh.detail).toContain('已保存，但当前不会发送')
+    expect(zh.runnableLabel).toBe('否：应答进程的服务端运行开关未全部开启')
+    expect(zh.detail).toContain('应答进程的')
+    expect(zh.detail).toContain('不能确认其他实例')
+    expect(zh.detail).not.toContain('不会发送')
     expect(zh.closedGateLabels).toHaveLength(3)
     for (const env of ['ATTENDANCE_REPORT_DIGEST_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED', 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED']) {
       expect(zh.detail).toContain(env)
     }
     const en = describeScheduledFeatureStatus(enTr, { feature: 'reportDigest', configured: 'configured', gate: CLOSED_DIGEST })
-    expect(en.detail).toContain('Saved, but it will not send')
+    expect(en.detail).toContain('answering process reported')
+    expect(en.detail).toContain('cannot confirm other instances')
+    expect(en.detail).not.toMatch(/will not send/i)
   })
 
   it('accrual configured + gates closed: says it will not run automatically, names only the closed gates, and keeps the manual run out of it', () => {
     const closed: AttendanceRuntimeGateEntry = { gatesOpen: false, closedGates: ['scheduler'] }
     const zh = describeScheduledFeatureStatus(zhTr, { feature: 'annualLeaveAccrualScheduled', configured: 'configured', gate: closed })
-    expect(zh.detail).toContain('已保存，但当前不会自动运行')
+    expect(zh.detail).toContain('应答进程的')
+    expect(zh.detail).toContain('手工运行不受影响')
+    expect(zh.detail).not.toContain('不会自动运行')
     expect(zh.detail).toContain('ATTENDANCE_SCHEDULER_ENABLED')
     expect(zh.detail).not.toContain('ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED')
     expect(zh.detail).toContain('手工运行不受影响')
@@ -251,7 +257,7 @@ describe('describeScheduledFeatureStatus', () => {
     const view = describeScheduledFeatureStatus(zhTr, { feature: 'reportDigest', configured: 'not_configured', gate: CLOSED_DIGEST })
     expect(view.configuredLabel).toBe('未配置')
     expect(view.warn).toBe(false)
-    expect(view.detail).toContain('即使开启，也要等运维开启')
+    expect(view.detail).toContain('即使开启，应答进程的')
   })
 
   it('unknown configuration says it has not been loaded and never claims "not configured"', () => {
@@ -279,14 +285,15 @@ describe('scheduledFeatureSaveNotice / withScheduledFeatureSaveNotice', () => {
     }
   })
 
-  it('saved + gates closed: the notice says it will not send until ops turn the named gates on', () => {
+  it('saved + gates closed: the notice bounds the verdict to the answering process and names the closed gates', () => {
     const message = withScheduledFeatureSaveNotice(
       zhTr,
       { feature: 'reportDigest', configured: 'configured', gate: CLOSED_DIGEST },
       '统计通知订阅已保存',
     )
     expect(message.startsWith('统计通知订阅已保存 ')).toBe(true)
-    expect(message).toContain('之前不会发送')
+    expect(message).toContain('应答进程的')
+    expect(message).toContain('不能确认其他实例')
     expect(message).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
   })
 

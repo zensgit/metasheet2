@@ -161,9 +161,10 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(status.getAttribute('data-configured-state')).toBe('configured')
     expect(status.getAttribute('data-runnable-state')).toBe('closed')
     expect(textOf(status.querySelector('[data-scheduled-feature-configured]'))).toBe('Configured')
-    expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('No — server run switches are off')
+    expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('No — the answering process reports server run switches off')
     const detail = textOf(status.querySelector('[data-scheduled-feature-detail]'))
-    expect(detail).toContain('Saved, but it will not send')
+    expect(detail).toContain('answering process reported')
+    expect(detail).not.toMatch(/will not send/i)
     expect(detail).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
     expect(detail).toContain('ATTENDANCE_SCHEDULER_ENABLED')
     expect(detail).toContain('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
@@ -222,7 +223,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     const status = statusIn(digestCard(root))
     expect(status.getAttribute('data-configured-state')).toBe('not_configured')
     expect(textOf(status.querySelector('[data-scheduled-feature-configured]'))).toBe('Not configured')
-    expect(textOf(status)).toContain('Even once switched on, it will not send until ops turn on')
+    expect(textOf(status)).toContain('Even once switched on, the answering process reports')
   })
 
   it('digest: ticking the checkbox does NOT move the configured status; only a saved response does', async () => {
@@ -258,7 +259,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect((puts[0].body!.attendanceReportDigestPolicy as { enabled: boolean }).enabled).toBe(true)
   })
 
-  it('digest: after saving, the status says it will not send until ops turn the named gates on', async () => {
+  it('digest: after saving, the status bounds the verdict to the answering process and names the closed gates', async () => {
     settingsData = { attendanceReportDigestPolicy: DIGEST_OFF }
     runtimeGates = GATES_ALL_CLOSED
     const root = await mountAdmin()
@@ -270,7 +271,8 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
 
     const status = adminStatusText(root)
     expect(status).toContain('Report digest subscription saved')
-    expect(status).toContain('it will not send until ops turn on')
+    expect(status).toContain('answering process reported')
+    expect(status).toContain('cannot confirm other instances')
     expect(status).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
   })
 
@@ -462,7 +464,8 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(status.getAttribute('data-configured-state')).toBe('configured')
     expect(status.getAttribute('data-runnable-state')).toBe('closed')
     const detail = textOf(status.querySelector('[data-scheduled-feature-detail]'))
-    expect(detail).toContain('Saved, but it will not run automatically')
+    expect(detail).toContain('answering process reported')
+    expect(detail).toContain('The manual run is not affected')
     expect(detail).toContain('ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED')
     expect(detail).not.toContain('ATTENDANCE_SCHEDULER_ENABLED')
     expect(detail).toContain('The manual run is not affected')
@@ -503,7 +506,8 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(statusIn(card).getAttribute('data-configured-state')).toBe('configured')
     const status = adminStatusText(root)
     expect(status).toContain('Annual leave policy saved')
-    expect(status).toContain('will not run automatically until ops turn on')
+    expect(status).toContain('answering process reported')
+    expect(status).toContain('The manual run is not affected')
   })
 
   it('PIN annual: saving sends exactly the same PUT body as before - ONLY annualLeavePolicy with the same keys', async () => {
@@ -565,7 +569,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
       const status = statusIn(card)
       expect(textOf(status.querySelector('[data-scheduled-feature-configured]'))).toBe('已配置')
       expect(textOf(status)).toContain('当前是否可运行')
-      expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('否：服务端运行开关未开启')
+      expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('否：应答进程的服务端运行开关未全部开启')
     }
   })
 })

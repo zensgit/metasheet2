@@ -59,10 +59,10 @@ describe('AttendanceScheduledFeatureStatus', () => {
     expect(host!.getAttribute('data-configured-state')).toBe('configured')
     expect(host!.getAttribute('data-runnable-state')).toBe('closed')
     expect(text(root, '[data-scheduled-feature-configured]')).toBe('已配置')
-    expect(text(root, '[data-scheduled-feature-runnable]')).toBe('否：服务端运行开关未开启')
+    expect(text(root, '[data-scheduled-feature-runnable]')).toBe('否：应答进程的服务端运行开关未全部开启')
     expect(root.textContent).toContain('配置状态')
     expect(root.textContent).toContain('当前是否可运行')
-    expect(text(root, '[data-scheduled-feature-detail]')).toContain('已保存，但当前不会发送')
+    expect(text(root, '[data-scheduled-feature-detail]')).toContain('应答进程的')
   })
 
   it('renders exactly what the pure module derives (so the component adds no logic of its own)', () => {

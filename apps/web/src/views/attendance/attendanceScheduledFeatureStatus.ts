@@ -8,7 +8,7 @@
 //       `runtimeGates` is the switch snapshot of the ONE process that answered the request (当前响应进程的
 //       开关快照); another instance may be configured differently. The open-state hints say so explicitly. The
 //       closed-state copy (e.g. 「已保存，但当前不会发送」) predates this and still reads that one snapshot as the
-//       answer - its wording is unchanged here and is the owner's call.
+//       answer; the closed-state copy is now bounded the same way (reviewer finding, 2026-10-09).
 // Missing (b) is a byte-exact no-op at base 9d65b8318f - digest producer: plugins/plugin-attendance/index.cjs:16548-16550
 // read by runAttendanceReportDigestOnce (:17423); accrual: :19791-19793 read by
 // runAnnualLeaveAccrualScheduledTriggerOnce (:19893); the scheduler gate is packages/core-backend/src/services/
@@ -18,7 +18,8 @@
 // Honesty rules this module encodes (see the A1 report for the evidence):
 //   1. Configured state is derived from the SAVED settings the server last returned - never from a live,
 //      unsaved checkbox - so toggling a box cannot flip the status before anything is saved.
-//   2. The env half is asymmetric on purpose: a closed gate means "will not run"; an OPEN gate only means "not
+//   2. The env half is bounded to the answering process on purpose: a closed gate means "this process will not run
+//      it" (another instance may differ); an OPEN gate only means "not
 //      blocked by these gates" - never "running"/"in effect". Org policy, engine prerequisites and channel
 //      configuration are separate, and the settings read is cached up to 60 s per process
 //      (index.cjs:348 SETTINGS_CACHE_TTL_MS, :14970-14977 getSettings; a save refreshes only the writing
@@ -164,7 +165,7 @@ function configuredLabelOf(tr: TranslateFn, state: AttendanceConfiguredState): s
 function runnableLabelOf(tr: TranslateFn, state: AttendanceRunnableState): string {
   switch (state) {
     case 'open': return tr('Server run switches are on', '服务端运行开关已开启')
-    case 'closed': return tr('No — server run switches are off', '否：服务端运行开关未开启')
+    case 'closed': return tr('No — the answering process reports server run switches off', '否：应答进程的服务端运行开关未全部开启')
     default: return tr('Unknown — server run switches not reported', '未知：未取得服务端运行开关状态')
   }
 }
@@ -215,22 +216,22 @@ function closedDetail(
   if (configured === 'not_configured') {
     return feature === 'reportDigest'
       ? tr(
-        `Not configured. Even once switched on, it will not send until ops turn on: ${list}.`,
-        `未配置。即使开启，也要等运维开启 ${list} 后才会发送。`,
+        `Not configured. Even once switched on, the answering process reports ${list} off; this snapshot cannot confirm other instances or task execution.`,
+        `未配置。即使开启，应答进程的 ${list} 也未开启；此快照不能确认其他实例或任务执行状态。`,
       )
       : tr(
-        `Not configured. Even once switched on, it will not run automatically until ops turn on: ${list}.`,
-        `未配置。即使开启，也要等运维开启 ${list} 后才会自动运行。`,
+        `Not configured. Even once switched on, the answering process reports ${list} off; this snapshot cannot confirm other instances or task execution.`,
+        `未配置。即使开启，应答进程的 ${list} 也未开启；此快照不能确认其他实例或任务执行状态。`,
       )
   }
   return feature === 'reportDigest'
     ? tr(
-      `Saved, but it will not send: ops must turn on ${list} in the server environment.`,
-      `已保存，但当前不会发送：需运维在服务端环境开启 ${list}。`,
+      `Saved. At the last settings read the answering process reported ${list} off; this snapshot cannot confirm other instances or task execution.`,
+      `已保存。最近一次读取时，应答进程的 ${list} 未开启；此快照不能确认其他实例或任务执行状态。`,
     )
     : tr(
-      `Saved, but it will not run automatically: ops must turn on ${list} in the server environment. The manual run is not affected.`,
-      `已保存，但当前不会自动运行：需运维在服务端环境开启 ${list}。手工运行不受影响。`,
+      `Saved. At the last settings read the answering process reported ${list} off; this snapshot cannot confirm other instances or task execution. The manual run is not affected.`,
+      `已保存。最近一次读取时，应答进程的 ${list} 未开启；此快照不能确认其他实例或任务执行状态。手工运行不受影响。`,
     )
 }
 
@@ -294,8 +295,8 @@ export function scheduledFeatureSaveNotice(
   if (runnable === 'closed' && gate) {
     const list = closedGateLabels(tr, gate.closedGates).join(tr(', ', '、'))
     return feature === 'reportDigest'
-      ? tr(`Note: it will not send until ops turn on: ${list}.`, `提示：在运维开启 ${list} 之前不会发送。`)
-      : tr(`Note: it will not run automatically until ops turn on: ${list}.`, `提示：在运维开启 ${list} 之前不会自动运行。`)
+      ? tr(`Note: at the last settings read the answering process reported ${list} off; this snapshot cannot confirm other instances or task execution.`, `提示：最近一次读取时，应答进程的 ${list} 未开启；此快照不能确认其他实例或任务执行状态。`)
+      : tr(`Note: at the last settings read the answering process reported ${list} off; this snapshot cannot confirm other instances or task execution. The manual run is not affected.`, `提示：最近一次读取时，应答进程的 ${list} 未开启；此快照不能确认其他实例或任务执行状态。手工运行不受影响。`)
   }
   if (runnable === 'unknown') {
     return tr(
