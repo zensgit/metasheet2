@@ -32,8 +32,6 @@
 // sheet's display name (that is its purpose — the operator must find their project) and nowhere
 // else this module emits.
 
-const crypto = require('node:crypto')
-
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
@@ -42,14 +40,25 @@ const {
   StockPreparationTargetProvisioningError,
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationTodoView,
+  resolveFieldExistence,
   STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX,
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN,
   isStockPreparationProjectSheetObjectId,
+  deriveStockPreparationProjectSheetObjectId,
 } = require('./stock-preparation-own-base.cjs')
 const { STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID } = require('./stock-preparation-templates.cjs')
+// S2 (ADR §2 「客户包」): the deployment's customer pack, re-placed onto each project sheet. The
+// installer is the ONE path that lands a pack (additive, never `ensureObject`); this module only
+// decides WHICH packs and WHERE, and refuses before any write when they cannot cover the action.
+const { retargetCustomerPack } = require('./stock-preparation-customer-pack.cjs')
+const {
+  installCustomerPack,
+  preflightCustomerPackInstallCapabilities,
+} = require('./stock-preparation-customer-pack-installer.cjs')
+const { LIVE_STATUSES: PACK_INSTALL_LIVE_STATUSES } = require('./stock-preparation-pack-install-store.cjs')
 
 const PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
 // G1: comma-separated role ids that receive `spreadsheet:write` on every project sheet at create
@@ -105,8 +114,9 @@ function resolveProjectSheetGrantRoleIds(env = process.env) {
 function deriveProjectSheetObjectId(tenantId, projectNo) {
   const tenant = requiredString(tenantId, 'tenantId')
   const project = requiredString(projectNo, 'projectNo')
-  const digest = crypto.createHash('sha256').update(`${tenant}:${project}`, 'utf8').digest('hex')
-  return `${STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX}${digest.slice(0, PROJECT_SHEET_OBJECT_ID_DIGEST_LENGTH)}`
+  // The ONE derivation lives in own-base.cjs (S2 fix round 1) so the customer-pack module can bind a
+  // re-placed pack to the same (tenant, project) without a load cycle.
+  return deriveStockPreparationProjectSheetObjectId(tenant, project)
 }
 
 /**
@@ -130,20 +140,40 @@ function templateFieldIds(template) {
   return template.fields.map((field) => field.id)
 }
 
+/** A declared `ext_` band as a clean id list: strings only, de-duplicated, order kept. */
+function extensionFieldIdList(extensionFieldIds) {
+  if (!Array.isArray(extensionFieldIds)) return []
+  const out = []
+  for (const id of extensionFieldIds) {
+    if (typeof id === 'string' && id && !out.includes(id)) out.push(id)
+  }
+  return out
+}
+
 /**
  * The table-action TARGET for a project sheet: sheetId + objectId from the registry row, the key
  * field the canonical writer keys on, and a FULL logical→physical field map resolved for THIS
  * objectId. `resolveFieldIds` is compute-only on the host (a pure derivation, no IO), which is why
  * the registry stores no map (ADR §2 「登记表存什么」).
+ *
+ * S2: the map ALSO covers the action's declared `extensionFieldIds`. The env target's explicit map
+ * names its `ext_` columns, and `assertTargetFieldMapCompleteness` requires every declared one to be
+ * bound — a project binding without them answered 422 TARGET_SCHEMA_INCOMPLETE ("fieldIdMap is
+ * missing") on every dry-run of a pack deployment, before the field-existence probe was even
+ * reached. A derived id for a column the sheet does not carry is still caught: the DB-backed
+ * existence probe judges the same ids (`assertTargetFieldsExist`). With no declared band the map is
+ * the template's alone, byte-identical to S1.
  */
-async function buildProjectTargetBinding({ provisioning, projectId, target }) {
+async function buildProjectTargetBinding({ provisioning, projectId, target, extensionFieldIds }) {
   if (!provisioning || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationProjectTargetError(503, 'STOCK_PREPARATION_PROJECT_TARGET_PROVISIONING_UNAVAILABLE', 'resolving a project sheet requires multitable.provisioning.resolveFieldIds', { requiredMethods: ['resolveFieldIds'] })
   }
+  const templateIds = templateFieldIds(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  const extensionIds = extensionFieldIdList(extensionFieldIds).filter((id) => !templateIds.includes(id))
   const fieldIdMap = await provisioning.resolveFieldIds({
     projectId,
     objectId: target.objectId,
-    fieldIds: templateFieldIds(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE),
+    fieldIds: templateIds.concat(extensionIds),
   })
   return {
     sheetId: target.sheetId,
@@ -176,6 +206,9 @@ async function resolveProjectTargetForAction({
   tenantId,
   projectNo,
   targetPurpose,
+  // S2: the looked-up action's declared `ext_` band (server config, threaded by the registry) — the
+  // binding resolves those columns too; see `buildProjectTargetBinding`.
+  extensionFieldIds,
   env = process.env,
 } = {}) {
   if (!stockPreparationProjectSheetsEnabled(env)) return null
@@ -195,7 +228,7 @@ async function resolveProjectTargetForAction({
   if (row.status === 'archived' && purpose === 'write') {
     throw new StockPreparationProjectTargetError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it before writing', { field: 'projectNo' })
   }
-  const target = await buildProjectTargetBinding({ provisioning, projectId, target: row })
+  const target = await buildProjectTargetBinding({ provisioning, projectId, target: row, extensionFieldIds })
   return { status: row.status, projectNo: project, target }
 }
 
@@ -280,6 +313,254 @@ async function grantProjectSheetRoles({ provisioning, projectId, sheetId, object
   }
 }
 
+// ── S2: the deployment's customer pack, re-placed onto the project sheet (ADR §2 「客户包」) ─────────
+//
+// WHY. `ensureObject` builds the frozen template's columns and nothing else, so a fresh project
+// sheet carries no `ext_` column. A deployment whose pull action declares `extensionFieldIds` (the
+// columns its customer pack added to the env sheet) would then answer its FIRST dry-run on the new
+// sheet with 422 TARGET_SCHEMA_INCOMPLETE. The fix the ADR names: re-install the SAME pack — `ext_`
+// columns, option sets, role views, column write scopes — onto the new objectId.
+//
+// WHICH PACKS. The install ledger (migration 076, keyed (tenant, project, object, pack)) is the
+// record of what the deployment installed on its env target object; the server-held catalog is the
+// only place a pack body comes from. Neither is request input.
+//
+// ORDER (R-36): PLAN → PRE-FLIGHT → PROVISION → INSTALL → REGISTER, with two different guarantees:
+//   * EVERY REFUSAL DECIDABLE WITHOUT THE SHEET runs before provisioning (S2 fix round 1, the cap
+//     boundary): the band coverage (`planProjectSheetCustomerPacks`), the installer's own
+//     sheet-independent pre-flight per pack — provisioning surface, field-permission port, reconcile
+//     support, declared roles — and the tenant-claim requirement for packs that govern column write
+//     scopes (`preflightProjectSheetCustomerPacks`). A host that would refuse every install refuses
+//     before the first table exists, so a repeating refusal cannot leave one unregistered managed
+//     table per project number behind.
+//   * A GENUINE MID-INSTALL FAILURE (the host failing a write) still happens after provisioning. It
+//     leaves no registered row, and the provisioned sheet is ensure-if-absent by its DERIVED objectId,
+//     so the retry — the same POST — reuses that one table; the same project number can never own two.
+//     Such a sheet is not counted by the 200 cap until it is registered.
+// An already registered sheet (the 200 replay) is HEALED by the same install: when its own ledger
+// lacks the pack at the catalog's version, OR when the DB-backed field-existence probe the dry-run
+// uses says a declared `ext_` column is gone.
+
+const PROJECT_SHEET_PACK_INSTALL_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
+const PROJECT_SHEET_TENANT_CLAIM_REQUIRED_CODE = 'STOCK_PREPARATION_PROJECT_TARGET_TENANT_CLAIM_REQUIRED'
+
+/**
+ * The admin pack-install route refuses a claimless principal (403 TENANT_CLAIM_REQUIRED) because
+ * the install's write-scope reconcile issues a bounded DELETE on `field_permissions`. The create
+ * route reaches the same installer at the PULL tier, so the same door applies whenever a pack that
+ * governs column write scopes is about to be installed: the host-vouched membership alone is not
+ * enough for a delete. Tighten-only; values-free.
+ */
+function assertTenantClaimForWriteScopes(tenantClaimVerified, writeScopePackCount) {
+  if (writeScopePackCount > 0 && tenantClaimVerified !== true) {
+    throw new StockPreparationProjectTargetError(
+      403,
+      PROJECT_SHEET_TENANT_CLAIM_REQUIRED_CODE,
+      'this deployment’s customer pack governs column write permissions; installing it onto a project sheet requires a login whose verified token carries the tenant claim',
+      { writeScopePackCount },
+    )
+  }
+}
+
+/**
+ * Reads only. Which catalog packs the new sheet must carry, or a 409 when they cannot cover the
+ * action's declared `ext_` band. Values-free: pack ids (deployment slugs) and logical field ids.
+ */
+async function planProjectSheetCustomerPacks({
+  tenantId,
+  projectId,
+  deploymentObjectId,
+  extensionFieldIds,
+  packCatalog,
+  packInstallStore,
+} = {}) {
+  const declared = extensionFieldIdList(extensionFieldIds)
+  const deploymentObject = optionalString(deploymentObjectId)
+  let ledgerPackIds = []
+  if (deploymentObject && packInstallStore && typeof packInstallStore.listInstalledFieldIds === 'function') {
+    // LIVE rows only ('installed' / 'partial'): a failed attempt on the env sheet is not a pack the
+    // deployment carries.
+    const live = await packInstallStore.listInstalledFieldIds({ tenantId, projectId, objectId: deploymentObject })
+    ledgerPackIds = Array.isArray(live && live.packIds) ? live.packIds.filter((id) => typeof id === 'string' && id) : []
+  }
+  const packs = []
+  const notInCatalog = []
+  const covered = new Set()
+  for (const packId of [...new Set(ledgerPackIds)].sort()) {
+    if (!packCatalog || typeof packCatalog.has !== 'function' || !packCatalog.has(packId)) {
+      // A ledger row for a pack this server no longer holds: it cannot be re-installed from here.
+      // Not a refusal by itself — the completeness check below decides whether its absence matters.
+      notInCatalog.push(packId)
+      continue
+    }
+    const pack = packCatalog.get(packId)
+    packs.push(pack)
+    for (const field of pack.extensionFields) covered.add(field.id)
+  }
+  const missing = declared.filter((id) => !covered.has(id))
+  if (missing.length > 0) {
+    throw new StockPreparationProjectTargetError(
+      409,
+      'STOCK_PREPARATION_PROJECT_TARGET_PACK_INCOMPLETE',
+      'this deployment declares extension columns that no installed customer pack can re-create on a project sheet; install the customer pack on the deployment target first',
+      {
+        missingExtensionFields: missing,
+        declaredExtensionFieldCount: declared.length,
+        ledgerPackCount: ledgerPackIds.length,
+        notInCatalogPackCount: notInCatalog.length,
+      },
+    )
+  }
+  return {
+    packs,
+    notInCatalogPackIds: notInCatalog,
+    declaredExtensionFieldCount: declared.length,
+    writeScopePackCount: packs.filter((pack) => pack.fieldWritePolicies.length > 0).length,
+  }
+}
+
+/**
+ * Reads only, BEFORE PROVISIONING (the create leg). Every planned pack through the installer's own
+ * sheet-independent pre-flight (same assertions, same codes), then the tenant-claim door for packs
+ * that govern column write scopes. A refusal here means no table was created.
+ */
+async function preflightProjectSheetCustomerPacks({
+  plan,
+  provisioning,
+  fieldPermissions,
+  tenantClaimVerified,
+} = {}) {
+  const planned = plan && Array.isArray(plan.packs) ? plan.packs : []
+  for (const pack of planned) {
+    try {
+      await preflightCustomerPackInstallCapabilities({ provisioning, fieldPermissions, pack })
+    } catch (error) {
+      throw wrapPackInstallError(error, pack.packId)
+    }
+  }
+  assertTenantClaimForWriteScopes(tenantClaimVerified, plan ? plan.writeScopePackCount : 0)
+}
+
+/** One typed code for every installer refusal, with the pack id and the installer's own code. */
+function wrapPackInstallError(error, packId) {
+  if (error instanceof StockPreparationProjectTargetError) return error
+  const status = error && Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500
+  const code = error && typeof error.code === 'string' && PROJECT_SHEET_PACK_INSTALL_CODE_PATTERN.test(error.code) ? error.code : 'CUSTOMER_PACK_INSTALL_FAILED'
+  const wrapped = new StockPreparationProjectTargetError(
+    status,
+    'STOCK_PREPARATION_PROJECT_TARGET_PACK_INSTALL_FAILED',
+    'the deployment’s customer pack could not be installed on this project sheet; nothing was registered by this request and the same request can be retried',
+    { packId, installCode: code },
+  )
+  wrapped.cause = error
+  return wrapped
+}
+
+/**
+ * Does the project object still carry every `ext_` column this pack declares? Asked through the SAME
+ * DB-backed probe the dry-run uses (`resolveFieldExistence`). Only a `db` verdict can say "missing";
+ * an older host (compute-only) cannot, so the ledger is trusted there.
+ */
+async function packColumnsPresent({ provisioning, projectId, objectId, pack }) {
+  const fieldIds = pack.extensionFields.map((field) => field.id)
+  if (fieldIds.length === 0 || !provisioning || typeof provisioning.resolveFieldIds !== 'function') return true
+  const verdict = await resolveFieldExistence({ provisioning, projectId, objectId, fieldIds })
+  if (verdict.fieldExistenceMode !== 'db') return true
+  const resolved = verdict.resolved || {}
+  return fieldIds.every((id) => typeof resolved[id] === 'string' && resolved[id].length > 0)
+}
+
+/**
+ * Writes. Install every planned pack onto THIS project sheet. A pack is SKIPPED only when the project
+ * object's own ledger row is live at the catalog's version AND its declared `ext_` columns are still
+ * on the sheet; otherwise it is (re)installed — the installer is additive, so a reinstall adds what
+ * is missing and changes nothing else. A failure is one typed code with the pack id and the
+ * installer's own code.
+ *
+ * THE BINDING TO THIS PROJECT is enforced once, by `retargetCustomerPack` (it refuses any objectId
+ * that is not the one derived for this tenant and project), before any host call for the pack. The
+ * earlier shape check that sat here repeated a weaker form of that rule and was deleted in S2 fix
+ * round 1; with no planned pack this function makes no host call at all.
+ */
+async function installProjectSheetCustomerPacks({
+  plan,
+  provisioning,
+  projectId,
+  tenantId,
+  projectNo,
+  objectId,
+  packInstallStore,
+  fieldPermissions,
+  tenantClaimVerified,
+  logger,
+} = {}) {
+  const planned = plan && Array.isArray(plan.packs) ? plan.packs : []
+  const outcomes = []
+  for (const sourcePack of planned) {
+    let pack
+    try {
+      pack = retargetCustomerPack(sourcePack, { tenantId, projectNo, targetObjectId: objectId })
+    } catch (error) {
+      throw new StockPreparationProjectTargetError(
+        500,
+        'STOCK_PREPARATION_PROJECT_TARGET_PACK_TARGET_INVALID',
+        'a customer pack may only be re-installed onto the sheet derived for this tenant and project',
+        { packId: sourcePack.packId, reason: error && error.details ? error.details.provisioningReason || null : null },
+      )
+    }
+    let mode = 'install'
+    if (packInstallStore && typeof packInstallStore.getInstall === 'function') {
+      const existing = await packInstallStore.getInstall({ tenantId, projectId, objectId, packId: pack.packId })
+      // The ledger column is TEXT (migration 076: `pack_version TEXT`; the store stringifies on the
+      // way in), the catalog's version an integer — compared as the ledger stores it, or a replay
+      // would never recognise its own install and re-run the installer every time.
+      if (existing && PACK_INSTALL_LIVE_STATUSES.includes(existing.status)) {
+        mode = 'reinstall'
+        if (String(existing.packVersion) === String(pack.packVersion)
+          && await packColumnsPresent({ provisioning, projectId, objectId, pack })) {
+          outcomes.push({ packId: pack.packId, packVersion: pack.packVersion, outcome: 'already_installed', createdFieldCount: 0, stampedFieldCount: 0 })
+          continue
+        }
+      }
+    }
+    // The claim door, per pack, at the moment an install that may DELETE write scopes is about to run
+    // (the replay leg reaches here without the create leg's pre-flight).
+    assertTenantClaimForWriteScopes(tenantClaimVerified, pack.fieldWritePolicies.length > 0 ? 1 : 0)
+    let summary
+    try {
+      summary = await installCustomerPack({
+        provisioning,
+        projectId,
+        pack,
+        logger: logger || undefined,
+        packInstallStore: packInstallStore || undefined,
+        tenantId,
+        // No workspace dimension on project sheets (ADR §1.2), the same as the registry itself.
+        workspaceId: null,
+        mode,
+        fieldPermissions: fieldPermissions || undefined,
+      })
+    } catch (error) {
+      throw wrapPackInstallError(error, pack.packId)
+    }
+    outcomes.push({
+      packId: pack.packId,
+      packVersion: pack.packVersion,
+      outcome: mode === 'reinstall' ? 'reinstalled' : 'installed',
+      createdFieldCount: Array.isArray(summary && summary.createdFields) ? summary.createdFields.length : 0,
+      stampedFieldCount: Array.isArray(summary && summary.stampedExistingFields) ? summary.stampedExistingFields.length : 0,
+    })
+  }
+  return {
+    packs: outcomes,
+    installedPackCount: outcomes.filter((entry) => entry.outcome === 'installed').length,
+    reinstalledPackCount: outcomes.filter((entry) => entry.outcome === 'reinstalled').length,
+    alreadyInstalledPackCount: outcomes.filter((entry) => entry.outcome === 'already_installed').length,
+    notInCatalogPackCount: plan && Array.isArray(plan.notInCatalogPackIds) ? plan.notInCatalogPackIds.length : 0,
+    declaredExtensionFieldCount: plan && Number.isInteger(plan.declaredExtensionFieldCount) ? plan.declaredExtensionFieldCount : 0,
+  }
+}
+
 /** The two deep-link handles a project sheet carries: the fill view and the to-fill view. */
 function projectSheetViewHandles({ provisioning, projectId, objectId }) {
   if (!provisioning || typeof provisioning.getObjectViewId !== 'function') return { viewId: null, todoViewId: null }
@@ -308,5 +589,9 @@ module.exports = {
   resolveProjectTargetForAction,
   provisionProjectSheet,
   grantProjectSheetRoles,
+  PROJECT_SHEET_TENANT_CLAIM_REQUIRED_CODE,
+  planProjectSheetCustomerPacks,
+  preflightProjectSheetCustomerPacks,
+  installProjectSheetCustomerPacks,
   projectSheetViewHandles,
 }

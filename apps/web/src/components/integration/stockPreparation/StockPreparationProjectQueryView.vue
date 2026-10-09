@@ -336,6 +336,7 @@ import { stockPrepHomeStatusLabel } from '../../../services/integration/stockPre
 import {
   resolveStockPrepPullBanner,
   stockPrepBoardErrorPlain,
+  STOCK_PREP_SOURCE_MVP_LABEL,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
@@ -507,9 +508,11 @@ const statusChips = computed(() => STOCK_PREP_PROJECT_QUERY_STATUS_KEYS.map((key
 const memoryOnlyChipsNote = computed<boolean>(() => rows.value.length > 0
   && !rows.value.some((row) => row.postureFromMemory || row.origin === 'memory'))
 
+// Q8 (ADR adr-stock-prep-project-sheets-20261008 default (iii); S2, R-36): the `mvp` source reads
+// 「平台登记」 — 「已归档」 belongs to the project-sheet lifecycle now. The code key stays `mvp`.
 const SOURCE_LABELS: Record<StockPrepProjectQuerySourceKey, [string, string]> = {
   all: ['全部', 'All'],
-  mvp: ['归档过', 'Archived'],
+  mvp: [STOCK_PREP_SOURCE_MVP_LABEL.zh, STOCK_PREP_SOURCE_MVP_LABEL.en],
   pull_target: ['自助拉取', 'Pulled in-house'],
   both: ['两者都有', 'Both'],
 }
@@ -559,8 +562,8 @@ function sourceLabel(row: StockPrepProjectQueryRow): string {
   if (row.sources === null) return bi('看不到', 'Not visible')
   const mvp = row.sources.includes('mvp')
   const pull = row.sources.includes('pull_target')
-  if (mvp && pull) return bi('归档过 + 自助拉取', 'Archived + pulled in-house')
-  if (mvp) return bi('归档过', 'Archived')
+  if (mvp && pull) return bi(`${STOCK_PREP_SOURCE_MVP_LABEL.zh} + 自助拉取`, `${STOCK_PREP_SOURCE_MVP_LABEL.en} + pulled in-house`)
+  if (mvp) return bi(STOCK_PREP_SOURCE_MVP_LABEL.zh, STOCK_PREP_SOURCE_MVP_LABEL.en)
   if (pull) return bi('自助拉取', 'Pulled in-house')
   return '—'
 }
