@@ -4,6 +4,7 @@
 - 基线: `origin/main` `9d65b8318f3d5cbc323b458cb5c96c2240a144f7`
 - 参照: `afd32b704`（`ci(plugin-tests): route the test job through the MS2_PLUGIN_RUNNER variable`，#6247）
 - 性质: Draft。只改必需检查的 `runs-on`。不合并。
+- 2026-10-09 协调修订：移除与 #6272 重叠的 `web-tests.yml` 修改；前端由 #6272 独立使用 `MS2_WEB_RUNNER`，本 PR 不改它。
 
 变量未设置时，表达式求值为 `ubuntu-latest`，与改前的托管 runner 相同。仓库变量 `MS2_PLUGIN_RUNNER` 设成一个自托管 runner 标签后，下面列出的 job 改到该标签。删掉变量即回到 `ubuntu-latest`。
 
@@ -23,7 +24,6 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 |---|---|---|---|
 | `contracts (strict)` / `contracts (dashboard)` / `contracts (openapi)` | `.github/workflows/attendance-gate-contract-matrix.yml` | `contracts` | `:26` |
 | `pr-validate` | `.github/workflows/phase5-validate.yml` | `pr-validate` | `:19` |
-| `web-tests` | `.github/workflows/web-tests.yml` | `web-tests` | `:40` |
 | `attendance-web-guard` | `.github/workflows/attendance-web-guard.yml` | `attendance-web-guard` | `:274` |
 | `integration-guard` | `.github/workflows/integration-guard.yml` | `integration-guard` | `:350` |
 | `ssh host-key pin contract (fail-closed known_hosts)` | `.github/workflows/ssh-hostkey-pin-contract.yml` | `contract`（`name:` 在 `:42`） | `:44` |
@@ -39,10 +39,11 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 
 | workflow | 原因 |
 |---|---|
+| `.github/workflows/web-tests.yml` | 由 #6272 独立路由到 `MS2_WEB_RUNNER`。本 PR 保持基线文件不变，避免两个 PR 对同一 job 选择不同变量。 |
 | `.github/workflows/stock-prep-powershell51.yml` | 检查名 `stock-prep PowerShell 5.1 acceptance`（job id `stock-prep-powershell51`，`name:` `:43`，`runs-on: windows-latest` `:44`）。要 Windows PowerShell 5.1。整文件是 provenance 哈希输入 `evidenceFiles.s6aPowershell51Workflow`（`plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs:307-311`）。Linux 标签带不动这个 job。 |
 | `.github/workflows/sealed-export-s5-sqlserver.yml` | 不在本次必需检查名单里。整文件是哈希输入 `evidenceFiles.s5EvidenceWorkflow`（同文件 `:254-258`）。本 PR 不改它，pin 不动。 |
 
-本次改动的 9 个 workflow 都不在 `PINNED_EVIDENCE_FILES` / `PINNED_RUNTIME_FILES` 里。`plugin-tests.yml` 在 pin 范围收窄之后不再是哈希输入（provenance 模块 `:297-306`）。
+本次改动的 8 个 workflow 都不在 `PINNED_EVIDENCE_FILES` / `PINNED_RUNTIME_FILES` 里。`plugin-tests.yml` 在 pin 范围收窄之后不再是哈希输入（provenance 模块 `:297-306`）。
 
 ### 2.2 同一 workflow 里其它 job 保持 `ubuntu-latest`
 
@@ -93,9 +94,7 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 
 ### 3.4 `web-tests`
 
-- Node `20.x`，pnpm `10.16.1`，`actions/cache@v4`（`:67`）。
-- 跑 `apps/web/scripts/run-required-web-tests.sh`。其中一条 vitest 调用把堆设成 8192。无 `services:`，无 Playwright，无 `sudo`，无仓库 secret。
-- 无 `permissions:`，token 用仓库默认权限。
+由 #6272 验证并使用 `MS2_WEB_RUNNER`；不属于本 PR 的路由改动。
 
 ### 3.5 `attendance-web-guard`
 
@@ -166,7 +165,7 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 
 删除仓库变量 `MS2_PLUGIN_RUNNER`。下一个 run 的 `runs-on` 回到 `ubuntu-latest`。不需要 revert 本 PR。把变量设成空字符串效果相同。把变量设成 `ubuntu-latest` 也会回到托管 runner，但删除变量是默认回退。
 
-这个变量一次管第 1 节的全部 job，外加已经接上的 `test`。没有按 job 分开的第二个开关。
+这个变量一次管第 1 节的全部 job，外加已经接上的 `test`。`web-tests` 不在本 PR 内；#6272 使用独立的 `MS2_WEB_RUNNER`，不受此变量回退影响。
 
 ## 7. 安全
 
@@ -180,7 +179,7 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 
 ## 8. 本地验证
 
-工作树相对 `9d65b8318`，只含这 9 个 workflow 的 `runs-on`（加一行注释）和本文。`s6a-package-provenance-pins.json`、`stock-prep-powershell51.yml`、`sealed-export-s5-sqlserver.yml` 都不在 diff 里。
+工作树相对 `9d65b8318`，只含这 8 个 workflow 的 `runs-on`（加一行注释）和本文。`web-tests.yml`、`s6a-package-provenance-pins.json`、`stock-prep-powershell51.yml`、`sealed-export-s5-sqlserver.yml` 都不在 diff 里。
 
 检查名: 用 PyYAML 解析 HEAD 与工作树。每个被改 workflow 的 job id、`name:`、矩阵、以及由此得到的检查名与 HEAD 一致。除 `runs-on` 外，解析后的文档结构一致。`plugin-tests.yml` 的五个检查名也一致，其中 `test` 的 `runs-on` 在 HEAD 上已经是同一表达式。
 
@@ -200,7 +199,7 @@ GitHub Actions 里，未定义的 `vars.*` 是空字符串。空字符串在 `||
 | `Approval browser verify (chromium)` |
 | `stock-prep PowerShell 5.1 acceptance`（未改，`windows-latest`） |
 
-actionlint 1.7.7 对上述 9 个文件、`plugin-tests.yml`、`stock-prep-powershell51.yml` 退出码 0。
+初始版本的 actionlint 1.7.7 对当时 9 个路由文件、`plugin-tests.yml`、`stock-prep-powershell51.yml` 退出码 0。协调修订需重新校验剩余 8 个路由文件及未变的前端文件。
 
 pins: `computePackageProvenancePinSet` 对冻结清单逐叶比较，不一致 0 条。冻结清单与现场重算都是 63 个 SHA-256、66 个叶子字段。
 
@@ -208,3 +207,5 @@ pins: `computePackageProvenancePinSet` 对冻结清单逐叶比较，不一致 0
 node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
 sealed-export-package-provenance.test.cjs OK
 ```
+
+2026-10-09 协调修订复核：8 个 workflow 解析后仅 `runs-on` 不同，触发条件、步骤、条件、矩阵和检查名全部保持；`web-tests.yml` 与基线逐字节相同。actionlint 1.7.12 的 workflow 检查（不运行 shellcheck）通过；带 shellcheck 的完整检查有 12 条既有诊断，与基线逐项相同，新增 0 条，不声称完整 lint 全绿。integration-guard 接线契约及全局 flag manifest 测试合计 99/99，package-provenance 测试通过。远端 CI 需以修订后 SHA 重新验证。

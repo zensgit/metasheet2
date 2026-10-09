@@ -36,8 +36,7 @@ concurrency:
 
 jobs:
   web-tests:
-    # Same expression as plugin-tests.yml `test` (afd32b704). Unset MS2_PLUGIN_RUNNER keeps ubuntu-latest.
-    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
