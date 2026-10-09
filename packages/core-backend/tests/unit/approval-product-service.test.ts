@@ -5076,6 +5076,12 @@ describe('ApprovalProductService', () => {
   it('redacts stored record-link ids when getApproval omits a viewer', async () => {
     pgState.pool.query.mockImplementation(async (sql: string) => {
       const statement = normalize(sql)
+      // `getApproval` reads the instance's frozen runtime graph for `returnableNodeKeys` whether or
+      // not a viewer is passed (the field is viewer-independent). This fixture's published definition
+      // has no stored row, so the production answer is no graph — and no `returnableNodeKeys`.
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [], rowCount: 0 }
+      }
       if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
         return {
           rows: [buildInstanceRow({

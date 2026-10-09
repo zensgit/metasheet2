@@ -117,6 +117,18 @@ export interface UnifiedApprovalDTO {
    */
   currentNodeKeys?: string[] | null
   /**
+   * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
+   * (start → cursor) — `computeReturnableNodeKeys` (approval-return-targets.ts): the FROZEN runtime
+   * graph walked exactly as `dispatchAction`'s `return` arm walks it, after its handler-cursor and
+   * parallel-region refusals. `[]` = nothing is legal (a client hides 退回). ABSENT = not computed:
+   * an older server, a non-pending instance, a bridged / legacy instance with no frozen graph, or a
+   * graph the walker could not evaluate — a client keeps its own fallback. Carried by the detail
+   * read (`ApprovalBridgeService.getApproval`) and by every action response
+   * (`ApprovalProductService.getApproval`); never by the list builders. Presentation only: the
+   * gate's own 409s remain the authority.
+   */
+  returnableNodeKeys?: string[]
+  /**
    * lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」 — the
    * 呈现 channel, DEFAULT CONTRACT (⚠️ owner 待裁, 按默认值; the alternatives are listed with the
    * type in `core/attendance-cancellation-execution-port.ts`).

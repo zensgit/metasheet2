@@ -20,6 +20,7 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import { decisionDoorIsSeatGated, resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { computeReturnableNodeKeys } from './approval-return-targets'
 import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
@@ -342,10 +343,20 @@ function resolveCurrentNodeType(
   return null
 }
 
-function toUnifiedDTO(
+// Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the detail
+// carrier below); the list and detail paths in this module remain its callers.
+export function toUnifiedDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentRow[] = [],
   runtimeGraph: RedactableRuntimeGraph | null = null,
+  options: {
+    /**
+     * 退回 targets — DETAIL read only. The list path shares this builder and stays byte-identical:
+     * a per-row graph walk buys the list nothing (no list surface offers 退回), so the field is
+     * computed only when the caller asks for it.
+     */
+    withReturnableNodeKeys?: boolean
+  } = {},
 ): UnifiedApprovalDTO {
   // P1-C: redact form fields the instance's currently-active node(s) mark
   // `hidden`. Keyed on the instance-active node, NOT the viewer — so observers /
@@ -360,6 +371,20 @@ function toUnifiedDTO(
   // surface can withhold approve/reject on a 办理 (handler) task. Structural read of the same JSONB
   // view already loaded for redaction; null when there is no graph (bridged/external) or no cursor.
   const currentNodeType = resolveCurrentNodeType(runtimeGraph, row.current_node_key)
+  // The server-computed 退回 target list (see `computeReturnableNodeKeys` for the contract). The same
+  // frozen graph blob loaded for redaction is the graph the return gate walks; the walk reads the
+  // RAW `row.form_snapshot` (condition branches route on the stored form, hidden fields included),
+  // never the redacted echo built above. Spread only when computed, like `currentNodeType`.
+  const returnableNodeKeys = options.withReturnableNodeKeys
+    ? computeReturnableNodeKeys({
+        runtimeGraph,
+        formSnapshot: row.form_snapshot,
+        requesterSnapshot: row.requester_snapshot,
+        currentNodeKey: row.current_node_key,
+        status: row.status,
+        metadata: row.metadata,
+      })
+    : undefined
   return {
     id: row.id,
     sourceSystem: row.source_system,
@@ -380,6 +405,7 @@ function toUnifiedDTO(
     formSnapshot,
     currentNodeKey: row.current_node_key,
     ...(currentNodeType ? { currentNodeType } : {}),
+    ...(returnableNodeKeys ? { returnableNodeKeys } : {}),
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
       type: assignment.assignment_type,
@@ -1056,6 +1082,8 @@ export class ApprovalBridgeService {
       row,
       instanceAssignments,
       detailRuntimeGraph,
+      // The detail read is the one bridge carrier of `returnableNodeKeys` (the list never offers 退回).
+      { withReturnableNodeKeys: true },
     )
     // Lock-7 OD-L7-10 — DETAIL-only actor-scoped per-field access map. Computed from the viewer's
     // ACTIVE user-typed seats (the same seats the write path claims), over the SAME
