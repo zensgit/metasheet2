@@ -198,7 +198,7 @@ describe('describeScheduledFeatureStatus', () => {
     expect(zh.detail).toContain('手工运行不受影响')
   })
 
-  it('an OPEN gate is "on", never "running"/"in effect"/已生效 - and the copy carries the 60-second settings-cache window', () => {
+  it('an OPEN gate is "on", never "running"/"in effect"/已生效 - and the copy names the per-process snapshot and a cache lag, never a numeric window', () => {
     for (const feature of features) {
       const zh = describeScheduledFeatureStatus(zhTr, { feature, configured: 'configured', gate: OPEN })
       const en = describeScheduledFeatureStatus(enTr, { feature, configured: 'configured', gate: OPEN })
@@ -212,9 +212,12 @@ describe('describeScheduledFeatureStatus', () => {
         expect(text).not.toMatch(/\bin effect\b/i)
         expect(text).not.toMatch(/\bnow running\b/i)
       }
-      expect(zh.detail).toContain('下次读取时刷新')
+      expect(zh.detail).toContain('当前响应进程的')
+      expect(zh.detail).toContain('缓存到期后的下次读取时刷新')
       expect(zh.detail).not.toMatch(/\d+ ?秒/)
-      expect(en.detail).toContain('60 seconds')
+      expect(en.detail).toContain('process that answered this request')
+      expect(en.detail).toContain('next re-reads its settings')
+      expect(en.detail).not.toMatch(/\d+\s*seconds?/i)
     }
   })
 
@@ -287,10 +290,16 @@ describe('scheduledFeatureSaveNotice / withScheduledFeatureSaveNotice', () => {
     expect(message).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
   })
 
-  it('saved + gates open: never says it is running now; it says the change is picked up within about 60 seconds', () => {
+  it('saved + gates open: never says it is running now; it names the last-read process snapshot and a cache lag, never a numeric window', () => {
     for (const feature of features) {
       const notice = scheduledFeatureSaveNotice(enTr, { feature, configured: 'configured', gate: OPEN })
-      expect(notice).toContain('60 seconds')
+      expect(notice).toContain('process that answered the last settings read')
+      expect(notice).toContain('next re-reads its settings')
+      expect(notice).not.toMatch(/\d+\s*seconds?/i)
+      const zhNotice = scheduledFeatureSaveNotice(zhTr, { feature, configured: 'configured', gate: OPEN })
+      expect(zhNotice).toContain('最近一次读取时应答进程的')
+      expect(zhNotice).toContain('缓存到期后的下次读取时刷新')
+      expect(zhNotice).not.toMatch(/\d+ ?秒/)
       expect(notice).not.toMatch(/\brunning\b/i)
       expect(notice).not.toMatch(/\bin effect\b/i)
     }

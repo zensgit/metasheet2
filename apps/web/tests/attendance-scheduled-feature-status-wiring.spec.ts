@@ -169,7 +169,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(detail).toContain('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
   })
 
-  it('digest: gates open reads "Server run switches are on" - never "running" - and keeps the 60 s cache window and the channel caveat', async () => {
+  it('digest: gates open reads "Server run switches are on" - never "running" - and names the per-process snapshot, a cache lag and the channel caveat', async () => {
     settingsData = { attendanceReportDigestPolicy: DIGEST_ON }
     runtimeGates = GATES_ALL_OPEN
     const root = await mountAdmin()
@@ -177,7 +177,9 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(status.getAttribute('data-runnable-state')).toBe('open')
     expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toBe('Server run switches are on')
     const text = textOf(status)
-    expect(text).toContain('60 seconds')
+    expect(text).toContain('process that answered this request')
+    expect(text).toContain('next re-reads its settings')
+    expect(text).not.toMatch(/\d+\s*seconds?/i)
     expect(text).toContain('The selected channel still needs its own server configuration')
     expect(text).not.toMatch(/\brunning\b/i)
     expect(text).not.toMatch(/\bin effect\b/i)
@@ -283,7 +285,8 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     await flushUi(10)
     const status = adminStatusText(root)
     expect(status).toContain('Report digest subscription saved')
-    expect(status).toContain('60 seconds')
+    expect(status).toContain('process that answered the last settings read')
+    expect(status).not.toMatch(/\d+\s*seconds?/i)
     expect(status).not.toMatch(/\brunning\b|\bin effect\b|\bnow being sent\b/i)
   })
 

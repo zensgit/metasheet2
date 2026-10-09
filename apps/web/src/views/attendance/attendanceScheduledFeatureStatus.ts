@@ -6,7 +6,9 @@
 //   (a) the org-side policy saved in settings (this is what 「已配置」 reports), AND
 //   (b) the process-level env gates owned by ops (this is what 「当前是否可运行」 reports).
 //       `runtimeGates` is the switch snapshot of the ONE process that answered the request (当前响应进程的
-//       开关快照); another instance may be configured differently, so the UI never calls it a cluster-wide state.
+//       开关快照); another instance may be configured differently. The open-state hints say so explicitly. The
+//       closed-state copy (e.g. 「已保存，但当前不会发送」) predates this and still reads that one snapshot as the
+//       answer - its wording is unchanged here and is the owner's call.
 // Missing (b) is a byte-exact no-op at base 9d65b8318f - digest producer: plugins/plugin-attendance/index.cjs:16548-16550
 // read by runAttendanceReportDigestOnce (:17423); accrual: :19791-19793 read by
 // runAnnualLeaveAccrualScheduledTriggerOnce (:19893); the scheduler gate is packages/core-backend/src/services/
@@ -182,12 +184,12 @@ function incompleteDetail(tr: TranslateFn, feature: AttendanceScheduledFeatureKe
 function openDetail(tr: TranslateFn, feature: AttendanceScheduledFeatureKey): string {
   return feature === 'reportDigest'
     ? tr(
-      'The server run switches are on. A saved change can take up to about 60 seconds to be picked up by each server instance. The selected channel still needs its own server configuration.',
-      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例下次读取时刷新，可能有缓存延迟；所选渠道仍需各自的服务端配置。',
+      'The server run switches are on in the process that answered this request. A saved change is picked up when each instance next re-reads its settings after its cache expires, so it may lag. The selected channel still needs its own server configuration.',
+      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例缓存到期后的下次读取时刷新，可能有延迟；所选渠道仍需各自的服务端配置。',
     )
     : tr(
-      'The server run switches are on. A saved change can take up to about 60 seconds to be picked up by each server instance. The annual leave engine above must also stay enabled.',
-      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例下次读取时刷新，可能有缓存延迟；上方年假引擎也需保持启用。',
+      'The server run switches are on in the process that answered this request. A saved change is picked up when each instance next re-reads its settings after its cache expires, so it may lag. The annual leave engine above must also stay enabled.',
+      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例缓存到期后的下次读取时刷新，可能有延迟；上方年假引擎也需保持启用。',
     )
 }
 
@@ -277,7 +279,9 @@ export function describeScheduledFeatureStatus(
 /**
  * The sentence appended to the save status after a successful save. '' when there is nothing to add (not
  * configured, or configuration not known): the base message then stands alone, exactly as before.
- * A saved + open feature never says "now running": it says the change is picked up within about 60 seconds.
+ * A saved + open feature never says "now running": it names the switch report as the snapshot of the process that
+ * answered the last settings read, and says the change is picked up at each instance's next re-read after its
+ * cache expires (no numeric window is promised).
  */
 export function scheduledFeatureSaveNotice(
   tr: TranslateFn,
@@ -301,12 +305,12 @@ export function scheduledFeatureSaveNotice(
   }
   return feature === 'reportDigest'
     ? tr(
-      'The server run switches are on; a saved change can take up to about 60 seconds to be picked up. The selected channel still needs its own server configuration.',
-      '当前响应进程的服务端运行开关已开启；已保存的改动会在各实例下次读取时刷新，可能有缓存延迟。所选渠道仍需各自的服务端配置。',
+      'The server run switches were on in the process that answered the last settings read; a saved change is picked up when each instance next re-reads its settings after its cache expires, so it may lag. The selected channel still needs its own server configuration.',
+      '最近一次读取时应答进程的服务端运行开关已开启；已保存的改动会在各实例缓存到期后的下次读取时刷新，可能有延迟。所选渠道仍需各自的服务端配置。',
     )
     : tr(
-      'The server run switches are on; a saved change can take up to about 60 seconds to be picked up. The annual leave engine must also stay enabled.',
-      '当前响应进程的服务端运行开关已开启；已保存的改动会在各实例下次读取时刷新，可能有缓存延迟。年假引擎也需保持启用。',
+      'The server run switches were on in the process that answered the last settings read; a saved change is picked up when each instance next re-reads its settings after its cache expires, so it may lag. The annual leave engine must also stay enabled.',
+      '最近一次读取时应答进程的服务端运行开关已开启；已保存的改动会在各实例缓存到期后的下次读取时刷新，可能有延迟。年假引擎也需保持启用。',
     )
 }
 
