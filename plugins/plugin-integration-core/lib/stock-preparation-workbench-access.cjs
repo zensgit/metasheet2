@@ -226,6 +226,44 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/board',
     control: 'stock-prep-operator-project-board',
   }),
+  // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 §4; S1 routes R-35, S2 controls
+  // R-36). The three project-sheet routes joined this manifest in S2, which is when their controls
+  // shipped; S1 had them on a named, expiring M-07 exemption. All three answer 404
+  // STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the default-OFF switch is off — that is a
+  // refusal by CONFIG, after the permission gate, exactly like the unconfigured handoff answering
+  // 501 — so "visible == actionable" is decided by the gate below and the controls render only
+  // once the server has answered (switch on). None of the three controls lives on the
+  // confirmation-queue view; the web matrix suite lists them as such and names the suite that
+  // asserts their alignment on the surface they do live on (StockPreparationProjectTarget.spec.ts).
+  Object.freeze({
+    // The project's sheet state (absent / active / archived), its deep-link handles and bounded row
+    // counts — values-free. OPERATE, the board's tier: a floor operator sees whether their project
+    // has a sheet and opens it (「直接打开」), but `may.*` is computed on the PULL tier.
+    capability: 'projectTarget.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-status',
+  }),
+  Object.freeze({
+    // CREATE the project's sheet — the named R-11 exception (R-35): PULL tier, frozen template, empty
+    // body. Its control is the 「新建备料表并拉取」 confirmation on the pull panel, which is itself
+    // rendered only for the PULL tier (`canRunStockPrepProjectSync`).
+    capability: 'projectTarget.create',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-create',
+  }),
+  Object.freeze({
+    // The tenant's registry rows (handles, enums, counts). OPERATE. Its control is the home page's
+    // 「每个项目一张备料表」 line, which renders only when this list answered.
+    capability: 'projectTarget.list',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    control: 'stock-prep-project-target-list',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

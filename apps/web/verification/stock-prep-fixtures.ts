@@ -751,6 +751,15 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 200, envelope({ rowCount: 3, entries: synAuditEntries() })),
   },
   {
+    // S2 (#6286): the board's home face lists the project sheets on first render and the pull panel probes
+    // one project's sheet before a run. The acceptance deployment keeps MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO; the web client treats it as 'disabled'
+    // and renders the pre-S2 surface. Mocking the real answer keeps the P0/P1 scenarios on the old flow.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -784,12 +793,17 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 ]
 
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore))?$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
 function resolveResponder(method: string, path: string): Responder | null {
   for (const entry of ROUTES) {
     if (entry.method === method && path === entry.path) return entry.respond
+  }
+  if ((method === 'GET' || method === 'POST') && PROJECT_TARGET_PATTERN.test(path)) {
+    // Switch off in the acceptance deployment: every project-sheet route answers the same refusal (S1 §8).
+    return ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
   }
   if (method === 'GET' && BOARD_PATTERN.test(path)) {
     return ({ route, state }) => {
