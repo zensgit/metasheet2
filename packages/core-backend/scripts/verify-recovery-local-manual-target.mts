@@ -293,7 +293,7 @@ function launch(recoveryConfig: string, appConfig: string, targetRoot: string, p
   return spawn(process.execPath, ['--import', 'tsx', launcher, recoveryConfig], {
     cwd: backend,
     env: targetEnvironment(appConfig, targetRoot, port),
-    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'ipc'],
   })
 }
 
