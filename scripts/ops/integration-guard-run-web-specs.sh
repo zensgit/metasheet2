@@ -83,6 +83,21 @@
 # a substring nor a superstring of any other token in this list (nearest neighbours
 # `StockPreparationSnapshotDiffView` / `StockPreparationScenarioBAcceptance` diverge right after
 # `StockPreparation`), so it resolves to exactly one file.
+#
+# 一个项目一张备料表 S2 note (ADR adr-stock-prep-project-sheets-20261008 §10 S2 row, register R-36,
+# 2026-10-09): FOUR tokens added on the same footing as the notes above. The ADR names three specs that
+# were in the required lane but NOT in this list — `StockPreparationOperatorHome`,
+# `StockPreparationProjectBoard`, `StockPreparationProjectSync` — and S2 changes the surfaces all
+# three cover; the fourth is S2's own new spec, `StockPreparationProjectTarget`. All four live under the
+# `/**` roster entries (apps/web/src/components/integration/stockPreparation/** and
+# apps/web/src/services/integration/stockPreparation/**) that already fire this lane. 过滤词唯一:
+# `StockPreparationProjectSync` alone would ALSO match StockPreparationProjectSyncPanel.spec.ts, so it is
+# registered in the `.spec.ts`-suffixed form (exactly one file, the required lane's own form);
+# `StockPreparationOperatorHome`, `StockPreparationProjectBoard` and `StockPreparationProjectTarget` are
+# each a substring of exactly one spec path and neither contain nor are contained by any other token
+# here (the nearest neighbours `StockPreparationProjectQuery` / `StockPreparationProjectWorkspaceView`
+# diverge right after `StockPreparationProject`). Roster entries for the .spec.ts files themselves are
+# the same deferred follow-up as the notes above.
 set -euo pipefail
 
 #
@@ -155,8 +170,12 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationHomeQueryLabels \
   StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
+  StockPreparationOperatorHome \
   StockPreparationPrepLineView \
+  StockPreparationProjectBoard \
   StockPreparationProjectQuery \
+  StockPreparationProjectSync.spec.ts \
+  StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
