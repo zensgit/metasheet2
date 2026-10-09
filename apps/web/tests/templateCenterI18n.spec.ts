@@ -20,7 +20,7 @@
  * entry to Chinese reddens only the matching 'en' assertion + the CJK guard sweep". That was
  * FALSE for most keys. The mount tests below only assert the STRINGS THEY RENDER, and 13 of the
  * 42 EN values (and 16 of the 42 ZH values) are never rendered by any test here — e.g. setting
- * `EN.colName` to '模板名称' or `EN.visibilityAll` to '' reddened nothing across this spec,
+ * `EN.colName` to '表单名称' or `EN.visibilityAll` to '' reddened nothing across this spec,
  * approvalCenterDesktopEmptyTextI18n, approvalTemplateCenterCategory, templateGalleryFilter and
  * statusTag (verified by mutation). The CJK guard does NOT cover it either: it scans
  * TemplateCenterView.vue, not templateCenterLabels.ts. `EN: Record<keyof typeof ZH, string>`
@@ -64,7 +64,11 @@ const mockTemplates = ref<any[]>([])
 const mockLoading = ref(false)
 const mockError = ref<string | null>(null)
 const mockTotal = ref(0)
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 
 vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
@@ -107,6 +111,24 @@ vi.mock('../src/approvals/api', () => ({
   getTemplateUsage: (id: string) => getTemplateUsageSpy(id),
   archiveTemplate: (id: string) => archiveTemplateSpy(id),
   unarchiveTemplate: (id: string) => unarchiveTemplateSpy(id),
+  // A-2 scope item 2 (design lock v2.13 §6 phase 1) — TemplateCenterView.vue mounts
+  // ApprovalTemplateGroupsPanel.vue when canManageTemplates is true (the default in this file),
+  // and that panel calls these two on mount/submit plus does an `instanceof ApprovalApiError`
+  // check in its catch branch — all three must exist on this replacement mock or the panel's
+  // onMounted throws unhandled (this spec makes no assertions about groups, so an empty resolved
+  // list is enough).
+  //
+  // A-2 x A-4 convergence (2026-09-20): that mount is now GROUPED-view-only and behind the
+  // group-manager disclosure toggle, so the rendered-page CJK sweeps below (all flat view) no
+  // longer cover the panel's own markup. The panel keeps its dedicated file-level guard at the
+  // bottom of this file ("guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a
+  // paired tr(en, zh) call"), which reads the file from disk and is unaffected by mounting.
+  ApprovalApiError: class ApprovalApiError extends Error {},
+  listApprovalTemplateGroups: () => Promise.resolve([]),
+  createApprovalTemplateGroup: (name: string) => Promise.resolve({
+    id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
+  }),
 }))
 
 const elSuccessSpy = vi.fn()
@@ -463,10 +485,10 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     ]
     const root = await mountView()
 
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
     expect(root.querySelector('[data-el-select] option')?.textContent).toBe('全部分类')
-    expect(root.querySelector('[data-el-input]')?.getAttribute('placeholder')).toBe('搜索模板名称')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('[data-el-input]')?.getAttribute('placeholder')).toBe('搜索表单名称')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-testid="template-center-delegations-link"]')?.textContent).toBe('委托管理')
 
     const tabLabels = Array.from(root.querySelectorAll('[data-tab-pane]')).map((p) => p.getAttribute('data-tab-label'))
@@ -491,7 +513,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     setLocale('zh-CN')
     mockTemplates.value = []
     const root = await mountView()
-    expect(root.querySelector('[data-el-empty]')?.textContent).toBe('暂无审批模板，点击新建模板开始')
+    expect(root.querySelector('[data-el-empty]')?.textContent).toBe('暂无审批表单，点击新建表单开始')
   })
 
   it('requester gallery (non-manager) renders English chrome, including the start button and empty state', async () => {
@@ -524,7 +546,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     if (app) app.unmount()
     mockTemplates.value = []
     const root2 = await mountView()
-    expect(root2.querySelector('[data-testid="template-center-gallery-empty"]')?.textContent?.trim()).toBe('暂无可用的审批模板')
+    expect(root2.querySelector('[data-testid="template-center-gallery-empty"]')?.textContent?.trim()).toBe('暂无可用的审批表单')
   })
 
   it('archive dialog title/buttons and the success toast are English under "en"', async () => {
@@ -555,12 +577,12 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     root.querySelector<HTMLButtonElement>('[data-testid="template-center-archive-button"]')!.click()
     await flushUi()
 
-    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用模板')
+    expect(String(confirmSpy.mock.calls[0][1])).toBe('停用表单')
     expect((confirmSpy.mock.calls[0][2] as any).confirmButtonText).toBe('停用')
     expect((confirmSpy.mock.calls[0][2] as any).cancelButtonText).toBe('取消')
 
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已停用模板')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已停用表单')
   })
 
   it('unarchive dialog title/buttons and the success toast are English under "en"', async () => {
@@ -593,7 +615,7 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     const root2 = await mountView()
     root2.querySelector<HTMLButtonElement>('[data-testid="template-center-clone-button"]')!.click()
     await flushUi()
-    expect(elSuccessSpy).toHaveBeenCalledWith('已克隆模板：出差申请 (副本)')
+    expect(elSuccessSpy).toHaveBeenCalledWith('已克隆表单：出差申请 (副本)')
   })
 
   // Round-2 fix (C1): every test above seeds the locale BEFORE mounting, so none of them can
@@ -608,8 +630,8 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     setLocale('zh-CN')
     mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published' })]
     const root = await mountView()
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
 
     setLocale('en')
@@ -620,8 +642,8 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
 
     setLocale('zh-CN')
     await flushUi()
-    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
-    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批表单')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建表单')
     expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
   })
 
@@ -863,5 +885,393 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     const englishBranch = computedBody.slice(0, ifStart) + computedBody.slice(ifEnd + 1)
     const offenders = englishBranch.split('\n').filter((line) => CJK.test(line))
     expect(offenders).toEqual([])
+  })
+
+  // P3 hygiene wave (2026-09-19), closing gate impl-gate-A2-round1-20260918.md's P3-8: the A-2
+  // template-groups slice added two new user-facing approval surfaces
+  // (SessionOrgSwitcher.vue, ApprovalTemplateGroupsPanel.vue) that sit outside every existing
+  // closed-world file list in this guard (CONVERTED_FILES above only ever names the two files the
+  // ORIGINAL i18n slice converted; it is read by index in the two tests above, not iterated, so a
+  // new file never gets swept just by being added to that array — it needs its own assertion,
+  // which is what these two tests are). Neither file routes through an external labels file the
+  // way TemplateCenterView.vue does, so a bare whole-file sweep (first attempt, reverted) false-
+  // positived on their OWN legitimate bilingual copy — each gets its own allowlisted-construct
+  // guard instead, same shape as the ApprovalCenterView.vue guard above.
+
+  function stripNonCode(source: string): string {
+    const noStyle = source.replace(/<style[\s\S]*?<\/style>/g, '')
+    const noHtmlComments = noStyle.replace(/<!--[\s\S]*?-->/g, '')
+    const noBlockComments = noHtmlComments.replace(/\/\*[\s\S]*?\*\//g, '')
+    return stripLineCommentsConservatively(noBlockComments)
+  }
+
+  it("guard: SessionOrgSwitcher.vue has no CJK literal outside its DEFAULT_COPY bilingual table", async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const abs = path.resolve(__dirname, '../src/components/SessionOrgSwitcher.vue')
+    const source = fs.readFileSync(abs, 'utf-8')
+    const stripped = stripNonCode(source)
+
+    const marker = 'const DEFAULT_COPY: SessionOrgSwitcherCopy = {'
+    const markerStart = stripped.indexOf(marker)
+    expect(markerStart).toBeGreaterThan(-1)
+    const { text: defaultCopySpan, endIndex } = extractBalanced(stripped, markerStart + marker.length - 1)
+    // Sanity: the allowlisted span really is the bilingual table (every `[en, zh]` tuple), not an
+    // extraction bug that silently allowlists nothing.
+    expect(CJK.test(defaultCopySpan)).toBe(true)
+
+    const rest = stripped.slice(0, markerStart) + stripped.slice(endIndex + 1)
+    const offenders = rest.split('\n').filter((line) => CJK.test(line))
+    expect(offenders).toEqual([])
+  })
+
+  it('guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a paired tr(en, zh) call', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const abs = path.resolve(__dirname, '../src/views/approval/ApprovalTemplateGroupsPanel.vue')
+    const source = fs.readFileSync(abs, 'utf-8')
+    const stripped = stripNonCode(source)
+
+    // Every user-visible string in this panel is a direct `tr('English', '中文')` call (no labels
+    // table, unlike TemplateCenterView.vue / SessionOrgSwitcher.vue) — a line is allowlisted only
+    // when the CJK literal is paired with an English literal in the SAME `tr(...)` call, which is
+    // exactly what "translated" means here; anything else with CJK on it is a stray, untranslated
+    // string this guard exists to catch.
+    const pairedTrCall = /tr\('[^']*',\s*'[^']*'\)/
+    const lines = stripped.split('\n')
+    const pairedLines = lines.filter((line) => pairedTrCall.test(line))
+    // Sanity: this file really does have paired tr(en, zh) calls — otherwise the allowlist below
+    // is vacuous and this test degrades to a (still-valid, but weaker) whole-file CJK sweep.
+    expect(pairedLines.length).toBeGreaterThan(0)
+    for (const line of pairedLines) expect(CJK.test(line)).toBe(true)
+
+    const offenders = lines.filter((line) => CJK.test(line) && !pairedTrCall.test(line))
+    expect(offenders).toEqual([])
+  })
+})
+
+// -------------------------------------------------------------------------------------------------
+// O-8 / slice F8-1 (approval member surface) — per-file source guard over EVERY non-test file the
+// slice changed: the member views (center / table / detail pane / mobile list / detail / comments /
+// new / my-delegation / card decision), their label tables, the three shared pickers, and the
+// approval helpers whose copy those views render. Same shape as templateDetailI18n.spec.ts's guard
+// (#5545): strip `<style>`, HTML comments, block comments and full-line `//` comments; take out each
+// recognised locale construct, checking its English side has no CJK; presence-check the named
+// exceptions by exact line text and occurrence count; any other line with CJK left in the file is
+// red. Every construct count is pinned per file (vacuity guard): a construct regex that stopped
+// matching changes a count, and whatever it stopped covering falls through to the blanket scan.
+//
+// Recognised constructs (and nothing broader):
+//   ternary        `isZh ? '<zh>' : '<en>'` (also `isZh.value` / `isZh()`), string/template literals
+//   objectTernary  `isZh.value ? { <zh> } : { <en> }`
+//   ifZhBlock      `if (isZh.value) { return { <zh> } } return { <en> }`
+//   zhTable        `const X_ZH = { … }`, only with a CJK-free `const X_EN = { … }` in the same file
+//   constPair      `const X = '<zh>'`, only with a CJK-free `const X_EN = '<en>'` in the same file
+//
+// This is a tripwire, not a proof. Known ways past it: CJK written as `\u` escapes or built with
+// String.fromCharCode; CJK kept in a module that is not in RULES (e.g. quickPhrases.ts,
+// amountInWords.ts) or passed in as a prop from a host outside this list; an English side that is
+// an identifier bound to Chinese text elsewhere; a `/*` inside a string literal, which the comment
+// strip reads as a comment opener. The mounted English render scans (same slice) are the other
+// half of the gate.
+//
+// Named exceptions carry the slice or decision that owns them. `api.ts` is the one file scanned by
+// construct rather than whole: only its request-error fallback is converted here, the rest of the
+// file is development mock data and the admin group-error table (the same scoping #5545 used for
+// ApprovalCenterView.vue's tabEmptyText, above).
+// -------------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — approval member-surface source guard (per changed file)', () => {
+  type NamedException = { line: string; count: number }
+  type FileRule = {
+    file: string
+    ternary?: number
+    objectTernary?: number
+    ifZhBlock?: number
+    zhTable?: number
+    constPair?: number
+    /** Scan only from this marker to the first following line that is exactly `}`. */
+    scopeFrom?: string
+    exceptions?: NamedException[]
+  }
+
+  // Exception comments below use two tags:
+  //   AUTHORING_ONLY — an authoring-only path inside a shared helper; slice F8-3 owns it (zh-CN until then).
+  //   ZH_ARM         — the zh-CN arm of an early return; its English arm is the `if (!isZh)` return
+  //                    directly above it in the source.
+  const RULES: FileRule[] = [
+    // constPair = ADD_SIGN_MODE_HINT and the F4-S1 round-incomplete message; zhTable = the F4-S1
+    // add-sign placement copy (ADD_SIGN_PLACEMENT_COPY_ZH / _EN).
+    { file: 'src/approvals/addSignHonestyCopy.ts', zhTable: 1, constPair: 2 },
+    {
+      file: 'src/approvals/api.ts',
+      scopeFrom: 'export async function approvalRequestError(response: Response): Promise<never> {',
+      ternary: 1,
+    },
+    { file: 'src/approvals/approvalCenterDetailPaneController.ts', ternary: 1 },
+    {
+      file: 'src/approvals/assigneeSource.ts',
+      ternary: 5,
+      exceptions: [
+        // AUTHORING_ONLY: `assigneeSourceSummary`'s zh-CN arm. Its `isZh` defaults to zh-CN for the
+        // authoring callers (TemplateAuthoringView.vue, linearStepSpine.ts); the member path passes
+        // the shell locale and gets `assigneeSourceSummaryEn`.
+        { line: "case 'static_user': return `指定用户：${source.userIds.join('、') || '（无）'}`", count: 1 },
+        { line: "case 'static_role': return `指定角色：${source.roleIds.join('、') || '（无）'}`", count: 1 },
+        { line: "case 'requester': return '发起人'", count: 1 },
+        { line: "case 'form_field_user': return `表单用户字段：${source.fieldId}`", count: 1 },
+        { line: "case 'direct_manager': return '直属上级'", count: 1 },
+        { line: "case 'dept_head': return '部门主管'", count: 1 },
+        { line: "case 'continuous_managers': return `连续多级上级（${source.levels} 级）`", count: 1 },
+        { line: "case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`", count: 1 },
+        { line: "case 'continuous_dept_heads': return `连续多级部门负责人（${source.levels} 级）`", count: 1 },
+        { line: "case 'dept_head_at_level': return `指定层级部门负责人（第 ${source.level} 级）`", count: 1 },
+        { line: "case 'form_field_user_manager': return `表单内联系人上级：${source.fieldId}（第 ${source.level} 级）`", count: 1 },
+        { line: "case 'form_field_user_dept_head': return `表单内联系人部门负责人：${source.fieldId}（第 ${source.level} 级）`", count: 1 },
+        { line: "case 'requester_choice': return '提交人自选（提交时选择）'", count: 1 },
+        { line: "case 'prior_node_approver': return `节点审批人（引用节点 ${source.nodeKey}）`", count: 1 },
+        { line: "case 'user_group': return `用户组：${source.groupIds.join('、') || '（无）'}`", count: 1 },
+        { line: "default: return '（未知审批人来源）'", count: 1 },
+        // ZH_ARM: requester-facing node summaries (upcoming nodes / new-approval flow preview).
+        { line: "return `指定用户${count ? `（${count} 人）` : '（无）'}`", count: 1 },
+        { line: "return `指定角色${count ? `（${count} 个）` : '（无）'}`", count: 1 },
+        { line: "return cfg.assigneeType === 'role' ? `指定角色（${count} 个）` : `指定成员（${count} 人）`", count: 1 },
+        { line: "return `抄送${cfg.targetType === 'role' ? '角色' : '成员'}`", count: 1 },
+        { line: "const suffix = branches.length > 2 ? '；…' : ''", count: 1 },
+        { line: "return `按条件进入后续分支：${shown.join('；')}${suffix}`", count: 1 },
+      ],
+    },
+    { file: 'src/approvals/cardDecision.ts', ternary: 4 },
+    { file: 'src/approvals/components/ApprovalDepartmentPicker.vue', ternary: 3 },
+    { file: 'src/approvals/components/ApprovalRecordLinkPicker.vue' },
+    { file: 'src/approvals/components/ApprovalUserPicker.vue', ternary: 1 },
+    { file: 'src/approvals/components/approvalPickerLabels.ts', zhTable: 3 },
+    { file: 'src/approvals/conditionSummary.ts', ternary: 11, zhTable: 1 },
+    { file: 'src/approvals/dateRangeField.ts', ternary: 4 },
+    {
+      file: 'src/approvals/delegations.ts',
+      ternary: 4,
+      exceptions: [
+        // `validateDelegationForm` serves only the admin DelegationSettingsView.vue — slice F8-2.
+        { line: "if (!form.delegatorUserId.trim()) return '请填写委托人'", count: 1 },
+        { line: "if (!form.delegateeUserId.trim()) return '请填写被委托人'", count: 1 },
+        { line: "if (form.delegatorUserId.trim() === form.delegateeUserId.trim()) return '委托人与被委托人不能相同'", count: 1 },
+        { line: "if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定表单范围需要选择表单'", count: 1 },
+        { line: "if (!form.startAt || !form.endAt) return '请填写时间窗'", count: 1 },
+        { line: "if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'", count: 1 },
+      ],
+    },
+    {
+      file: 'src/approvals/detailField.ts',
+      ternary: 5,
+      exceptions: [
+        // AUTHORING_ONLY: new sub-field default label and `validateDetailColumnsDraft` (authoring).
+        { line: 'label: `子字段 ${index}`,', count: 1 },
+        { line: "const label = fieldLabel || '(未命名明细)'", count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 至少需要一个子字段`)', count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的子字段 id 必填`)', count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的子字段 id 不能重复`)', count: 1 },
+        { line: "const columnLabel = column.label.trim() || column.id.trim() || '(未命名)'", count: 1 },
+        { line: "errors.push(`明细字段 ${label} 的子字段 ${column.id.trim() || '(未命名)'} 名称必填`)", count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 类型不支持`)', count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 需要至少一个选项`)', count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 的选项 label/value 不能为空`)', count: 1 },
+        { line: "if (minRows === 'invalid') errors.push(`明细字段 ${label} 的最小行数必须是非负整数`)", count: 1 },
+        { line: "if (maxRows === 'invalid') errors.push(`明细字段 ${label} 的最大行数必须是非负整数`)", count: 1 },
+        { line: 'errors.push(`明细字段 ${label} 的最小行数不能大于最大行数`)', count: 1 },
+        // ZH_ARM: the new-approval required detail-row message.
+        { line: 'violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)', count: 1 },
+      ],
+    },
+    { file: 'src/approvals/graphSummary.ts' },
+    { file: 'src/approvals/memberActionDialogGrammar.ts', zhTable: 1 },
+    { file: 'src/approvals/memberActionErrorCopy.ts', constPair: 1 },
+    {
+      file: 'src/approvals/recordLinkField.ts',
+      constPair: 1,
+      exceptions: [
+        // AUTHORING_ONLY: target option labels, date-range visibility endpoints and the pin check
+        // are used by TemplateAuthoringView.vue / templateAuthoring.ts only.
+        { line: "export const RECORD_LINK_TARGET_UNAVAILABLE = '目标不可用'", count: 1 },
+        { line: "{ endpoint: 'start', label: '起始' },", count: 1 },
+        { line: "{ endpoint: 'end', label: '结束' },", count: 1 },
+        { line: "const label = humanLabel || '该字段'", count: 1 },
+        { line: 'return `字段 ${label}（关联记录）目标不可用，请重新选择目标空间与目标表`', count: 2 },
+        // RECORD_LINK_VALUE_HINT has no importer in apps/web/src.
+        { line: "'请选择一条关联记录（仅支持单条；提交时服务端按读权限校验）'", count: 1 },
+      ],
+    },
+    { file: 'src/approvals/relativeWait.ts', ternary: 4 },
+    { file: 'src/approvals/routePreviewController.ts', ternary: 1 },
+    { file: 'src/approvals/routePreviewSummary.ts', ternary: 4 },
+    { file: 'src/approvals/store.ts', ternary: 9 },
+    { file: 'src/approvals/templateStore.ts', ternary: 3 },
+    { file: 'src/approvals/upcomingNodes.ts' },
+    { file: 'src/approvals/urgeButtonState.ts', ternary: 3 },
+    { file: 'src/approvals/useApprovalListFieldSummary.ts' },
+    { file: 'src/views/approval/ApprovalCardDecisionView.vue', ternary: 1 },
+    { file: 'src/views/approval/ApprovalCenterDetailPane.vue', ternary: 4 },
+    { file: 'src/views/approval/ApprovalCenterTable.vue', ternary: 2 },
+    // ifZhBlock = `tabEmptyText` (pinned separately above) and the CSV-export `exportCopy`.
+    // ternary 14 -> 15 (T1): the export asks the server for its header language with
+    // `isZh.value ? 'zh' : 'en'` — a language CODE sent in the request, not UI copy (no CJK on either side).
+    { file: 'src/views/approval/ApprovalCenterView.vue', ternary: 15, ifZhBlock: 2 },
+    { file: 'src/views/approval/ApprovalCommentsPanel.vue', ternary: 3 },
+    {
+      file: 'src/views/approval/ApprovalDetailView.vue',
+      ternary: 10,
+      exceptions: [
+        // Quick-phrase insertion joins with a full-width comma. The phrases themselves (and so the
+        // text written into the comment) stay zh-CN in this slice — an owner decision, not made here.
+        { line: 'actionComment.value = actionComment.value ? `${actionComment.value}，${phrase}` : phrase', count: 1 },
+      ],
+    },
+    { file: 'src/views/approval/ApprovalMobileList.vue', objectTernary: 1 },
+    {
+      file: 'src/views/approval/ApprovalNewView.vue',
+      ternary: 12,
+      exceptions: [
+        // Flag-OFF attachment placeholder (B2-28), pinned byte-identical by approvalNewView.spec.ts
+        // until the attachment rung that retires it.
+        { line: '附件上传功能即将支持，请先在其他字段中注明附件信息。', count: 1 },
+      ],
+    },
+    { file: 'src/views/approval/MyDelegationView.vue', ternary: 2 },
+    { file: 'src/views/approval/approvalCardDecisionLabels.ts', zhTable: 1 },
+    { file: 'src/views/approval/approvalCenterLabels.ts', zhTable: 3 },
+    { file: 'src/views/approval/approvalDetailLabels.ts', zhTable: 3 },
+    { file: 'src/views/approval/approvalNewLabels.ts', zhTable: 1 },
+    { file: 'src/views/approval/myDelegationLabels.ts', zhTable: 1 },
+  ]
+
+  const LIT = String.raw`(\`(?:[^\`\\]|\\.)*\`|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")`
+  const blank = (text: string) => text.replace(/[^\n]/g, '')
+
+  function stripComments(src: string): string {
+    let s = src.replace(/<style[\s\S]*?<\/style>/g, blank)
+    s = s.replace(/<!--[\s\S]*?-->/g, blank)
+    s = s.replace(/\/\*[\s\S]*?\*\//g, blank)
+    // Full-line `//` comments only (same conservative rule as the guards above).
+    return s
+      .split('\n')
+      .map((line) => {
+        const slashIdx = line.indexOf('//')
+        if (slashIdx === -1) return line
+        return line.slice(0, slashIdx).trim() === '' ? '' : line
+      })
+      .join('\n')
+  }
+
+  // Index just past the `}` that closes the `{` at `open`, or -1.
+  function closeBrace(s: string, open: number): number {
+    let depth = 0
+    for (let k = open; k < s.length; k += 1) {
+      if (s[k] === '{') depth += 1
+      else if (s[k] === '}') {
+        depth -= 1
+        if (depth === 0) return k + 1
+      }
+    }
+    return -1
+  }
+
+  function scanFile(source: string) {
+    const counts = { ternary: 0, objectTernary: 0, ifZhBlock: 0, zhTable: 0, constPair: 0 }
+    const englishSideCjk: string[] = []
+    let s = stripComments(source)
+
+    const TERNARY = new RegExp(String.raw`\bisZh(?:\.value|\(\))?\s*\?\s*` + LIT + String.raw`\s*:\s*` + LIT, 'g')
+    s = s.replace(TERNARY, (m: string, _zh: string, en: string) => {
+      counts.ternary += 1
+      if (CJK.test(en)) englishSideCjk.push(en)
+      return blank(m)
+    })
+
+    // A `{ zh } … { en }` pair: `head` ends at the zh block's `{`, `between` must reach the en `{`.
+    const takePairs = (head: RegExp, between: RegExp, key: 'objectTernary' | 'ifZhBlock') => {
+      for (;;) {
+        const m = head.exec(s)
+        if (!m) return
+        const zhEnd = closeBrace(s, m.index + m[0].length - 1)
+        const rest = zhEnd < 0 ? null : between.exec(s.slice(zhEnd))
+        if (!rest) throw new Error(`${key}: unpaired construct at offset ${m.index}`)
+        const enOpen = zhEnd + rest[0].length - 1
+        const enEnd = closeBrace(s, enOpen)
+        if (CJK.test(s.slice(enOpen, enEnd))) englishSideCjk.push(s.slice(enOpen, enEnd))
+        counts[key] += 1
+        s = s.slice(0, m.index) + blank(s.slice(m.index, enEnd)) + s.slice(enEnd)
+      }
+    }
+    takePairs(/\bisZh(?:\.value|\(\))?\s*\?\s*\{/, /^\s*:\s*\{/, 'objectTernary')
+    takePairs(/\bif\s*\(\s*isZh(?:\.value)?\s*\)\s*\{\s*return\s*\{/, /^\s*\}\s*return\s*\{/, 'ifZhBlock')
+
+    for (;;) {
+      const m = /\bconst\s+([A-Z][A-Z0-9_]*)_ZH\b[^=\n]*=\s*\{/.exec(s)
+      if (!m) break
+      const end = closeBrace(s, m.index + m[0].length - 1)
+      const en = new RegExp(String.raw`\bconst\s+` + m[1] + String.raw`_EN\b[^=\n]*=\s*\{`).exec(source)
+      if (!en) throw new Error(`zhTable: ${m[1]}_ZH has no ${m[1]}_EN sibling`)
+      const enOpen = en.index + en[0].length - 1
+      const enBody = stripComments(source.slice(enOpen, closeBrace(source, enOpen)))
+      if (CJK.test(enBody)) englishSideCjk.push(`${m[1]}_EN`)
+      counts.zhTable += 1
+      s = s.slice(0, m.index) + blank(s.slice(m.index, end)) + s.slice(end)
+    }
+
+    const PAIR = new RegExp(String.raw`\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*` + LIT, 'g')
+    s = s.replace(PAIR, (m: string, name: string, lit: string) => {
+      if (!CJK.test(lit) || name.endsWith('_EN')) return m
+      const en = new RegExp(String.raw`\bconst\s+` + name + String.raw`_EN\s*=\s*` + LIT).exec(source)
+      if (!en) return m
+      if (CJK.test(en[1]!)) englishSideCjk.push(`${name}_EN`)
+      counts.constPair += 1
+      return blank(m)
+    })
+
+    return { counts, englishSideCjk, rest: s }
+  }
+
+  it.each(RULES.map((rule) => [rule.file, rule] as const))('guard: %s', async (_file, rule) => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    let source = fs.readFileSync(path.resolve(__dirname, '..', rule.file), 'utf-8')
+    if (rule.scopeFrom) {
+      const at = source.indexOf(rule.scopeFrom)
+      expect(at, `scope marker missing in ${rule.file}`).toBeGreaterThanOrEqual(0)
+      expect(source.indexOf(rule.scopeFrom, at + 1), 'scope marker must be unique').toBe(-1)
+      const close = source.indexOf('\n}\n', at)
+      expect(close, 'scope end missing').toBeGreaterThan(at)
+      source = source.slice(at, close + 3)
+    }
+
+    const { counts, englishSideCjk, rest } = scanFile(source)
+    expect(counts, `construct counts changed in ${rule.file}`).toEqual({
+      ternary: rule.ternary ?? 0,
+      objectTernary: rule.objectTernary ?? 0,
+      ifZhBlock: rule.ifZhBlock ?? 0,
+      zhTable: rule.zhTable ?? 0,
+      constPair: rule.constPair ?? 0,
+    })
+    expect(englishSideCjk, `an English side contains CJK in ${rule.file}`).toEqual([])
+
+    let remaining = rest
+    for (const { line, count } of rule.exceptions ?? []) {
+      expect(CJK.test(line), `named exception without CJK: ${line}`).toBe(true)
+      expect(remaining.split(line).length - 1, `named exception occurrence count changed: ${line}`).toBe(count)
+      remaining = remaining.split(line).join('')
+    }
+    const offenders = remaining.split('\n').filter((line) => CJK.test(line)).map((line) => line.trim())
+    expect(offenders, `CJK outside the locale constructs in ${rule.file}`).toEqual([])
+  })
+
+  it('the guard itself reds on a stray literal, an English-side CJK and a missing EN table (positive controls)', () => {
+    expect(scanFile("const a = '审批'").rest).toMatch(CJK)
+    expect(scanFile("const a = isZh.value ? '审批' : '审批'").englishSideCjk).toHaveLength(1)
+    expect(scanFile("const a = isZh.value ? '审批' : 'Approval'").rest).not.toMatch(CJK)
+    expect(() => scanFile("export const X_ZH = { a: '审批' }")).toThrow(/no X_EN sibling/)
+    expect(scanFile("const X_ZH = { a: '审批' }\nconst X_EN = { a: '审批' }").englishSideCjk).toEqual(['X_EN'])
+    expect(scanFile("const M = '审批'").rest).toMatch(CJK)
+    expect(scanFile("const M = '审批'\nconst M_EN = 'Approval'").counts.constPair).toBe(1)
+    expect(scanFile('const t = isZh.value ? { a: 1 } : { a: \'审批\' }').englishSideCjk).toHaveLength(1)
+    expect(scanFile('function f() { if (isZh.value) { return { a: \'审批\' } } return { a: \'x\' } }').counts.ifZhBlock).toBe(1)
   })
 })

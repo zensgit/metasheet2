@@ -2,6 +2,7 @@ import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
 import { formatRecordLinkDisplay } from './recordLinkField'
+import { unknownUserLabel } from './components/approvalPickerLabels'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -334,6 +335,7 @@ export function pruneHiddenFormDataWithDetail(
 export function validateDetailRows(
   formSchema: FormSchema,
   formData: Record<string, unknown>,
+  isZh: boolean,
 ): string[] {
   const violations: string[] = []
   for (const field of formSchema.fields) {
@@ -352,6 +354,10 @@ export function validateDetailRows(
         if (!visibleIds.has(column.id)) continue // hidden this row — can never be "missing"
         if (isRowDerivationActive(columns, column, row)) continue // read-only derived target
         if (isEmptyValue(row[column.id])) {
+          if (!isZh) {
+            violations.push(`"${fieldLabel}" row ${index + 1} is missing "${column.label || column.id}"`)
+            continue
+          }
           violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)
         }
       }
@@ -432,15 +438,123 @@ function matchOptionLabel(options: FormOption[] | undefined, value: unknown): st
   return match ? match.label : String(value)
 }
 
+/** O-8 / F8-1: the Intl locale the shell language maps to. */
+function displayLocale(isZh: boolean): string {
+  return isZh ? 'zh-CN' : 'en-US'
+}
+
 /**
  * Mirrors the detail view's own zh-CN date formatting (`new Date(x).toLocaleString('zh-CN')`),
  * but — unlike that helper — passes the raw value through unchanged when it doesn't parse as a
  * date, instead of surfacing the JS-internal "Invalid Date" string to the reader.
  */
-function formatDisplayDate(value: unknown): string {
+function formatDisplayDate(value: unknown, isZh = true): string {
   const raw = String(value)
   const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString('zh-CN')
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString(displayLocale(isZh))
+}
+
+const CIVIL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * Test report 2026-10-08, T4a-E2: a `date` value is a FLOATING civil date (Lock-8 D-2), stored as
+ * the strict `YYYY-MM-DD` string the server validates. `formatDisplayDate` reads such a string as
+ * UTC midnight, so it showed a time of day that was never entered (08:00:00 at UTC+8) and, for a
+ * viewer west of UTC, the PREVIOUS day. This renders the string date-only from its own
+ * year/month/day, as a UTC calendar day formatted in UTC, so every viewer in every timezone sees
+ * the day that was entered. Returns `null` for anything that is not a real strict calendar string;
+ * the caller then keeps the instant path (legacy instant values, unparsable text).
+ */
+function formatCivilDate(value: unknown, isZh: boolean): string | null {
+  if (typeof value !== 'string') return null
+  const match = CIVIL_DATE_PATTERN.exec(value)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const calendarDay = new Date(Date.UTC(year, month - 1, day))
+  calendarDay.setUTCFullYear(year)
+  if (calendarDay.getUTCMonth() !== month - 1 || calendarDay.getUTCDate() !== day) return null
+  return calendarDay.toLocaleDateString(displayLocale(isZh), { timeZone: 'UTC' })
+}
+
+/** O-8 / F8-1: the list separator used when several display values share one cell. */
+function displayListSeparator(isZh: boolean): string {
+  return isZh ? '、' : ', '
+}
+
+/**
+ * Test report 2026-10-08, T4b — the member ids a `user` (人员 / 联系人) snapshot value holds: a bare
+ * id (the picker's single value), an array of ids (Lock-2B multi), or a historical object carrying
+ * `id`. The Lock-2B development report (§3) keeps such enriched values readable but states that
+ * "display metadata is not authoritative", so ONLY `id` is read from an object — a stored name is
+ * never displayed. Same shapes as the server's `resolveFormUserValues` (ApprovalAssigneeResolver.ts).
+ */
+export function userFieldValueIds(value: unknown): string[] {
+  const entries = Array.isArray(value) ? value : [value]
+  const ids: string[] = []
+  for (const entry of entries) {
+    const raw = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? (entry as { id?: unknown }).id
+      : entry
+    if (typeof raw !== 'string') continue
+    const id = raw.trim()
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * T4b — a `user` value rendered as display names, each id looked up through `resolveUserName` (the
+ * member surfaces pass the shared directory cache's `getResolvedUserName`). An id with no
+ * resolvable name — an inactive or nameless account, or a lookup still in flight — renders as the
+ * values-free unknown-user label, one label per id, so the names that DO resolve stay readable.
+ * A raw id, a stored display name, or "[object Object]" never renders; an empty selection is '-'.
+ */
+export function formatUserFieldValue(
+  value: unknown,
+  resolveUserName: ((id: string) => string | null) | undefined,
+  isZh = true,
+): string {
+  if (value === null || value === undefined || value === '') return '-'
+  if (Array.isArray(value) && value.length === 0) return '-'
+  const ids = userFieldValueIds(value)
+  if (ids.length === 0) return unknownUserLabel(isZh)
+  return ids
+    .map((id) => resolveUserName?.(id) || unknownUserLabel(isZh))
+    .join(displayListSeparator(isZh))
+}
+
+/**
+ * T4b — every member id held by `user` values in a snapshot, deduplicated: top-level `user` fields,
+ * plus (unless `includeDetailColumns` is false) the `user` columns of `detail` (明细) rows. Callers
+ * hand the result to `ensureUserNamesResolved` from a watch — never from a computed.
+ */
+export function collectFormUserIds(
+  formSchema: FormSchema | null | undefined,
+  formSnapshot: Record<string, unknown> | null | undefined,
+  options: { includeDetailColumns?: boolean } = {},
+): string[] {
+  const snapshot = formSnapshot ?? {}
+  const ids = new Set<string>()
+  for (const field of formSchema?.fields ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
+    const value = snapshot[field.id]
+    if (field.type === 'user') {
+      for (const id of userFieldValueIds(value)) ids.add(id)
+      continue
+    }
+    if (field.type !== 'detail' || options.includeDetailColumns === false) continue
+    if (!Array.isArray(field.columns) || !Array.isArray(value)) continue
+    const userColumns = field.columns.filter((column) => column.type === 'user')
+    for (const row of value) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+      for (const column of userColumns) {
+        for (const id of userFieldValueIds((row as Record<string, unknown>)[column.id])) ids.add(id)
+      }
+    }
+  }
+  return [...ids]
 }
 
 /**
@@ -449,15 +563,15 @@ function formatDisplayDate(value: unknown): string {
  * Render those without calling the attachment refs endpoint. Opaque id arrays from the new pipeline
  * are NOT formatted here — they resolve through `attachmentRefs.ts` when the flag is ON.
  */
-export function formatLegacyAttachmentValue(value: unknown): string {
+export function formatLegacyAttachmentValue(value: unknown, isZh = true): string {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) {
     const parts = value
-      .map((entry) => formatLegacyAttachmentValue(entry))
+      .map((entry) => formatLegacyAttachmentValue(entry, isZh))
       .filter((part) => part && part !== '-')
-    return parts.length > 0 ? parts.join('、') : '-'
+    return parts.length > 0 ? parts.join(displayListSeparator(isZh)) : '-'
   }
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>
@@ -466,7 +580,7 @@ export function formatLegacyAttachmentValue(value: unknown): string {
       if (typeof candidate === 'string' && candidate.trim()) return candidate
     }
     // Avoid dumping "[object Object]" — a nameless legacy object still surfaces as a stable placeholder.
-    return '附件'
+    return isZh ? '附件' : 'Attachment'
   }
   return String(value)
 }
@@ -476,29 +590,40 @@ export function formatLegacyAttachmentValue(value: unknown): string {
  * null/undefined/'' always render as '-' regardless of type. `select` maps the stored value to
  * its option label, falling back to the raw value when no option matches (e.g. an option
  * renamed/removed after the instance was created); `multi-select` maps each stored value the
- * same way and joins with '、'; `date` uses `formatDisplayDate` (pass-through on unparsable);
- * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user)
- * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
+ * same way and joins with '、'; `date` renders a strict `YYYY-MM-DD` civil string date-only via
+ * `formatCivilDate` (timezone-independent) and anything else via `formatDisplayDate`, which
+ * `datetime` always uses (pass-through on unparsable);
+ * `number` localizes finite values via zh-CN grouping. `user` renders display names through
+ * `formatUserFieldValue` (T4b — never the stored ids). Everything else (text/textarea) stringifies
+ * as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
  * string/object snapshots remain readable without the new refs endpoint.
  */
-function formatDisplayValue(field: FormField, value: unknown): string {
+function formatDisplayValue(
+  field: FormField,
+  value: unknown,
+  isZh: boolean,
+  resolveUserName?: (id: string) => string | null,
+): string {
   if (value === null || value === undefined || value === '') return '-'
   switch (field.type) {
+    case 'user':
+      return formatUserFieldValue(value, resolveUserName, isZh)
     case 'select':
       return matchOptionLabel(field.options, value)
     case 'multi-select': {
       const values = Array.isArray(value) ? value : [value]
-      return values.map((entry) => matchOptionLabel(field.options, entry)).join('、')
+      return values.map((entry) => matchOptionLabel(field.options, entry)).join(displayListSeparator(isZh))
     }
     case 'date':
+      return formatCivilDate(value, isZh) ?? formatDisplayDate(value, isZh)
     case 'datetime':
-      return formatDisplayDate(value)
+      return formatDisplayDate(value, isZh)
     case 'number': {
       const num = Number(value)
-      return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value)
+      return Number.isFinite(num) ? num.toLocaleString(isZh ? 'zh-CN' : 'en-US') : String(value)
     }
     case 'attachment':
-      return formatLegacyAttachmentValue(value)
+      return formatLegacyAttachmentValue(value, isZh)
     case 'department': {
       if (!Array.isArray(value)) return '-'
       const showFullPath = field.props?.display === 'full_path'
@@ -508,7 +633,7 @@ function formatDisplayValue(field: FormField, value: unknown): string {
         const candidate = showFullPath ? record.fullPath : record.name
         return typeof candidate === 'string' && candidate.trim() ? [candidate.trim()] : []
       })
-      return labels.length > 0 ? labels.join('、') : '-'
+      return labels.length > 0 ? labels.join(displayListSeparator(isZh)) : '-'
     }
     case 'record-link': {
       // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
@@ -516,7 +641,7 @@ function formatDisplayValue(field: FormField, value: unknown): string {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const recordId = (value as { recordId?: unknown }).recordId
         if (typeof recordId === 'string' && recordId.trim()) {
-          return formatRecordLinkDisplay(null)
+          return formatRecordLinkDisplay(null, isZh)
         }
       }
       return '-'
@@ -528,7 +653,11 @@ function formatDisplayValue(field: FormField, value: unknown): string {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const { start, end } = value as { start?: unknown; end?: unknown }
         if (start !== undefined && end !== undefined) {
-          return `${formatDisplayDate(start)} ~ ${formatDisplayDate(end)}`
+          // T4a-E2: a `dateType: 'date'` range stores civil `YYYY-MM-DD` endpoints — same rendering
+          // as a `date` field. The time-of-day granularities keep the instant path.
+          const civil = field.props?.dateType === 'date'
+          const endpoint = (raw: unknown) => (civil ? formatCivilDate(raw, isZh) : null) ?? formatDisplayDate(raw, isZh)
+          return `${endpoint(start)} ~ ${endpoint(end)}`
         }
       }
       return '-'
@@ -557,6 +686,18 @@ export interface BuildDisplayFieldsOptions {
    * string/object snapshot values still render inline without calling the new endpoint.
    */
   attachmentPipelineEnabled?: boolean
+  /**
+   * O-8 / F8-1: shell locale for value formatting (list separators, dates, numbers, the legacy
+   * attachment placeholder). Defaults to zh-CN so the not-yet-converted authoring callers (F8-3)
+   * keep today's output; the member surfaces pass `useLocale().isZh`.
+   */
+  isZh?: boolean
+  /**
+   * Test report 2026-10-08, T4b: the display-name lookup for `user` values (the member surfaces pass
+   * the shared directory cache's `getResolvedUserName`). Absent, every `user` value renders the
+   * values-free unknown-user label — never the stored id.
+   */
+  resolveUserName?: (id: string) => string | null
 }
 
 export function buildDisplayFields(
@@ -569,6 +710,7 @@ export function buildDisplayFields(
   const knownFieldIds = new Set(fields.map((field) => field.id))
   const result: DisplayField[] = []
   const pipelineOn = options.attachmentPipelineEnabled === true
+  const isZh = options.isZh ?? true
   // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3): explanation carries no formSnapshot value at all (A-1),
   // so "is this field's id a snapshot key" — the test every OTHER arm below uses — is never true
   // for it and can't gate its render. Its visibility must instead be evaluated directly against
@@ -596,7 +738,7 @@ export function buildDisplayFields(
     result.push({
       key: field.id,
       label: field.label || field.id,
-      value: formatDisplayValue(field, snapshot[field.id]),
+      value: formatDisplayValue(field, snapshot[field.id], isZh, options.resolveUserName),
     })
   }
 
@@ -624,6 +766,8 @@ export function summaryFields(
   formSchema: FormSchema | null | undefined,
   formSnapshot: Record<string, unknown> | null | undefined,
   limit = 3,
+  isZh = true,
+  resolveUserName?: (id: string) => string | null,
 ): DisplayField[] {
   const fields = formSchema?.fields
   if (!Array.isArray(fields) || fields.length === 0) return []
@@ -637,7 +781,7 @@ export function summaryFields(
   )
   if (eligibleFieldIds.size === 0) return []
 
-  return buildDisplayFields(formSchema, formSnapshot)
+  return buildDisplayFields(formSchema, formSnapshot, { isZh, resolveUserName })
     .filter((field) => eligibleFieldIds.has(field.key))
     .slice(0, limit)
 }
@@ -648,6 +792,6 @@ export function summaryFields(
  * single-line container with CSS `text-overflow: ellipsis`, so truncation stays purely visual
  * (never a substring cut here that could clip mid-character).
  */
-export function formatSummaryLine(fields: DisplayField[]): string {
-  return fields.map((field) => `${field.label}：${field.value}`).join(' · ')
+export function formatSummaryLine(fields: DisplayField[], isZh = true): string {
+  return fields.map((field) => (isZh ? `${field.label}：${field.value}` : `${field.label}: ${field.value}`)).join(' · ')
 }

@@ -114,6 +114,12 @@ type RoleCatalogItem = {
   name: string
   permissions: string[]
   memberCount: number
+  /**
+   * Optimistic-concurrency token from GET /api/admin/roles. Echoed back on save as
+   * `expectedUpdatedAt` so that saving a grid loaded before someone else's revoke is
+   * answered 409 instead of silently resurrecting the revoked codes.
+   */
+  updatedAt?: string | null
 }
 
 type PermissionCatalogItem = {
@@ -172,7 +178,14 @@ function togglePermission(code: string, checked: boolean): void {
   selectedPermissions.value = Array.from(current.values()).sort()
 }
 
-async function loadCatalog(): Promise<void> {
+/**
+ * Returns whether the reload actually SUCCEEDED. The caller needs that distinction: this
+ * function swallows its own error and leaves `roles.value` holding the pre-save array, so a
+ * post-save reconciliation that cannot tell "reload failed" from "reload disagrees" would
+ * report a data loss that never happened — and teach admins to ignore the one message this
+ * page added to make silent drops visible.
+ */
+async function loadCatalog(): Promise<boolean> {
   loading.value = true
   try {
     const [rolesResponse, permissionsResponse] = await Promise.all([
@@ -202,37 +215,89 @@ async function loadCatalog(): Promise<void> {
       const latest = roles.value.find((role) => role.id === selectedRoleId.value) || null
       applyRole(latest)
     }
+    return true
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载角色失败', 'error')
+    return false
   } finally {
     loading.value = false
   }
 }
 
+function sameCodeSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  const left = [...a].sort()
+  const right = [...b].sort()
+  return left.every((code, index) => code === right[index])
+}
+
 async function saveRole(): Promise<void> {
   if (!canSave.value) return
   busy.value = true
+  // `isEditing` is derived from selectedRoleId, which applyRole() rewrites below — read
+  // it here so the closing message still describes the action that was actually taken.
+  const wasEditing = isEditing.value
   try {
-    const payload = {
+    const payload: Record<string, unknown> = {
       id: draftRoleId.value.trim(),
       name: draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
+    // Mid-air-collision token: the grid being submitted is the one loaded with this
+    // timestamp, so a save that lands after someone else's change is refused (409) instead
+    // of replaying a stale set over it.
+    if (wasEditing && selectedRole.value?.updatedAt) {
+      payload.expectedUpdatedAt = selectedRole.value.updatedAt
+    }
+    if (wasEditing && selectedRole.value) {
+      // The permission set as LOADED. `updatedAt` alone would miss a writer that changes
+      // role_permissions without touching the roles row (the plugin provisioner does
+      // exactly that), and the DELETE this save implies would then revoke codes the admin
+      // never unchecked and never saw.
+      payload.expectedPermissions = [...(selectedRole.value.permissions || [])]
+    }
+    const submittedPermissions = [...selectedPermissions.value]
 
     const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
       method: isEditing.value ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
     const body = await readJson(response)
+    const errorCode = String((body.error as Record<string, unknown> | undefined)?.code || '')
+    if (response.status === 409 && errorCode === 'ROLE_MODIFIED') {
+      // Someone else changed this role after this grid was loaded. Re-read it rather than
+      // offering 重试 on a stale draft — replaying it is exactly what the token prevents.
+      await loadCatalog()
+      setStatus('该角色已被其他人修改，已重新加载最新权限，请确认后再保存', 'error')
+      return
+    }
     if (!response.ok || body.ok !== true) {
       throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
     }
 
     const currentId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)
-    await loadCatalog()
+    const reloaded = await loadCatalog()
     const latest = roles.value.find((role) => role.id === currentId) || null
     applyRole(latest)
-    setStatus(isEditing.value ? '角色已更新' : '角色已创建')
+
+    // Do not claim success on the strength of `ok: true` alone. This page used to report
+    // 角色已更新 while the reloaded role still showed the OLD checkboxes, because the
+    // backend silently dropped the permission set on edit; the reverted grid was the only
+    // signal, and it looked like a rendering quirk. Re-reading the persisted set and
+    // saying so when it disagrees with what was submitted makes that class of silent drop
+    // visible here — including against a server that has not been updated yet.
+    if (!reloaded) {
+      // The write itself answered ok:true; only the re-read failed. Saying「不一致」here
+      // would assert a data loss that did not happen (roles.value still holds the PRE-save
+      // array, so the comparison below would be old-vs-submitted and always disagree).
+      setStatus('已保存，但无法重新加载角色目录以核对，请刷新确认', 'error')
+    } else if (!latest) {
+      setStatus('已保存，但重新加载后未找到该角色，请刷新确认', 'error')
+    } else if (!sameCodeSet(latest.permissions || [], submittedPermissions)) {
+      setStatus(`已保存名称，但服务端记录的权限为 ${latest.permissions?.length ?? 0} 项，与提交的 ${submittedPermissions.length} 项不一致，请刷新确认`, 'error')
+    } else {
+      setStatus(wasEditing ? '角色已更新' : '角色已创建')
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
   } finally {

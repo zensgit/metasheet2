@@ -60,6 +60,16 @@ const {
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require('./stock-preparation-templates.cjs')
+const {
+  // THE ONE field-existence probe readiness and the #5719 plan layer run (db / computed /
+  // computed_scope_unavailable), and the verdict they derive from it. Reused here for the MVP
+  // snapshot tables this module writes, never re-implemented — see `assertMvpTargetFieldsExist`.
+  resolveFieldExistence,
+  __internals: {
+    templateFieldIds: templateLogicalFieldIds,
+    missingLogicalFields,
+  },
+} = require('./stock-preparation-target-provisioning.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
@@ -94,6 +104,10 @@ const PROJECT_KEY_FIELD = PROJECT_TEMPLATE.keyFields[0] // 'projectId'
 // Design-grounded enum literal (docs/development/stock-preparation-mvp-design-20260707.md §"Project
 // Table": project_status includes 'active'). A project that just synced is, by definition, active.
 const PROJECT_STATUS_ACTIVE = 'active'
+
+// The FOUR MVP tables this module writes, in the order their sheets are resolved below. The field
+// existence probe walks exactly this list — a table this module never addresses is never judged.
+const MVP_PERSIST_TARGET_TEMPLATES = Object.freeze([BATCH_TEMPLATE, LINE_TEMPLATE, RUN_TEMPLATE, PROJECT_TEMPLATE])
 
 class StockPreparationSyncRunPersistError extends Error {
   constructor(status, code, message, details = {}) {
@@ -180,6 +194,95 @@ async function resolveScopedTarget(recordsApi, provisioning, projectId, objectId
   )
   const scoped = await bindRecordsApi(recordsApi)
   return { objectId, sheetId, scoped, bindRecordsApi }
+}
+
+/**
+ * MVP 快照表字段存在性探针 — THE WRITE-PATH HALF OF THE READINESS PROBE, FOR THE TABLES THIS MODULE
+ * WRITES.
+ *
+ * THE GAP (#5719 终审「所有视角都没看的路径」). #5719 gave dry-run/apply a DB-backed field
+ * existence probe, and the mvp-persist route threads it — into `computeDryRun`, which judges the
+ * CANONICAL 备料 target (`action.target.objectId`). The rows this module then persists go to FOUR
+ * OTHER tables — the snapshot batch / line / run / project MVP tables — whose field ids
+ * `resolveScopedTarget` resolves through `resolveTargetFieldIds`, i.e. through the COMPUTE-ONLY
+ * `provisioning.resolveFieldIds`. That map never omits a field, so its
+ * TABLE_ACTION_FIELD_IDS_UNRESOLVED gate is unreachable on a real host (目标表漂移检测是死代码), and a
+ * snapshot table provisioned by an older template surfaces the drift only when the records service
+ * rejects the first write as an opaque `VALIDATION_ERROR: Unknown fieldId` — the 222 incident where
+ * the snapshot line table was five columns short.
+ *
+ * WHAT THIS DOES. After every MVP sheet is proven provisioned, and BEFORE the host unit-of-work opens
+ * (so before any records read or write), ask the SAME probe readiness asks — `resolveFieldExistence`
+ * — for each of the four templates, and apply the SAME verdict (`missingLogicalFields` over the
+ * template's own ids). A `db` verdict that omits a field refuses with the code readiness/ensure and
+ * the #5719 plan layer already use.
+ *
+ * THE THREE MODES, AND THE ONE THAT REFUSES — identical to `assertTargetFieldsExist`
+ * (stock-preparation-table-actions.cjs):
+ *   db                         — the host read `meta_fields`; a missing field is a fact => 422.
+ *   computed                   — an older host without the DB read; nothing to act on => no refusal,
+ *                                no log, the pre-probe result byte for byte.
+ *   computed_scope_unavailable — the DB read refused the object scope and the shared probe degraded
+ *                                to the compute-only map => same as `computed`.
+ *
+ * CAPABILITY-DETECTED HERE, not in `ensureProvisioning`: that gate is the required-method contract
+ * (findObjectSheet / resolveFieldIds) and every provisioning fake in the suite satisfies exactly it. A
+ * host without the DB read is skipped outright — not one host call — so the legacy result and the
+ * legacy call trace are unchanged.
+ *
+ * NO SHEET-IDENTITY GATE, ON PURPOSE. #5719 runs its probe only when `getObjectSheetId(projectId,
+ * objectId)` equals the CONFIGURED `action.target.sheetId`, because the canonical binding may name a
+ * sheet the host would not derive from that pair. This module has no configured sheet id: the sheet
+ * it writes is `findObjectSheet({ projectId, objectId })`, which the host defines as
+ * `loadActiveSheet(getObjectSheetId(projectId, objectId))` — the very key the DB read judges. The two
+ * halves are one tuple by construction, so the gate would only add a way for the probe to fall silent.
+ *
+ * ORDER: 409 PERSIST_TARGET_NOT_PROVISIONED keeps precedence. The probe runs after the four
+ * `resolveScopedTarget` calls so an unprovisioned sheet still answers the coded "provision first",
+ * never a 422 that lists every column as missing.
+ *
+ * THE PROJECT IS SERVER-HELD: `targetProjectId` is the internal staging project every route derives
+ * from the AUTHENTICATED tenant (`resolveIntegrationStagingProjectId(tenantId, undefined)`) and this
+ * module already requires; no request field reaches it.
+ *
+ * VALUES-FREE: the refusal carries the public objectId and logical ids only — never a physical field
+ * id, never a sheet id. A host failure on the DB read (anything the shared probe does not degrade)
+ * is a values-free 503 TARGET_SCHEMA_UNAVAILABLE carrying the objectId and nothing else; the original
+ * stays on `cause` for the server log and never reaches the response as a driver string.
+ */
+async function assertMvpTargetFieldsExist(provisioning, projectId, template) {
+  if (
+    typeof provisioning.resolveExistingObjectFieldIds !== 'function'
+    || typeof provisioning.resolveFieldIds !== 'function'
+  ) return
+  const objectId = template.objectId
+  let verdict
+  try {
+    verdict = await resolveFieldExistence({
+      provisioning,
+      projectId,
+      objectId,
+      fieldIds: templateLogicalFieldIds(template),
+    })
+  } catch (error) {
+    const unavailable = new StockPreparationSyncRunPersistError(
+      503,
+      'TARGET_SCHEMA_UNAVAILABLE',
+      'stock-preparation MVP target table schema could not be read; retry once the metadata store answers',
+      { targetObjectId: objectId },
+    )
+    unavailable.cause = error
+    throw unavailable
+  }
+  if (verdict.fieldExistenceMode !== 'db') return
+  const missingFields = missingLogicalFields(template, verdict.resolved)
+  if (missingFields.length === 0) return
+  throw new StockPreparationSyncRunPersistError(
+    422,
+    'TARGET_SCHEMA_INCOMPLETE',
+    'stock-preparation MVP target table is missing template fields; the MVP readiness/ensure routes do not add columns to an existing table - repair the table (repairStockPreparationMvpTargets / host ensureMissingObjectFields) before persisting',
+    { targetObjectId: objectId, missingFields, fieldExistenceMode: verdict.fieldExistenceMode },
+  )
 }
 
 // Ground a mapped snapshot line to ONLY the frozen line-template field ids (dropping null / undefined
@@ -636,6 +739,13 @@ async function persistStockPreparationSyncRun(input = {}) {
   const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
   const projectTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, PROJECT_OBJECT_ID)
 
+  // 3b. field existence on each of the four provisioned MVP sheets — the DB-backed verdict the
+  //     compute-only resolution above cannot give (see assertMvpTargetFieldsExist). Still before the
+  //     unit-of-work, so a refusal here has read and written nothing.
+  for (const template of MVP_PERSIST_TARGET_TEMPLATES) {
+    await assertMvpTargetFieldsExist(provisioning, targetProjectId, template)
+  }
+
   // 4. The host takes all four canonical sheet fences, then the project key and batch key, and invokes
   //    this callback on one transaction-scoped records API. Every idempotency decision, replay read,
   //    create/patch, and revision write below therefore shares the same transaction and lock lifetime.
@@ -787,6 +897,8 @@ module.exports = {
     ensureProvisioning,
     ensurePersistUnitOfWork,
     resolveScopedTarget,
+    assertMvpTargetFieldsExist,
+    MVP_PERSIST_TARGET_TEMPLATES,
     groundLineRow,
     upsertStockPreparationProject,
     buildEvidence,

@@ -11,6 +11,11 @@ import type { MetaRecordSubscriptionNotification } from '../src/multitable/types
 function notif(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
   return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'record.updated', actorId: null, revisionId: null, commentId: null, message: null, createdAt: '2026-06-16T00:00:00Z', readAt }
 }
+// F9b (#5664): non-record-triggered automations (webhook.received / approval.task_created|completed /
+// schedule) deliver `send_notification` rows with `record_id = ''` — there is no record to locate.
+function notifNoRecord(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
+  return { id, sheetId: 's1', recordId: '', userId: 'u1', eventType: 'notification.sent', actorId: null, revisionId: null, commentId: null, message: 'Webhook received', createdAt: '2026-06-16T00:00:00Z', readAt }
+}
 // B1-S1 D0-A: a durable button-delivered notification carries a custom message body.
 function notifSent(id: string, message: string): MetaRecordSubscriptionNotification {
   return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'notification.sent', actorId: null, revisionId: null, commentId: null, message, createdAt: '2026-06-16T00:00:00Z', readAt: null }
@@ -64,6 +69,24 @@ describe('MetaNotificationBell (S1b)', () => {
     expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['a'])
   })
 
+  it('F9b (#5664): clicking a non-record notification (record_id = "") marks it read but does not emit navigate', async () => {
+    const onNavigate = vi.fn()
+    const m = mount({
+      listRecordSubscriptionNotifications: vi.fn(async () => [notifNoRecord('n1')]),
+      getRecordSubscriptionUnreadCount: vi.fn(async () => 1),
+    }, onNavigate)
+    mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    m.container.querySelector<HTMLElement>('[data-test="notification-item"]')!.click()
+    await flush()
+    expect(onNavigate).not.toHaveBeenCalled()
+    expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['n1'])
+    // the panel still closes on click, same as a normal item
+    expect(m.container.querySelector('[data-test="notification-panel"]')).toBeNull()
+  })
+
   it('mark-all-read calls the client and the panel closes the item back to read', async () => {
     const m = mount(); mounted = m
     await flush()
@@ -98,6 +121,51 @@ describe('MetaNotificationBell (S1b)', () => {
     const message = m.container.querySelector('[data-test="notification-message"]')
     expect(message).not.toBeNull()
     expect(message?.textContent).toContain('Ship the release')
+  })
+
+  // #5745 §5.4 regression pin: a record-less notification.sent row (approval.completed / schedule /
+  // webhook trigger) renders in the panel; clicking it marks it read and closes the panel WITHOUT
+  // emitting navigate (F9b) — the row must not be hidden by the panel while the badge counts it.
+  it('renders a record-less notification.sent row and marks it read on click without navigating', async () => {
+    const onNavigate = vi.fn()
+    const recordless: MetaRecordSubscriptionNotification = { ...notifSent('n_recordless', 'approval done'), recordId: '' }
+    const m = mount({
+      listRecordSubscriptionNotifications: vi.fn(async () => [recordless]),
+      getRecordSubscriptionUnreadCount: vi.fn(async () => 1),
+    }, onNavigate)
+    mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    const items = m.container.querySelectorAll('[data-test="notification-item"]')
+    expect(items.length).toBe(1)
+    expect(m.container.querySelector('[data-test="notification-empty"]')).toBeNull()
+    expect(m.container.querySelector('[data-test="notification-message"]')?.textContent).toContain('approval done')
+    ;(items[0] as HTMLElement).click()
+    await flush()
+    expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['n_recordless'])
+    expect(onNavigate).not.toHaveBeenCalled()
+    expect(m.container.querySelector('[data-test="notification-panel"]')).toBeNull()
+  })
+
+  it('viewport clip: panel aligns left when the bell sits near the left edge', async () => {
+    const m = mount(); mounted = m
+    await flush()
+    const btn = m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!
+    btn.getBoundingClientRect = () => ({ left: 40, right: 120, width: 80, top: 0, bottom: 0, height: 0, x: 40, y: 0, toJSON: () => ({}) })
+    btn.click()
+    await flush()
+    expect(m.container.querySelector('[data-test="notification-panel"]')?.classList.contains('meta-notif-bell__panel--align-left')).toBe(true)
+  })
+
+  it('viewport clip: panel stays right-anchored when there is room to the left', async () => {
+    const m = mount(); mounted = m
+    await flush()
+    const btn = m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!
+    btn.getBoundingClientRect = () => ({ left: 900, right: 980, width: 80, top: 0, bottom: 0, height: 0, x: 900, y: 0, toJSON: () => ({}) })
+    btn.click()
+    await flush()
+    expect(m.container.querySelector('[data-test="notification-panel"]')?.classList.contains('meta-notif-bell__panel--align-left')).toBe(false)
   })
 
   it('does not crash when the client fails — renders the error state instead (P2-1)', async () => {

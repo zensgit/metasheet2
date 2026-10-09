@@ -234,10 +234,12 @@ describe('Multitable sheet-scoped permissions API', () => {
       canManageAutomation: false,
       canExport: true,
       canSendNotification: false,
+      canSubmitApproval: false,
       pitResetEnabled: false, // T8-2: flag-off default ⇒ false (this actor is also not a sheet-admin, so false regardless)
       sheetRevertEnabled: false, // interim revert-execute master gate: flag-off default ⇒ false (also not a sheet-admin, so false regardless)
       personalViewsEnabled: false, // Slice 3: flag-off default ⇒ false (available to all readers when the flag is on)
       canDeleteSheet: false, // scoped spreadsheet:read only, no global schema authority, not a sheet admin
+      canCopySheet: false, // copy-sheet S1 (ADR #6094): the base-write lookup is unanswered by this mock ⇒ fail-closed false
     })
     expect(contextResponse.body.data.viewPermissions).toEqual({
       view_grid: {
@@ -1403,7 +1405,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           views.set(viewId, row)
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+        // #5807: the People sync reads only id + name from users.
+        if (sql.includes('SELECT id, name') && sql.includes('FROM users')) {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -1923,7 +1926,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         if (sql.includes('WITH user_candidates AS') && sql.includes('role_candidates AS')) {
-          expect(params).toEqual(['sheet_ops', '', '%', 20])
+          // #5795: a term is required; the route asks for one row past its page (hasMore probe).
+          expect(params).toEqual(['sheet_ops', 'e', '%e%', 21])
           return {
             rows: [
               {
@@ -1987,7 +1991,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
 
     const response = await request(app)
-      .get('/api/multitable/sheets/sheet_ops/form-share-candidates')
+      .get('/api/multitable/sheets/sheet_ops/form-share-candidates?q=e')
       .expect(200)
 
     expect(response.body.data).toEqual({
@@ -2039,7 +2043,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       ],
       total: 4,
       limit: 20,
-      query: '',
+      query: 'e',
+      hasMore: false,
+      requiresQuery: false,
+      minQueryLength: 1,
     })
   })
 
@@ -2548,7 +2555,10 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
-        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+        // Column-tolerant form (#6089 B1 fix): `isSystemManagedSheet` now reads `system_kind` via
+        // `to_jsonb(meta_sheets) ->> 'system_kind'`, the same tolerant shape every other reader in
+        // univer-meta.ts already uses, so a database without the column does not 500 the route.
+        if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ system_kind: null, description: null }] }
         }
@@ -3002,7 +3012,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     const { app } = await createApp({
       tokenPerms: [],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+        if (sql.includes("SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200")) {
           return {
             rows: [
               { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },
@@ -3054,7 +3064,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+        if (sql.includes("SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200")) {
           return {
             rows: [
               { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },

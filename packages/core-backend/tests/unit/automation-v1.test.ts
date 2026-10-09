@@ -87,6 +87,38 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
   }
 }
 
+// F9b: the rule-side send_notification HARD-REJECTS non-members before its durable write, using the
+// SAME resolver as the button route (loadSheetMemberUserIdSet → listSheetPermissionCandidates). Mock
+// deps must therefore model the member-roster SQL; an unmodelled roster resolves to the EMPTY set,
+// i.e. fail-closed — which is the intended behaviour, not a fixture accident.
+export const MOCK_SHEET_MEMBER_IDS = ['u1', 'u2', 'u3']
+
+export function sheetMemberRosterRows(
+  memberIds: string[],
+  sqlText: string,
+): { rows: unknown[]; rowCount: number } | null {
+  if (/WITH user_candidates AS/i.test(sqlText)) {
+    return {
+      rows: memberIds.map((id) => ({
+        subject_type: 'user',
+        subject_id: id,
+        user_name: id,
+        user_email: `${id}@members.test`,
+        user_is_active: true,
+        permission_codes: ['multitable:read'],
+      })),
+      rowCount: memberIds.length,
+    }
+  }
+  if (/FROM user_permissions up/i.test(sqlText)) {
+    return {
+      rows: memberIds.map((id) => ({ user_id: id, permission_code: 'multitable:read' })),
+      rowCount: memberIds.length,
+    }
+  }
+  return null
+}
+
 function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps {
   return {
     eventBus: new EventBus(),
@@ -98,6 +130,11 @@ function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps
     queryFn: vi.fn(async (sql: unknown) => {
       if (typeof sql === 'string' && /FROM meta_sheets/i.test(sql)) {
         return { rows: [{ base_id: 'base_mock' }], rowCount: 1 }
+      }
+      // F9b member roster (see sheetMemberRosterRows): send_notification recipients must be members.
+      if (typeof sql === 'string') {
+        const roster = sheetMemberRosterRows(MOCK_SHEET_MEMBER_IDS, sql)
+        if (roster) return roster
       }
       return { rows: [], rowCount: 0 }
     }),
@@ -3998,7 +4035,15 @@ describe('AutomationService — Rule CRUD', () => {
 
   beforeEach(() => {
     eventBus = new EventBus()
-    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    // F9c: createRule/updateRule now resolve the selectable-people roster (the SAME
+    // loadSheetMemberUserIdSet the executor and the button route use) before persisting any rule that
+    // contains a send_notification. An unmodelled roster is the EMPTY set = fail-closed, so the legacy
+    // alias / branch specs below would be refused for a FIXTURE reason rather than a product one.
+    // Modelling it with the file's own helper keeps every recipient in these specs (`u1`) a member.
+    queryFn = vi.fn(async (sql: unknown) => (
+      (typeof sql === 'string' ? sheetMemberRosterRows(MOCK_SHEET_MEMBER_IDS, sql) : null)
+      ?? { rows: [], rowCount: 0 }
+    ))
     _valuesCalls.length = 0
     const db = makeMockDb()
     service = new AutomationService(eventBus, db as never, queryFn)
@@ -6595,6 +6640,22 @@ describe('F9 legacy action alias normalization (toExecutorRule)', () => {
     expect(result.steps[0].simulated).toBeUndefined() // live delivery, NOT the dry-run step
     expect(result.steps[0].error ?? '').not.toContain('Unknown action type')
     expect(emit).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1'], message: 'Ping' }))
+
+    // F9b: "the step succeeded" now MEANS a durable notification-centre row exists. The legacy emit
+    // alone has no listener anywhere in the repo, so without this assertion the end-to-end claim is
+    // "an event nobody consumes was raised".
+    const insertCall = (deps.queryFn as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .find(([sql]) => typeof sql === 'string' && /INSERT INTO meta_record_subscription_notifications/i.test(sql))
+    expect(insertCall, 'the rule path must write the durable notification row').toBeTruthy()
+    const insertedRows = JSON.parse(String((insertCall?.[1] as unknown[])?.[0] ?? '[]')) as Array<Record<string, unknown>>
+    expect(insertedRows).toHaveLength(1)
+    expect(insertedRows[0]).toMatchObject({
+      user_id: 'u1',
+      event_type: 'notification.sent',
+      message: 'Ping',
+      sheet_id: 'sheet_1',
+      record_id: 'r1',
+    })
   })
 
   it('test run (simulate) of a legacy rule dry-runs instead of delivering', async () => {

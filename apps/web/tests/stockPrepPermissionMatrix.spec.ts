@@ -88,6 +88,7 @@ import {
   STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
@@ -164,6 +165,12 @@ const ACTORS: Actor[] = [
   { name: 'orphan operate (no read)', roles: [], permissions: [STOCK_PREP_OPERATE] },
   { name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] },
   { name: 'platform admin', roles: ['admin'], permissions: ['integration:admin'] },
+  // R-33 (2026-10-08): the 拉取人员 (read+operate+pull) and the two degenerate pull grants. On the
+  // confirmation-queue manifest the pull code adds nothing, so the puller must equal
+  // 'operator with read+confirm' cell for cell, and the degenerate grants must equal 'orphan operate'.
+  { name: 'puller (read+operate+pull)', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] },
+  { name: 'pull without operate', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_PULL] },
+  { name: 'orphan pull', roles: [], permissions: [STOCK_PREP_PULL] },
   // THE FOUR PRINCIPALS THAT USED TO SIT OUTSIDE THIS TABLE, now inside it — which is the whole
   // point of the change that put them here. Each one separates 「the code the server matches」 from
   // 「the code `useAuth().hasPermission` would expand to」, and the browser predicates are now
@@ -198,8 +205,14 @@ function asActor(actor: Actor): void {
  * permissions }`, which is what the browser mirror computes its literal ladder over.
  *
  * `probe()` (the expanding `hasPermission`) is deliberately NOT what these predicates receive any
- * more, and the two are kept separate here on purpose: `probe()` still drives the ROUTE GUARD in
- * F-03, which is app-wide machinery this wave did not change, so the file needs both.
+ * more, and the two are kept separate here on purpose — but NOT for the reason an earlier version
+ * of this comment gave. It said `probe()` "still drives the ROUTE GUARD in F-03, which is app-wide
+ * machinery this wave did not change", and as of the gate-alignment change that is simply false:
+ * `buildStockPrepAwarePermissionProbe` now answers the three `stock-prep:*` codes from the
+ * PRINCIPAL, so in F-03 `probe()` is handed to the adapter and then deliberately BYPASSED for
+ * exactly the code that route declares. The file still needs both because `probe()` is what every
+ * OTHER permission on every other route still goes through, and F-03 passes it in to prove that the
+ * bypass is scoped rather than total.
  */
 function principal(): { roles: string[]; permissions: string[] } {
   return { roles: [...h.roles], permissions: [...h.permissions] }
@@ -333,6 +346,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_READ).toBe(backendAccess.STOCK_PREP_READ)
     expect(STOCK_PREP_OPERATE).toBe(backendAccess.STOCK_PREP_OPERATE)
     expect(STOCK_PREP_ADMIN).toBe(backendAccess.STOCK_PREP_ADMIN)
+    // R-33 (2026-10-08): the 拉取人员 code, mirrored like the other three.
+    expect(STOCK_PREP_PULL).toBe(backendAccess.STOCK_PREP_PULL)
+    expect(STOCK_PREP_PULL).toBe('stock-prep:pull')
     expect(PLATFORM_ADMIN_GATE).toBe(backendAccess.PLATFORM_ADMIN_GATE)
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe(backendAccess.STOCK_PREP_ROUTE_PERMISSION)
     expect([...STOCK_PREP_PERMISSION_CODES]).toEqual([...backendAccess.STOCK_PREP_PERMISSION_CODES])
@@ -381,17 +397,19 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe('stock-prep:read')
   })
 
-  it('F-07: the nav link is gated on the route permission, not on integration:write', () => {
+  it('F-07: the nav link is gated on the workbench gate itself, not on integration:write and not on the expanding probe', () => {
     expect(APP_VUE_SOURCE).toContain('v-if="canUseStockPreparation" to="/stock-prep"')
     expect(APP_VUE_SOURCE).not.toContain('v-if="canUseIntegration" to="/stock-prep"')
-    expect(APP_VUE_SOURCE).toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
+    expect(APP_VUE_SOURCE).toContain('canReachStockPrepWorkbench(getAccessSnapshot())')
+    // The expanding app-wide probe must not be what decides this link — that was the divergence.
+    expect(APP_VUE_SOURCE).not.toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
   })
 
   it('F-08: /stock-prep declares NO requiredFeature (a flag would be a second gate on admins too)', () => {
     const block = APP_ROUTES_SOURCE.slice(APP_ROUTES_SOURCE.indexOf("path: '/stock-prep'")).slice(0, 400)
     expect(block).not.toContain('requiredFeature')
-    // And no stock-prep feature was smuggled into the known set.
-    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'])
+    // And no stock-prep feature was smuggled into the known set ('tasks' gates /tasks only).
+    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning', 'tasks'])
   })
 
   // ---------------------------------------------------------------------------
@@ -409,23 +427,31 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       'orphan operate (no read)': 'redirect',
       'workbench admin': 'allow',
       'platform admin': 'allow',
-      // THE ROUTE GUARD IS NOT THIS WAVE'S TO CHANGE, and these four rows say so out loud. It runs on
-      // `useAuth().hasPermission`, which expands `*:*`, `stock-prep:*` and `stock-prep:write` → read
-      // — so three of the four reach `/stock-prep` while the workbench (now literal) shows them
-      // nothing, and the bare `integration:admin` is refused the route while the workbench opens
-      // everything. Both residues are named in the PR body's 「没做/偏离」; narrowing the app-wide
-      // guard is a platform change, not a stock-prep one.
-      'integration:admin without role': 'redirect',
-      'stock-prep:* wildcard': 'allow',
-      '*:* without the admin role': 'allow',
-      'stock-prep:write holder': 'allow',
+      // R-33: reachability is still exactly the READ code — the pull code neither opens nor closes
+      // the page. The puller holds read; the two degenerate pull grants answer by whether they do.
+      'puller (read+operate+pull)': 'allow',
+      'pull without operate': 'allow',
+      'orphan pull': 'redirect',
+      // THE FOUR ROWS THAT USED TO DIVERGE, now closed. They used to read
+      // redirect/allow/allow/allow, because the guard ran on `useAuth().hasPermission`, which
+      // expands `*:*`, `stock-prep:*` and `stock-prep:write` → read and treats `users:write` as
+      // admin — so three principals reached `/stock-prep` and found every panel refusing them,
+      // while a bare `integration:admin` (a platform admin to the server) was redirected away from
+      // a page it may use in full. `buildStockPrepAwarePermissionProbe` now answers the three
+      // stock-prep codes with `satisfiesStockPrepAccess`, so the guard and the workbench give ONE
+      // answer per principal. Three of the four moved STRICTLY NARROWER; the fourth stopped hiding
+      // a page the server already serves.
+      'integration:admin without role': 'allow',
+      'stock-prep:* wildcard': 'redirect',
+      '*:* without the admin role': 'redirect',
+      'stock-prep:write holder': 'redirect',
     }
     for (const actor of ACTORS) {
       asActor(actor)
       const decision = resolveRouteGuardDecision(
         buildRouteGuardInput({ path: '/stock-prep', meta }),
         buildRouteGuardContext({
-          auth: { hasPermission: probe() },
+          auth: { hasPermission: probe(), getAccessSnapshot: () => principal() },
           flags: {
             hasFeature: () => true,
             isAttendanceFocused: () => false,

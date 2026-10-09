@@ -29,6 +29,13 @@ import * as objectReceiptAuthority from '../../src/db/migrations/zzzz20260828125
 import * as claimAnchorAmendment from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import * as legalHoldAuthority from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 import * as restoreJobs from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
+import * as derivedEffects from '../../src/db/migrations/zzzz20260915160000_create_recovery_archive_derived_effects'
+import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_add_recovery_archive_section_checkpoints'
+import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
+import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
+import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
+import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
+import * as retypeConvertTombstoneReason from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -175,9 +182,62 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260828131000_create_recovery_archive_restore_jobs',
     module: restoreJobs,
   },
+  {
+    name: 'zzzz20260915160000_create_recovery_archive_derived_effects',
+    module: derivedEffects,
+  },
+  {
+    name: 'zzzz20260918120000_add_recovery_archive_section_checkpoints',
+    module: {
+      up: (db) => db.transaction().execute(sectionCheckpoints.up),
+      down: (db) => db.transaction().execute(sectionCheckpoints.down),
+    },
+  },
+  {
+    name: 'zzzz20260918130000_create_recovery_archive_prepared_captures',
+    module: {
+      up: (db) => db.transaction().execute(preparedCaptures.up),
+      down: (db) => db.transaction().execute(preparedCaptures.down),
+    },
+  },
+  {
+    name: 'zzzz20260918140000_create_recovery_archive_manual_requests',
+    module: {
+      up: (db) => db.transaction().execute(manualRequests.up),
+      down: (db) => db.transaction().execute(manualRequests.down),
+    },
+  },
+  {
+    name: 'zzzz20260919130000_extend_archive_nonce_object_identity',
+    module: {
+      up: (db) => db.transaction().execute(nonceObjectIdentity.up),
+      down: (db) => db.transaction().execute(nonceObjectIdentity.down),
+    },
+  },
+  {
+    name: 'zzzz20260919160000_create_archive_attachment_restore_stages',
+    module: {
+      up: (db) => db.transaction().execute(attachmentRestoreStages.up),
+      down: (db) => db.transaction().execute(attachmentRestoreStages.down),
+    },
+  },
+  // Field retype convert (ADR multitable-field-retype-first-batch-adr-20260926 §3.6): widens the `reason` CHECK of
+  // meta_field_value_tombstones, a relation this replay OWNS. It must be part of the sequence: the replay drops
+  // and rebuilds that table from its creating migration, which carries the narrower constraint.
+  {
+    name: 'zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert',
+    module: {
+      up: (db) => db.transaction().execute(retypeConvertTombstoneReason.up),
+      down: (db) => db.transaction().execute(retypeConvertTombstoneReason.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
+  'meta_recovery_archive_attachment_stages',
+  'meta_recovery_archive_manual_requests',
+  'meta_recovery_archive_prepared_captures',
+  'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
   'meta_link_tombstones',
   'meta_config_revisions',
@@ -218,6 +278,10 @@ const TOUCHED_RELATIONS = [
 ]
 
 const OWNED_RELATIONS = [
+  'meta_recovery_archive_attachment_stages',
+  'meta_recovery_archive_manual_requests',
+  'meta_recovery_archive_prepared_captures',
+  'meta_recovery_archive_derived_effects',
   'meta_field_value_tombstones',
   'meta_link_tombstones',
   'meta_record_version_markers',
@@ -486,6 +550,9 @@ const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
 ]
 
 const OWNED_FUNCTIONS = [
+  'meta_recovery_archive_manual_request_guard',
+  'meta_recovery_archive_attachment_stage_guard',
+  'meta_recovery_archive_prepared_capture_guard',
   ...OPERATION_FUNCTIONS,
   ...AUTHORITY_FUNCTIONS,
   ...RECOVERY_ARCHIVE_FUNCTIONS,
@@ -581,6 +648,8 @@ const ARCHIVE_RESTORE_JOB_TRIGGERS = [
   'trg_meta_recovery_archive_sync_receipts_reject_truncate',
 ]
 const OWNED_TRIGGERS = [
+  'trg_mrapc_row',
+  'trg_mrapc_truncate',
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
   ...RECOVERY_ARCHIVE_TRIGGERS,

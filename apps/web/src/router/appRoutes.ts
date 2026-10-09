@@ -184,9 +184,30 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Template Details', titleZh: '模板详情', requiresAuth: true },
   },
   {
+    // 整合切片 (2026-09-09): the standalone 外接数据源 page was folded into 数据工厂's 连接管理
+    // section, so this path is now a REDIRECT that keeps every existing bookmark, doc link and
+    // in-app hint working. The hash is the workbench's own section anchor — the view resolves it
+    // via resolveWorkbenchLandingGroupId() and scrolls there (views/integrationWorkbenchLanding.ts).
+    //
+    // The target carries the workbench's `integration:write` gate, which the old page did not.
+    // That is a TIGHTENING and deliberate. Scoped to what is actually true: no principal loses a
+    // NAVIGATION entry point — the shell's 外接数据源 nav link was itself gated on
+    // integration:write (App.vue's `canUseIntegration`), so everyone who could SEE that link can
+    // still open the target. The other entry points do change for a principal without
+    // integration:write, and this comment names them rather than claiming they do not exist:
+    //   * a bookmark / printed runbook on '/data-sources' now meets the workbench guard and is
+    //     bounced to the home path instead of rendering the page;
+    //   * 备料向导①'s link is exactly that case — 交付指南 lists 「开始使用」 as a surface a
+    //     `stock-prep:admin` holder sees (customer-delivery-guide-20260904.md 的可见项表格; the
+    //     harness's `stockadmin` actor holds stock-prep:admin and nothing else), and that holder
+    //     has no integration:write. StockPreparationGettingStarted.vue therefore renders that
+    //     link ONLY when the host says the principal can open 数据工厂, and a plain-text
+    //     「联系实施」 sentence otherwise — a bounce is not an entry point.
+    // The target path also sits under the '/integrations' prefix that PLM_WORKBENCH_ALLOWED_PREFIXES
+    // already allows (router/guardPolicy.ts), so PLM-focused orgs are not bounced by the fold.
     path: '/data-sources',
     name: 'data-sources',
-    component: () => import('../views/DataSourcesView.vue'),
+    redirect: { path: '/integrations/workbench', hash: '#int-sec-connection' },
     meta: { title: 'Data Sources', titleZh: '外接数据源', requiresAuth: true },
   },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
@@ -348,6 +369,16 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true, permissions: ['approvals:read'] }
   },
   {
+    // B-2 (todo-center-design-lock v2.14 §4) — the cross-source aggregation page. Gated exactly
+    // like `GET /api/todo/items`/`GET /api/todo/count` (`rbacGuard('approvals','read')`, see
+    // `routes/todo.ts`'s docblock on why that is coextensive with today's ONE registered source
+    // and must widen alongside the backend gate once a second source is registered).
+    path: '/todo',
+    name: 'todo-center',
+    component: () => import('../todo/views/TodoCenterView.vue'),
+    meta: { title: 'Todo Center', titleZh: '待办中心', requiresAuth: true, permissions: ['approvals:read'] }
+  },
+  {
     path: '/approvals/new/:templateId',
     name: 'approval-create',
     component: () => import('../views/approval/ApprovalNewView.vue'),
@@ -375,7 +406,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates',
     name: 'approval-template-list',
     component: () => import('../views/approval/TemplateCenterView.vue'),
-    meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
+    meta: { title: 'Approval Templates', titleZh: '审批表单', requiresAuth: true }
   },
   {
     path: '/approval-delegations',
@@ -395,19 +426,19 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-templates/new',
     name: 'approval-template-create',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'New Approval Template', titleZh: '新建审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'New Approval Template', titleZh: '新建审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id/edit',
     name: 'approval-template-edit',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),
-    meta: { title: 'Edit Approval Template', titleZh: '编辑审批模板', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'Edit Approval Template', titleZh: '编辑审批表单', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     path: '/approval-templates/:id',
     name: 'approval-template-detail',
     component: () => import('../views/approval/TemplateDetailView.vue'),
-    meta: { title: 'Template Detail', titleZh: '模板详情', requiresAuth: true }
+    meta: { title: 'Template Detail', titleZh: '表单详情', requiresAuth: true }
   },
   {
     path: '/approvals/metrics',
@@ -457,6 +488,25 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'elearning-manual-grading',
     component: () => import('../views/ElearningManualGradingView.vue'),
     meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
+  },
+  // Task feature line M2 skeleton (design lock §5.2), gated on the tasks feature AND tasks:read.
+  // The M2 skeleton had tasks:read only and relied on §13-38 缺省乙 (TasksView renders "not enabled"
+  // off a 404 from GET /api/tasks/context). After R61 that left an administrator on a server with
+  // TASKS_ENABLED unset looking at a nav entry that led nowhere; the session now carries `tasks`
+  // (true only when TASKS_ENABLED is exactly 'true'), so with it off /tasks redirects home like the
+  // other feature-gated routes. The 缺省乙 rendering still covers a feature-on session whose
+  // backend nevertheless answers 404.
+  {
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
+  },
+  {
+    path: '/tasks/:id',
+    name: 'task-detail',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
   {
     path: '/:pathMatch(.*)*',

@@ -158,6 +158,22 @@ function createMockDb() {
       }
       return before - tableRows.length
     },
+    // Delete lock protocol: deleteExternalSystem opens a transaction with selectOneForUpdate. The
+    // EXACT-scope where it sends is what L-07 pins; the lock itself is exercised elsewhere.
+    async selectOneForUpdate(table, where) {
+      calls.push(['selectOneForUpdate', table, { ...where }])
+      return rows.find(row => matchesWhere(row, where)) || null
+    },
+    async transaction(callback) {
+      calls.push(['transaction'])
+      return callback(this)
+    },
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
   }
 }
 

@@ -400,7 +400,7 @@ describe('(C) GET /api/data-sources/:id/schema — lazy by default, full only on
     expect(res.status).toBe(504)
     expect(res.body.error.code).toBe(SCHEMA_DETAIL_TIMEOUT_CODE)
     expect(res.body.error.message).toContain('12/480')
-    for (const leak of ['10.10.52.16', '1433', 'PLM.dbo']) {
+    for (const leak of ['10.99.99.16', '1433', 'PLM.dbo']) {
       expect(JSON.stringify(res.body)).not.toContain(leak)
     }
   })

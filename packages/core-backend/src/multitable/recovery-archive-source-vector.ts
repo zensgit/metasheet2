@@ -1,8 +1,7 @@
 /**
- * Time Machine D2: pure versioned domain-separated source-vector hash over the
- * exact ordered D2c bootstrap-only source heads.
+ * Pure domain-separated source identities: bootstrap v1 and checkpoint v2.
  *
- * No runtime route reaches this D2-only module yet. It does not include
+ * No runtime route reaches the checkpoint preparation function yet. It does not include
  * row_count or source_hash (those exist only after later RR capture/root), and
  * it does not invent provider or object identity.
  */
@@ -15,7 +14,6 @@ import {
   RecoveryArchiveManifestError,
 } from './recovery-archive-manifest'
 import {
-  isD2cSnapshotSourceHeadKind,
   isSectionCausalityDataSectionKind,
   SECTION_CAUSALITY_DATA_SECTION_KINDS,
   type SectionCausalityDataSectionKind,
@@ -26,6 +24,10 @@ export const RECOVERY_ARCHIVE_SOURCE_VECTOR_DOMAIN =
   'metasheet2:multitable:recovery-archive:source-vector:v1' as const
 
 export const RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION = 1 as const
+
+export const RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_DOMAIN =
+  'metasheet2:multitable:recovery-archive:source-vector:v2' as const
+export const RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_FORMAT_VERSION = 2 as const
 
 export const RECOVERY_ARCHIVE_SOURCE_VECTOR_HEAD_KEYS = Object.freeze([
   'sourceHeadKind',
@@ -56,25 +58,44 @@ export class RecoveryArchiveSourceVectorError extends Error {
   }
 }
 
-export interface RecoveryArchiveSourceVectorHead {
-  readonly sourceHeadKind: SectionCausalityD2cSnapshotSourceHeadKind
+type SourceKind = SectionCausalityD2cSnapshotSourceHeadKind | 'section_checkpoint'
+interface SourceHead<K extends SourceKind> {
+  readonly sourceHeadKind: K
   readonly sectionKind: SectionCausalityDataSectionKind
   readonly operationId: string
   readonly headSeq: string
 }
 
-export interface RecoveryArchiveSourceVector {
-  readonly formatVersion: typeof RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION
-  readonly heads: readonly RecoveryArchiveSourceVectorHead[]
+export type RecoveryArchiveSourceVectorHead = SourceHead<SectionCausalityD2cSnapshotSourceHeadKind>
+export type RecoveryArchiveCheckpointVectorHead = SourceHead<'section_checkpoint'>
+
+interface SourceVector<V extends 1 | 2, K extends SourceKind> {
+  readonly formatVersion: V
+  readonly heads: readonly SourceHead<K>[]
   readonly preimage: string
   readonly hash: string
 }
+export type RecoveryArchiveSourceVector = SourceVector<1, SectionCausalityD2cSnapshotSourceHeadKind>
+export type RecoveryArchiveCheckpointVector = SourceVector<2, 'section_checkpoint'>
 
 /** D2 only: no runtime route currently makes source-vector behavior reachable. */
 export function computeRecoveryArchiveSourceVectorHash(heads: unknown): RecoveryArchiveSourceVector {
-  const canonicalHeads = admitHeads(snapshotHeads(heads))
+  return computeVector(heads, 'section_bootstrap', RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION, RECOVERY_ARCHIVE_SOURCE_VECTOR_DOMAIN)
+}
+
+/** Identity preparation only; does not authorize or prove a checkpoint seal.
+ * Database checkpoint admission must be implemented before any runtime caller.
+ */
+export function computeRecoveryArchiveCheckpointVectorHash(heads: unknown): RecoveryArchiveCheckpointVector {
+  return computeVector(heads, 'section_checkpoint', RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_FORMAT_VERSION, RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_DOMAIN)
+}
+
+function computeVector<V extends 1 | 2, K extends SourceKind>(
+  heads: unknown, sourceKind: K, formatVersion: V, domain: string,
+): SourceVector<V, K> {
+  const canonicalHeads = admitHeads(snapshotHeads(heads), sourceKind)
   const bodyJson = canonicalizeOrThrow({
-    format_version: RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION,
+    format_version: formatVersion,
     heads: canonicalHeads.map((head) => ({
       source_head_kind: head.sourceHeadKind,
       section_kind: head.sectionKind,
@@ -82,16 +103,16 @@ export function computeRecoveryArchiveSourceVectorHash(heads: unknown): Recovery
       head_seq: head.headSeq,
     })),
   })
-  const preimage = `${RECOVERY_ARCHIVE_SOURCE_VECTOR_DOMAIN}\u0000${bodyJson}`
+  const preimage = `${domain}\u0000${bodyJson}`
   return Object.freeze({
-    formatVersion: RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION,
+    formatVersion,
     heads: Object.freeze(canonicalHeads.map(freezeHead)),
     preimage,
     hash: createHash('sha256').update(preimage, 'utf8').digest('hex'),
   })
 }
 
-function admitHeads(values: readonly unknown[]): RecoveryArchiveSourceVectorHead[] {
+function admitHeads<K extends SourceKind>(values: readonly unknown[], sourceKind: K): SourceHead<K>[] {
   const seenOperations = new Set<string>()
   const seenSeqs = new Set<string>()
   return values.map((value, index) => {
@@ -101,7 +122,7 @@ function admitHeads(values: readonly unknown[]): RecoveryArchiveSourceVectorHead
       'RECOVERY_ARCHIVE_SOURCE_VECTOR_INVALID_HEAD',
       'RECOVERY_ARCHIVE_SOURCE_VECTOR_INVALID_KEYS',
     )
-    if (!isD2cSnapshotSourceHeadKind(snapshot.sourceHeadKind)) {
+    if (snapshot.sourceHeadKind !== sourceKind) {
       throwSourceVectorError('RECOVERY_ARCHIVE_SOURCE_VECTOR_UNKNOWN_KIND')
     }
     if (!isSectionCausalityDataSectionKind(snapshot.sectionKind)) {
@@ -123,7 +144,7 @@ function admitHeads(values: readonly unknown[]): RecoveryArchiveSourceVectorHead
     seenOperations.add(snapshot.operationId)
     seenSeqs.add(snapshot.headSeq)
     return {
-      sourceHeadKind: snapshot.sourceHeadKind,
+      sourceHeadKind: sourceKind,
       sectionKind: snapshot.sectionKind,
       operationId: snapshot.operationId,
       headSeq: snapshot.headSeq,
@@ -131,7 +152,7 @@ function admitHeads(values: readonly unknown[]): RecoveryArchiveSourceVectorHead
   })
 }
 
-function freezeHead(head: RecoveryArchiveSourceVectorHead): RecoveryArchiveSourceVectorHead {
+function freezeHead<K extends SourceKind>(head: SourceHead<K>): SourceHead<K> {
   return Object.freeze({
     sourceHeadKind: head.sourceHeadKind,
     sectionKind: head.sectionKind,

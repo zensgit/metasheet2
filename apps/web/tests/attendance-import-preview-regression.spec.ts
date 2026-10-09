@@ -67,12 +67,21 @@ function unwrapRef<T>(value: unknown): T {
   return value as T
 }
 
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) => btoa(JSON.stringify(value))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`
+}
+
 describe('Attendance import preview regression', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
+    window.localStorage.removeItem('auth_token')
     window.localStorage.setItem('metasheet_locale', 'en')
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -83,6 +92,44 @@ describe('Attendance import preview regression', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.localStorage.removeItem('auth_token')
+  })
+
+  it('binds prepare and preview to the same non-default organization', async () => {
+    const tenantId = '00000000-0000-4000-8000-000000000123'
+    window.localStorage.setItem('auth_token', unsignedJwt({ id: 'qa-user', tenantId }))
+    const apiFetchMock = vi.mocked(apiFetch)
+    let preparePayload: Record<string, unknown> | null = null
+    let previewPayload: Record<string, unknown> | null = null
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/prepare')) {
+        preparePayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { commitToken: 'tenant-bound-token', expiresAt: '2099-01-01T00:00:00.000Z' },
+        })
+      }
+      if (url.startsWith('/api/attendance/import/preview')) {
+        previewPayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [], csvWarnings: [], groupWarnings: [], rowCount: 1 },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    findButton(findImportSection(container!), 'Preview').click()
+    await vi.waitFor(() => expect(previewPayload).not.toBeNull())
+
+    expect(preparePayload).toEqual({ orgId: tenantId })
+    expect(previewPayload).toMatchObject({ orgId: tenantId, commitToken: 'tenant-bound-token' })
   })
 
   it('clears stale preview rows/warnings on preview retry failure and keeps retry action context', async () => {

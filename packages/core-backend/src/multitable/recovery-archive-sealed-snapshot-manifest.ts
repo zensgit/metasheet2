@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { recoveryArchiveAttachmentNonceIdentity } from './recovery-archive-attachment-crypto'
 
 import {
   RECOVERY_ARCHIVE_FORMAT_VERSION,
@@ -150,6 +151,7 @@ type NormalizedSealResult = {
   readonly wrappedDek: Uint8Array
   readonly reservations: readonly Record<string, unknown>[]
   readonly sealedSections: readonly Record<string, unknown>[]
+  readonly sealedAttachments: readonly Record<string, unknown>[]
 }
 
 const utf8Encoder = new TextEncoder()
@@ -181,6 +183,7 @@ export function buildRecoveryArchiveSealedSnapshotManifest(
   const plan = normalizePlan(admitted.plan)
   const sealResult = normalizeSealResult(admitted.sealResult)
   assertSealBindingMatchesManifest(binding, keyId, sealResult)
+  assertAttachmentBindings(plan, sealResult)
   const sectionInputs = bindPlanAndSeal(plan, sealResult, binding, keyId)
 
   const built = callClosed('RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_BINDING', () =>
@@ -304,9 +307,10 @@ function decodeCanonicalRows(
 }
 
 function normalizeSealResult(value: unknown): NormalizedSealResult {
+  const hasAttachments = value !== null && typeof value === 'object' && Object.hasOwn(value, 'sealedAttachments')
   const result = snapshotExactRecord(
     value,
-    SEAL_RESULT_KEYS,
+    hasAttachments ? [...SEAL_RESULT_KEYS, 'sealedAttachments'] : SEAL_RESULT_KEYS,
     'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
     new Set(['wrappedDek']),
   )
@@ -346,8 +350,12 @@ function normalizeSealResult(value: unknown): NormalizedSealResult {
       'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
     ),
   )
+  const sealedAttachments = hasAttachments ? snapshotDenseArray(result.sealedAttachments,
+    'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT').map((object) => snapshotExactRecord(object,
+    ['attachmentId', 'sourceVersion', 'plaintextSha256', 'sizeBytes', 'nonce', 'ciphertext', 'authTag'],
+    'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT')) : []
   if (
-    reservations.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length
+    reservations.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length + sealedAttachments.length
     || sealedSections.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length
   ) {
     fail('RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT')
@@ -359,7 +367,40 @@ function normalizeSealResult(value: unknown): NormalizedSealResult {
     wrappedDek,
     reservations: Object.freeze(reservations),
     sealedSections: Object.freeze(sealedSections),
+    sealedAttachments: Object.freeze(sealedAttachments),
   })
+}
+
+function assertAttachmentBindings(plan: readonly NormalizedPlanSection[], result: NormalizedSealResult): void {
+  const invalid = 'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_BINDING_MISMATCH' as const
+  const rows = plan.find((section) => section.sectionName === 'attachments_index')!.rows
+  if (rows.length !== result.sealedAttachments.length) fail(invalid)
+  const remaining = new Map(rows.map((row) => [row.entity_key, row.payload as Record<string, unknown>]))
+  const nonces = new Set(plan.map((section) => section.nonceHex))
+  for (const [index, object] of result.sealedAttachments.entries()) {
+    if (typeof object.attachmentId !== 'string' || !object.attachmentId.trim()
+      || typeof object.sourceVersion !== 'string' || !object.sourceVersion.trim()
+      || typeof object.plaintextSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(object.plaintextSha256)
+      || typeof object.sizeBytes !== 'number' || !Number.isSafeInteger(object.sizeBytes) || object.sizeBytes < 0) fail(invalid)
+    const row = remaining.get(`attachment/${object.attachmentId}`)
+    if (!row || row.attachment_id !== object.attachmentId || row.immutable_object_version !== object.sourceVersion
+      || row.plaintext_sha256 !== object.plaintextSha256 || row.size_bytes !== String(object.sizeBytes)) fail(invalid)
+    remaining.delete(`attachment/${object.attachmentId}`)
+    const nonce = snapshotBytes(object.nonce, RECOVERY_ARCHIVE_AEAD_NONCE_BYTES, invalid)
+    const nonceHex = toRecoveryArchiveNonceHex(nonce)
+    if (nonces.has(nonceHex)) fail(invalid)
+    nonces.add(nonceHex)
+    const ciphertext = snapshotBytes(object.ciphertext, undefined, invalid)
+    snapshotBytes(object.authTag, RECOVERY_ARCHIVE_AEAD_TAG_BYTES, invalid)
+    if (ciphertext.byteLength !== object.sizeBytes) fail(invalid)
+    const reservation = result.reservations[RECOVERY_ARCHIVE_V1_SECTION_NAMES.length + index]!
+    if (reservation.dekFingerprint !== result.dekFingerprint || reservation.nonceHex !== nonceHex
+      || reservation.generationId !== result.binding.generationId
+      || reservation.sectionName !== recoveryArchiveAttachmentNonceIdentity(object.attachmentId)
+      || reservation.aeadAlgorithm !== result.binding.aeadAlgorithm
+      || reservation.formatVersion !== result.binding.formatVersion) fail(invalid)
+  }
+  if (remaining.size) fail(invalid)
 }
 
 function assertSealBindingMatchesManifest(

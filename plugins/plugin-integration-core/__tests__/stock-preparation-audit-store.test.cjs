@@ -188,7 +188,7 @@ async function main() {
     // NOT GATED: the columns that carry caller/customer data. A free-text projectNo is exactly what
     // the export route stamps, and refusing it would refuse the export.
     for (const [column, value] of [
-      ['projectId', '注射水缓冲罐 / RY2-2023'],
+      ['projectId', '示例乙型 / EX0-2000'],
       ['workspaceId', 'my workspace (2026)'],
       ['actor', 'ops.lead+beiliao@example.com'],
       ['actor', '张三'],

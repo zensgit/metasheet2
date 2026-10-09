@@ -3,10 +3,13 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
+  DirectoryConflictError,
+  DirectoryNotFoundError,
   DirectorySyncFrozenByTransferError,
   DirectorySyncInProgressError,
   DirectorySyncRunReplayError,
   DirectoryTenantChangeBlockedError,
+  DirectoryValidationError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
@@ -32,6 +35,7 @@ import {
 } from '../directory/directory-sync'
 import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
 import { isDingTalkOutcomeUnknown } from '../integrations/dingtalk/client'
+import { DingTalkCorpNotAllowedError } from '../integrations/dingtalk/runtime-policy'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId,
@@ -52,6 +56,8 @@ import {
   restoreDeprovisionEvent,
 } from '../directory/deprovision-evidence-api'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { LoginNameRuleError } from '../auth/login-name-rule'
+import { PasswordPolicyError } from '../auth/password-policy-error'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -100,6 +106,32 @@ function normalizeInactiveLinkedDays(value: unknown): number {
 function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message
   return fallback
+}
+
+/**
+ * #6163 S6: the failure responder the directory handlers below share. The status comes from the error's
+ * TYPE, never from a regex over its text: the three typed directory-sync errors answer 400 / 404 / 409 with
+ * their own developer-authored sentence (see their classes in directory-sync.ts). Anything else is
+ * unexpected — its text goes to the log only, and the 500 body carries the route's fixed `fallbackMessage`
+ * (a literal at every call site), so no driver, provider or transport text reaches a 5xx body. A handler's
+ * specific branches (sync lease / freeze, recovery conflict, login-name and password rules, tenant change,
+ * corp allowlist) run before it; every call keeps the route's own error code.
+ */
+function sendDirectoryFailure(res: Response, error: unknown, code: string, fallbackMessage: string): void {
+  if (error instanceof DirectoryValidationError) {
+    jsonError(res, 400, code, error.message)
+    return
+  }
+  if (error instanceof DirectoryNotFoundError) {
+    jsonError(res, 404, code, error.message)
+    return
+  }
+  if (error instanceof DirectoryConflictError) {
+    jsonError(res, 409, code, error.message)
+    return
+  }
+  logger.warn(fallbackMessage, { error: readErrorMessage(error, 'unknown error') })
+  jsonError(res, 500, code, fallbackMessage)
 }
 
 // Mirrors `directory-sync.ts`'s private `normalizeText` so the save-time gate below sees exactly the same
@@ -246,7 +278,7 @@ export function adminDirectoryRouter(): Router {
       const status = await getDingTalkWorkNotificationRuntimeStatusFromStore(integrationId)
       jsonOk(res, { status })
     } catch (error) {
-      jsonError(res, 500, 'DINGTALK_WORK_NOTIFICATION_STATUS_FAILED', readErrorMessage(error, 'Failed to load DingTalk work notification status'))
+      sendDirectoryFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_STATUS_FAILED', 'Failed to load DingTalk work notification status')
     }
   })
 
@@ -265,12 +297,14 @@ export function adminDirectoryRouter(): Router {
       // fact have arrived. This is the interactive test-send path — there is no ledger row to mark
       // outcome_unknown on (by design), so the ambiguity is surfaced directly to the caller instead.
       if (isDingTalkOutcomeUnknown(error)) {
-        const reason = readErrorMessage(error, 'DingTalk did not confirm the outcome')
+        // #6163 S6: a fixed sentence. The transport's own text (a timeout, a socket error naming the peer)
+        // goes to the log, not into this 5xx body.
+        logger.warn('DingTalk test send outcome unknown', { error: readErrorMessage(error, 'unknown error') })
         jsonError(
           res,
           502,
           'DINGTALK_TEST_SEND_OUTCOME_UNKNOWN',
-          `${reason}. The test message may still have been delivered — check the test message on the device before retrying.`,
+          'DingTalk did not confirm the outcome. The test message may still have been delivered — check the test message on the device before retrying.',
         )
         return
       }
@@ -313,7 +347,7 @@ export function adminDirectoryRouter(): Router {
       const items = await listDirectoryIntegrations()
       jsonOk(res, { items })
     } catch (error) {
-      jsonError(res, 500, 'DIRECTORY_LIST_FAILED', readErrorMessage(error, 'Failed to load directory integrations'))
+      sendDirectoryFailure(res, error, 'DIRECTORY_LIST_FAILED', 'Failed to load directory integrations')
     }
   })
 
@@ -346,7 +380,13 @@ export function adminDirectoryRouter(): Router {
       await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
-      jsonError(res, 400, 'DIRECTORY_CREATE_FAILED', readErrorMessage(error, 'Failed to create directory integration'))
+      // The corp allowlist refusing the submitted corpId is a policy verdict on the caller's input, typed by
+      // its own class: it keeps the 400 (and its sentence) it always had.
+      if (error instanceof DingTalkCorpNotAllowedError) {
+        jsonError(res, 400, 'DIRECTORY_CREATE_FAILED', error.message)
+        return
+      }
+      sendDirectoryFailure(res, error, 'DIRECTORY_CREATE_FAILED', 'Failed to create directory integration')
     }
   })
 
@@ -394,12 +434,14 @@ export function adminDirectoryRouter(): Router {
           snapshot = await getDirectorySyncScheduleSnapshot(req.params.integrationId)
         } catch (error) {
           // Cannot read the zone we are about to preserve ⇒ we cannot honestly validate the cron in it.
-          // Refuse; do NOT fall back to UTC and let a never-firing schedule through.
+          // Refuse; do NOT fall back to UTC and let a never-firing schedule through. The read error's text
+          // goes to the log; the 503 body is the fixed sentence (#6163 S6).
+          logger.warn('Could not read the saved schedule timezone to validate scheduleCron', { error: readErrorMessage(error, 'unknown error') })
           jsonError(
             res,
             503,
             'DIRECTORY_SCHEDULE_CONFIG_UNREADABLE',
-            readErrorMessage(error, 'Could not read the integration\'s saved schedule timezone, so scheduleCron cannot be validated against the zone it will run in. No change was made; retry.'),
+            'Could not read the integration\'s saved schedule timezone, so scheduleCron cannot be validated against the zone it will run in. No change was made; retry.',
           )
           return
         }
@@ -428,7 +470,12 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 409, 'DIRECTORY_TENANT_CHANGE_BLOCKED', readErrorMessage(error, 'Tenant change blocked'))
         return
       }
-      jsonError(res, 400, 'DIRECTORY_UPDATE_FAILED', readErrorMessage(error, 'Failed to update directory integration'))
+      // Same corp-allowlist verdict as on create: the caller's input, typed by its own class — 400 as before.
+      if (error instanceof DingTalkCorpNotAllowedError) {
+        jsonError(res, 400, 'DIRECTORY_UPDATE_FAILED', error.message)
+        return
+      }
+      sendDirectoryFailure(res, error, 'DIRECTORY_UPDATE_FAILED', 'Failed to update directory integration')
     }
   })
 
@@ -446,7 +493,7 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { status })
     } catch (error) {
-      jsonError(res, 500, 'APPROVAL_CARD_CONFIG_STATUS_FAILED', readErrorMessage(error, 'Failed to load approval card config status'))
+      sendDirectoryFailure(res, error, 'APPROVAL_CARD_CONFIG_STATUS_FAILED', 'Failed to load approval card config status')
     }
   })
 
@@ -576,20 +623,21 @@ export function adminDirectoryRouter(): Router {
         // ever fires, so it always lands in this catch — and it is the same benign
         // "already running" state as in the non-async branch below. Map it identically:
         // 409 with the active runId, never a 500 "sync failed" that monitoring pages on.
+        // (409 is written as a literal at every lease / freeze branch: both classes declare
+        // `statusCode = 409`, and a literal 4xx is what the values-free scan can see.)
         if (error instanceof DirectorySyncInProgressError) {
-          jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+          jsonError(res, 409, error.code, error.message, { activeRunId: error.activeRunId })
           return
         }
         // T2 (§12.2): an active org transfer freezes this source integration's sync — a
         // deliberate admin-visible state, not a failure. 409 + the transfer id.
         if (error instanceof DirectorySyncFrozenByTransferError) {
-          jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
+          jsonError(res, 409, error.code, error.message, { transferId: error.transferId })
           return
         }
         // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
         if (sendIfRecoveryConflict(res, error)) return
-        const message = readErrorMessage(error, 'Failed to start directory sync')
-        jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+        sendDirectoryFailure(res, error, 'DIRECTORY_SYNC_FAILED', 'Failed to start directory sync')
         return
       }
     }
@@ -601,18 +649,17 @@ export function adminDirectoryRouter(): Router {
       // DT-HARDEN-05: another sync already holds the lease. Return the active run so the
       // admin UI can jump straight to it instead of re-triggering a duplicate API pull.
       if (error instanceof DirectorySyncInProgressError) {
-        jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        jsonError(res, 409, error.code, error.message, { activeRunId: error.activeRunId })
         return
       }
       // T2 (§12.2): same deliberate frozen state as the async branch above.
       if (error instanceof DirectorySyncFrozenByTransferError) {
-        jsonError(res, error.statusCode, error.code, error.message, { transferId: error.transferId })
+        jsonError(res, 409, error.code, error.message, { transferId: error.transferId })
         return
       }
       // O2-S2: marker 40001 from the sync's local-apply transaction → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to sync directory integration')
-      jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_SYNC_FAILED', 'Failed to sync directory integration')
     }
   })
 
@@ -630,11 +677,10 @@ export function adminDirectoryRouter(): Router {
       // as the two sync-trigger branches above, mapped identically (409 + the active runId,
       // never a 500 that monitoring pages on).
       if (error instanceof DirectorySyncInProgressError) {
-        jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        jsonError(res, 409, error.code, error.message, { activeRunId: error.activeRunId })
         return
       }
-      const message = readErrorMessage(error, 'Failed to preview directory sync')
-      jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_PREVIEW_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_SYNC_PREVIEW_FAILED', 'Failed to preview directory sync')
     }
   })
 
@@ -656,7 +702,7 @@ export function adminDirectoryRouter(): Router {
         pageSize,
       })
     } catch (error) {
-      jsonError(res, 500, 'DIRECTORY_RUNS_FAILED', readErrorMessage(error, 'Failed to load sync runs'))
+      sendDirectoryFailure(res, error, 'DIRECTORY_RUNS_FAILED', 'Failed to load sync runs')
     }
   })
 
@@ -676,7 +722,7 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { run })
     } catch (error) {
-      jsonError(res, 500, 'DIRECTORY_RUN_FAILED', readErrorMessage(error, 'Failed to load sync run'))
+      sendDirectoryFailure(res, error, 'DIRECTORY_RUN_FAILED', 'Failed to load sync run')
     }
   })
 
@@ -692,8 +738,7 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { snapshot })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory schedule')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_SCHEDULE_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_SCHEDULE_FAILED', 'Failed to load directory schedule')
     }
   })
 
@@ -723,8 +768,7 @@ export function adminDirectoryRouter(): Router {
         ack: filter,
       })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory alerts')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ALERTS_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_ALERTS_FAILED', 'Failed to load directory alerts')
     }
   })
 
@@ -753,8 +797,7 @@ export function adminDirectoryRouter(): Router {
         queue: filter,
       })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory review items')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_REVIEW_ITEMS_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_REVIEW_ITEMS_FAILED', 'Failed to load directory review items')
     }
   })
 
@@ -778,8 +821,7 @@ export function adminDirectoryRouter(): Router {
         query: search?.trim() || '',
       })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory accounts')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNTS_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_ACCOUNTS_FAILED', 'Failed to load directory accounts')
     }
   })
 
@@ -794,8 +836,7 @@ export function adminDirectoryRouter(): Router {
         total: result.total,
       })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory departments')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_DEPARTMENTS_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_DEPARTMENTS_FAILED', 'Failed to load directory departments')
     }
   })
 
@@ -809,8 +850,7 @@ export function adminDirectoryRouter(): Router {
       const coverage = await getDirectoryManagerBindingCoverage(req.params.integrationId)
       jsonOk(res, { coverage })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory manager binding coverage')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_MANAGER_COVERAGE_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_MANAGER_COVERAGE_FAILED', 'Failed to load directory manager binding coverage')
     }
   })
 
@@ -827,8 +867,7 @@ export function adminDirectoryRouter(): Router {
       const metric = await getDirectoryInactiveLinkedMetric(req.params.integrationId, thresholdDays)
       jsonOk(res, { metric })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory inactive-linked metric')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_INACTIVE_LINKED_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_INACTIVE_LINKED_FAILED', 'Failed to load directory inactive-linked metric')
     }
   })
 
@@ -844,8 +883,7 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { account })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory account')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNT_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_ACCOUNT_FAILED', 'Failed to load directory account')
     }
   })
 
@@ -861,8 +899,7 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { item })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory review item')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_REVIEW_ITEM_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_REVIEW_ITEM_FAILED', 'Failed to load directory review item')
     }
   })
 
@@ -904,15 +941,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from the bind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to bind directory account')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /already bound|already linked/i.test(message)
-          ? 409
-          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
-            ? 400
-            : 500
-      jsonError(res, statusCode, 'DIRECTORY_BIND_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_BIND_FAILED', 'Failed to bind directory account')
     }
   })
 
@@ -992,15 +1021,18 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from the admission write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /already exists|already bound|already linked/i.test(message)
-          ? 409
-          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
-            ? 400
-            : 500
-      jsonError(res, statusCode, 'DIRECTORY_ADMISSION_FAILED', message)
+      // #6259: input-rule failures are recognised by TYPE (not by matching their English prose) and
+      // answered 400 with the same stable codes POST /api/admin/users uses. The login-name sentence
+      // matched none of the message patterns this catch used to have and fell through to 500.
+      if (error instanceof LoginNameRuleError) {
+        jsonError(res, 400, error.code, error.message, { rule: error.rule })
+        return
+      }
+      if (error instanceof PasswordPolicyError) {
+        jsonError(res, 400, error.code, error.message, { details: [...error.errors] })
+        return
+      }
+      sendDirectoryFailure(res, error, 'DIRECTORY_ADMISSION_FAILED', 'Failed to create and bind local user for directory account')
     }
   })
 
@@ -1043,10 +1075,11 @@ export function adminDirectoryRouter(): Router {
         },
       })))
 
-      // Nothing committed → keep the historical error mapping. Otherwise a partial
+      // Nothing committed → answer like the single-item route: rethrow the first item's error AS
+      // THROWN (#6163 S6), so the catch below picks the status from its type. Otherwise a partial
       // failure is a normal batch result the caller can act on per item.
       if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
-        throw new Error(outcome.failed[0].error)
+        throw outcome.failedErrors[0]
       }
 
       jsonOk(res, {
@@ -1058,15 +1091,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from a bind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /already bound|already linked/i.test(message)
-          ? 409
-          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
-            ? 400
-            : 500
-      jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_BATCH_BIND_FAILED', 'Failed to batch bind directory accounts')
     }
   })
 
@@ -1133,8 +1158,9 @@ export function adminDirectoryRouter(): Router {
         }),
       ]))
 
+      // Nothing committed → rethrow the first item's error as thrown (see batch-bind above).
       if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
-        throw new Error(outcome.failed[0].error)
+        throw outcome.failedErrors[0]
       }
 
       // Report applied grant (truthful); request may have been forced off in pending mode.
@@ -1166,15 +1192,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from an admission write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /already exists|already bound|already linked/i.test(message)
-          ? 409
-          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
-            ? 400
-            : 500
-      jsonError(res, statusCode, 'DIRECTORY_BATCH_ADMISSION_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_BATCH_ADMISSION_FAILED', 'Failed to batch create and bind local users for directory accounts')
     }
   })
 
@@ -1209,13 +1227,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from the unbind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to unbind directory account')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /required/i.test(message)
-          ? 400
-          : 500
-      jsonError(res, statusCode, 'DIRECTORY_UNBIND_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_UNBIND_FAILED', 'Failed to unbind directory account')
     }
   })
 
@@ -1252,8 +1264,9 @@ export function adminDirectoryRouter(): Router {
         },
       })))
 
+      // Nothing committed → rethrow the first item's error as thrown (see batch-bind above).
       if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
-        throw new Error(outcome.failed[0].error)
+        throw outcome.failedErrors[0]
       }
 
       jsonOk(res, {
@@ -1266,13 +1279,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from an unbind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
-      const message = readErrorMessage(error, 'Failed to batch unbind directory accounts')
-      const statusCode = /not found/i.test(message)
-        ? 404
-        : /required/i.test(message)
-          ? 400
-          : 500
-      jsonError(res, statusCode, 'DIRECTORY_BATCH_UNBIND_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_BATCH_UNBIND_FAILED', 'Failed to batch unbind directory accounts')
     }
   })
 
@@ -1304,8 +1311,7 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { alert })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to acknowledge directory alert')
-      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ALERT_ACK_FAILED', message)
+      sendDirectoryFailure(res, error, 'DIRECTORY_ALERT_ACK_FAILED', 'Failed to acknowledge directory alert')
     }
   })
 
@@ -1503,29 +1509,30 @@ export function adminDirectoryRouter(): Router {
       // unchanged (RECOVERY_AUTHORITY_BUSY is not in its lists, so it previously fell
       // to the unclassified 500).
       if (sendIfRecoveryConflict(res, error)) return
+      // #6163 S6: the same coded mapping, one literal status per branch (a status chosen at run time is
+      // held to the 5xx rule by the values-free scan). A coded refusal carries the sentence its service
+      // set next to the code; anything else is the fixed 500.
       const errorCode = (error as { code?: unknown })?.code
       const code = typeof errorCode === 'string' ? errorCode : ''
-      const knownStatus =
-        code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND'
-          ? 404
-          : code === 'DRIFT_CONFLICT'
-              || code === 'SOURCE_INACTIVE'
-              || code === 'NO_EFFECTS'
-              || code === 'NOT_APPLIED'
-              || code === 'EVENT_NOT_APPLIED'
-            ? 409
-            : code === 'FORCE_CONFIRM_REQUIRED'
-                || code === 'FORCE_NOTE_REQUIRED'
-              ? 400
-              : null
-      jsonError(
-        res,
-        knownStatus ?? 500,
-        knownStatus === null ? 'DEPROVISION_RESTORE_FAILED' : code,
-        knownStatus === null
-          ? 'Restore failed'
-          : (error as Error)?.message || 'Restore failed',
-      )
+      if (code === 'EVENT_NOT_FOUND' || code === 'USER_NOT_FOUND') {
+        jsonError(res, 404, code, (error as Error)?.message || 'Restore failed')
+        return
+      }
+      if (
+        code === 'DRIFT_CONFLICT'
+        || code === 'SOURCE_INACTIVE'
+        || code === 'NO_EFFECTS'
+        || code === 'NOT_APPLIED'
+        || code === 'EVENT_NOT_APPLIED'
+      ) {
+        jsonError(res, 409, code, (error as Error)?.message || 'Restore failed')
+        return
+      }
+      if (code === 'FORCE_CONFIRM_REQUIRED' || code === 'FORCE_NOTE_REQUIRED') {
+        jsonError(res, 400, code, (error as Error)?.message || 'Restore failed')
+        return
+      }
+      jsonError(res, 500, 'DEPROVISION_RESTORE_FAILED', 'Restore failed')
     }
   }
 
@@ -1586,37 +1593,36 @@ export function adminDirectoryRouter(): Router {
       // O2-S2: compensateSupersededDenyGrant re-raises a marker 40001 as the named
       // retryable RecoveryConflictError → uniform retryable 409; mappings below unchanged.
       if (sendIfRecoveryConflict(res, error)) return
+      // #6163 S6: the same coded mapping, one literal status per branch (see the restore catch above).
       const errorCode =
         (error as { code?: string })?.code
         || 'DEPROVISION_COMPENSATION_FAILED'
-      const status =
-        errorCode === 'EVENT_NOT_FOUND' || errorCode === 'USER_NOT_FOUND'
-          ? 404
-          : errorCode === 'COMPENSATION_CONFIRM_REQUIRED'
-              || errorCode === 'COMPENSATION_NOTE_REQUIRED'
-              || errorCode === 'COMPENSATION_ACTOR_REQUIRED'
-            ? 400
-            : errorCode === 'DRIFT_CONFLICT'
-                || errorCode === 'COMPENSATION_EVENT_NOT_SUPERSEDED'
-                || errorCode === 'COMPENSATION_NOT_APPLICABLE'
-                || errorCode === 'COMPENSATION_USER_INACTIVE'
-                || errorCode === 'COMPENSATION_SOURCE_INACTIVE'
-                || errorCode === 'COMPENSATION_SOURCE_BUSY'
-                || errorCode === 'COMPENSATION_MEMBERSHIP_INACTIVE'
-                || errorCode === 'COMPENSATION_LIVE_EVIDENCE'
-              ? 409
-              : 500
-      const responseCode = status === 500
-        ? 'DEPROVISION_COMPENSATION_FAILED'
-        : errorCode
-      jsonError(
-        res,
-        status,
-        responseCode,
-        status === 500
-          ? 'Deny-row compensation failed'
-          : (error as Error)?.message || 'Deny-row compensation failed',
-      )
+      if (errorCode === 'EVENT_NOT_FOUND' || errorCode === 'USER_NOT_FOUND') {
+        jsonError(res, 404, errorCode, (error as Error)?.message || 'Deny-row compensation failed')
+        return
+      }
+      if (
+        errorCode === 'COMPENSATION_CONFIRM_REQUIRED'
+        || errorCode === 'COMPENSATION_NOTE_REQUIRED'
+        || errorCode === 'COMPENSATION_ACTOR_REQUIRED'
+      ) {
+        jsonError(res, 400, errorCode, (error as Error)?.message || 'Deny-row compensation failed')
+        return
+      }
+      if (
+        errorCode === 'DRIFT_CONFLICT'
+        || errorCode === 'COMPENSATION_EVENT_NOT_SUPERSEDED'
+        || errorCode === 'COMPENSATION_NOT_APPLICABLE'
+        || errorCode === 'COMPENSATION_USER_INACTIVE'
+        || errorCode === 'COMPENSATION_SOURCE_INACTIVE'
+        || errorCode === 'COMPENSATION_SOURCE_BUSY'
+        || errorCode === 'COMPENSATION_MEMBERSHIP_INACTIVE'
+        || errorCode === 'COMPENSATION_LIVE_EVIDENCE'
+      ) {
+        jsonError(res, 409, errorCode, (error as Error)?.message || 'Deny-row compensation failed')
+        return
+      }
+      jsonError(res, 500, 'DEPROVISION_COMPENSATION_FAILED', 'Deny-row compensation failed')
     }
   }
 

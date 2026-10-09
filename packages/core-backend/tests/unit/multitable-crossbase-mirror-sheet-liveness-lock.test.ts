@@ -1,0 +1,264 @@
+/**
+ * issue #5954 — the cross-base mirror op's TWO-sheet lock re-reads liveness under the lock.
+ *
+ * `POST /crossbase/mirror-link` gates both ends of the edge (`livenessB`, `livenessA`) through the POOL,
+ * outside any transaction, and then — inside the patch transaction, in `preWriteGuard` — locked both sheet
+ * rows with a lock-only `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE`. A soft delete
+ * that commits between the gate reads and that lock leaves the lock FREE: the op took it on a dead row and
+ * wrote the forward edge anyway, answering 200. `assertSheetsLiveForUpdate` locks the rows AND reads
+ * `deleted_at` in one statement, and refuses with the same values-free 404 the gates answer.
+ *
+ * This file EXECUTES the real route in the no-DB lane, over a scripted pool (no Postgres here). The gate
+ * reads see both sheets LIVE; the transaction's locked read sees DELETED / NO ROW ⇒ 404, ROLLBACK, nothing
+ * after the lock — on both verbs; both live ⇒ the guard runs past the lock. The helper's own behaviour legs
+ * live in tests/unit/multitable-permissions-txn-liveness-recheck.guard.test.ts (#5954 describe blocks, with
+ * the route's structural rule); the real two-connection races are the #5954 cases in
+ * tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts (CI real-DB step).
+ *
+ * The fake is SQL-HONEST about `meta_sheets`: it PROJECTS the columns the statement selects instead of
+ * returning a canned row. A fake that always handed back `deleted_at` would keep every refusal leg green
+ * against a helper whose statement stopped selecting it — the exact regression this file must catch.
+ *
+ * TRANSPORT: one pinned listener per file (usePinnedServer); `request(app)` is banned in tests/unit by the
+ * supertest app-mode tripwire (#4154).
+ *
+ * Ported from the parallel #5954 branch (PR #6068, route legs), merged into #6065.
+ */
+import express from 'express'
+import request from 'supertest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const rbacServiceMocks = vi.hoisted(() => ({
+  isAdmin: vi.fn().mockResolvedValue(false),
+  listUserPermissions: vi.fn().mockResolvedValue([]),
+  userHasPermission: vi.fn().mockResolvedValue(false),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn(),
+}))
+vi.mock('../../src/rbac/service', () => rbacServiceMocks)
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn().mockResolvedValue(true),
+}))
+
+import { poolManager } from '../../src/integration/db/connection-pool'
+import {
+  SHEETS_ROW_LOCK_LIVENESS_SQL,
+  SHEET_DELETED_CODE,
+  SHEET_DELETED_MESSAGE,
+  SHEET_NOT_FOUND_MESSAGE,
+} from '../../src/multitable/sheet-liveness'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const collapse = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
+
+type SheetRow = { id: string; base_id: string | null; deleted_at: unknown }
+
+/**
+ * `SELECT <cols> FROM meta_sheets WHERE id = ANY($1::text[]) …`, and the multi-sheet helper's
+ * `SELECT s.<col>, … FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY … ORDER BY u.ord FOR UPDATE OF s`,
+ * answered from a table in the order of `$1`, projecting ONLY the selected columns. Returns null for any other
+ * statement. `AND …` predicates are not modelled (they belong to other readers — the approval-projection
+ * probe — which must see nothing here).
+ */
+function answerMultiSheetSelect(table: ReadonlyMap<string, SheetRow>, sql: string, params: unknown[]): { rows: unknown[] } | null {
+  const text = collapse(sql)
+  const m = /^SELECT (.+?) FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)(.*)$/i.exec(text)
+    ?? /^SELECT (.+?) FROM meta_sheets s JOIN unnest\(\$1::text\[\]\) WITH ORDINALITY AS u\(id, ord\) ON s\.id = u\.id( ORDER BY u\.ord FOR UPDATE OF s)$/i.exec(text)
+  if (!m) return null
+  if (/\bAND\b/i.test(m[2]!)) return { rows: [] }
+  const cols = m[1]!.split(',').map((c) => c.trim().split(/\s+/).pop()!.replace(/^s\./, ''))
+  const ids = Array.isArray(params[0]) ? (params[0] as unknown[]) : []
+  const rows: unknown[] = []
+  for (const id of ids) {
+    const row = table.get(String(id))
+    if (!row) continue
+    rows.push(Object.fromEntries(cols.map((c) => [c, (row as Record<string, unknown>)[c]])))
+  }
+  return { rows }
+}
+
+const DELETED_AT = '2026-09-25T08:00:00.000Z'
+
+const SA = 'sheet_mlr_a_5954' // base-A sheet — the forward field F_A, rec_A
+const SB = 'sheet_mlr_b_5954' // base-B sheet — the mirror field M_B, rec_B
+const BASE_A = 'base_mlr_a_5954'
+const BASE_B = 'base_mlr_b_5954'
+const F_A = 'fld_mlr_fwd_5954'
+const M_B = 'fld_mlr_mir_5954'
+const REC_A = 'rec_mlr_a_5954'
+const REC_B = 'rec_mlr_b_5954'
+const CALLER = 'u_mlr_caller_5954'
+const CALLER_PERMISSIONS = ['multitable:read', 'multitable:write']
+
+const FORWARD_PROPERTY = { foreignSheetId: SB, foreignBaseId: BASE_B, twoWay: true, mirrorFieldId: M_B }
+const MIRROR_PROPERTY = { foreignSheetId: SA, foreignBaseId: BASE_A, twoWay: true, mirrorFieldId: F_A, mirrorOf: F_A }
+
+const SHEET_DELETED_BODY = { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } }
+const NOT_FOUND_BODY = { ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } }
+
+type Via = 'pool' | 'txn'
+const sqlLog: Array<{ sql: string; params: unknown[]; via: Via }> = []
+/** What the pool-level gate reads see (pre-transaction, unlocked): always both live here. */
+let gateSheets = new Map<string, SheetRow>()
+/** What the transaction sees under the lock — the state after a concurrent soft delete committed. */
+let lockedSheets = new Map<string, SheetRow>()
+
+function liveSheets(): Map<string, SheetRow> {
+  return new Map([
+    [SA, { id: SA, base_id: BASE_A, deleted_at: null }],
+    [SB, { id: SB, base_id: BASE_B, deleted_at: null }],
+  ])
+}
+
+function answerFor(via: Via, sql: string, params: unknown[]): { rows: unknown[]; rowCount: number } {
+  const text = collapse(sql)
+  const sheets = via === 'txn' ? lockedSheets : gateSheets
+  const wrap = (rows: unknown[]) => ({ rows, rowCount: rows.length })
+  if (/^SELECT deleted_at FROM meta_sheets WHERE id = \$1( FOR UPDATE)?$/i.test(text)) {
+    const row = sheets.get(String(params[0]))
+    return wrap(row ? [{ deleted_at: row.deleted_at }] : [])
+  }
+  const multi = answerMultiSheetSelect(sheets, text, params)
+  if (multi) return wrap(multi.rows)
+  if (/^SELECT id, type, property FROM meta_fields WHERE id = \$1 AND sheet_id = \$2$/i.test(text)) {
+    if (params[0] === M_B && params[1] === SB) return wrap([{ id: M_B, type: 'link', property: MIRROR_PROPERTY }])
+    if (params[0] === F_A && params[1] === SA) return wrap([{ id: F_A, type: 'link', property: FORWARD_PROPERTY }])
+    return wrap([])
+  }
+  if (/^SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = \$1\b/i.test(text)) {
+    if (params[0] === SA) return wrap([{ id: F_A, name: 'Fwd', type: 'link', property: FORWARD_PROPERTY, order: 1 }])
+    if (params[0] === SB) return wrap([{ id: M_B, name: 'Mir', type: 'link', property: MIRROR_PROPERTY, order: 1 }])
+    return wrap([])
+  }
+  return wrap([])
+}
+
+const record = (via: Via) => async (sql: string, params: unknown[] = []) => {
+  sqlLog.push({ sql: collapse(sql), params, via })
+  return answerFor(via, sql, params)
+}
+
+/** Mirrors integration/db/connection-pool.ts `transaction`: BEGIN, handler, COMMIT — or ROLLBACK + rethrow. */
+const transactionFake = vi.fn(async (handler: (c: { query: ReturnType<typeof record> }) => Promise<unknown>) => {
+  sqlLog.push({ sql: 'BEGIN', params: [], via: 'txn' })
+  try {
+    const out = await handler({ query: record('txn') })
+    sqlLog.push({ sql: 'COMMIT', params: [], via: 'txn' })
+    return out
+  } catch (e) {
+    sqlLog.push({ sql: 'ROLLBACK', params: [], via: 'txn' })
+    throw e
+  }
+})
+
+const isMultiLock = (sql: string) => sql === SHEETS_ROW_LOCK_LIVENESS_SQL
+const lockIndex = () => sqlLog.findIndex(({ sql }) => isMultiLock(sql))
+const txnMarkers = () => sqlLog.filter(({ sql }) => ['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)).map((s) => s.sql)
+/** Transaction statements issued AFTER the sheet lock, excluding the protocol's own markers. */
+const txnStatementsAfterLock = () =>
+  sqlLog.slice(lockIndex() + 1).filter(({ via, sql }) => via === 'txn' && !['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql))
+
+describe('POST /crossbase/mirror-link — the two-sheet lock re-reads liveness, executed in the no-DB lane (#5954)', () => {
+  const pinned = usePinnedServer()
+  const savedFlag = process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE
+
+  beforeEach(() => {
+    process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE = 'true'
+    sqlLog.length = 0
+    gateSheets = liveSheets()
+    lockedSheets = liveSheets()
+    transactionFake.mockClear()
+    vi.spyOn(poolManager, 'get').mockReturnValue({
+      query: (sql: string, params?: unknown[]) => record('pool')(sql, params ?? []),
+      transaction: transactionFake,
+    } as never)
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as express.Request & { user?: unknown }).user = {
+        id: CALLER, permissions: CALLER_PERMISSIONS, perms: CALLER_PERMISSIONS, roles: [],
+      }
+      next()
+    })
+    app.use('/api/multitable', univerMetaRouter())
+    pinned.setApp(app)
+  })
+
+  afterEach(() => {
+    if (savedFlag === undefined) delete process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE
+    else process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE = savedFlag
+    vi.restoreAllMocks()
+  })
+
+  const mirrorOp = (action: 'add' | 'remove' = 'add') =>
+    request(pinned.url()).post('/api/multitable/crossbase/mirror-link').send({
+      sheetId: SB, recordId: REC_B, fieldId: M_B, action, foreignRecordId: REC_A, targetBaseId: BASE_A,
+    })
+
+  /** The shared tail of every refusal leg: entered the txn, locked on its own client, rolled back, wrote nothing. */
+  function expectRefusedUnderTheLock(res: request.Response, body: unknown): void {
+    expect(res.status).toBe(404) // not 200 (the pre-fix answer), not 500
+    expect(res.body).toEqual(body)
+    const raw = JSON.stringify(res.body)
+    for (const value of [SA, SB, BASE_A, BASE_B, F_A, M_B, REC_A, REC_B]) expect(raw).not.toContain(value)
+
+    // The gates ran on the POOL and saw both ends live — this refusal is the lock's, not the gate's.
+    const gateReads = sqlLog.filter(({ sql }) => /^SELECT deleted_at FROM meta_sheets WHERE id = \$1$/.test(sql))
+    expect(gateReads.map((r) => [r.via, r.params[0]])).toEqual([['pool', SB], ['pool', SA]])
+
+    expect(transactionFake).toHaveBeenCalledTimes(1)
+    expect(txnMarkers()).toEqual(['BEGIN', 'ROLLBACK'])
+    const locks = sqlLog.filter(({ sql }) => isMultiLock(sql))
+    expect(locks).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[SA, SB].sort()], via: 'txn' }])
+    // Nothing ran on the transaction after the refused lock — no record lock, no edge read, no write.
+    expect(txnStatementsAfterLock()).toEqual([])
+  }
+
+  it('gate saw both LIVE, sheet A (the edge\'s write target) is SOFT-DELETED under the lock → 404 SHEET_DELETED', async () => {
+    lockedSheets.get(SA)!.deleted_at = DELETED_AT
+    expectRefusedUnderTheLock(await mirrorOp(), SHEET_DELETED_BODY)
+  })
+
+  it('gate saw both LIVE, sheet B (the mirror side) is SOFT-DELETED under the lock → 404 SHEET_DELETED', async () => {
+    lockedSheets.get(SB)!.deleted_at = DELETED_AT
+    expectRefusedUnderTheLock(await mirrorOp(), SHEET_DELETED_BODY)
+  })
+
+  it('gate saw both LIVE, sheet A has NO ROW under the lock → 404 NOT_FOUND', async () => {
+    lockedSheets.delete(SA)
+    expectRefusedUnderTheLock(await mirrorOp(), NOT_FOUND_BODY)
+  })
+
+  it('both ends dead under the lock: B is judged first, as the gates judge it', async () => {
+    lockedSheets.delete(SA)
+    lockedSheets.get(SB)!.deleted_at = DELETED_AT
+    expectRefusedUnderTheLock(await mirrorOp(), SHEET_DELETED_BODY)
+  })
+
+  for (const [label, sheetId] of [['sheet A', SA], ['sheet B', SB]] as const) {
+    it(`the REMOVE verb: gate saw both LIVE, ${label} is SOFT-DELETED under the lock → the same 404, nothing after the lock`, async () => {
+      lockedSheets.get(sheetId)!.deleted_at = DELETED_AT
+      expectRefusedUnderTheLock(await mirrorOp('remove'), SHEET_DELETED_BODY)
+    })
+  }
+
+  it('CONTROL — both live under the lock: the guard runs PAST the lock, on the same transaction', async () => {
+    const res = await mirrorOp()
+    // Whatever else the guard decides (rec_B is not seeded here), it is not a liveness refusal.
+    expect(res.body).not.toEqual(SHEET_DELETED_BODY)
+    expect(res.body).not.toEqual(NOT_FOUND_BODY)
+    expect(res.status).not.toBe(500)
+    expect(transactionFake).toHaveBeenCalledTimes(1)
+    expect(lockIndex()).toBeGreaterThanOrEqual(0)
+    expect(sqlLog[lockIndex()]!.via).toBe('txn')
+    // The very next thing the guard does on the transaction is lock rec_B — it got past the sheets.
+    const after = txnStatementsAfterLock()
+    expect(after.length).toBeGreaterThan(0)
+    expect(after.some(({ sql }) => /^SELECT id, created_by, locked, locked_by FROM meta_records WHERE id = \$1 AND sheet_id = \$2 FOR UPDATE$/.test(sql)))
+      .toBe(true)
+    // …and the sheet lock was the FIRST statement the guard issued on the transaction.
+    const firstTxnStatement = sqlLog.find(({ via, sql }) => via === 'txn' && sql !== 'BEGIN')
+    expect(firstTxnStatement?.sql).toBe(SHEETS_ROW_LOCK_LIVENESS_SQL)
+  })
+})

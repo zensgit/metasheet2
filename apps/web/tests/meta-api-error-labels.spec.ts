@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  FIELD_SCHEMA_CHANGED_CODE,
   META_API_ERROR_LABEL_KEYS,
   aiRetryCountdown,
   aiShortcutErrorMessage,
+  apiCodeOwnedErrorMessage,
   apiDefaultErrorMessage,
   apiFieldValidationFallback,
   metaApiErrorLabel,
@@ -17,6 +19,8 @@ describe('meta-api-error-labels', () => {
       'error.unauthenticated',
       'error.validation',
       'error.fieldValidation',
+      // F8A: the server-side lossless-retype whitelist refusal (FIELD_RETYPE_NOT_LOSSLESS).
+      'error.fieldRetypeNotLossless',
       // A3 AI shortcut state copy (§2.3) — keyed on error.code.
       'error.aiBlocked',
       'error.aiRateLimited',
@@ -36,6 +40,10 @@ describe('meta-api-error-labels', () => {
       'error.aiBulkJobCommitInProgress',
       // F4-B gateway-outage copy (502/503/504).
       'error.serverRestarting',
+      // 客户反馈 #4b: automation condition value does not fit the field type.
+      'error.automationConditionValueInvalid',
+      // 字段类型转换第 3 刀: 409 FIELD_SCHEMA_CHANGED.
+      'error.fieldSchemaChanged',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
@@ -82,6 +90,47 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage('FORBIDDEN', 403, true)).toBe('权限不足')
     expect(apiDefaultErrorMessage('UNAUTHENTICATED', 401, true)).toBe('请先登录后继续。')
     expect(apiDefaultErrorMessage('VALIDATION_ERROR', 422, true)).toBe('请检查提交的数据后重试。')
+    // F8A: a stable refusal code gets real copy in BOTH locales instead of `API 400`
+    // (the server's own Chinese message still wins in parseJson when one is present).
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, true))
+      .toBe('这样改字段类型会让已有数据不可读，已被拒绝。只允许无损的类型转换。')
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, false))
+      .toBe('This field type change would make the existing data unreadable, so it was refused. Only lossless conversions are allowed.')
+    // values-free: the copy names no field id
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, true)).not.toMatch(/fld[_-]/)
+    // 客户反馈 #4b: the automation condition-value refusal code gets format-naming copy in both locales.
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, true))
+      .toBe('条件值与字段类型不匹配（日期请填 YYYY-MM-DD，日期时间请填 YYYY-MM-DD HH:mm，数字只填数字）。')
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, false))
+      .toBe('A condition value does not match its field type (dates use YYYY-MM-DD, date-times YYYY-MM-DD HH:mm, numbers digits only).')
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, true)).not.toMatch(/fld[_-]/)
+  })
+
+  // Field retype slice 3b — the write was refused because its column changed type while it waited.
+  it('FIELD_SCHEMA_CHANGED: one plain sentence per locale, owned by the client, values-free', () => {
+    const zh = '这一列刚刚被改成了别的类型，你这次的修改没有保存。请刷新页面后重新修改。'
+    const en = 'This column was just changed to another type, so your edit was not saved. Refresh the page and edit again.'
+    expect(FIELD_SCHEMA_CHANGED_CODE).toBe('FIELD_SCHEMA_CHANGED')
+    // the copy the client uses INSTEAD of the server's message
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED', true)).toBe(zh)
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED', false)).toBe(en)
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED')).toBe(en)
+    // and the same copy when the payload arrived without a message
+    expect(apiDefaultErrorMessage('FIELD_SCHEMA_CHANGED', 409, true)).toBe(zh)
+    expect(apiDefaultErrorMessage('FIELD_SCHEMA_CHANGED', 409, false)).toBe(en)
+    // the AI run surface reads its copy by code
+    expect(aiShortcutErrorMessage('FIELD_SCHEMA_CHANGED', true)).toBe(zh)
+    // plain: no code, no lock vocabulary, no field id — and it says the edit was NOT saved
+    for (const copy of [zh, en]) expect(copy).not.toMatch(/FIELD_SCHEMA|fld[_-]|409|fence|栅栏|锁/)
+    expect(zh).toContain('没有保存')
+    expect(en).toContain('not saved')
+  })
+
+  it('FIELD_SCHEMA_CHANGED is the ONLY code whose copy the client owns: every other code leaves the server message alone', () => {
+    for (const code of ['VERSION_CONFLICT', 'RECOVERY_IN_PROGRESS', 'LINK_WRITER_FENCE_PLAN_CHANGED', 'VALIDATION_ERROR', 'FORBIDDEN', 'FIELD_RETYPE_NOT_LOSSLESS', 'field_schema_changed', 'SOMETHING_NEW', '']) {
+      expect([code, apiCodeOwnedErrorMessage(code, true)]).toEqual([code, null])
+    }
+    expect(apiCodeOwnedErrorMessage(undefined, true)).toBeNull()
   })
 
   it('keeps unknown API status fallback technical and locale-neutral', () => {
@@ -116,24 +165,40 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage(undefined, 505, true)).toBe('API 505')
   })
 
-  // F4-B CONTRACT (cross-module): the two outage copies live in two files on two different
-  // layers — utils/networkErrors.ts (no HTTP response at all) and this module (gateway answered
-  // 502/503/504). A user cannot tell the two apart, so they must be BYTE-IDENTICAL per locale.
-  // Nothing else enforces that: api.spec.ts's EN assertion used to compare the helper with
-  // itself, so rewriting only one of the two files left every spec green. These assertions are
-  // the whole enforcement of the "one wording, two layers" ruling.
-  it('F4-B CONTRACT: transport copy and gateway-status copy are identical in both locales', () => {
-    expect(networkUnavailableMessage(false)).toBe(metaApiErrorLabel('error.serverRestarting', false))
-    expect(networkUnavailableMessage(true)).toBe(metaApiErrorLabel('error.serverRestarting', true))
-    // …and identical through the status path the gateway actually takes.
-    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 502, false))
-    expect(networkUnavailableMessage(true)).toBe(apiDefaultErrorMessage(undefined, 503, true))
-    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 504, false))
-    // Both sides pinned to the literal, so a matched rename of BOTH files still turns this red.
-    expect(networkUnavailableMessage(false)).toBe('The service is temporarily unavailable. Please try again in a moment.')
-    expect(networkUnavailableMessage(true)).toBe('服务暂时不可用，请稍后重试')
+  // P5 CONTRACT (cross-module, REPLACES the old F4-B "one wording, two layers" ruling).
+  // On 2026-09-14 the customer link to the 222 host dropped; every action rendered the
+  // gateway sentence, so the customer reported "delete is broken" instead of "my network
+  // is down". The two layers now say two different things, and the split is only real if
+  // something forbids them from converging again — that is this test.
+  it('P5 CONTRACT: no-response copy and gateway-status copy are DIFFERENT, per locale', () => {
+    expect(networkUnavailableMessage(false)).not.toBe(metaApiErrorLabel('error.serverRestarting', false))
+    expect(networkUnavailableMessage(true)).not.toBe(metaApiErrorLabel('error.serverRestarting', true))
+    expect(networkUnavailableMessage(false)).not.toBe(apiDefaultErrorMessage(undefined, 502, false))
+    expect(networkUnavailableMessage(true)).not.toBe(apiDefaultErrorMessage(undefined, 503, true))
+    expect(networkUnavailableMessage(false)).not.toBe(apiDefaultErrorMessage(undefined, 504, false))
+    // Each side pinned to its literal, so silently rewriting either one turns this red.
+    expect(networkUnavailableMessage(false)).toBe('Cannot reach the server (no response received). Check your network connection, or try again later.')
+    expect(networkUnavailableMessage(true)).toBe('无法连接服务器（未收到任何响应），请检查网络或稍后重试')
+    expect(metaApiErrorLabel('error.serverRestarting', false)).toBe('The service is temporarily unavailable. Please try again in a moment.')
+    expect(metaApiErrorLabel('error.serverRestarting', true)).toBe('服务暂时不可用，请稍后重试')
+    // The gateway sentence must never claim the network is unreachable, in either locale.
+    expect(metaApiErrorLabel('error.serverRestarting', true)).not.toContain('无法连接')
+    expect(metaApiErrorLabel('error.serverRestarting', false).toLowerCase()).not.toContain('cannot reach')
     // The EN/zh pair must stay two distinct strings (a copy-paste slip is a real failure mode).
     expect(networkUnavailableMessage(true)).not.toBe(networkUnavailableMessage(false))
+  })
+
+  // apiDefaultErrorMessage no longer READS the label table for gateway statuses -- it asks the
+  // shared discriminator (`unavailableMessageFor({ status, ok: false }, ...)`), which is what makes
+  // the "a response exists" arm a production path instead of a test-only contract. That leaves two
+  // faces of one sentence -- the label-table entry (exported through META_API_ERROR_LABEL_KEYS) and
+  // what the gateway branch actually emits -- so this pins them EQUAL. Rewriting either face alone
+  // turns it red; both are spreads of utils/networkErrors.ts's SERVICE_UNAVAILABLE_COPY today.
+  it('P5: the gateway branch emits exactly the `error.serverRestarting` label, in both locales', () => {
+    for (const status of [502, 503, 504]) {
+      expect(apiDefaultErrorMessage(undefined, status, true)).toBe(metaApiErrorLabel('error.serverRestarting', true))
+      expect(apiDefaultErrorMessage(undefined, status, false)).toBe(metaApiErrorLabel('error.serverRestarting', false))
+    }
   })
 
   it('F4-B REGRESSION: the code-keyed branches still win over the new status branch', () => {

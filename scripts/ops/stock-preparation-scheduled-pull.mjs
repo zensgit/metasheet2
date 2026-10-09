@@ -132,7 +132,7 @@ Required environment variables:
   MS_API          base URL of the MetaSheet API, e.g. http://127.0.0.1:8900
   MS_TOKEN        a Bearer token for an admin service account, BOUND TO THE TARGET TENANT
                    (a tenantless platform-admin token is refused by default — see --allow-tenantless)
-  MS_PROJECT_NOS  comma-separated project numbers to pull, e.g. "2-20231625,230920006"
+  MS_PROJECT_NOS  comma-separated project numbers to pull, e.g. "2-20000001,200000006"
 
 Optional environment variables:
   MS_TENANT_ID         tenant id to operate on (default: "default")
@@ -154,8 +154,14 @@ Flags:
   --help, -h          print this text and exit 0
 
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
-was simply skipped as manual_confirm_required, large_bom_bounded, not_found, or (without --apply)
-ready-but-not-applied.
+was simply skipped as manual_confirm_required, large_bom_bounded, not_found, (without --apply)
+ready-but-not-applied, or — with per-project sheets enabled on the server — project_sheet_absent
+(no 拉取人员 has created that project's sheet yet; this script NEVER creates one) or
+project_sheet_archived.
+
+The account behind MS_TOKEN must be allowed to PULL: since S0 (stock-prep:pull) the floor tier
+(read+operate) is refused dry-run and apply, so use a 拉取人员 account (pull+operate+read), a
+stock-prep:admin, or a legacy integration:* holder.
 
 Prints exactly one JSON line per project, then one summary JSON line. Never prints any decoded token
 claim or any row value from a response. MS_TOKEN itself is redacted from all output by an exact match
@@ -514,6 +520,21 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   if (dryRun.networkError) {
     return { ...record, action: 'error', error: networkErrorMessage(dryRun), failed: true, durationMs: Date.now() - startedAt }
   }
+  // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 §3 定时试拉 row): with the
+  // project-sheets switch on, a project nobody has created a sheet for answers 409
+  // STOCK_PREPARATION_PROJECT_ABSENT and an archived one 409 STOCK_PREPARATION_PROJECT_ARCHIVED.
+  // Both are SKIPS, not failures: the first is a 拉取人员's pending job (this script NEVER creates a
+  // sheet — creation is a deliberate human act behind its own gate), the second is a lifecycle
+  // decision somebody made on purpose. Neither flips the exit code; both are counted in the summary.
+  if (!dryRun.ok) {
+    const refusal = errorCodeOf(dryRun)
+    if (refusal === 'STOCK_PREPARATION_PROJECT_ABSENT') {
+      return { ...record, action: 'skipped_project_sheet_absent', note: 'no project sheet registered yet; a puller must create it (this script never creates one)', durationMs: Date.now() - startedAt }
+    }
+    if (refusal === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
+      return { ...record, action: 'skipped_project_sheet_archived', note: 'the project sheet is archived; restore it before pulling', durationMs: Date.now() - startedAt }
+    }
+  }
   if (!dryRun.ok || dryRun.parseError || !dryRun.json || dryRun.json.ok !== true || !dryRun.json.data) {
     const code = errorCodeOf(dryRun)
     return {
@@ -600,6 +621,8 @@ export function summarize(results, applyFlag) {
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),
     skippedReadyNotApplicable: count('skipped_ready_not_applicable'),
+    skippedProjectSheetAbsent: count('skipped_project_sheet_absent'),
+    skippedProjectSheetArchived: count('skipped_project_sheet_archived'),
     failed: results.filter((r) => r.failed === true).length,
   }
 }

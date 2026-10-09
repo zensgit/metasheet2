@@ -106,8 +106,8 @@ const MAIN_FIELD_ID_MAP = Object.freeze({
 })
 
 
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 
 // Tenant B's project number is a string that appears NOWHERE in tenant A's fixture, so a single
@@ -139,7 +139,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -741,7 +741,7 @@ async function theAuditRowIsValuesFreeAndPrecedesTheValues() {
   //
   // `?workspaceId` used to be forwarded verbatim into the audit row's `workspace_id`, which made the
   // "the row never carries the projectNo" claim depend on the caller not putting it there: send
-  // `?workspaceId=230920006` and the number was on the trail, in a column no gate looked at. The
+  // `?workspaceId=200000006` and the number was on the trail, in a column no gate looked at. The
   // board route now selects nothing from it at all (the key stays in the allowlist for shape
   // compatibility with the rest of this family, exactly like `tenantId`, and steers nothing), and
   // the store gates the column besides. Asserted on BOTH branches, because a miss writes a row too.
@@ -1099,7 +1099,7 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
 // this pins BOTH, because a claim that only ever gets tested on its comfortable side is not pinned.
 async function theBoundSheetsTenantModelHoldsFromBothSides() {
   const CANONICAL_SHEET = ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID)
-  const NEIGHBOUR_PROJECT_NO = '230920007'
+  const NEIGHBOUR_PROJECT_NO = '200000007'
 
   // HALF ONE — THE OWNER READS THE WHOLE SHEET, and that is what "owning" means here. Two different
   // project numbers living in tenant A's own bound sheet are BOTH tenant A's data by definition:
@@ -1594,7 +1594,7 @@ async function theBoardRefusesBeforeItsAuditActionCanBeStored() {
 // ever breaks — every project's rows counted under whichever project the operator happens to open,
 // and a 「上次从 PLM 拉过」 stamp that belongs to somebody else's pull.
 async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
-  const OTHER_PROJECT_NO = '230920099'
+  const OTHER_PROJECT_NO = '200000099'
   const OURS = '2026-09-01T00:00:00.000Z'
   const THEIRS = '2026-09-05T00:00:00.000Z'
   const boundTarget = {

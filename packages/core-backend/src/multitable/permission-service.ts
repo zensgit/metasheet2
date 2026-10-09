@@ -49,6 +49,7 @@ import {
   APPROVAL_PROJECTION_BASE_ID,
   restrictApprovalProjectionCapabilitiesPerRow,
   isApprovalProjectionBaseId,
+  approvalProjectionParticipantPredicateSql,
 } from './approval-projection-constants'
 import {
   canAccessElearningProjectionBase,
@@ -56,7 +57,7 @@ import {
   loadElearningProjectionBaseOrg,
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
-import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -220,6 +221,8 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
   canExport: false,
   // Anonymous public-form submitter must NEVER be able to send notifications.
   canSendNotification: false,
+  // ... nor start an approval instance in someone else's name (no identity, no approvals:write).
+  canSubmitApproval: false,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -937,6 +940,12 @@ export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: strin
  * T36-1 (Plan A): of the given sheet ids, the approval-projection sheets where `userId` is a
  * PARTICIPANT in ≥1 row (row's own requesterId/approverId — zero new storage). Fail-closed: any
  * error → empty set → the caller treats the actor as a non-participant (full fence).
+ *
+ * Project-key fix: the projection WRITER namespaces every column by the row's OWN sheet id
+ * (`deriveProjectionFieldId` — `${sheetId}__${columnKey}`), so the match is derived IN SQL from
+ * `r.sheet_id` (a JOIN spans every sheet in `sheetIds`, each potentially a different template
+ * family) via the ONE shared `approvalProjectionParticipantPredicateSql` — never a bare
+ * `'requesterId'`/`'approverId'` literal, which the writer never stores a row under.
  */
 export async function loadApprovalProjectionParticipantSheetIds(
   query: QueryFn,
@@ -951,7 +960,7 @@ export async function loadApprovalProjectionParticipantSheetIds(
          JOIN meta_records r ON r.sheet_id = s.id
         WHERE s.id = ANY($1::text[])
           AND s.base_id = $2
-          AND (r.data->>'requesterId' = $3 OR r.data->>'approverId' = $3)`,
+          AND ${approvalProjectionParticipantPredicateSql('r.data', 'r.sheet_id', '$3')}`,
       [sheetIds, APPROVAL_PROJECTION_BASE_ID, userId],
     )
     return new Set((result.rows as Array<{ id: string }>).map((row) => row.id))
@@ -1048,11 +1057,11 @@ export async function loadApprovalProjectionDeniedRecordIds(
   if (requested && requested.length === 0) return { isProjection: false, denied: new Set() }
   const projectionIds = await loadApprovalProjectionSheetIds(query, [sheetId])
   if (!projectionIds.has(sheetId)) return { isProjection: false, denied: new Set() }
-  // COALESCE closes the SQL three-valued-logic hole: a row with a MISSING participant field
-  // yields NULL comparisons, and `NOT (NULL OR NULL)` is NULL — the corrupt row would silently
-  // escape the denied set (fail-OPEN). With COALESCE to '' it can never equal a real user id, so
-  // corrupt rows are always denied (lock §3 fail-closed). An empty/absent actor id denies every
-  // row for the same reason ('' is matched against COALESCE'd '' explicitly guarded out below).
+  // The COALESCE-to-'' fail-closed handling of a row with a MISSING/corrupt participant field
+  // (three-valued-logic: `NOT (NULL OR NULL)` is NULL, which a bare WHERE would drop from the
+  // denied set — fail-OPEN) now lives ONCE inside `approvalProjectionParticipantPredicateSql`,
+  // not re-spelled here. An empty/absent actor id denies every row for the same reason ('' is
+  // explicitly guarded out below before it could match a COALESCE'd '').
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
   if (!normalizedUserId) {
     const all = requested
@@ -1060,18 +1069,21 @@ export async function loadApprovalProjectionDeniedRecordIds(
       : await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
     return { isProjection: true, denied: new Set((all.rows as Array<{ id: string }>).map((row) => row.id)) }
   }
+  // Project-key fix: `sheetId` is already a bound single-sheet parameter here ($1), so the shared
+  // predicate derives the namespaced key from that placeholder directly (no per-row JOIN needed,
+  // unlike the multi-sheet carve-out above) — same ONE definition, same fail-closed COALESCE.
   const result = requested
     ? await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
           AND id = ANY($3::text[])
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId, requested],
     )
     : await query(
       `SELECT id FROM meta_records
         WHERE sheet_id = $1
-          AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+          AND NOT ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}`,
       [sheetId, normalizedUserId],
     )
   return { isProjection: true, denied: new Set((result.rows as Array<{ id: string }>).map((row) => row.id)) }
@@ -1487,6 +1499,9 @@ export function applySheetPermissionScope(
     // Notify = full sheet write/admin only (scope.canWrite), NOT write-own: a
     // record-scoped write must not imply notifying members from any row.
     canSendNotification: capabilities.canSendNotification && scope.canWrite,
+    // Submit-for-approval rides the READ plane (you submit a record you can read) AND still needs the
+    // global `multitable:submit-approval` code — a sheet grant alone never confers it.
+    canSubmitApproval: capabilities.canSubmitApproval && scope.canRead,
   }
 }
 
@@ -1561,6 +1576,7 @@ const MULTITABLE_CAPABILITY_KEYS: Array<keyof MultitableCapabilities> = [
   'canComment',
   'canManageAutomation',
   'canSendNotification',
+  'canSubmitApproval',
 ]
 
 export function deriveCapabilityOrigin(
@@ -1830,14 +1846,16 @@ export async function resolveSheetReadableCapabilities(
 }
 
 export async function resolveReadableSheetIds(
-  req: Request,
+  req: Request | undefined,
   query: QueryFn,
   sheetIds: Iterable<string>,
+  authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).map((sheetId) => sheetId.trim()).filter(Boolean)))
   if (uniqueSheetIds.length === 0) return new Set()
 
-  const access = await resolveRequestAccess(req)
+  const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
+  if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   if (access.isAdminRole) {
     return new Set(uniqueSheetIds)
   }
@@ -1887,6 +1905,17 @@ export async function resolveBaseReadable(
   if (!normalizedBaseId) return false
 
   const access = await resolveRequestAccess(req)
+  return resolveBaseReadableForAccess(query, normalizedBaseId, access)
+}
+
+/** Same base-read policy for an already-adjudicated, transaction-bound access snapshot. */
+export async function resolveBaseReadableForAccess(
+  query: QueryFn,
+  baseId: string,
+  access: ResolvedRequestAccess,
+): Promise<boolean> {
+  const normalizedBaseId = baseId.trim()
+  if (!normalizedBaseId) return false
 
   // Symmetry with `resolveBaseWritable`'s NIT-1: resolve target-base EXISTENCE FIRST. A missing /
   // soft-deleted base is NOT readable by ANYONE — including an admin / base-read-grant holder — which is
@@ -1978,4 +2007,46 @@ export async function resolveBaseWritable(
   // base ownership (symmetric with resolveBaseReadable) — reuses the existence row resolved above.
   const ownerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id.trim() : ''
   return Boolean(ownerId) && ownerId === normalizedUserId
+}
+
+/**
+ * Copy-sheet TARGET gate (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-3 / §4.2, amended
+ * 2026-09-28): **platform admin role ∨ `resolveBaseWritable`**, with the two projection refusals folded in so the
+ * three enforcement sites (fast route gate, in-transaction DB-fresh re-check, `/context` `canCopySheet` probe) share
+ * ONE predicate and cannot drift.
+ *
+ * Why the admin arm exists: the SOURCE gate (`hasFullTableReadAccess` axis ①) admits only an admin role on a sheet
+ * whose row-level read switch is on, while `resolveBaseWritable` consults only the base owner and the base-write
+ * codes — never the role. A row-level sheet in a base owned by someone else was therefore copyable by NOBODY. The
+ * owner accepted admitting the platform admin role on 2026-09-28. The admin predicate is the codebase's canonical
+ * one (`ResolvedRequestAccess.isAdminRole`, `access.ts`), the same axis-① test the source gate applies.
+ *
+ * FAIL-CLOSED, for the admin too:
+ *   - no identity / empty base id → false;
+ *   - the approval projection base and any e-learning projection base id (id shape, stricter than the registry
+ *     lookup `resolveBaseWritable` performs) → false, no matter who asks;
+ *   - a missing / soft-deleted base → false (the same existence read `resolveBaseWritable` starts with — NIT-1).
+ * `resolveBaseWritable` itself is NOT changed; its other callers (automation cross-base write, C1/C2) keep the
+ * owner-or-code policy without the role arm.
+ */
+export async function resolveCopyTargetWritable(
+  access: Pick<ResolvedRequestAccess, 'userId' | 'isAdminRole'>,
+  query: QueryFn,
+  baseId: string,
+): Promise<boolean> {
+  const normalizedUserId = typeof access.userId === 'string' ? access.userId.trim() : ''
+  if (!normalizedUserId) return false // fail-closed: no identity → no write (admin flag alone is not an identity)
+  const normalizedBaseId = typeof baseId === 'string' ? baseId.trim() : ''
+  if (!normalizedBaseId) return false
+  if (isApprovalProjectionBaseId(normalizedBaseId) || isElearningProjectionBaseIdCandidate(normalizedBaseId)) return false
+
+  if (!access.isAdminRole) return resolveBaseWritable(normalizedUserId, query, normalizedBaseId)
+
+  // Admin arm: existence + liveness only (no grant / owner lookup). A missing / soft-deleted target base is not
+  // writable by ANYONE — the same read `resolveBaseWritable` resolves first, so the two arms refuse identically here.
+  const baseRes = await query(
+    'SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  return baseRes.rows.length > 0
 }

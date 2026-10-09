@@ -227,20 +227,43 @@ function inertService(methods) {
   return service
 }
 
+// The row as the registry hands it to an ADAPTER: the whole config, including the private
+// `lookupProjection` subtree that `publicRow()` deletes for `data-source:sql-readonly`
+// (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND). Having the private key present here is what
+// makes the two accessors below distinguishable at all.
+function adapterReadyRow(input = {}) {
+  return {
+    id: input.id,
+    tenantId: input.tenantId,
+    name: 'Readonly PLM SQL',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: {
+      dataSourceId: 'ds_plm',
+      object: 'DN_PDM_PathExAttrInfo',
+      lookupProjection: { table: 'DN_PDM_PathExAttrInfo' },
+    },
+  }
+}
+
 function baseServices(sourceAdapter) {
   return {
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+      // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the
+      // route under test (`loadTableActionSourceAdapter`) now reads the decrypting one and only the
+      // decrypting one. `getExternalSystem` returns the public projection the registry really
+      // returns — private config subtree deleted (`lookupProjection` for this kind), no
+      // credentials — so a call site that degraded back to it would hand the adapter a different
+      // object, not the same one under another name.
       async getExternalSystem(input = {}) {
-        return {
-          id: input.id,
-          tenantId: input.tenantId,
-          name: 'Readonly PLM SQL',
-          kind: 'data-source:sql-readonly',
-          role: 'source',
-          status: 'active',
-          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
-        }
+        const row = adapterReadyRow(input)
+        const { lookupProjection, ...publicConfig } = row.config
+        return { ...row, config: publicConfig }
+      },
+      async getExternalSystemForAdapter(input = {}) {
+        return adapterReadyRow(input)
       },
     },
     adapterRegistry: {
@@ -651,12 +674,16 @@ async function oneUnparseableCellDoesNotCostTheRow() {
 
 // ── 7. the large-BOM path announces that it does NOT apply the mapping ───────
 //
-// That path supplies neither `extFieldMapping` nor `installedFieldProperties`, and the second
-// omission is what makes the first dangerous: with template-only bands the planner leaves `ext_` out
-// of the update patch entirely, and a patch does not blank what it omits — so whatever a previous
-// SMALL-path refresh wrote SURVIVES while every canonical column around it moves to today's source.
-// Stale-but-plausible, not absent. Nor is the path chosen by anyone: a slow source alone
-// (`read_time_limit_exceeded`) moves an unchanged project from one path to the other.
+// That path supplies `installedFieldProperties` (see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) but still no `extFieldMapping`, and
+// the band does not make the missing mapping harmless: with no mapper filling an `ext_` cell the row
+// carries no such key, `pickFields` skips it and the planner leaves every mapper-territory `ext_` id
+// out of the update patch (the only exception is the <=5 planner-derived pack columns, see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) —
+// and a patch does not blank what it omits, so whatever a previous SMALL-path refresh wrote SURVIVES
+// while every canonical column around it moves to today's source. Stale-but-plausible, not absent.
+// Nor is the path chosen by anyone: a slow source alone (`read_time_limit_exceeded`) moves an
+// unchanged project from one path to the other.
 
 const LARGE_BOM_START_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
 const DIVERGENCE_KEY = 'extFieldMappingConfiguredButNotAppliedOnThisPath'

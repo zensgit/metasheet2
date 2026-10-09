@@ -386,6 +386,57 @@ describe('DingTalkGroupDestinationService', () => {
     expect(roots.deleteFrom).toHaveBeenCalledWith('dingtalk_group_destinations')
   })
 
+  /**
+   * #5812 final-review follow-up: the routes gate the sheetId that arrives on the REQUEST
+   * (capability, then liveness). That gate only protects a destination if the service then insists
+   * the destination ROW is bound to that same sheet. `loadAuthorizedDestination` is that second
+   * boundary: a sheet-bound row admits ONLY a matching sheetId, and it returns before the
+   * private-row `created_by` branch, so even the row's own creator (`user_1` here) cannot reach it
+   * without the matching sheet. Without it, a caller authorized on some other live sheet — or
+   * sending no sheetId at all — could test-send (a REAL outbound message), rewrite or delete a
+   * destination whose own sheet was soft-deleted.
+   *
+   * The "no sheetId" leg is also the backstop for an array-form `?sheetId=a&sheetId=b`: the route
+   * reads that as no sheetId and passes `undefined` here (pinned in
+   * dingtalk-group-routes-sheet-liveness.test.ts, "array-form sheetId").
+   */
+  describe.each([
+    ['a different live sheet', 'sheet_live'],
+    ['no sheetId', undefined],
+  ] as const)('a destination bound to a soft-deleted sheet refuses %s', (_label, callerSheetId) => {
+    test.each(['testSend', 'updateDestination', 'deleteDestination'] as const)(
+      '%s -> Not authorized, nothing sent, nothing written',
+      async (method) => {
+        const { db, roots } = createMockDb()
+        const fetchFn = vi.fn(async () => new Response(
+          JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ))
+        const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+        const boundRow = () => destinationRow({ sheet_id: 'sheet_deleted', created_by: 'user_1' })
+        executeTakeFirstQueue.push(boundRow())
+        // Second row for updateDestination's re-read: if authorization were skipped, the update would
+        // complete, so the failure is the authorization assertion rather than an incidental 'no rows'.
+        executeTakeFirstQueue.push(boundRow())
+
+        const call = method === 'testSend'
+          ? service.testSend('dt_1', 'user_1', { subject: 'T', content: 'B' }, callerSheetId)
+          : method === 'updateDestination'
+            ? service.updateDestination('dt_1', 'user_1', { name: 'Hijacked', enabled: false }, callerSheetId)
+            : service.deleteDestination('dt_1', 'user_1', callerSheetId)
+
+        await expect(call).rejects.toThrow(/^Not authorized$/)
+        // The row WAS loaded: the refusal is the sheet-binding check, not a missing destination.
+        expect(roots.selectFrom).toHaveBeenCalledTimes(1)
+        expect(fetchFn).not.toHaveBeenCalled()
+        expect(roots.updateTable).not.toHaveBeenCalled()
+        expect(roots.deleteFrom).not.toHaveBeenCalled()
+        expect(roots.insertInto).not.toHaveBeenCalled()
+      },
+    )
+  })
+
   test('testSend marks success when DingTalk responds ok', async () => {
     const { db, roots } = createMockDb()
     const fetchFn = vi.fn(async () => new Response(

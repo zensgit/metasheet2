@@ -55,6 +55,8 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   CARRY_TARGET_OWNERSHIP_STATES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
   decideCarryTargetOwnership,
   SANDBOX_OBJECT_ID_NAMESPACE,
   inspectStockPreparationCanonicalTarget,
@@ -74,6 +76,15 @@ const {
 const {
   OUTBOUND_HTTP_WRITE_TARGETS_ENV,
 } = require('./outbound-http-write-gate.cjs')
+// S1 一个项目一张备料表: the switch, the G1 role-list env and the registry cap — read for the
+// informational `checks.projectSheets` section only. Nothing here provisions or resolves a sheet.
+const {
+  PROJECT_SHEETS_ENABLED_ENV,
+  PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+  MAX_PROJECT_TARGETS_PER_TENANT,
+  stockPreparationProjectSheetsEnabled,
+  resolveProjectSheetGrantRoleIds,
+} = require('./stock-preparation-project-targets.cjs')
 
 // ---------------------------------------------------------------------------
 // The deployment vocabulary the fix lines quote.
@@ -333,7 +344,7 @@ function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived
       // the carry is allowed is reported by `checks.carryTargetBinding.ownershipState` and, when it
       // will be refused, by the STOCK_PREP_CARRY_TARGET_NOT_OWNED blocker — not here.
       note: carryTargetBindingDerived === false
-        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). By itself that is not a fault: sheetId and objectId are independent fields for the writer, the export and the conflict policies, and a sheet provisioned before the ownership registry existed is in this state through no fault of its own. It is reported because two halves naming different tables is usually an editing slip — if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one. Whether carry is permitted is a SEPARATE question answered by checks.carryTargetBinding.ownershipState.'
+        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). By itself that is not a fault: sheetId and objectId are independent fields for the writer, the export and the conflict policies, and a sheet provisioned before the ownership registry existed is in this state through no fault of its own. It is reported because two halves naming different tables is usually an editing slip — if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one. Whether carry and the materials export are permitted is a SEPARATE question answered by checks.carryTargetBinding.ownershipState.'
         : 'nothing to report: the bound sheetId either is the derived one, or this host exposes no derivation to check it against.',
     }),
     outboundHttpWrite: Object.freeze({
@@ -355,7 +366,11 @@ function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived
 async function resolveBoundActionTarget({ tableActions, tenantId, actionId }) {
   if (!tableActions || typeof tableActions.getTableAction !== 'function' || !actionId) return null
   try {
-    const action = await tableActions.getTableAction({ tenantId, actionId })
+    // S1 / R2: this is the deployment's ENV binding probe (the carry target the preflight reports on),
+    // not a per-project lookup, so it declares the readiness purpose the large-BOM job routes declare:
+    // the project-sheet overlay skips it, and with the switch on it no longer throws
+    // PROJECT_NO_REQUIRED (which the catch below would have swallowed into `configured: false`).
+    const action = await tableActions.getTableAction({ tenantId, actionId, targetPurpose: 'readiness' })
     const target = action && action.target
     return isPlainObject(target) ? target : null
   } catch (error) {
@@ -464,9 +479,38 @@ async function computeStockPreparationPreflight({
   tenantId,
   actionId,
   env = process.env,
+  // S1: the project-sheet registry store (optional). Only its COUNT is read, for the informational
+  // section below; a caller without it gets `registeredCount: null`.
+  projectTargetStore,
 } = {}) {
   const blockers = []
   const checks = {}
+
+  // ---- 0. 一个项目一张备料表 (S1) — INFORMATIONAL, NEVER A BLOCKER --------------------------------
+  // How many project sheets this tenant has registered (archived INCLUDED, the same count the
+  // 200-row cap reads) and how many G1 roles are configured. Values-free: a boolean, two integers
+  // and env KEY names. EMITTED ONLY WHILE THE SWITCH IS ON (R3): ADR §3 promises the switch-off
+  // response is byte-identical to pre-S1, so with the switch off there is no `projectSheets` key
+  // and the registry is not even counted. Off is the correct posture of a release that ships S1
+  // with the switch closed (ADR §8), so there is nothing to fix and no `fix` line either way.
+  if (stockPreparationProjectSheetsEnabled(env)) {
+    let registeredCount = null
+    if (projectTargetStore && typeof projectTargetStore.count === 'function' && tenantId) {
+      try {
+        registeredCount = await projectTargetStore.count({ tenantId })
+      } catch (error) {
+        registeredCount = null
+      }
+    }
+    checks.projectSheets = Object.freeze({
+      enabled: true,
+      switchEnv: PROJECT_SHEETS_ENABLED_ENV,
+      grantRolesEnv: PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+      grantRoleCount: resolveProjectSheetGrantRoleIds(env).length,
+      registeredCount,
+      registeredLimit: MAX_PROJECT_TARGETS_PER_TENANT,
+    })
+  }
 
   // ---- 1. the confirmation-decision LEDGER -------------------------------------------------
   // A managed multitable object that the SQL migration chain does not create. Without it the
@@ -680,9 +724,14 @@ async function computeStockPreparationPreflight({
       : null,
   })
   if (carryBinding.ownership && !carryBinding.ownership.ok) {
+    // The materials export and the handoff advance ask the SAME ownership question through the same
+    // wall (http-routes.cjs assertStockPreparationTargetBelongsToTenant), each answering in its own
+    // vocabulary — so the one verdict is quoted in all three routes' codes.
+    const exportRefusalCode = PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
+    const handoffRefusalCode = STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
     blockers.push(blocker({
       code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED,
-      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}. Apply, dry-run and the export do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
+      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}, every 按项目导出物料 (materials export) with ${exportRefusalCode} and every 通知下一步 (handoff advance) with ${handoffRefusalCode}. Apply and dry-run do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
       fix: httpFix({
         method: 'POST',
         path: '/api/integration/stock-preparation/sandbox-target/ensure',
@@ -693,6 +742,8 @@ async function computeStockPreparationPreflight({
         // The EXACT string the click returns, so "what the preflight warned about" and "what the
         // operator saw" are the same token rather than two descriptions of one thing.
         carryRouteCode: carryBinding.ownership.refusalCode,
+        exportRouteCode: exportRefusalCode,
+        handoffRouteCode: handoffRefusalCode,
       },
     }))
   }

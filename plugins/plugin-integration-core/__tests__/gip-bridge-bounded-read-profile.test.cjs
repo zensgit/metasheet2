@@ -81,6 +81,8 @@ async function resolutionForProfile(actionProfileVersion) {
     async select() { return [] },
     async insertOne() { return null },
     async updateRow() { return null },
+    // Required by the store since the external-system delete lock protocol; read-only here.
+    async selectOneForKeyShare(_t, where) { return { id: where.id, tenant_id: where.tenant_id } },
     async transaction(fn) { return fn(this) },
   }
   const resolver = createApprovedBindingResolver({

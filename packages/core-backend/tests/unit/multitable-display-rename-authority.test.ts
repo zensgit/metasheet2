@@ -30,6 +30,7 @@ import {
   deriveElearningProjectionBaseId,
   deriveElearningProjectionSheetId,
 } from '../../src/multitable/elearning-projection-constants'
+import { PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE } from '../../src/routes/univer-meta'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_rn'
@@ -153,6 +154,15 @@ function createMockPool(store: Store) {
     }
 
     // ── base writes ─────────────────────────────────────────────────────────────
+    // B3 positive control for the plugin-system-base reservation: a create that is NOT reserved
+    // reaches this insert and is recorded as a write.
+    if (/^\s*INSERT\s+INTO\s+meta_bases\b/i.test(sql)) {
+      store.writes.push('base.insert')
+      return {
+        rows: [{ id: p(0), name: p(1), icon: null, color: null, owner_id: p(4), workspace_id: null }],
+        rowCount: 1,
+      }
+    }
     if (/^\s*UPDATE\s+meta_bases\s+SET\s+name\s*=/i.test(sql)) {
       store.writes.push('base.name')
       if (store.base.id !== p(0)) return { rows: [], rowCount: 0 }
@@ -296,6 +306,43 @@ describe('F21 — sheet and base display rename', () => {
       }
       expect(store.writes).toEqual([])
       expect(store.configRevisions).toEqual([])
+    })
+  })
+
+  // B3: a plugin system base (`base_<plugin>_...`) is created by its plugin through ensureSystemBase,
+  // which fails closed on a pre-existing OWNED row — so a caller-chosen id of that shape on POST /bases
+  // would let any multitable:write holder squat the plugin's derived id and wedge its ensure into a
+  // permanent 409. Same precedent as the e-learning projection identities above. Mutation M7 (delete
+  // the guard line in POST /bases) reds this case.
+  describe('plugin system base identities stay reserved', () => {
+    it('refuses a caller-chosen plugin-shaped base id with zero writes, even for an admin', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+      const derivedShape = `base_integration-core_sp_${'a'.repeat(24)}`
+      const responses = [
+        await on(app).post('/api/multitable/bases').send({ id: derivedShape, name: 'Squat' }),
+        await on(app).post('/api/multitable/bases').send({ id: 'base_attendance_catalog', name: 'Squat' }),
+      ]
+      for (const response of responses) {
+        expect(response.status).toBe(403)
+        expect(response.body).toEqual({
+          ok: false,
+          error: { code: 'FORBIDDEN', message: PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE },
+        })
+      }
+      expect(store.writes).toEqual([])
+      expect(store.configRevisions).toEqual([])
+    })
+
+    it('positive control: a create without a caller-chosen id still reaches the insert', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+      const response = await on(app).post('/api/multitable/bases').send({ name: 'Fine' })
+      expect(response.status).toBe(201)
+      expect(response.body.ok).toBe(true)
+      // Server-minted ids are `base_<uuid>` — no second `_`, so they can never match the reservation.
+      expect(response.body.data.base.id).toMatch(/^base_[0-9a-f-]{36}$/)
+      expect(store.writes).toEqual(['base.insert'])
     })
   })
 

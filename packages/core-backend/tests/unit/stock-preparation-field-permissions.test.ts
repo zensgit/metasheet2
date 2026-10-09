@@ -45,6 +45,7 @@ import {
   stockPreparationFieldPermissionCreatedBy,
   type StockPreparationFieldPermissionsPool,
 } from '../../src/services/stock-preparation-field-permissions'
+import { SHEET_ROW_LOCK_LIVENESS_SQL } from '../../src/multitable/sheet-liveness'
 
 // ── The 备料 scenario (the real column shape this port exists for) ────────────────────────────────
 const SHEET = 'sheet_beiliao'
@@ -93,6 +94,12 @@ type Captured = { sql: string; params: unknown[] }
 
 interface FakePoolOptions {
   sheetIds?: string[]
+  /**
+   * Sheets whose `meta_sheets` row is PRESENT but soft-deleted (#5938). A soft delete is an UPDATE,
+   * not a DELETE: the row stays, so an existence-only check ("did I get a row back?") waves it
+   * through. Listing an id here reproduces exactly that — the row is returned, with `deleted_at` set.
+   */
+  softDeletedSheetIds?: string[]
   fieldIdsBySheet?: Record<string, string[]>
   roleIds?: string[]
   /**
@@ -116,6 +123,8 @@ function createFakePool(options: FakePoolOptions = {}): {
   transactions: number
 } {
   const sheetIds = new Set(options.sheetIds ?? [SHEET])
+  const softDeletedSheetIds = new Set(options.softDeletedSheetIds ?? [])
+  for (const id of softDeletedSheetIds) sheetIds.add(id)
   const fieldIdsBySheet = options.fieldIdsBySheet ?? { [SHEET]: ALL_FIELDS }
   const roleIds = new Set(options.roleIds ?? ALL_ROLES)
   const calls: Captured[] = []
@@ -125,7 +134,9 @@ function createFakePool(options: FakePoolOptions = {}): {
     calls.push({ sql, params })
     if (sql.includes('FROM meta_sheets')) {
       const id = String(params[0])
-      return { rows: sheetIds.has(id) ? [{ id }] : [] }
+      if (!sheetIds.has(id)) return { rows: [] }
+      // The row a soft delete leaves behind: PRESENT, with `deleted_at` set.
+      return { rows: [{ id, deleted_at: softDeletedSheetIds.has(id) ? '2026-09-19T10:00:00.000Z' : null }] }
     }
     if (sql.includes('FROM meta_fields')) {
       const sheetId = String(params[0])
@@ -281,7 +292,44 @@ describe('applyRoleWriteScopes — writes one role-scoped, read-only, provenance
       sheetId: SHEET,
       entries: [{ fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE }],
     })
-    expect(fake.calls[0].sql).toBe('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE')
+    // #5938: ONE statement, and it is the SAME one the routes take — the lock AND the `deleted_at`
+    // re-read. Pinned against the exported constant rather than a copy of its text, so a rewording
+    // moves this assertion with the statement instead of quietly pinning a dead string.
+    expect(fake.calls[0].sql).toBe(SHEET_ROW_LOCK_LIVENESS_SQL)
+    expect(SHEET_ROW_LOCK_LIVENESS_SQL).toContain('FOR UPDATE')
+    expect(SHEET_ROW_LOCK_LIVENESS_SQL).toContain('deleted_at')
+  })
+
+  it('#5938: a soft-deleted sheet is refused under the lock — no write reaches a dead sheet', async () => {
+    // The row EXISTS (soft delete is an UPDATE). The pre-fix check asked only `rows.length === 0`,
+    // so this call sailed through and wrote `field_permissions` rows onto a sheet that is gone —
+    // rows that outlive it and would come back with a restore.
+    const fake = createFakePool({ softDeletedSheetIds: [SHEET] })
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+    const caught = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [{ fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE }],
+    }).catch((e: unknown) => e)
+    expect(caught).toBeInstanceOf(StockPreparationFieldPermissionsError)
+    expect((caught as StockPreparationFieldPermissionsError).reason).toBe('SHEET_NOT_FOUND')
+    // The refusal happens on the FIRST statement: nothing after the lock ran, and nothing was written.
+    expect(fake.calls).toHaveLength(1)
+    expect(fake.calls[0].sql).toBe(SHEET_ROW_LOCK_LIVENESS_SQL)
+    expect(fake.inserts).toHaveLength(0)
+  })
+
+  it('#5938: deleted and absent are the SAME refusal — the tightening is not an existence oracle', async () => {
+    const service = (pool: StockPreparationFieldPermissionsPool) =>
+      new StockPreparationFieldPermissionsService({ pool })
+    const entries = [{ fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE }]
+    const deleted = await service(createFakePool({ softDeletedSheetIds: [SHEET] }).pool)
+      .applyRoleWriteScopes({ sheetId: SHEET, entries }).catch((e: unknown) => e)
+    const absent = await service(createFakePool({ sheetIds: [] }).pool)
+      .applyRoleWriteScopes({ sheetId: SHEET, entries }).catch((e: unknown) => e)
+    expect((deleted as StockPreparationFieldPermissionsError).reason)
+      .toBe((absent as StockPreparationFieldPermissionsError).reason)
+    expect((deleted as StockPreparationFieldPermissionsError).reason).toBe('SHEET_NOT_FOUND')
+    expect((deleted as Error).message).toBe((absent as Error).message)
   })
 
   it('an empty entry list is a documented no-op — no transaction, no write', async () => {
@@ -1167,7 +1215,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     //     A DELETE appearing here — or a fourth kind of read — reds this.
     const canonical = fake.calls.map((call) => call.sql.replace(/\s+/g, ' ').trim())
     expect(canonical).toEqual([
-      'SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE',
+      SHEET_ROW_LOCK_LIVENESS_SQL,
       'SELECT id FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
       'SELECT id FROM roles WHERE id = ANY($1::text[])',
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
@@ -1876,7 +1924,10 @@ describe('7-RC7. falsy reconcile is absent, not malformed', () => {
         // fake below is where the witness is actually read.
         skippedUnattributed: [],
       })
-      expect(fake.calls.filter((call) => /DELETE/i.test(call.sql))).toHaveLength(0)
+      // `\bDELETE\s+FROM\b`, not a bare `DELETE`: the liveness re-check's `SELECT deleted_at …`
+      // contains the substring "delete" and would otherwise be counted as a retirement statement
+      // (#5938). The claim here is about DELETE STATEMENTS, so the matcher says so.
+      expect(fake.calls.filter((call) => /\bDELETE\s+FROM\b/i.test(call.sql))).toHaveLength(0)
       // …and the additive path issues no classification SELECT either — the header's
       // "no statement of any kind beyond the upserts" is a count, not a claim.
       expect(fake.calls.filter((call) => /FROM field_permissions/i.test(call.sql))).toHaveLength(0)

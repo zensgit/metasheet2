@@ -4,7 +4,7 @@
       class="approval-detail__header"
       :title="headerTitle"
       back
-      back-label="返回列表"
+      :back-label="t.backToList"
       @back="goBack"
     >
       <template #actions>
@@ -18,7 +18,7 @@
           data-testid="approval-copy-summary-button"
           @click="handleCopySummary"
         >
-          复制摘要
+          {{ t.copySummary }}
         </el-button>
         <el-button
           v-if="approval"
@@ -27,7 +27,7 @@
           data-testid="approval-print-button"
           @click="handlePrint"
         >
-          打印
+          {{ t.print }}
         </el-button>
         <!-- G-B2-10: appears only after a successful approve/reject AND with another pending
              item available in the store list (deep-link entries with no list render nothing). -->
@@ -38,11 +38,11 @@
           data-testid="approval-next-pending"
           @click="goNextPending"
         >
-          下一条 →
+          {{ t.nextPending }}
         </el-button>
       </template>
       <template v-if="approval" #meta>
-        <StatusTag domain="approvalInstance" :status="approval.status" force-locale="zh" />
+        <StatusTag v-bind="approvalStatusTagProps(approval)" />
         <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
         <el-tag
           v-if="approval.status === 'pending'"
@@ -51,7 +51,7 @@
           effect="plain"
           data-testid="approval-wait-chip"
         >
-          已等待 {{ waitChipLabel }}
+          {{ waitingPhrase(waitChipLabel, isZh) }}
         </el-tag>
         <el-tag
           v-if="isInParallelRegion"
@@ -60,7 +60,7 @@
           class="approval-detail__parallel-badge"
           effect="light"
         >
-          并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
+          {{ t.parallelInProgress }} · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
         </el-tag>
         <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
         <el-tag
@@ -70,7 +70,7 @@
           effect="light"
           data-testid="approval-my-turn-badge"
         >
-          等待你处理
+          {{ t.myTurn }}
         </el-tag>
       </template>
     </PageHeader>
@@ -87,7 +87,7 @@
          which the latch state never is. -->
     <el-alert
       v-if="store.error || displayedInstanceLoadFailed"
-      :title="store.error ?? DETAIL_RELOAD_REQUIRED_MESSAGE"
+      :title="store.error ?? t.reloadRequired"
       type="error"
       show-icon
       :closable="!displayedInstanceLoadFailed"
@@ -96,7 +96,7 @@
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link data-testid="approval-detail-retry" @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link data-testid="approval-detail-retry" @click="retryLoad">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -117,40 +117,40 @@
       <AsyncStateBlock
         v-else-if="!approval"
         state="empty"
-        title="未找到该审批"
-        hint="该审批可能已被删除、链接有误或暂时无法加载"
+        :title="t.notFoundTitle"
+        :hint="t.notFoundHint"
         data-testid="detail-not-found"
       >
         <template #action>
           <el-button type="primary" data-testid="approval-not-found-retry" @click="retryLoad">
-            重新加载
+            {{ t.reload }}
           </el-button>
-          <el-button data-testid="approval-not-found-back" @click="goBack">返回列表</el-button>
+          <el-button data-testid="approval-not-found-back" @click="goBack">{{ t.backToList }}</el-button>
         </template>
       </AsyncStateBlock>
       <div v-if="approval" class="approval-detail__body">
         <!-- Left: form snapshot -->
         <div ref="formSectionRef" class="approval-detail__form" data-testid="approval-detail-form-section">
-          <h2>表单信息</h2>
+          <h2>{{ t.formInfo }}</h2>
           <div class="approval-detail__meta">
             <div class="approval-detail__meta-item">
-              <span class="approval-detail__label">审批编号</span>
+              <span class="approval-detail__label">{{ t.metaRequestNo }}</span>
               <span>{{ approval.requestNo ?? '-' }}</span>
             </div>
             <div class="approval-detail__meta-item">
-              <span class="approval-detail__label">发起人</span>
+              <span class="approval-detail__label">{{ t.metaRequester }}</span>
               <span>{{ approval.requester?.name ?? '-' }}</span>
             </div>
             <div class="approval-detail__meta-item">
-              <span class="approval-detail__label">部门</span>
+              <span class="approval-detail__label">{{ t.metaDepartment }}</span>
               <span>{{ approval.requester?.department ?? '-' }}</span>
             </div>
             <div class="approval-detail__meta-item">
-              <span class="approval-detail__label">发起时间</span>
+              <span class="approval-detail__label">{{ t.metaCreatedAt }}</span>
               <span>{{ formatDate(approval.createdAt) }}</span>
             </div>
             <div class="approval-detail__meta-item">
-              <span class="approval-detail__label">进度</span>
+              <span class="approval-detail__label">{{ t.metaProgress }}</span>
               <span>{{ approval.currentStep ?? '-' }} / {{ approval.totalSteps ?? '-' }}</span>
             </div>
           </div>
@@ -185,7 +185,7 @@
               <span class="approval-detail__label">{{ group.label }}</span>
               <ul class="approval-detail__attachments">
                 <li v-for="ref in group.refs" :key="ref.id">
-                  <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                  <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">{{ t.attachmentDeleted }}</span>
                   <template v-else>
                     <a
                       v-if="ref.downloadUrl"
@@ -193,7 +193,7 @@
                       data-testid="approval-attachment-download"
                       @click.prevent="handleAttachmentDownload(ref)"
                     >{{ ref.fileName }}</a>
-                    <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                    <span v-else class="approval-detail__attachment-unavailable">{{ t.attachmentUnavailable }}</span>
                     <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
                       {{ formatAttachmentSize(ref.sizeBytes) }}
                     </span>
@@ -228,7 +228,7 @@
               </el-table>
             </div>
           </div>
-          <el-empty v-else description="暂无表单数据" :image-size="80" />
+          <el-empty v-else :description="t.noFormData" :image-size="80" />
         </div>
 
         <!-- Right: history timeline -->
@@ -241,7 +241,7 @@
             v-if="!isMobileLayout"
             class="approval-detail__detail-tabs"
             data-testid="approval-detail-tabs"
-            aria-label="审批详情分区导航"
+            :aria-label="t.sectionNav"
           >
             <button
               type="button"
@@ -250,7 +250,7 @@
               data-testid="approval-detail-tab-info"
               @click="scrollToDetailSection('form')"
             >
-              审批详情
+              {{ t.tabInfo }}
             </button>
             <button
               type="button"
@@ -259,7 +259,7 @@
               data-testid="approval-detail-tab-record"
               @click="scrollToDetailSection('record')"
             >
-              审批记录
+              {{ t.tabRecord }}
             </button>
             <button
               type="button"
@@ -268,10 +268,10 @@
               data-testid="approval-detail-tab-comments"
               @click="scrollToDetailSection('comments')"
             >
-              全文评论
+              {{ t.tabComments }}
             </button>
           </nav>
-          <h2>审批流程</h2>
+          <h2>{{ t.flow }}</h2>
           <!-- UI-6: 审批记录 view toggle — timeline (default, byte-for-byte the pre-existing
                markup below) vs a compact audit-derived table projection. Both read the SAME
                already-fetched `store.history` array; switching never fetches or dispatches. -->
@@ -287,7 +287,7 @@
               data-testid="approval-detail-record-view-timeline"
               @click="recordView = 'timeline'"
             >
-              时间线
+              {{ t.viewTimeline }}
             </button>
             <button
               type="button"
@@ -296,38 +296,38 @@
               data-testid="approval-detail-record-view-table"
               @click="recordView = 'table'"
             >
-              表格
+              {{ t.viewTable }}
             </button>
           </div>
           <div v-if="recordView === 'table' && !isMobileLayout && store.history.length" class="approval-detail__record-table" data-testid="approval-detail-record-table">
             <el-table :data="recordTableRows" border size="small">
-              <el-table-column label="节点名称">
+              <el-table-column :label="t.colNode">
                 <template #default="{ row }">{{ row.nodeName }}</template>
               </el-table-column>
-              <el-table-column label="审批人">
+              <el-table-column :label="t.colApprover">
                 <template #default="{ row }">{{ row.actorName }}</template>
               </el-table-column>
-              <el-table-column label="审批结果/时间">
+              <el-table-column :label="t.colResult">
                 <template #default="{ row }">
                   <div class="approval-detail__record-result">
                     <span>{{ row.resultLabel }}</span>
                     <span v-if="row.timestamp" class="approval-detail__record-time">{{ formatDate(row.timestamp) }}</span>
                   </div>
                   <div v-if="hasRecordTableBadgeMetadata(row.metadata, row.action)" class="approval-detail__timeline-meta">
-                    <span v-if="row.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                    <span v-if="row.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">{{ t.autoApproved }}</span>
                     <span v-if="row.metadata?.approvalMode" class="approval-detail__meta-badge">
-                      审批模式: {{ approvalModeLabel(row.metadata.approvalMode as string) }}
+                      {{ approvalModeText(row.metadata.approvalMode as string) }}
                     </span>
-                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
-                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.allApprovedComplete }}</span>
+                    <span v-if="row.metadata?.aggregateComplete && row.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.anyApprovedComplete }}</span>
                     <span v-if="cancelledAssigneesLabel(row.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
                       {{ cancelledAssigneesLabel(row.metadata) }}
                     </span>
                     <span v-if="row.action === 'sign' && row.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
-                      （已被 {{ row.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                      {{ overriddenByText(row.metadata?.aggregateCancelledBy) }}
                     </span>
                     <span v-if="row.action === 'return' && row.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
-                      退回至: {{ nodeLabel(row.metadata.targetNodeKey as string) }}
+                      {{ returnedToText(nodeLabel(row.metadata.targetNodeKey as string)) }}
                     </span>
                   </div>
                 </template>
@@ -349,7 +349,7 @@
                     {{ group.label }}
                   </span>
                   <span class="approval-detail__timeline-group-count">
-                    {{ group.items.length }} 条
+                    {{ groupCountText(group.items.length) }}
                   </span>
                 </div>
                 <el-timeline>
@@ -365,7 +365,7 @@
                   >
                     <div class="approval-detail__timeline-content">
                       <div class="approval-detail__timeline-header">
-                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ historyActorName(item) }}</strong>
                         <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                           {{ actionLabel(item.action, item.metadata) }}
                         </el-tag>
@@ -380,7 +380,7 @@
                         data-testid="approval-timeline-process-attachments"
                       >
                         <li v-for="ref in processAttachmentRefsForHistoryItem(item)" :key="ref.id">
-                          <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                          <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">{{ t.attachmentDeleted }}</span>
                           <template v-else>
                             <a
                               v-if="ref.downloadUrl"
@@ -388,7 +388,7 @@
                               data-testid="approval-timeline-attachment-download"
                               @click.prevent="handleAttachmentDownload(ref)"
                             >{{ ref.fileName }}</a>
-                            <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                            <span v-else class="approval-detail__attachment-unavailable">{{ t.attachmentUnavailable }}</span>
                             <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
                               {{ formatAttachmentSize(ref.sizeBytes) }}
                             </span>
@@ -396,23 +396,23 @@
                         </li>
                       </ul>
                       <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
-                        <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                        <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">{{ t.autoApproved }}</span>
                         <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
-                          审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
+                          {{ approvalModeText(item.metadata.approvalMode as string) }}
                         </span>
-                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
-                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.allApprovedComplete }}</span>
+                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.anyApprovedComplete }}</span>
                         <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
                           {{ cancelledAssigneesLabel(item.metadata) }}
                         </span>
                         <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
-                          （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                          {{ overriddenByText(item.metadata?.aggregateCancelledBy) }}
                         </span>
                         <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
-                          退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
+                          {{ returnedToText(nodeLabel(item.metadata.targetNodeKey as string)) }}
                         </span>
                         <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                          节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
+                          {{ nodeText(nodeLabel(item.metadata.nodeKey as string)) }}
                         </span>
                       </div>
                     </div>
@@ -433,7 +433,7 @@
               >
                 <div class="approval-detail__timeline-content">
                   <div class="approval-detail__timeline-header">
-                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ historyActorName(item) }}</strong>
                     <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                       {{ actionLabel(item.action, item.metadata) }}
                     </el-tag>
@@ -448,7 +448,7 @@
                     data-testid="approval-timeline-process-attachments"
                   >
                     <li v-for="ref in processAttachmentRefsForHistoryItem(item)" :key="ref.id">
-                      <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                      <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">{{ t.attachmentDeleted }}</span>
                       <template v-else>
                         <a
                           v-if="ref.downloadUrl"
@@ -456,7 +456,7 @@
                           data-testid="approval-timeline-attachment-download"
                           @click.prevent="handleAttachmentDownload(ref)"
                         >{{ ref.fileName }}</a>
-                        <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                        <span v-else class="approval-detail__attachment-unavailable">{{ t.attachmentUnavailable }}</span>
                         <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
                           {{ formatAttachmentSize(ref.sizeBytes) }}
                         </span>
@@ -464,30 +464,30 @@
                     </li>
                   </ul>
                   <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
-                    <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                    <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">{{ t.autoApproved }}</span>
                     <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
-                      审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
+                      {{ approvalModeText(item.metadata.approvalMode as string) }}
                     </span>
-                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
-                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.allApprovedComplete }}</span>
+                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">{{ t.anyApprovedComplete }}</span>
                     <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
                       {{ cancelledAssigneesLabel(item.metadata) }}
                     </span>
                     <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
-                      （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                      {{ overriddenByText(item.metadata?.aggregateCancelledBy) }}
                     </span>
                     <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
-                      退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
+                      {{ returnedToText(nodeLabel(item.metadata.targetNodeKey as string)) }}
                     </span>
                     <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                      节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
+                      {{ nodeText(nodeLabel(item.metadata.nodeKey as string)) }}
                     </span>
                   </div>
                 </div>
               </el-timeline-item>
             </el-timeline>
           </template>
-          <el-empty v-else description="暂无审批历史" :image-size="80" />
+          <el-empty v-else :description="t.noHistory" :image-size="80" />
 
           <!-- UX B2-08: current handler + upcoming nodes — synthesized (NOT real history rows),
                appended at the END of the timeline so a requester can see who it's stuck with and
@@ -507,8 +507,11 @@
               data-testid="approval-current-handler-item"
             >
               <span class="approval-detail__timeline-upcoming-dot" />
-              <span class="approval-detail__timeline-upcoming-text">
-                当前处理人：{{ entry.label }} · 已等待 {{ entry.wait }}
+              <span v-if="entry.seatNamesWithheld" class="approval-detail__timeline-upcoming-text">
+                {{ entry.label }} · {{ waitingPhrase(entry.wait, isZh) }}
+              </span>
+              <span v-else class="approval-detail__timeline-upcoming-text">
+                {{ currentHandlerText(entry.label) }} · {{ waitingPhrase(entry.wait, isZh) }}
               </span>
             </div>
             <div
@@ -551,7 +554,7 @@
              into a composable/`comments` ref nothing renders — the race is structurally
              unreachable rather than patched with a generation counter. -->
         <div v-if="!isMobileLayout" ref="commentsSectionRef" class="approval-detail__comments" data-testid="approval-detail-comments-section">
-          <h2>全文评论</h2>
+          <h2>{{ t.tabComments }}</h2>
           <ApprovalCommentsPanel
             v-if="commentsActivated"
             :key="(route.params.id as string)"
@@ -570,24 +573,24 @@
                (and a detail/history refresh no longer spins the whole bar). -->
           <div class="approval-detail__actions-primary">
             <el-button
-              v-if="canDecide"
+              v-if="canDecidePrimary"
               type="success"
               :loading="inFlightAction === 'approve'"
               :disabled="!actionsEnabled"
               data-testid="approval-approve-button"
               @click="openActionDialog('approve')"
             >
-              通过
+              {{ t.approve }}
             </el-button>
             <el-button
-              v-if="canDecide"
+              v-if="canDecidePrimary"
               type="danger"
               :loading="inFlightAction === 'reject'"
               :disabled="!actionsEnabled"
               data-testid="approval-reject-button"
               @click="openActionDialog('reject')"
             >
-              驳回
+              {{ t.reject }}
             </el-button>
           </div>
           <div class="approval-detail__actions-secondary">
@@ -604,7 +607,7 @@
               data-testid="approval-return-button"
               @click="openReturnDialog"
             >
-              退回
+              {{ t.return }}
             </el-button>
             <el-button
               v-if="canDecide && !isMobileLayout && allowTransfer"
@@ -614,7 +617,7 @@
               data-testid="approval-transfer-button"
               @click="openTransferDialog"
             >
-              转交
+              {{ t.transfer }}
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
@@ -626,7 +629,7 @@
               data-testid="approval-add-sign-button"
               @click="openAddSignDialog"
             >
-              加签
+              {{ t.addSign }}
             </el-button>
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
@@ -639,7 +642,7 @@
               data-testid="approval-reduce-sign-button"
               @click="openReduceSignDialog"
             >
-              减签
+              {{ t.reduceSign }}
             </el-button>
             <!-- Wave 2 WP3 slice 1: 催办. Visible only for the requester on
                  a pending instance; server-side rate-limits to once per hour
@@ -653,7 +656,7 @@
               data-testid="approval-remind-button"
               @click="handleRemind"
             >
-              <el-icon class="ms-mr-4"><Bell /></el-icon>催一下
+              <el-icon class="ms-mr-4"><Bell /></el-icon>{{ t.remind }}
             </el-button>
             <!-- B3-13 撤回策略感知: the instance policy snapshot's `allowRevoke` (frozen from the
                  published runtime graph at creation; enforced fail-closed server-side with a 409
@@ -663,9 +666,9 @@
                  mirroring the backend default-deny for instances without a runtime graph). -->
             <el-popconfirm
               v-if="isRequester && !isMobileLayout && allowRevoke"
-              title="确认撤回此审批？"
-              confirm-button-text="确认"
-              cancel-button-text="取消"
+              :title="t.revokeConfirmTitle"
+              :confirm-button-text="t.confirm"
+              :cancel-button-text="t.cancel"
               @confirm="handleRevoke"
             >
               <template #reference>
@@ -675,7 +678,7 @@
                   :disabled="!actionsEnabled"
                   data-testid="approval-revoke-button"
                 >
-                  撤回
+                  {{ t.revoke }}
                 </el-button>
               </template>
             </el-popconfirm>
@@ -686,13 +689,13 @@
               data-testid="approval-comment-button"
               @click="openCommentDialog"
             >
-              评论
+              {{ t.comment }}
             </el-button>
           </div>
         </template>
         <template v-else>
           <el-alert
-            title="该审批已结束"
+            :title="t.ended"
             type="info"
             show-icon
             :closable="false"
@@ -706,7 +709,7 @@
             data-testid="approval-resubmit-button"
             @click="handleResubmit"
           >
-            再次提交
+            {{ t.resubmit }}
           </el-button>
         </template>
       </div>
@@ -761,7 +764,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="actionDialogVisible = false">取消</el-button>
+        <el-button @click="actionDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           :type="currentAction === 'approve' ? 'success' : 'danger'"
           :loading="inFlightAction === currentAction"
@@ -769,7 +772,7 @@
           data-testid="approval-action-dialog-confirm"
           @click="submitAction"
         >
-          确认
+          {{ t.confirm }}
         </el-button>
       </template>
     </el-dialog>
@@ -777,9 +780,9 @@
     <!-- Transfer dialog -->
     <el-dialog
       v-model="transferDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTitle"
+      :title="grammar.transfer.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTestId"
+      :data-testid="grammar.transfer.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above — the
@@ -795,26 +798,26 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item label="转交给">
+        <el-form-item :label="t.transferTo">
           <ApprovalUserPicker
             :model-value="transferUserId || null"
-            placeholder="搜索并选择转交对象"
-            aria-label="转交给"
+            :placeholder="t.transferPickerPlaceholder"
+            :aria-label="t.transferTo"
             @update:model-value="transferUserId = $event ?? ''"
           />
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel">
+        <el-form-item :label="grammar.transfer.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel"
+            :rows="grammar.transfer.commentRows"
+            :placeholder="grammar.transfer.commentPlaceholder"
+            :aria-label="grammar.transfer.commentLabel"
           />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="transferDialogVisible = false">取消</el-button>
+        <el-button @click="transferDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="warning"
           :loading="inFlightAction === 'transfer'"
@@ -822,7 +825,7 @@
           data-testid="approval-transfer-submit"
           @click="submitTransfer"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.transfer.confirmLabel }}
+          {{ grammar.transfer.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -830,9 +833,9 @@
     <!-- P1-B 加签 dialog -->
     <el-dialog
       v-model="addSignDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTitle"
+      :title="grammar.add_sign.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTestId"
+      :data-testid="grammar.add_sign.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -846,7 +849,7 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item label="加签人">
+        <el-form-item :label="t.addSignUsers">
           <!-- P1-B 加签 target picker: ApprovalUserPicker is single-select by design (v-model one
                id), so multi-target add-sign uses a REPEATED-PICK pattern instead of a multi-select
                dropdown — pick one, it lands as a removable chip below, the picker resets for the
@@ -859,39 +862,69 @@
               class="approval-detail__add-sign-chip"
               @close="removeAddSignUser(uid)"
             >
-              {{ addSignUserLabels[uid] || `成员 ${chipIndex + 1}` }}
+              {{ addSignUserLabels[uid] || memberOrdinal(chipIndex + 1) }}
             </el-tag>
           </div>
           <ApprovalUserPicker
             :model-value="addSignPickerValue"
-            placeholder="搜索并添加加签人"
-            aria-label="搜索并添加加签人"
+            :placeholder="t.addSignPickerPlaceholder"
+            :aria-label="t.addSignPickerPlaceholder"
             @select="onAddSignUserSelected"
           />
         </el-form-item>
-        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio is RETIRED. Its
+        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio was RETIRED. Its
              `前加签` arm claimed corpus C-3 semantics (insert a node BEFORE this one and come back
              to it) that no shipped path implements — §0.1: both modes seat co-signers at the CURRENT
              node in the SAME epoch, so outside a parallel region the arms were byte-identical (now
              pinned by a real-DB test). A radio whose arms cannot be told apart is a fake switch, so
-             the arm is removed rather than relabelled and the surface states what add-sign really
-             does. The wire contract is unchanged: this client sends `'parallel'`, and the server
-             still accepts `'before'` from any other client. -->
-        <el-form-item label="加签方式">
-          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
+             that arm stays gone. The server still accepts `'before'` from any other client.
+             F4-S1 (Lock-5 L5-B, OD-L5-4(b) + owner disposition (1)): the choice returns with TWO
+             arms that really differ — 并加签 (`'parallel'`, the default) and 后加签 (`'after'`,
+             a fresh round at the SAME node after this seat's approval). Each arm carries the copy
+             that states what the server does; neither claims corpus 后加签 (当前节点自动通过并流转到
+             新增节点). O-8 / F8-1: all of it follows the shell locale — the label is `t.addSignMode`,
+             the 并加签 hint `addSignModeHint`, the rest `addSignCopy` (addSignHonestyCopy.ts). -->
+        <el-form-item :label="t.addSignMode">
+          <el-radio-group v-model="addSignPlacement" data-testid="approval-add-sign-placement">
+            <el-radio value="parallel" data-testid="approval-add-sign-placement-parallel">{{ addSignCopy.parallelLabel }}</el-radio>
+            <el-radio value="after" data-testid="approval-add-sign-placement-after">{{ addSignCopy.afterLabel }}</el-radio>
+          </el-radio-group>
+          <span
+            v-if="addSignPlacement === 'after'"
+            class="approval-detail__hint"
+            data-testid="approval-add-sign-after-hint"
+          >{{ addSignCopy.afterHint }}</span>
+          <span
+            v-else
+            class="approval-detail__hint"
+            data-testid="approval-add-sign-mode-hint"
+          >{{ addSignModeHint(isZh) }}</span>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel">
+        <!-- OD-L5-5(a) / gate B-5: only 后加签 with two or more addees needs an aggregation for the
+             appended round; a single addee completes it either way, and 并加签 inherits the node's
+             own mode (today's behaviour), so the control renders ONLY when it governs something. -->
+        <el-form-item
+          v-if="addSignAggregationRequired"
+          :label="addSignCopy.aggregationLabel"
+        >
+          <el-radio-group v-model="addSignAggregation" data-testid="approval-add-sign-aggregation">
+            <el-radio value="all" data-testid="approval-add-sign-aggregation-all">{{ addSignCopy.aggregationAll }}</el-radio>
+            <el-radio value="any" data-testid="approval-add-sign-aggregation-any">{{ addSignCopy.aggregationAny }}</el-radio>
+          </el-radio-group>
+          <span class="approval-detail__hint" data-testid="approval-add-sign-aggregation-hint">{{ addSignCopy.aggregationHint }}</span>
+        </el-form-item>
+        <el-form-item :label="grammar.add_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel"
+            :rows="grammar.add_sign.commentRows"
+            :placeholder="grammar.add_sign.commentPlaceholder"
+            :aria-label="grammar.add_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="addSignDialogVisible = false">取消</el-button>
+        <el-button @click="addSignDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="primary"
           :loading="inFlightAction === 'add_sign'"
@@ -899,7 +932,7 @@
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.confirmLabel }}
+          {{ grammar.add_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -907,9 +940,9 @@
     <!-- P1-B 减签 dialog -->
     <el-dialog
       v-model="reduceSignDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTitle"
+      :title="grammar.reduce_sign.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTestId"
+      :data-testid="grammar.reduce_sign.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -923,12 +956,12 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item label="减签人">
+        <el-form-item :label="t.reduceSignUser">
           <el-select
             v-model="reduceSignUserId"
             filterable
-            placeholder="选择要移除的加签人"
-            aria-label="选择要移除的加签人"
+            :placeholder="t.reduceSignPlaceholder"
+            :aria-label="t.reduceSignPlaceholder"
             class="ms-w-100pct"
             data-testid="approval-reduce-sign-user"
           >
@@ -941,18 +974,18 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel">
+        <el-form-item :label="grammar.reduce_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel"
+            :rows="grammar.reduce_sign.commentRows"
+            :placeholder="grammar.reduce_sign.commentPlaceholder"
+            :aria-label="grammar.reduce_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="reduceSignDialogVisible = false">取消</el-button>
+        <el-button @click="reduceSignDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="primary"
           :loading="inFlightAction === 'reduce_sign'"
@@ -960,7 +993,7 @@
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.confirmLabel }}
+          {{ grammar.reduce_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -968,9 +1001,9 @@
     <!-- Comment dialog -->
     <el-dialog
       v-model="commentDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTitle"
+      :title="grammar.comment.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTestId"
+      :data-testid="grammar.comment.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- B1-04: same dialog-scoped failure message as the 通过/驳回 dialog above. -->
@@ -984,7 +1017,7 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel">
+        <el-form-item :label="grammar.comment.commentLabel">
           <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
           <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
             <el-tag
@@ -1001,27 +1034,24 @@
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel"
+            :rows="grammar.comment.commentRows"
+            :placeholder="grammar.comment.commentPlaceholder"
+            :aria-label="grammar.comment.commentLabel"
           />
         </el-form-item>
-        <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND
-             `isMyTurn`, deliberately NOT `canAct` (the coarse `approvals:act` scope grant, which
-             the 评论 button above has no gate on at all and so also renders for requesters/CC
-             recipients). Budgets are server-authoritative and unratified (OD-L9-8) — no
-             client-side count/size cap here.
-             Lock-9 FE fix round (gate P3-1): `isMyTurn` is a narrower, FAIL-CLOSED approximation
-             of the server's seat check, not an exact mirror — the server's `assignmentMatchesActor`
-             also admits `assignment_type === 'role'`; `isMyTurn` (below) matches only
-             `type === 'user'`. A role-seated approver whose upload the server would accept sees no
-             uploader here. No security impact (fails closed) and consistent with the shipped action
-             bar's own `v-if="isMyTurn"` (line ~67, unchanged by this slice) — this is a display gap,
-             not a new capability gap, and correcting the "exact mirror" wording, not the gate choice
-             itself, is what this fix round changed. -->
+        <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND the
+             server-resolved `canAttachProcessEvidence`, deliberately NOT `canAct` (the coarse
+             `approvals:act` scope grant, which the 评论 button above has no gate on at all and so
+             also renders for requesters/CC recipients). Budgets are server-authoritative and
+             unratified (OD-L9-8) — no client-side count/size cap here.
+             The gate used to be the client-side `isMyTurn`, which matches `type === 'user'` seats
+             only while the server's seat check also admits role seats, so a role-seated approver
+             saw no uploader. The server now ships its own answer (see `canAttachProcessEvidence`
+             below); `isMyTurn` is kept for the 「等待你处理」 cue only. The flag conjunct comes
+             first, so with the pipeline OFF nothing here renders whatever the field says. -->
         <el-form-item
-          v-if="attachmentPipelineEnabled && isMyTurn"
-          label="附件"
+          v-if="attachmentPipelineEnabled && canAttachProcessEvidence"
+          :label="t.attachments"
           data-testid="approval-comment-attachment-upload"
         >
           <input
@@ -1035,14 +1065,14 @@
           <ul v-if="commentStagedAttachments.length > 0" class="approval-detail__comment-attachment-list">
             <li v-for="item in commentStagedAttachments" :key="item.id">
               <span>{{ item.name }}</span>
-              <el-button link type="danger" @click="removeCommentAttachment(item.id)">移除</el-button>
+              <el-button link type="danger" @click="removeCommentAttachment(item.id)">{{ t.removeAttachment }}</el-button>
             </li>
           </ul>
-          <span class="approval-detail__comment-attachment-hint">支持 PDF / JPG / PNG / TXT / CSV，单文件 ≤ 20MB</span>
+          <span class="approval-detail__comment-attachment-hint">{{ t.attachmentHint }}</span>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="commentDialogVisible = false">取消</el-button>
+        <el-button @click="commentDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="primary"
           :loading="inFlightAction === 'comment'"
@@ -1050,7 +1080,7 @@
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.comment.confirmLabel }}
+          {{ grammar.comment.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -1058,9 +1088,9 @@
     <!-- Return dialog -->
     <el-dialog
       v-model="returnDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTitle"
+      :title="grammar.return.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTestId"
+      :data-testid="grammar.return.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -1074,11 +1104,11 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item label="退回至节点">
+        <el-form-item :label="t.returnTo">
           <el-select
             v-model="returnTargetNodeKey"
-            placeholder="选择退回目标节点"
-            aria-label="选择退回目标节点"
+            :placeholder="t.returnToPlaceholder"
+            :aria-label="t.returnToPlaceholder"
             class="ms-w-100pct"
           >
             <el-option
@@ -1089,18 +1119,18 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel">
+        <el-form-item :label="grammar.return.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel"
+            :rows="grammar.return.commentRows"
+            :placeholder="grammar.return.commentPlaceholder"
+            :aria-label="grammar.return.commentLabel"
           />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="returnDialogVisible = false">取消</el-button>
+        <el-button @click="returnDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="warning"
           :loading="inFlightAction === 'return'"
@@ -1108,7 +1138,7 @@
           data-testid="approval-return-submit"
           @click="submitReturn"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.return.confirmLabel }}
+          {{ grammar.return.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -1131,20 +1161,41 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, UnifiedApprovalDTO } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
+import {
+  approvalStatusTagProps,
+  canDecideCancelRoundWith,
+  cancelRoundStatusKeyFromApproval,
+  decideCancelRoundFromApproval,
+  isCancelRoundClientRefusal,
+  isCancelRoundSystemActor,
+  isCancelRoundWorkflow,
+} from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import { unknownUserLabel } from '../../approvals/components/approvalPickerLabels'
 import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
+import { useLocale } from '../../composables/useLocale'
+import {
+  APPROVAL_MODE_EN,
+  APPROVAL_MODE_ZH,
+  DETAIL_EN,
+  DETAIL_ZH,
+  HISTORY_ACTION_EN,
+  HISTORY_ACTION_ZH,
+} from './approvalDetailLabels'
 import {
   buildDetailRowsForDisplay,
   buildDisplayFields,
+  collectFormUserIds,
   findDetailFieldInSchema,
+  formatUserFieldValue,
   type DetailDisplayColumn,
   type DetailDisplayTable,
   type DisplayField,
@@ -1166,11 +1217,17 @@ import {
 } from '../../approvals/attachmentUpload'
 import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
-import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
+import {
+  addSignModeHint,
+  addSignPlacementCopy,
+  CLIENT_ADD_SIGN_MODE,
+  type ClientAddSignAggregation,
+  type ClientAddSignPlacement,
+} from '../../approvals/addSignHonestyCopy'
 import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
-import { MEMBER_ACTION_DIALOG_GRAMMAR, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
+import { memberActionDialogGrammar, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
 // S3b: the 全文评论 tab wrapper. This file itself does not import shared/comments directly —
@@ -1182,8 +1239,16 @@ import { resolveStatusDisplay } from '../../utils/statusDomains'
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalStore()
+// O-8 / F8-1: this view follows the shell locale (the module-scope `useLocale()` singleton App.vue
+// and the template center already read).
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? DETAIL_ZH : DETAIL_EN))
+// The five member-action dialogs' copy for the current locale (testids / row counts are shared).
+const grammar = computed(() => memberActionDialogGrammar(isZh.value))
+// F4-S1: the add-sign dialog's placement / after-sign / aggregation copy for the current locale.
+const addSignCopy = computed(() => addSignPlacementCopy(isZh.value))
 const templateStore = useApprovalTemplateStore()
-const { canAct } = useApprovalPermissions()
+const { canAct, permissions: approvalAccess } = useApprovalPermissions()
 const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
 const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
 const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
@@ -1241,7 +1306,7 @@ const attachmentPipelineEnabled = computed(() => productFeatures?.value?.approva
 const approval = computed(() => store.activeApproval)
 // PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
 // the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
-const headerTitle = computed(() => approval.value?.title ?? '审批详情')
+const headerTitle = computed(() => approval.value?.title ?? t.value.pageTitleFallback)
 
 // ---------------------------------------------------------------------------
 // Instance consistency (2026-09-06)
@@ -1296,7 +1361,8 @@ const actionsEnabled = computed(
 // Round 4 (B15): the banner's copy while the refusal is standing but no request has left an error
 // string behind — a same-id reload in flight, or another writer having nulled `store.error`. Fixed,
 // values-free copy: the page must never invent a message the server did not send.
-const DETAIL_RELOAD_REQUIRED_MESSAGE = '该审批的最新内容未能加载，请重新加载后再操作'
+// O-8 / F8-1: the copy itself now lives in approvalDetailLabels.ts (`reloadRequired`), read in the
+// template as `t.reloadRequired` so it follows the shell locale.
 
 /**
  * The id every write verb acts on: the instance actually on screen, or `null` when the page is
@@ -1438,9 +1504,9 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
   if (!hasCreatedRow) {
     rows.push({
       id: '__submit',
-      nodeName: '提交',
+      nodeName: t.value.submitRow,
       actorName: detail.requester?.name ?? '-',
-      resultLabel: '提交',
+      resultLabel: t.value.submitRow,
       timestamp: detail.createdAt ?? null,
       action: null,
       metadata: null,
@@ -1451,7 +1517,7 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
     rows.push({
       id: item.id,
       nodeName: item.metadata?.nodeKey ? nodeLabel(item.metadata.nodeKey as string) : '-',
-      actorName: item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统'),
+      actorName: historyActorName(item),
       resultLabel: actionLabel(item.action, item.metadata),
       timestamp: item.occurredAt ?? null,
       action: item.action,
@@ -1462,9 +1528,9 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
   if (detail.status !== 'pending') {
     rows.push({
       id: '__end',
-      nodeName: '结束',
+      nodeName: t.value.endRow,
       actorName: '-',
-      resultLabel: resolveStatusDisplay('approvalInstance', detail.status, true).label,
+      resultLabel: instanceStatusLabel(detail),
       timestamp: detail.updatedAt ?? null,
       action: null,
       metadata: null,
@@ -1477,7 +1543,7 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
 // B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
 // only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
 // timeline already tell that story). Severity mirrors the list view's warn/urgent bands.
-const waitChipLabel = computed(() => (approval.value ? formatRelativeWait(approval.value.createdAt) : ''))
+const waitChipLabel = computed(() => (approval.value ? formatRelativeWait(approval.value.createdAt, isZh.value) : ''))
 const waitChipType = computed(() => {
   const severity = approval.value ? waitSeverity(approval.value.createdAt) : 'normal'
   if (severity === 'urgent') return 'danger'
@@ -1510,6 +1576,10 @@ const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
 const displayFields = computed<DisplayField[]>(() =>
   buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null, {
     attachmentPipelineEnabled: attachmentPipelineEnabled.value,
+    isZh: isZh.value,
+    // Test report 2026-10-08 T4b: `user` (人员) values render the directory-resolved name (ensured
+    // by the form-user watch below), never the stored id.
+    resolveUserName: getResolvedUserName,
   }),
 )
 
@@ -1571,7 +1641,7 @@ async function handleAttachmentDownload(ref: AttachmentFieldDisplay['refs'][numb
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
   } catch {
-    ElMessage.error('附件下载失败，请稍后重试')
+    ElMessage.error(t.value.attachmentDownloadFailed)
   }
 }
 
@@ -1681,7 +1751,29 @@ const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 // This is a NARROWING of an affordance, never a permission: the 403 remains the authority, and the
 // separate instance-consistency gate (`actionsEnabled`) is untouched and still applies on top.
 const canDecideCurrentNode = computed(() => approval.value?.canDecideCurrentNode !== false)
-const canDecide = computed(() => canAct.value && canDecideCurrentNode.value)
+// 撤销轮(`workflowKey === 'approval.cancel-round'`)— owner 2026-09-29 11:0x 「Attendance-side + OFF
+// flag」: the approver decides through `POST /api/attendance/requests/:id/cancel-round/actions`, which
+// is mounted on `attendance:approve`, NOT through the generic route behind `approvals:act`. So for a
+// cancel round the approve / reject affordance follows the grant that route actually checks, and the
+// other member verbs stay hidden — the lock's §9-9 allowed set refuses transfer / add_sign /
+// reduce_sign / return on a cancel round. The server (seat check, §9-9, grant) remains the authority.
+const isCancelRound = computed(() => isCancelRoundWorkflow(approval.value))
+const canActOnCancelRound = computed(() => canDecideCancelRoundWith(approvalAccess?.value))
+const canDecidePrimary = computed(() =>
+  (isCancelRound.value ? canActOnCancelRound.value : canAct.value) && canDecideCurrentNode.value,
+)
+const canDecide = computed(() => !isCancelRound.value && canAct.value && canDecideCurrentNode.value)
+
+// Process-evidence (过程附件) uploader affordance — the server's answer, not a client mirror. The
+// backend resolves it with the decision door's own seat predicate restricted to the seat-gated door
+// (both detail builders fill it; see `UnifiedApprovalDTO.canAttachProcessEvidence`), so a role seat
+// and a parallel-branch seat are covered and a legacy / `plm:` instance is not.
+//
+// `=== true`, deliberately unlike `canDecideCurrentNode` above: there the prior behaviour (render
+// the bar) was the wider one and absence must not hide it; here an absent field means a backend
+// that cannot say who may attach, and not rendering an optional uploader is the safe side. The
+// upload route's seat check and the bind-time 403 remain the authority either way.
+const canAttachProcessEvidence = computed(() => approval.value?.canAttachProcessEvidence === true)
 
 const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
 const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
@@ -1705,6 +1797,8 @@ const canResubmit = computed(() => {
 
 // B1-01: "等待你处理" cue — the reader holds a still-active user assignment at the current
 // node (or any branch of a parallel region). Mirrors, not replaces, the server-side action gate.
+// A CUE only: it matches user seats and nothing else, so no affordance is gated on it (the
+// process-evidence uploader reads `canAttachProcessEvidence` above instead).
 const isMyTurn = computed(() => {
   const me = currentUserId.value
   const detail = approval.value
@@ -1750,7 +1844,7 @@ const timelineBranchGroups = computed<TimelineGroup[]>(() => {
       order.push(bucketKey)
       buckets.set(bucketKey, {
         key: bucketKey,
-        label: bucketKey === OTHER_KEY ? '其他' : nodeLabel(bucketKey),
+        label: bucketKey === OTHER_KEY ? t.value.otherBucket : nodeLabel(bucketKey),
         items: [],
       })
     }
@@ -1780,6 +1874,8 @@ interface CurrentHandlerEntry {
   assignmentId: string
   label: string
   wait: string
+  /** 撤销轮: the entry carries the V1 word, not a person (撤销锁 §15.6 P-6). */
+  seatNamesWithheld?: boolean
 }
 
 // `assignment.metadata` carries no display name today — only `assigneeId` (see
@@ -1802,7 +1898,7 @@ function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
   const resolved = getResolvedUserName(assignment.assigneeId)
   if (resolved) return resolved
-  return '审批人'
+  return t.value.approverFallback
 }
 
 // One entry per ACTIVE assignment at the current node(s) — every currently-pending handler, not
@@ -1816,16 +1912,29 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
   if (!detail || detail.status !== 'pending') return []
   const keys = new Set(currentActiveNodeKeys.value)
   if (keys.size === 0) return []
-  const wait = formatRelativeWait(detail.updatedAt)
-  return detail.assignments
-    .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
-    .map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
+  const wait = formatRelativeWait(detail.updatedAt, isZh.value)
+  const active = detail.assignments.filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
+  // 撤销轮 — ratified 撤销锁 §15.6 (P-6) seat display boundary, lift conditions not met: the
+  // round's progress names no current approver. One line with the V1 word stands in for the whole
+  // node, whatever its seat count.
+  if (isCancelRound.value) {
+    if (active.length === 0) return []
+    return [{
+      assignmentId: 'cancel-round-pending',
+      label: resolveStatusDisplay('cancelRound', 'cancellation_pending_approval', isZh.value).label,
+      wait,
+      seatNamesWithheld: true,
+    }]
+  }
+  return active.map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
 })
 
 // member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view
 // might need to display a name for — every `assignments` row's `assigneeId` (feeds
 // `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
-// `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below). A single
+// `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below) PLUS (test report
+// 2026-10-08 T4cd) the actor id of every history row that stores only that id as its name (feeds
+// `historyActorName`). A single
 // consolidated `watch` (side effect) rather than one per consumer — they draw from overlapping id
 // universes and Vue de-dupes redundant `ensureUserNamesResolved` calls internally anyway. Never
 // inside a `computed` — mutating the resolver's cache from within a computed that itself reads
@@ -1837,9 +1946,21 @@ watch(
     for (const item of store.history) {
       const cancelled = item.metadata?.aggregateCancelled
       if (Array.isArray(cancelled)) for (const id of cancelled) ids.push(String(id))
+      // T4cd: a history row whose stored actor name is only the id (see historyActorIdToResolve).
+      const unnamedActorId = historyActorIdToResolve(item)
+      if (unnamedActorId) ids.push(unnamedActorId)
     }
     return ids
   },
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
+
+// Test report 2026-10-08 T4b — the member ids held by the form's `user` (人员) values, top-level and
+// 明细 columns, feed the same resolver cache `displayFields` and `formatFieldValue` read from.
+// Kept a watch of its own (side effect, never inside a computed) beside the consolidated one above.
+watch(
+  () => collectFormUserIds(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null),
   (ids) => ensureUserNamesResolved(ids),
   { immediate: true },
 )
@@ -1866,7 +1987,7 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
   if (!currentNodeKey) return []
   const graph = pinnedGraph.value
   if (!graph) return []
-  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null)
+  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null, isZh.value)
 })
 
 const actionDialogVisible = ref(false)
@@ -1972,9 +2093,15 @@ const addSignUserIds = ref<string[]>([])
 // lookup, populated from the picker's richer `select` event).
 const addSignPickerValue = ref<string | null>(null)
 const addSignUserLabels = ref<Record<string, string>>({})
-// Lock-5 B-2: the mode is no longer user-selectable (the retired radio's two arms were
-// byte-identical outside a parallel region). It stays in the SUBMIT PAYLOAD, pinned to the one
-// semantic we implement, so the wire contract is unchanged for the server and for replay.
+// Lock-5 B-2 retired the `前加签` arm (byte-identical to `并加签` outside a parallel region).
+// F4-S1 (L5-B, OD-L5-4(b)) adds the one arm that genuinely differs — `'after'` — so the placement
+// is user-selectable again, defaulting to the shipped `'parallel'` (`CLIENT_ADD_SIGN_MODE`), and
+// the aggregation for the appended round is asked only when it governs something (≥2 addees).
+const addSignPlacement = ref<ClientAddSignPlacement>(CLIENT_ADD_SIGN_MODE)
+const addSignAggregation = ref<ClientAddSignAggregation>('all')
+const addSignAggregationRequired = computed(
+  () => addSignPlacement.value === 'after' && addSignUserIds.value.length >= 2,
+)
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
 
@@ -2016,7 +2143,7 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
     const metaName = assignment.metadata?.assigneeName
     const trimmedMetaName = typeof metaName === 'string' ? metaName.trim() : ''
     const resolvedName = trimmedMetaName || getResolvedUserName(assignment.assigneeId)
-    const label = resolvedName || `成员 ${ordinal}`
+    const label = resolvedName || memberOrdinal(ordinal)
     result.push({ assigneeId: assignment.assigneeId, label, disabled: !resolvedName })
   }
   return result
@@ -2039,7 +2166,7 @@ const returnableNodes = computed(() => {
 })
 
 const actionDialogTitle = computed(() =>
-  currentAction.value === 'approve' ? '审批通过' : '审批驳回',
+  currentAction.value === 'approve' ? t.value.actionDialogApprove : t.value.actionDialogReject,
 )
 
 // B1-04: reject-comment pre-flight. `policy.rejectCommentRequired` defaults to "required" — only
@@ -2064,10 +2191,10 @@ const commentRequiredForAction = computed(() => {
 // Retained name: four template bindings and several specs key on the reject-side meaning.
 const rejectCommentRequired = computed(() => currentAction.value === 'reject' && commentRequiredForAction.value)
 const actionCommentLabel = computed(() => {
-  if (rejectCommentRequired.value) return '驳回原因（必填）'
-  return commentRequiredForAction.value ? '审批意见（必填）' : '审批意见'
+  if (rejectCommentRequired.value) return t.value.rejectReasonRequired
+  return commentRequiredForAction.value ? t.value.opinionRequired : t.value.opinion
 })
-const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? '请填写驳回原因' : '请输入审批意见'))
+const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? t.value.rejectReasonPlaceholder : t.value.opinionPlaceholder))
 const actionConfirmDisabled = computed(() => commentRequiredForAction.value && !actionComment.value.trim())
 
 // B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
@@ -2115,31 +2242,84 @@ function statusTagType(status: string) {
 }
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {
-  if (action === 'approve' && metadata?.autoApproved) return '自动通过'
-  if (action === 'sign' && metadata?.autoCancelled) return '自动失效'
-  const map: Record<string, string> = {
-    created: '发起',
-    approve: '通过',
-    reject: '驳回',
-    transfer: '转交',
-    revoke: '撤回',
-    comment: '评论',
-    return: '退回',
-    sign: '签字',
-    add_sign: '加签',
-    reduce_sign: '减签',
-    cc: '抄送',
-    // Lock-3 §2.1 — a handler submission renders as 办理 in the timeline (never the raw English verb).
-    handle: '办理',
+  if (action === 'approve' && metadata?.autoApproved) return t.value.autoPassed
+  // 撤销锁 P-2 / lock:131: a cancel round the SYSTEM closed writes a `reject` row whose bounded
+  // close-reason token (`cancelRoundCloseReason`, whitelisted onto the history DTO) is what tells it
+  // apart from an approver's 驳回 — render the V5 / V6 word, never 「驳回」.
+  if (action === 'reject' && typeof metadata?.cancelRoundCloseReason === 'string') {
+    const key = cancelRoundStatusKeyFromApproval('rejected', { kind: 'resolved', closeReason: metadata.cancelRoundCloseReason })
+    return resolveStatusDisplay('cancelRound', key, isZh.value).label
   }
+  if (action === 'sign' && metadata?.autoCancelled) return t.value.autoInvalidated
+  // Lock-3 §2.1 — a handler submission renders as 办理 in the timeline (never the raw English verb).
+  // O-8 / F8-1: the verb table lives in approvalDetailLabels.ts (HISTORY_ACTION_ZH / _EN).
+  const map: Record<string, string> = isZh.value ? HISTORY_ACTION_ZH : HISTORY_ACTION_EN
   return map[action] ?? action
 }
 
+type HistoryActorFields = { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }
+
+// Test report 2026-10-08 T4cd — the engine's own actor sentinels. Since the platform branch of
+// `/history` started sending its camelCase fields, the stored actor reaches this view as written:
+// `'system'` with the English name 'System' (cc rows and the any-mode aggregate-cancel `sign`
+// rows), and every `system:`-prefixed sentinel — timeout, departure, cancel round, auto-approval —
+// with the sentinel itself as the name. None of them is a person and none may render verbatim;
+// the prefix rule is the server's own (`isSystemSentinelActor`, ApprovalAssigneeResolver.ts).
+function historySystemActorKind(actorId: string | null | undefined): 'autoApproval' | 'system' | null {
+  if (typeof actorId !== 'string') return null
+  if (actorId === 'system:auto-approval') return 'autoApproval'
+  if (actorId === 'system' || actorId.startsWith('system:')) return 'system'
+  return null
+}
+
+// T4cd — a person row whose stored name is the id itself: the writer only had the id (`name ?? email
+// ?? id` at write time for an account with neither, or the `original_approver` auto-approval mode,
+// which stores the approver's id as the name). Such a row is named through the directory resolver
+// (ensured by the consolidated watch below), never by printing the id.
+// A row with NO stored name is deliberately not resolved (gate r1 P2-2). No platform writer stores
+// one (every route falls back to the id); the rows that carry none are a `plm:` instance's upstream
+// rows (`actorName: null`, the UPSTREAM system's user id as `actorId`), and looking such an id up in
+// the local directory could name an unrelated local account. They keep the system fallback.
+function historyActorIdToResolve(item: HistoryActorFields): string | null {
+  const actorId = typeof item.actorId === 'string' ? item.actorId.trim() : ''
+  if (!actorId || historySystemActorKind(actorId)) return null
+  const storedName = (item.actorName ?? '').trim()
+  return storedName === actorId ? actorId : null
+}
+
+// Timeline / record-table actor label. The cancel-round system closure writes a sentinel as BOTH its
+// actor id and actor name (lock:131 「系统终结身份」); it is shown as 「系统」, never as the raw id —
+// and so, since T4cd, is every other engine sentinel (see historySystemActorKind). A row with no
+// actor fields at all (a server that sends only the snake_case columns) keeps the 「系统」 fallback,
+// and so does a row whose stored name is missing or blank (see historyActorIdToResolve), which
+// would otherwise render an empty label.
+function historyActorName(item: HistoryActorFields): string {
+  if (item.metadata?.autoApproved) return t.value.systemAutoApproval
+  if (isCancelRoundSystemActor(item.actorId, item.actorName)) return t.value.system
+  const systemKind = historySystemActorKind(item.actorId)
+  if (systemKind === 'autoApproval') return t.value.systemAutoApproval
+  if (systemKind === 'system') return t.value.system
+  const unresolvedId = historyActorIdToResolve(item)
+  if (unresolvedId) return getResolvedUserName(unresolvedId) ?? unknownUserLabel(isZh.value)
+  return (item.actorName ?? '').trim() || t.value.system
+}
+
+// The record table's synthetic 结束 row and the 复制摘要 text state the instance's status through the
+// SAME domain selector as the header tag, so a system-closed cancel round never reads 「已驳回」 there.
+function instanceStatusLabel(detail: UnifiedApprovalDTO): string {
+  const tag = approvalStatusTagProps(detail)
+  return resolveStatusDisplay(tag.domain, tag.status, isZh.value).label
+}
+
 // G-B2-09: initial-letter avatar for timeline actors — display only, token-styled.
-function actorInitial(item: { actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
-  if (item.metadata?.autoApproved) return '系'
-  const name = (item.actorName ?? '').trim()
-  return name ? Array.from(name)[0]! : '系'
+function actorInitial(item: HistoryActorFields): string {
+  if (item.metadata?.autoApproved) return t.value.systemInitial
+  if (isCancelRoundSystemActor(item.actorId, item.actorName)) return t.value.systemInitial
+  // T4cd: every engine sentinel gets the system avatar; an id-only person row takes its initial
+  // from the label historyActorName shows (resolved name or the values-free fallback), not the id.
+  if (historySystemActorKind(item.actorId)) return t.value.systemInitial
+  const name = (historyActorIdToResolve(item) ? historyActorName(item) : (item.actorName ?? '')).trim()
+  return name ? Array.from(name)[0]! : t.value.systemInitial
 }
 
 function timelineItemType(action: string, toStatus: string): string {
@@ -2207,8 +2387,32 @@ function hasRecordTableBadgeMetadata(metadata?: Record<string, unknown> | null, 
 }
 
 function approvalModeLabel(mode: string): string {
-  const map: Record<string, string> = { single: '单人', all: '会签', any: '或签', threshold: '门槛会签', sequential: '依次审批' }
+  const map: Record<string, string> = isZh.value ? APPROVAL_MODE_ZH : APPROVAL_MODE_EN
   return map[mode] ?? mode
+}
+
+// O-8 / F8-1: the history badges' interpolated copy, one locale at a time.
+function approvalModeText(mode: string): string {
+  return isZh.value ? `审批模式: ${approvalModeLabel(mode)}` : `Mode: ${approvalModeLabel(mode)}`
+}
+function overriddenByText(by: unknown): string {
+  const who = typeof by === 'string' && by ? by : t.value.requesterFallback
+  return isZh.value ? `（已被 ${who} 的决定覆盖）` : `(overridden by ${who}'s decision)`
+}
+function returnedToText(node: string): string {
+  return isZh.value ? `退回至: ${node}` : `Returned to: ${node}`
+}
+function nodeText(node: string): string {
+  return isZh.value ? `节点: ${node}` : `Node: ${node}`
+}
+function groupCountText(count: number): string {
+  return isZh.value ? `${count} 条` : `${count} ${count === 1 ? 'entry' : 'entries'}`
+}
+function currentHandlerText(label: string): string {
+  return isZh.value ? `当前处理人：${label}` : `Current approver: ${label}`
+}
+function memberOrdinal(ordinal: number): string {
+  return isZh.value ? `成员 ${ordinal}` : `Member ${ordinal}`
 }
 
 /**
@@ -2245,9 +2449,9 @@ function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
     }
     // No display name reachable from already-loaded metadata OR the resolver — render a
     // values-free count rather than ever falling back to the raw id.
-    return `其他 ${cancelled.length} 位审批人已失效`
+    return isZh.value ? `其他 ${cancelled.length} 位审批人已失效` : `${cancelled.length} other approver(s) no longer needed`
   }
-  return `其他审批人已失效: ${names.join('、')}`
+  return isZh.value ? `其他审批人已失效: ${names.join('、')}` : `Other approvers no longer needed: ${names.join(', ')}`
 }
 
 // P7-R2 candidate #3 fix (values-free doctrine, HIGHEST PRIORITY confirmed exposure — fires on
@@ -2273,16 +2477,24 @@ function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
 // `formSchema` is already frozen from the pinned version without an admin-guarded fetch) — that is
 // backend work and a separate follow-up slice, not something this frontend-only fix can do without
 // adding a new endpoint or widening the admin guard (both out of scope here).
+//
+// Test report 2026-10-08 T4cd (node half): platform `/history` rows now carry their `nodeKey`, so
+// this runs for every platform instance. The template store is app-wide and `loadTemplate` leaves
+// it untouched on failure — a viewer outside this template's visibility scope gets a 404 — so it
+// can still hold ANOTHER template, whose nodes often share default keys (`approval_1`, …). Only
+// this instance's own template may name its nodes; any other falls to the values-free placeholder.
 function nodeLabel(nodeKey: string): string {
   if (!nodeKey) return '-'
-  const live = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  const template = templateStore.activeTemplate
+  const ownTemplate = template && template.id === approval.value?.templateId ? template : null
+  const live = ownTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
   if (live?.name?.trim()) return live.name.trim()
-  return '节点已变更'
+  return t.value.nodeChanged
 }
 
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  return new Date(dateStr).toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 // P7-R2 candidate #1 fix (values-free doctrine, confirmed member-facing raw-JSON exposure):
@@ -2296,7 +2508,7 @@ function objectDisplayValue(value: Record<string, unknown>): string {
     const candidate = value[key]
     if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
   }
-  return '复杂内容'
+  return t.value.complexValue
 }
 
 // P7-R2 gate hardening (P2-2/P3-2): the array branch used to `.join(', ')` every element
@@ -2312,19 +2524,22 @@ function objectDisplayValue(value: Record<string, unknown>): string {
 // single object value above.
 function formatFieldValue(value: unknown, column?: DetailDisplayColumn): string {
   if (value === null || value === undefined) return '-'
+  // Test report 2026-10-08 T4b: a 明细 `user` column renders resolved names exactly like a top-level
+  // `user` field (`formatUserFieldValue`), never the stored id or an embedded name.
+  if (column?.type === 'user') return formatUserFieldValue(value, getResolvedUserName, isZh.value)
   if (Array.isArray(value)) {
     const byValue = column?.options?.length
       ? new Map(column.options.map((opt) => [opt.value, opt.label]))
       : null
     return value
       .map((entry) => {
-        if (byValue) return byValue.get(String(entry)) ?? '未知选项'
+        if (byValue) return byValue.get(String(entry)) ?? t.value.unknownOption
         if (entry !== null && typeof entry === 'object') return objectDisplayValue(entry as Record<string, unknown>)
         // No options whitelist for this column and a bare (non-object) element — every leaf type
         // other than `multi-select` expects a single scalar, so an array reaching here at all is
         // already an anomalous/contract-violating shape; a values-free placeholder is the safe
         // default rather than trusting an unvalidated element.
-        return '未知选项'
+        return t.value.unknownOption
       })
       .join(', ')
   }
@@ -2412,9 +2627,9 @@ function openCommentDialog() {
 
 /**
  * Lock-9 OD-L9-10(a) — process-attachment picker for the comment dialog. Gated by the caller
- * template on `attachmentPipelineEnabled && isMyTurn` (never `canAct`, which is the coarse
- * `approvals:act` scope grant — a requester/CC recipient with that scope on a DIFFERENT instance
- * must not see an uploader here). `stagedInstanceId` is this instance's own id: the row does not
+ * template on `attachmentPipelineEnabled && canAttachProcessEvidence` (never `canAct`, which is
+ * the coarse `approvals:act` scope grant — a requester/CC recipient with that scope on a DIFFERENT
+ * instance must not see an uploader here). `stagedInstanceId` is this instance's own id: the row does not
  * commit to it until the comment action's `attachmentIds` rider binds it (§5.4).
  */
 async function onCommentAttachmentPick(event: Event): Promise<void> {
@@ -2444,7 +2659,7 @@ async function onCommentAttachmentPick(event: Event): Promise<void> {
   } catch (error) {
     if (!isLiveCommentAttachmentPick(pickGeneration, instanceId)) return
     // values-free code from the client mirror / server reject — never file contents or paths.
-    ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
+    ElMessage.error(error instanceof Error ? error.message : t.value.attachmentUploadFailed)
   } finally {
     // A same-generation store refresh can briefly expose a different instance. That invalidates
     // staging/toasts, but this pick still owns the generation's loading bit and must release it.
@@ -2471,7 +2686,7 @@ async function removeCommentAttachment(attachmentId: string): Promise<void> {
   try {
     await deleteApprovalAttachment(attachmentId)
   } catch {
-    ElMessage.error('附件移除失败，请重试')
+    ElMessage.error(t.value.attachmentRemoveFailed)
     return
   }
   const index = commentStagedAttachments.value.findIndex((item) => item.id === attachmentId)
@@ -2551,16 +2766,40 @@ async function submitAction() {
   if (!id) return
   actionDialogError.value = null
   inFlightAction.value = currentAction.value
+  const displayed = approval.value
   try {
-    await store.executeAction(id, {
-      action: currentAction.value,
-      comment: actionComment.value || undefined,
-    })
+    if (
+      displayed
+      && displayed.id === id
+      && isCancelRoundWorkflow(displayed)
+      && (currentAction.value === 'approve' || currentAction.value === 'reject')
+    ) {
+      // 撤销轮: decide through the attendance route (never the generic `/api/approvals/:id/actions`).
+      // Its success body is minimal (not a UnifiedApprovalDTO), so nothing is published into the
+      // store from it — the detail is re-read instead. A leave-id resolution failure throws and is
+      // shown in the dialog; it never falls back to the generic route.
+      try {
+        await decideCancelRoundFromApproval(displayed, currentAction.value, actionComment.value || undefined)
+      } catch (error) {
+        // The round on screen was not (or could not be confirmed as) the leave's pending round, or
+        // the decision landed on another round: re-read so the page stops showing the old one.
+        if (isCancelRoundClientRefusal(error) && id === routeInstanceId.value) {
+          await Promise.all([store.loadDetail(id), store.loadHistory(id)]).catch(() => undefined)
+        }
+        throw error
+      }
+      if (id === routeInstanceId.value) await store.loadDetail(id)
+    } else {
+      await store.executeAction(id, {
+        action: currentAction.value,
+        comment: actionComment.value || undefined,
+      })
+    }
     // Round 3 (B10/B13): everything the PAGE says or shows about this verb is scoped to the
     // instance it acted on. The two refresh helpers below stay OUTSIDE this block on purpose —
     // each keeps its own captured-id refusal so it remains independently observable.
     if (stillActingOn(id)) {
-      ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
+      ElMessage.success(currentAction.value === 'approve' ? t.value.toastApproved : t.value.toastRejected)
       rememberQuickPhraseIfOffered(actionComment.value)
       actionDialogVisible.value = false
       showNextEntry.value = true
@@ -2571,7 +2810,7 @@ async function submitAction() {
     // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
     // Round 3 (B10): symmetric with the success branch — a failure for an instance the reader has
     // left is not announced on the instance they are now on, in any grammar.
-    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, t.value.actionFailed)
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2605,7 +2844,7 @@ function handleMemberActionFailure(
   dialogVisible: Ref<boolean>,
   dialogError: Ref<string | null>,
 ): void {
-  const failure = memberActionFailure(error, fallback)
+  const failure = memberActionFailure(error, fallback, isZh.value)
   if (failure.isPolicyDenial) {
     ElMessage.error(failure.message)
     dialogVisible.value = false
@@ -2630,13 +2869,13 @@ async function submitTransfer() {
       targetUserId: transferUserId.value,
     })
     if (stillActingOn(id)) {
-      ElMessage.success('已成功转交')
+      ElMessage.success(t.value.transferred)
       transferDialogVisible.value = false
     }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     if (stillActingOn(id)) {
-      handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
+      handleMemberActionFailure(error, t.value.transferFailed, transferDialogVisible, actionDialogError)
     }
   } finally {
     inFlightAction.value = null
@@ -2647,6 +2886,8 @@ function openAddSignDialog() {
   addSignUserIds.value = []
   addSignUserLabels.value = {}
   addSignPickerValue.value = null
+  addSignPlacement.value = CLIENT_ADD_SIGN_MODE
+  addSignAggregation.value = 'all'
   actionComment.value = ''
   actionDialogError.value = null
   addSignDialogVisible.value = true
@@ -2692,16 +2933,19 @@ async function submitAddSign() {
       action: 'add_sign',
       comment: actionComment.value || undefined,
       targetUserIds: addSignUserIds.value,
-      addSignMode: CLIENT_ADD_SIGN_MODE,
+      addSignMode: addSignPlacement.value,
+      // OD-L5-5(a): sent only when it governs the appended round; never for 并加签 (the server
+      // ignores it there, and omitting it keeps that request byte-identical to before F4-S1).
+      ...(addSignAggregationRequired.value ? { addSignAggregation: addSignAggregation.value } : {}),
     })
     if (stillActingOn(id)) {
-      ElMessage.success('已成功加签')
+      ElMessage.success(t.value.addSigned)
       addSignDialogVisible.value = false
     }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     if (stillActingOn(id)) {
-      handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
+      handleMemberActionFailure(error, t.value.addSignFailed, addSignDialogVisible, actionDialogError)
     }
   } finally {
     inFlightAction.value = null
@@ -2738,13 +2982,13 @@ async function submitReduceSign() {
       targetAssignmentUserId: reduceSignUserId.value,
     })
     if (stillActingOn(id)) {
-      ElMessage.success('已成功减签')
+      ElMessage.success(t.value.reduceSigned)
       reduceSignDialogVisible.value = false
     }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     if (stillActingOn(id)) {
-      handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
+      handleMemberActionFailure(error, t.value.reduceSignFailed, reduceSignDialogVisible, actionDialogError)
     }
   } finally {
     inFlightAction.value = null
@@ -2772,7 +3016,7 @@ async function submitComment() {
       ...(stagedIds.length > 0 ? { attachmentIds: stagedIds } : {}),
     })
     if (stillActingOn(id)) {
-      ElMessage.success('评论已提交')
+      ElMessage.success(t.value.commentSubmitted)
       rememberQuickPhraseIfOffered(actionComment.value)
       // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
       // list, and these ids are now server-bound (clearing after the flip would race a DELETE
@@ -2784,7 +3028,7 @@ async function submitComment() {
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: same dialog-scoped inline error as `submitAction` above.
-    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, t.value.commentFailed)
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2807,13 +3051,13 @@ async function submitReturn() {
       targetNodeKey: returnTargetNodeKey.value,
     })
     if (stillActingOn(id)) {
-      ElMessage.success('已退回审批')
+      ElMessage.success(t.value.returned)
       returnDialogVisible.value = false
     }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     if (stillActingOn(id)) {
-      handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
+      handleMemberActionFailure(error, t.value.returnFailed, returnDialogVisible, actionDialogError)
     }
   } finally {
     inFlightAction.value = null
@@ -2836,10 +3080,10 @@ async function handleRevoke() {
   inFlightAction.value = 'revoke'
   try {
     await store.executeAction(id, { action: 'revoke' })
-    if (stillActingOn(id)) ElMessage.success('审批已撤回')
+    if (stillActingOn(id)) ElMessage.success(t.value.revoked)
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    if (stillActingOn(id)) ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
+    if (stillActingOn(id)) ElMessage.error(dialogErrorMessage(error, t.value.revokeFailed))
   } finally {
     inFlightAction.value = null
   }
@@ -2856,14 +3100,17 @@ async function handleRevoke() {
 function buildApprovalSummary(): string | null {
   const detail = approval.value
   if (!detail) return null
+  // O-8 / F8-1: the copied text follows the shell locale like the page it summarizes (prefixes
+  // live in approvalDetailLabels.ts; the zh-CN output is unchanged).
+  const L = t.value
   return [
-    `审批：${detail.title ?? '-'}`,
-    `编号：${detail.requestNo ?? '-'}`,
-    `状态：${resolveStatusDisplay('approvalInstance', detail.status, true).label}`,
-    `发起人：${detail.requester?.name ?? '-'}`,
-    `发起时间：${formatDate(detail.createdAt)}`,
-    `进度：${detail.currentStep ?? '-'} / ${detail.totalSteps ?? '-'}`,
-    `链接：${window.location.href}`,
+    `${L.summaryTitle}${detail.title ?? '-'}`,
+    `${L.summaryRequestNo}${detail.requestNo ?? '-'}`,
+    `${L.summaryStatus}${instanceStatusLabel(detail)}`,
+    `${L.summaryRequester}${detail.requester?.name ?? '-'}`,
+    `${L.summaryCreatedAt}${formatDate(detail.createdAt)}`,
+    `${L.summaryProgress}${detail.currentStep ?? '-'} / ${detail.totalSteps ?? '-'}`,
+    `${L.summaryLink}${window.location.href}`,
   ].join('\n')
 }
 
@@ -2872,10 +3119,10 @@ async function handleCopySummary() {
   if (!text) return
   try {
     await navigator.clipboard.writeText(text)
-    ElMessage.success('审批摘要已复制')
+    ElMessage.success(t.value.summaryCopied)
   } catch {
     // Clipboard API unavailable (insecure context / older browser) or permission denied.
-    ElMessage.error('复制失败，请重试')
+    ElMessage.error(t.value.copyFailed)
   }
 }
 
@@ -2892,15 +3139,19 @@ function handlePrint() {
 const remindLoading = ref(false)
 
 function formatRemindAgo(lastRemindedAt?: string): string {
-  if (!lastRemindedAt) return '刚刚'
+  if (!lastRemindedAt) return t.value.justNow
   const timestamp = new Date(lastRemindedAt).getTime()
-  if (!Number.isFinite(timestamp)) return '刚刚'
+  if (!Number.isFinite(timestamp)) return t.value.justNow
   const diffMs = Math.max(0, Date.now() - timestamp)
   const minutes = Math.floor(diffMs / 60000)
-  if (minutes <= 0) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟前`
+  if (minutes <= 0) return t.value.justNow
+  if (minutes < 60) return isZh.value ? `${minutes} 分钟前` : `${minutes} min ago`
   const hours = Math.floor(minutes / 60)
-  return `${hours} 小时前`
+  return isZh.value ? `${hours} 小时前` : `${hours} h ago`
+}
+
+function remindedAgoToast(ago: string): string {
+  return isZh.value ? `已在 ${ago}催办过` : `Already reminded (${ago})`
 }
 
 async function handleRemind() {
@@ -2913,12 +3164,12 @@ async function handleRemind() {
   try {
     const result = await remindApproval(id)
     if (result.ok) {
-      if (stillActingOn(id)) ElMessage.success('已催办')
+      if (stillActingOn(id)) ElMessage.success(t.value.reminded)
       await refreshHistoryForActedInstance(id)
     } else if (result.status === 429) {
-      if (stillActingOn(id)) ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
+      if (stillActingOn(id)) ElMessage.warning(remindedAgoToast(formatRemindAgo(result.error.lastRemindedAt)))
     } else if (stillActingOn(id)) {
-      ElMessage.error(result.error.message || '催办失败，请重试')
+      ElMessage.error(result.error.message || t.value.remindFailed)
     }
   } finally {
     remindLoading.value = false

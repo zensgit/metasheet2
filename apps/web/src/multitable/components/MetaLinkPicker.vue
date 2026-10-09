@@ -62,6 +62,13 @@ const props = defineProps<{
   field?: MetaField | null
   currentValue?: unknown
   initialSearch?: string
+  /**
+   * Overrides the field's own cap when set. Omitted (every cell / import caller) = the field decides:
+   * single-select for `limitSingleRecord` or a legacy person (`refKind: 'user'`). The automation condition
+   * editor passes it because an `in` / `not_in` condition picks a LIST whatever the field's cap is.
+   * (A string union, not a boolean: an absent boolean prop would be cast to `false`, not "unset".)
+   */
+  selectionMode?: 'single' | 'multiple'
 }>()
 
 const emit = defineEmits<{
@@ -78,7 +85,11 @@ const selected = reactive(new Set<string>())
 const summaryById = reactive<Record<string, LinkedRecordSummary>>({})
 const { isZh } = useLocale()
 const lp = (key: MetaLinkPickerLabelKey) => linkPickerLabel(key, isZh.value)
-const singleSelect = computed(() => props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user')
+const singleSelect = computed(() => {
+  if (props.selectionMode === 'multiple') return false
+  if (props.selectionMode === 'single') return true
+  return props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user'
+})
 const titleText = computed(() => linkPickerTitle(props.field, isZh.value))
 const searchPlaceholder = computed(() => linkPickerSearchPlaceholder(props.field, isZh.value))
 const hasMore = computed(() => page.value.hasMore)

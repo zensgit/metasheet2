@@ -36,18 +36,18 @@
 // not this view's own chrome.
 
 export const ZH = {
-  headerFallback: '审批模板',
-  backLabel: '返回模板列表',
+  headerFallback: '审批表单',
+  backLabel: '返回表单列表',
   startApproval: '发起审批',
-  editTemplate: '编辑模板',
+  editTemplate: '编辑表单',
   archiveButton: '停用',
   unarchiveButton: '启用',
   reload: '重新加载',
 
-  categoryLabel: '模板分类:',
+  categoryLabel: '表单分类:',
   categoryEmpty: '未分组',
   edit: '编辑',
-  categoryPlaceholder: '分组标识，用于模板中心筛选，留空表示未分组',
+  categoryPlaceholder: '分组标识，用于表单中心筛选，留空表示未分组',
   save: '保存',
   cancel: '取消',
 
@@ -117,22 +117,22 @@ export const ZH = {
   slaInvalid: 'SLA 必须是正整数小时',
   slaClearedToast: '已清除 SLA',
   slaUpdateFailed: '更新 SLA 失败',
-  categoryClearedToast: '已清除模板分类',
+  categoryClearedToast: '已清除表单分类',
   categoryUpdateFailed: '更新分类失败',
   visibilityIdsRequired: '可见范围至少需要一个 id',
-  visibilityUpdatedToast: '已更新模板可见范围',
+  visibilityUpdatedToast: '已更新表单可见范围',
   visibilityUpdateFailed: '更新可见范围失败',
-  archiveDialogTitle: '停用模板',
-  archiveSuccessToast: '已停用模板',
-  archiveFailed: '停用模板失败',
-  unarchiveDialogTitle: '启用模板',
-  unarchiveSuccessToast: '已启用模板',
-  unarchiveFailed: '启用模板失败',
+  archiveDialogTitle: '停用表单',
+  archiveSuccessToast: '已停用表单',
+  archiveFailed: '停用表单失败',
+  unarchiveDialogTitle: '启用表单',
+  unarchiveSuccessToast: '已启用表单',
+  unarchiveFailed: '启用表单失败',
   versionHistoryLoadFailed: '版本历史加载失败',
   versionDiffLoadFailed: '版本变化加载失败',
   restoreFailed: '恢复版本失败',
 
-  notFound: '未找到模板',
+  notFound: '未找到表单',
 } as const
 
 export const EN: Record<keyof typeof ZH, string> = {

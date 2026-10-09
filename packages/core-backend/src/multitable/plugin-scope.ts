@@ -6,6 +6,11 @@ import type {
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
 import {
+  StockPreparationProjectSheetGrantError,
+  isStockPreparationProjectSheetObjectId,
+  normalizeStockPreparationGrantRoleIds,
+} from './stock-preparation-project-sheet-grant-contract'
+import {
   getMultitableRequestMetadataCache,
   runWithMultitableRequestMetadataCache,
 } from './request-metadata-cache'
@@ -51,6 +56,13 @@ export type MultitableScopeHooks = {
   ) => ReturnType<MultitableAPI['provisioning']['ensureObject']>
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
+  /**
+   * G1 (R-35): the STRICT sheet-ownership assertion the grant port runs — throws unless the plugin
+   * object registry records this sheet as THIS plugin's. Unlike `assertSheetScope` it has no
+   * `observe` tolerance: an unregistered sheet is a refusal in every deployment mode, because a
+   * grant is an authorization write and "nobody has claimed this sheet" must never admit one.
+   */
+  assertSheetOwnedByPlugin?: (input: AssertPluginSheetScopeInput) => Promise<void>
   assertSheetScope?: (
     input: AssertPluginSheetScopeInput,
   ) => Promise<void | AssertPluginSheetScopeOutcome>
@@ -108,6 +120,16 @@ export class MultitableSheetScopeError extends Error {
   }
 }
 
+// B3: same shape as the projectId namespace refusal, for a system-base id outside the plugin's prefix.
+export class MultitableBaseScopeError extends Error {
+  code = 'MULTITABLE_BASE_SCOPE_FORBIDDEN'
+
+  constructor(pluginName: string, baseId: string) {
+    super(`Plugin ${pluginName} cannot access multitable baseId ${baseId}`)
+    this.name = 'MultitableBaseScopeError'
+  }
+}
+
 export function getPluginProjectNamespaces(pluginName: string): string[] {
   const raw = typeof pluginName === 'string' ? pluginName.trim() : ''
   if (!raw) return []
@@ -129,6 +151,55 @@ export function assertProjectIdAllowedForPlugin(pluginName: string, projectId: s
   if (!suffix || !allowedNamespaces.includes(suffix)) {
     throw new MultitableProjectNamespaceError(pluginName, projectId)
   }
+}
+
+/**
+ * B3 — the plugin system-base PREFIX RULE. Computed directly from the plugin name, with NO
+ * sanitising: the slug is the name minus a leading `plugin-`, and it must match
+ * `PLUGIN_BASE_SLUG_PATTERN` exactly or the plugin has no system-base surface at all (null) —
+ * never a trimmed or lower-cased one. Because the slug cannot contain `_`, the prefix ends at
+ * the first `_` after `base_`, which makes the rule injective on its accepted domain:
+ * `base_integration_x` does not start with `base_integration-core_`, and `base_a_...` is not
+ * under `base_a-b_`. `attendance` and `plugin-attendance` share `base_attendance_` by design —
+ * exactly the aliasing `getPluginProjectNamespaces` already applies to projectId namespaces.
+ */
+export const PLUGIN_BASE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+
+export function getPluginBaseSlug(pluginName: string): string | null {
+  const raw = typeof pluginName === 'string' ? pluginName.trim() : ''
+  const slug = raw.startsWith('plugin-') ? raw.slice('plugin-'.length) : raw
+  return PLUGIN_BASE_SLUG_PATTERN.test(slug) ? slug : null
+}
+
+export function getPluginBaseIdPrefix(pluginName: string): string | null {
+  const slug = getPluginBaseSlug(pluginName)
+  return slug ? `base_${slug}_` : null
+}
+
+/** Pure string rule, no I/O: a system-base id must sit strictly under the plugin's own prefix. */
+export function assertBaseIdAllowedForPlugin(pluginName: string, baseId: string): void {
+  const prefix = getPluginBaseIdPrefix(pluginName)
+  if (!prefix) {
+    throw new MultitableBaseScopeError(pluginName, String(baseId))
+  }
+  if (typeof baseId !== 'string' || baseId.trim().length === 0) {
+    throw new MultitableBaseScopeError(pluginName, String(baseId))
+  }
+  if (!baseId.startsWith(prefix) || baseId.length === prefix.length) {
+    throw new MultitableBaseScopeError(pluginName, baseId)
+  }
+}
+
+/**
+ * B3 — the RESERVATION half of the same rule, for the user-facing `POST /bases` route: does this
+ * caller-chosen id look like a plugin system-base id (`base_<slug>_<rest>`)? Server-minted ids
+ * (`base_<uuid>`, no second `_`) and `base_legacy` never match; `base_attendance_catalog` and
+ * `base_integration-core_sp_...` do. One rule, two enforcement points, no shared mutable state.
+ */
+export const PLUGIN_SYSTEM_BASE_ID_PATTERN = /^base_[a-z0-9][a-z0-9-]*_[A-Za-z0-9_-]+$/
+
+export function isPluginSystemBaseIdCandidate(baseId: string): boolean {
+  return typeof baseId === 'string' && PLUGIN_SYSTEM_BASE_ID_PATTERN.test(baseId)
 }
 
 export async function claimPluginObjectScope(
@@ -235,6 +306,14 @@ export async function assertPluginOwnsObject(
   }
   return true
 }
+
+/**
+ * R5 (S1 fix round 1): the ONE plugin whose scoped api carries the G1 grant port. Mirrors how
+ * index.ts hands `stockPreparationFieldPermissions` / `dataSources` to `plugin-integration-core`
+ * alone: a port that writes authorization rows is a capability boundary, not a type description,
+ * so every other plugin's scoped api simply has no `grantSheetRoleWrite` (undefined, never a throw).
+ */
+const STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN = 'plugin-integration-core'
 
 export function createPluginScopedMultitableApi(
   multitable: MultitableAPI,
@@ -400,6 +479,116 @@ export function createPluginScopedMultitableApi(
           return fn(scoped)
         })
       },
+      // B3: exposed iff the host exposes it (the `ensureObjectDefaultView` / `findObjectView`
+      // optional-capability idiom), so a plugin's feature detection stays truthful. The wrapper
+      // adds exactly one thing — the prefix assertion — and delegates. Read defensively at build
+      // time for the same reason `supportsFilterValueLists` below is. The baseId is read ONCE and
+      // the checked value is what the delegate receives: forwarding `input` itself would let a
+      // getter hand the prefix check one id and the host another (refuter r2 minor).
+      ...(typeof multitable.provisioning?.ensureSystemBase === 'function'
+        ? {
+            ensureSystemBase: async (input: { baseId: string; name: string }) => {
+              const baseId = input.baseId
+              assertBaseIdAllowedForPlugin(pluginName, baseId)
+              return multitable.provisioning.ensureSystemBase!({ baseId, name: input.name })
+            },
+          }
+        : {}),
+      // Display-name relabel — a WRITE against the plugin's own object, so it takes the same two
+      // assertions every other object write here takes (project namespace, then object scope) and is
+      // never bare-forwarded. Exposed iff the host exposes it (the optional-capability idiom above).
+      // projectId/objectId are read ONCE and the checked values are what the host receives, so a
+      // getter cannot show the scope checks one object and the host another.
+      ...(typeof multitable.provisioning?.relabelObjectDisplayNames === 'function'
+        ? {
+            relabelObjectDisplayNames: async (
+              input: Parameters<NonNullable<MultitableAPI['provisioning']['relabelObjectDisplayNames']>>[0],
+            ) => {
+              const projectId = input.projectId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return multitable.provisioning.relabelObjectDisplayNames!({
+                projectId,
+                objectId,
+                sheetName: input.sheetName,
+                fields: input.fields,
+                takenSheetNames: input.takenSheetNames,
+                apply: input.apply,
+                expectedPlanDigest: input.expectedPlanDigest,
+                actorId: input.actorId,
+              })
+            },
+          }
+        : {}),
+      // G1 (R-35): the project-sheet role grant — an AUTHORIZATION write, so it takes MORE than the
+      // two assertions every other write here takes. Exposed iff the host exposes it (the optional-
+      // capability idiom above) AND the plugin is `plugin-integration-core` (R5: the same least-
+      // privilege posture index.ts applies to the field-permissions port — every other plugin gets
+      // no port at all, `undefined`, and so cannot even ask). Every value is read ONCE and the
+      // checked values are what the host receives. Order, each refusing before the next does any IO:
+      //   1. project namespace (pure);
+      //   2. the role list is well-formed and entirely inside the `stock-prep` namespace (pure);
+      //   3. the objectId has the project-sheet shape (pure) — the canonical main table and a
+      //      hand-named sandbox twin are refused here;
+      //   4. the sheet id IS the one derived for (projectId, objectId) (pure) — so a caller cannot
+      //      pair a project-shaped objectId with some other sheet's id;
+      //   5. the registry records the sheet as THIS plugin's (strict hook — no `observe` tolerance;
+      //      a host that does not provide the hook cannot verify ownership and the port refuses);
+      //   6. the registry records the sheet as THIS project's (the same boolean port the tenant
+      //      wall uses, never an owner id).
+      ...(typeof multitable.provisioning?.grantSheetRoleWrite === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
+        ? {
+            grantSheetRoleWrite: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+              roleIds: string[]
+              actorId?: string | null
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              const roleIds = normalizeStockPreparationGrantRoleIds(input.roleIds)
+              if (!isStockPreparationProjectSheetObjectId(objectId)) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_OBJECT_NOT_PROJECT_SHEET',
+                  'a project-sheet grant may target only a per-project stock-preparation sheet',
+                  { objectId: String(objectId) },
+                )
+              }
+              if (typeof sheetId !== 'string' || sheetId.trim().length === 0
+                || multitable.provisioning.getObjectSheetId(projectId, objectId) !== sheetId) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_SHEET_MISMATCH',
+                  'the sheet is not the one derived for this project and objectId',
+                  { objectId },
+                )
+              }
+              if (!hooks.assertSheetOwnedByPlugin) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unverifiable')
+              }
+              await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+              const ownedByProject = hooks.isSheetOwnedByProject
+                ? await hooks.isSheetOwnedByProject({ sheetId, projectId })
+                : await multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
+              if (ownedByProject !== true) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
+              }
+              return multitable.provisioning.grantSheetRoleWrite!({
+                projectId,
+                sheetId,
+                objectId,
+                roleIds,
+                actorId: typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null,
+              })
+            },
+          }
+        : {}),
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         if (hooks.ensureObjectInScope) {

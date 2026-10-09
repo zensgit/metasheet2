@@ -2,7 +2,7 @@
   <div id="app">
     <nav class="app-nav" v-if="showNav">
       <div class="nav-brand">
-        <span class="brand-text">{{ brandText }}</span>
+        <router-link :to="brandHomePath" class="brand-text brand-link" data-testid="nav-brand-link">{{ brandText }}</router-link>
       </div>
       <div class="nav-links">
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -26,6 +26,16 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
+            <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
+                 badge above is now DATA-wired to the todo center's own aggregate, but that alone
+                 left the page it aggregates into reachable only by typing /todo — no nav entry
+                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
+                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
+                 made the badge's own href — deliberately, so this addition cannot regress the
+                 existing "badge is a sibling of the link, never a child of it" contract the P1b
+                 comment above and approvalNavTodoBadge.spec.ts already pin. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -36,6 +46,18 @@
               <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
               <ShellChromeBoundary>
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
+                 failure cannot blank the shell, and gated
+                 on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
+            <span v-if="canUseTasks" class="nav-tasks">
+              <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+              <ShellChromeBoundary>
+                <TasksTodoBadge v-if="!isPublicRoute" :label="navLabels.tasksTodo" />
               </ShellChromeBoundary>
             </span>
             <router-link
@@ -67,7 +89,10 @@
                  it would be a link that renders for a principal the guard immediately redirects: the
                  "visible but not actionable" failure moved from the page into the navigation. -->
             <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
-            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
+            <!-- 整合切片 (2026-09-09): the 外接数据源 nav entry is gone — that page is now the
+                 连接管理 section of 数据工厂 above, and '/data-sources' redirects there. The
+                 zh/en `navLabels.dataSources` entries are kept in both label maps below, but
+                 this shell has no consumer for them any more. -->
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -120,17 +145,18 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
-import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
+import { canReachStockPrepWorkbench } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures, resolveHomePath } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
@@ -156,16 +182,27 @@ const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
 })
-// O2 / R-11: `/stock-prep` reachability is exactly STOCK_PREP_ROUTE_PERMISSION, the same code the
-// route meta declares and the same one the plugin gates the queue read with. Imported from the
-// shared vocabulary rather than typed inline so the nav link cannot drift from the guard.
+// O2 / R-11: `/stock-prep` reachability is exactly the workbench's own gate — `satisfiesStockPrepAccess`
+// over this principal, via `canReachStockPrepWorkbench` — NOT the app-wide `hasPermission` probe:
+// that probe expands `stock-prep:*` / `*:*` / `:write` and treats `users:write` as admin, none of which
+// the server does, so the link used to render for three principals every panel behind it refuses and to
+// stay hidden from a bare `integration:admin` the server serves in full. The route guard
+// (`buildStockPrepAwarePermissionProbe`) now asks the same question, so nav and guard cannot drift.
 const canUseStockPreparation = computed(() => {
   void route.fullPath
-  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
+  return canReachStockPrepWorkbench(getAccessSnapshot())
 })
 const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
+})
+// The tasks feature must be switched on (session `tasks`, from the server's TASKS_ENABLED) AND the
+// caller must hold tasks:read. Without the feature check an administrator saw 任务 with a "!" badge
+// on a server where /api/tasks is not mounted, and every page load issued a 404 pending-count read.
+// The feature is checked first so that, while it is off, nothing about tasks renders or polls.
+const canUseTasks = computed(() => {
+  void route.fullPath
+  return hasFeature('tasks') && hasPermission('tasks:read')
 })
 const isLoggedIn = computed(() => {
   void route.fullPath
@@ -181,6 +218,8 @@ const navLabels = computed(() => {
       approvals: '审批中心',
       // Values-free: names the surface, never the count or any row content.
       approvalTodo: '待办审批',
+      // B-2: the nav entry point into the cross-source todo center page (/todo).
+      todoCenter: '待办中心',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -189,6 +228,9 @@ const navLabels = computed(() => {
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
       approvalBatchTransfer: '批量转交',
+      tasks: '任务',
+      // Values-free: names the surface, never the count.
+      tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -208,6 +250,7 @@ const navLabels = computed(() => {
     workflows: 'Workflows',
     approvals: 'Approvals',
     approvalTodo: 'Pending approvals',
+    todoCenter: 'Todo Center',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
@@ -216,6 +259,8 @@ const navLabels = computed(() => {
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
     approvalBatchTransfer: 'Batch Transfer',
+    tasks: 'Tasks',
+    tasksTodo: 'Pending tasks',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',
@@ -234,6 +279,16 @@ const brandText = computed(() => {
   if (attendanceFocused.value) return navLabels.value.attendance
   if (plmWorkbenchFocused.value) return navLabels.value.plmWorkbench
   return 'MetaSheet'
+})
+
+// Owner request (2026-09-14): the top-left brand is the way back to the landing page. It goes
+// through resolveHomePath() so the two FOCUSED product modes keep their own home ('/attendance' /
+// '/plm') and the router guard still decides reachability. For the ordinary platform mode this is
+// a top-nav entry to '/home' (我的应用) — superseding the #5392 note that '/home' had none.
+const brandHomePath = computed(() => {
+  void attendanceFocused.value
+  void plmWorkbenchFocused.value
+  return resolveHomePath()
 })
 
 const documentTitle = computed(() => resolveRouteDocumentTitle(route.meta, isZh.value))
@@ -346,6 +401,16 @@ html, body {
   font-weight: 600;
   color: var(--ms-color-primary);
   white-space: nowrap;
+}
+
+.brand-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.brand-link:hover,
+.brand-link:focus-visible {
+  text-decoration: underline;
 }
 
 .nav-links {

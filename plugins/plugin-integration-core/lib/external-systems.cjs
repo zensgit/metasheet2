@@ -16,6 +16,7 @@ const crypto = require('node:crypto')
 // restarts and removes the account set from anything that might leak.
 const INSTANCE_DIGEST_KEY = crypto.randomBytes(32)
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const TABLE = 'integration_external_systems'
 const SQL_READONLY_SOURCE_KIND = 'data-source:sql-readonly'
@@ -31,6 +32,90 @@ const VALID_STATUSES = new Set(['active', 'inactive', 'error'])
 // MERGES a payload over the stored config, an accepted client value would overwrite the stored
 // stamp and re-attribute somebody else's pin. Stripped at the single normalize choke point.
 const SERVER_OWNED_CONFIG_KEYS = new Set(['dataSourceOwnerId'])
+// The binding side's PARTICIPATION in the data-source delete lock protocol (#5784 ②, PR-B) is the
+// foreign key on `connection_id`, not a SELECT of this module's own: `lib/db.cjs` is scoped to
+// `integration_*` tables and must not be widened to reach `data_sources`. Since core-backend
+// migration zzzz20260920120000 that key references `data_sources(live_id)`, a STORED generated
+// column that is NULL once the source is soft-deleted. So an INSERT/UPDATE that names a deleted
+// source — or one whose delete committed while this write waited on its row lock — is refused by
+// PostgreSQL with SQLSTATE 23503 on THIS constraint. That refusal is a client-visible conflict, not
+// a server fault; `translateConnectionFkViolation` turns it into a stable 409 code.
+const LIVE_CONNECTION_FK = 'fk_integration_external_systems_live_connection_id'
+// The constraint the same column carried before that migration (-> data_sources(id)). Read the
+// same way so a not-yet-migrated schema reports a hard-deleted source identically.
+const LEGACY_CONNECTION_FK = 'fk_integration_external_systems_connection_id'
+const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
+
+// SECOND-ORDER POINTERS AT THIS TABLE (the delete guard's blind spot until now).
+//
+// `countPipelineReferences` below counts `integration_pipelines` and nothing else, so a system that
+// nothing pipelines at but that a stock-prep SOURCE BINDING (079), a read-source CONFIG (062) or a
+// sealed-export stock-prep BINDING (073) points at was deletable. All three store the external-system
+// id as a plain TEXT reference and DELIBERATELY carry no foreign key (079's own header says so at
+// `migrations/079_create_integration_stock_prep_source_binding.sql:16-23`), so the database will not
+// refuse the delete either — the row just goes dangling, and the read path only discovers it at the
+// next request (`TABLE_ACTION_SOURCE_INVALID` for 079, `SEALED_EXPORT_BINDING_UNQUALIFIED` for 073 —
+// `lib/sealed-export/stock-preparation-runtime-store.cjs:113-125`).
+//
+// That dangle is also what opens the SECOND-ORDER hole on the data source underneath: the external
+// system is what `DataSourceManager.countExternalSystemReferences` counts when a data source is
+// deleted, so once the system is gone the data source it named counts zero references and is itself
+// deletable — while 079/062/073 still point (now at nothing) and an operator still believes the
+// binding is live. Counting these three tables here closes the first link of that chain.
+//
+// WHICH TABLES ARE COUNTED, AND WHICH SAME-SHAPED ONE IS NOT. The scope of this guard is a claim that
+// can be falsified with one grep, so it is written down instead of implied: the persisted pointers at
+// `integration_external_systems.id` in `packages/core-backend/migrations/` are 057 (a real FK, the
+// database refuses that delete by itself), 079, 062, 073 — all counted below — and 064
+// `integration_write_target_configs.system_id` / `sandbox_system_id`, which is NOT counted because its
+// store is dormant: `createWriteTargetConfigStore` is defined at `lib/write-target-config-store.cjs:134`
+// and exported at `:356`, and nothing outside `__tests__/` instantiates it, so production carries no
+// rows. Wiring that store is what must also add its count here.
+//
+// COUNTING IS NOT ENOUGH ON ITS OWN. The counts above were, until the lock protocol, two autocommit
+// statements away from the DELETE: a pointer committed in between left a dangling reference and no
+// foreign key refused it. `deleteExternalSystem` now takes `SELECT ... FOR UPDATE` on the system row
+// as the FIRST statement of ONE transaction and counts under that lock; every pointer-writing path
+// takes `FOR KEY SHARE` on the same row inside ITS transaction before writing
+// (`lib/external-system-pointer-lock.cjs` is the writer half and holds the protocol's full account;
+// 073's writer is the registered exception, see the design doc). A guard that counts without the
+// lock is the hole, not the fix.
+const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
+const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
+const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
+// 062's lifecycle is draft -> approved -> retired (`lib/read-source-config-store.cjs:24-29`).
+// `retired` is the terminal, deliberately non-consumable state: a retired version can never go back
+// to approved, so it is history, not a live pointer, and must NOT keep a system undeletable forever.
+//
+// THE ORDER OF THIS ARRAY IS LOAD-BEARING (#6076 fourth-round final review). The delete side counts
+// 062 once per status, in THIS order, as two statements on its transaction (each one a fresh READ
+// COMMITTED snapshot), and `approve` (draft -> approved) takes NO lock on the system row
+// (`read-source-config-store.cjs` transition: it keeps a live pointer live, it mints none). So an
+// approve CAN commit between the two counts. Counting in lifecycle order — draft, THEN approved —
+// is what makes that harmless: a status only moves forward, and no new 062 row can appear while the
+// delete holds FOR UPDATE (the mint takes KEY SHARE; the registered reuse path writes no row). A row
+// that is live when the approved-count runs is either approved then (that count sees it) or still
+// draft — and then it was draft at the draft-count too (that count saw it). The most an approve in
+// between does is get the same row counted twice, which only refuses. REVERSED (approved, then
+// draft) the approve slips past BOTH counts — the approved-count runs while the row is still draft,
+// the draft-count after it became approved, the total is zero — and the DELETE commits under an
+// approved pointer: a dangle (real PostgreSQL 16.10 and the in-memory suite: mutant M-ORDER against
+// P-062-APPROVE-BETWEEN / L-12).
+// The counts are also issued SERIALLY (`countDependentBindingReferences` awaits each before sending
+// the next), so this order never rests on how a driver queues concurrent queries on one connection.
+// Adding a status here, or a transition that moves a 062 row BACKWARDS in this list, reopens it.
+const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved'])
+// 073's status vocabulary is ACTIVE / RETIRED (`migrations/073_..._runtime_authority.sql:32`), and the
+// reader qualifies a binding ONLY while it is ACTIVE and unexpired
+// (`lib/sealed-export/stock-preparation-runtime-store.cjs:113-125`, status at `:120`). RETIRED is therefore read the
+// same way as 062's `retired`: terminal history, not a live pointer. Expiry is deliberately NOT part
+// of this filter — an expired ACTIVE row is still a row an operator can re-provision against, and a
+// time-dependent delete guard would go green on its own between two identical requests.
+const LIVE_SEALED_EXPORT_BINDING_STATUS = 'ACTIVE'
+// undefined_table. Judged by SQLSTATE, never by message prose: the 222 server runs a zh_CN locale
+// where the English "relation ... does not exist" text never appears (same posture as
+// `translateConnectionFkViolation` below and `DataSourceManager.ts:20`).
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
 
 class ExternalSystemValidationError extends Error {
   constructor(message, details = {}) {
@@ -60,6 +145,24 @@ class ExternalSystemConflictError extends Error {
     // verbatim, exactly as before.
     if (typeof details.code === 'string' && details.code.trim()) this.code = details.code.trim()
   }
+}
+
+/**
+ * Map the connection foreign key's refusal to a typed conflict; return every other error as-is.
+ * Judged by SQLSTATE first — `23503` is stable across server locales, whereas the English
+ * "violates foreign key constraint" prose never appears on a zh_CN server — and by the constraint
+ * name second (pg reports it as `error.constraint`; a driver that omits it is accepted, because
+ * no other foreign key exists on this table's writes). Values-free: the constraint name is the
+ * only detail carried, never the connection id or the row.
+ */
+function translateConnectionFkViolation(error) {
+  if (!error || typeof error !== 'object' || error.code !== '23503') return error
+  const constraint = typeof error.constraint === 'string' ? error.constraint : ''
+  if (constraint && constraint !== LIVE_CONNECTION_FK && constraint !== LEGACY_CONNECTION_FK) return error
+  return new ExternalSystemConflictError(
+    'the selected connection is not live: the data source it names has been deleted (or its delete committed while this write waited); pick a live connection',
+    { field: 'connectionId', code: CONNECTION_NOT_LIVE_CODE, constraint: constraint || null },
+  )
 }
 
 function requiredString(value, field) {
@@ -606,6 +709,91 @@ function createExternalSystemRegistry({
     })
   }
 
+  // MIN-PR2-i: A ROLLBACK-ELIGIBLE LEGACY BINDING MAY NOT BE RE-POINTED WHILE STAYING LEGACY.
+  //
+  // docs/integration-consolidation-minimal-plan-20260901.md:214 — "已标记可回退的 legacy Binding 若
+  // 修改 `config.dataSourceId`，必须在同一次写入中提供 `connectionId` 并转为 canonical;不得允许旧指针
+  // 在 legacy 状态下静默改指向。"
+  //
+  // WHAT IT CLOSES. On an existing row `requestedConnectionId` inherits `existing.connection_id`
+  // unless the caller passes `connectionId` explicitly, and `baseRow` copies
+  // `legacy_connection_fallback_eligible` over verbatim. So a row in the rollback shape
+  // (connection_id NULL + marker TRUE) accepted a brand-new `config.dataSourceId`, kept the marker,
+  // skipped the whole canonical branch below (`connectionId !== null` is false) and went on
+  // resolving through `resolveLegacy` — against a DIFFERENT connection than the cutover recorded,
+  // with no canonical proof and no trace that the binding had moved.
+  //
+  // WHY REFUSE INSTEAD OF AUTO-CONVERTING. Converting would have to GUESS the canonical id from the
+  // legacy pointer — the inference the cutover migration only dared make where a server-stamped
+  // owner matched the connection's owner — and it is irreversible from this API
+  // (`requestedConnectionId` refuses to clear `connectionId` afterwards). Refusing keeps the choice
+  // with the operator, who re-issues the same write carrying `connectionId`.
+  //
+  // WHERE IT SITS. AFTER `resolveUpdatedConfig`, i.e. after the legacy pointer's own owner check, so
+  // a non-owner still gets the binder's uniform "not found" and cannot use this refusal to learn
+  // that a row exists in the legacy state. Both are pure validation, so a refusal still writes
+  // nothing.
+  //
+  // WHAT IT DOES NOT TOUCH:
+  //   * INSERTS — a new binding has no stored pointer to move and is canonical-only already;
+  //   * kinds other than `data-source:sql-readonly` (`data-source:sql-write-gated`, http, erp:*) —
+  //     they carry no `connection_id` at all, and `requestedConnectionId` REJECTS `connectionId` for
+  //     them, so a kind-blind guard would freeze their pointer with no remedy available;
+  //   * rows whose marker is FALSE — a canonical row that never went through the cutover keeps its
+  //     pre-existing refusal (the resolver's CONNECTION_BINDING_MISMATCH on a disagreeing dual
+  //     reference);
+  //   * re-asserting the SAME pointer, which is what the bridge picker serializes on every rename;
+  //   * CLEARING the pointer (`{ dataSourceId: null }`), which de-points rather than re-points: the
+  //     binding then resolves to nothing (`CONNECTION_LEGACY_POINTER_REQUIRED`) instead of to
+  //     somewhere else. Clear-then-set is still caught, because an empty stored pointer is still a
+  //     difference from the non-empty one being written.
+  function assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized) {
+    if (normalized.kind !== SQL_READONLY_SOURCE_KIND) return
+    if (!existing || existing.legacy_connection_fallback_eligible !== true) return
+    // An explicit `connectionId` IS the remedy: that write goes through
+    // `validateCanonicalConnectionBinding` below and converts the row.
+    if (normalized.connectionId !== undefined && normalized.connectionId !== null) return
+    if (!isPlainObject(normalized.config)) return
+    if (!Object.prototype.hasOwnProperty.call(normalized.config, 'dataSourceId')) return
+    const requested = typeof normalized.config.dataSourceId === 'string'
+      ? normalized.config.dataSourceId.trim()
+      : ''
+    if (!requested) return
+    const stored = isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+    if (requested === stored) return
+    throw new ExternalSystemValidationError(
+      // Values-free: names the rule and the remedy, echoes neither pointer, neither scope nor the id.
+      'a rollback-eligible legacy binding cannot change its data source pointer without providing connectionId in the same write',
+      { field: 'connectionId', code: 'LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID' },
+    )
+  }
+
+  // THE CONNECTION A ROLLBACK-ELIGIBLE ROW CURRENTLY RESOLVES AGAINST ("生效指针").
+  //
+  // The two shapes the cutover leaves behind disagree about WHERE that id is stored:
+  //   * pure legacy  (connection_id NULL,  marker TRUE): it lives in `config.dataSourceId` and
+  //     `resolveLegacy` reads it;
+  //   * migrated     (connection_id SET,   marker TRUE): `resolveCanonical` reads `connection_id`,
+  //     and `config.dataSourceId` survives only as the rollback trail (it must AGREE, or
+  //     connection-resolver.cjs raises CONNECTION_BINDING_MISMATCH).
+  // Canonical wins when both are present, which is exactly the precedence the resolver applies, so
+  // this returns the id the row is being read through TODAY. '' means the row currently points
+  // nowhere (a cleared pointer on a pure-legacy row).
+  //
+  // NOT `config.dataSourceId` ALONE. Comparing the payload against the stored legacy pointer would
+  // leave `connection_id` free to move on a migrated row while the pointer stayed put, minting the
+  // one shape neither resolver branch accepts (canonical id A + legacy pointer B).
+  function effectiveLegacyBindingPointer(existing) {
+    if (!existing) return ''
+    const canonical = typeof existing.connection_id === 'string' ? existing.connection_id.trim() : ''
+    if (canonical) return canonical
+    return isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
@@ -665,6 +853,34 @@ function createExternalSystemRegistry({
       if (input.config === undefined) updateRow.config = existing.config
       else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
+      assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized)
+      // The other half of the same rule: a write that MOVES a rollback-eligible row's binding to a
+      // DIFFERENT connection is an explicit canonical re-bind, proven a few lines below through
+      // `validateCanonicalConnectionBinding`. Retiring the marker in that same write is what makes
+      // the new binding canonical rather than "canonical id written, still resolving as legacy"; it
+      // only ever NARROWS the row (it can no longer take `resolveLegacy`), and the pointer drop
+      // below follows from it, so marker FALSE never coexists with a stored legacy pointer.
+      //
+      // NARROWED (this PR, #5783 follow-up) TO AN ACTUAL POINTER CHANGE. The condition used to be
+      // "kind + marker TRUE + an explicit non-null `connectionId`", which never looked at whether
+      // the binding moved. The workbench edit form fills its draft from
+      // `system.connectionId || config.dataSourceId` and serializes `connectionId` on EVERY save
+      // (apps/web/src/views/IntegrationWorkbenchView.vue:2309/2325/2445, passed through verbatim by
+      // lib/http-routes.cjs), so a pure RENAME re-asserted the row's OWN current connection and
+      // retired the marker on the spot — and the pointer drop below then deleted
+      // `config.dataSourceId`, silently destroying the rollback trail the cutover deliberately kept.
+      // Re-asserting the id the row already resolves through proves nothing new and moves nothing,
+      // so it now leaves the marker alone; only a write that names a DIFFERENT connection converts.
+      // This RELAXES a guard: see the design note for why the narrowed condition still cannot leave
+      // a row canonical-but-legacy-marked against a connection it does not resolve through.
+      const retiresRollbackMarker = normalized.kind === SQL_READONLY_SOURCE_KIND
+        && existing.legacy_connection_fallback_eligible === true
+        && normalized.connectionId !== undefined
+        && normalized.connectionId !== null
+        && normalized.connectionId !== effectiveLegacyBindingPointer(existing)
+      if (retiresRollbackMarker) {
+        updateRow.legacy_connection_fallback_eligible = false
+      }
       if (normalized.kind === SQL_READONLY_SOURCE_KIND && connectionId !== null) {
         const reassertsConnection = normalized.connectionId !== undefined
           || (isPlainObject(input.config) && Object.prototype.hasOwnProperty.call(input.config, 'dataSourceId'))
@@ -677,7 +893,11 @@ function createExternalSystemRegistry({
         // Rows created after cutover are canonical-only. An old picker may still submit the
         // compatibility alias, but it must not re-introduce the legacy storage shape. Migrated
         // rows keep their pointer because the explicit fallback marker is their rollback proof.
-        if (existing.legacy_connection_fallback_eligible !== true) {
+        // Reads the marker AS THIS WRITE LEAVES IT, not `existing.`: a row converted a few lines
+        // above is canonical from this write onwards, so it sheds the pointer in the same write
+        // instead of persisting the one shape (marker FALSE + legacy pointer) neither resolver
+        // branch is written for.
+        if (updateRow.legacy_connection_fallback_eligible !== true) {
           updateRow.config = withoutLegacyDataSourcePointer(updateRow.config)
         }
         // ATTRIBUTION LAST, on the whole canonical branch (migrated rows included — they resolve
@@ -693,10 +913,13 @@ function createExternalSystemRegistry({
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
       }
+      // The write that takes the data_sources KEY SHARE lock through the connection FK (see
+      // LIVE_CONNECTION_FK): if the named source is gone by the time the lock is granted, the FK
+      // refuses here and the refusal is a 409, not a 500.
       const rows = await db.updateRow(TABLE, updateRow, {
         ...scopeWhere(normalized),
         id: existing.id,
-      })
+      }).catch((error) => { throw translateConnectionFkViolation(error) })
       const row = Array.isArray(rows) ? rows[0] : rows?.rows?.[0]
       if (!row) {
         throw new ExternalSystemNotFoundError('external system not found during update', {
@@ -735,7 +958,10 @@ function createExternalSystemRegistry({
       config: insertConfig,
       credentials_encrypted: credentialsEncrypted === undefined ? null : credentialsEncrypted,
     }
+    // Same FK participation as the update branch: a bind racing a delete waits on the source's
+    // row lock, then fails its FK re-check against data_sources(live_id) and surfaces as a 409.
     const rows = await db.insertOne(TABLE, insertRow)
+      .catch((error) => { throw translateConnectionFkViolation(error) })
     const row = Array.isArray(rows) ? rows[0] : rows?.rows?.[0]
     return publicRow(credentialStore, row || insertRow)
   }
@@ -1018,14 +1244,17 @@ function createExternalSystemRegistry({
     return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(material).digest('hex')
   }
 
-  async function countPipelineReferences({ tenantId, workspaceId, id }) {
+  // `executor` is the scoped db helper the count runs on: the TRANSACTION handle when called from
+  // `deleteExternalSystem` (so the count is taken under the FOR UPDATE row lock and sees exactly the
+  // pipelines that committed before that lock was granted), the root helper otherwise.
+  async function countPipelineReferences(executor, { tenantId, workspaceId, id }) {
     const where = scopeWhere({ tenantId, workspaceId })
     const [sourcePipelineCount, targetPipelineCount] = await Promise.all([
-      db.countRows('integration_pipelines', {
+      executor.countRows('integration_pipelines', {
         ...where,
         source_system_id: id,
       }),
-      db.countRows('integration_pipelines', {
+      executor.countRows('integration_pipelines', {
         ...where,
         target_system_id: id,
       }),
@@ -1036,6 +1265,172 @@ function createExternalSystemRegistry({
     }
   }
 
+  function isUndefinedTableError(error) {
+    return Boolean(error) && typeof error === 'object' && error.code === UNDEFINED_TABLE_SQLSTATE
+  }
+
+  /**
+   * Count one dependent table, tolerating ONLY "the table is not there".
+   *
+   * A deployment that never ran 079 (or 062) has no such relation, and the delete it used to allow
+   * must keep working — that is the single tolerated case, and it is decided by SQLSTATE. EVERY
+   * other failure (permission, connection, syntax, a timeout) PROPAGATES, which is the fail-closed
+   * half: a guard that cannot read its own evidence must not let the delete proceed as if the
+   * evidence said zero.
+   *
+   * Returns `{ count, undefinedTable }` so the caller can tell a real zero from a tolerated absence:
+   * the absence is learned OUTSIDE the delete transaction (see `probeAbsentDependentTables`), because
+   * a 42P01 raised INSIDE a PostgreSQL transaction aborts it — every later statement fails 25P02 and
+   * the delete could never proceed, which would silently turn the tolerated case into a refusal.
+   */
+  async function countDependentRows(executor, table, where) {
+    try {
+      return { count: Number(await executor.countRows(table, where)) || 0, undefinedTable: false }
+    } catch (error) {
+      if (isUndefinedTableError(error)) return { count: 0, undefinedTable: true }
+      throw error
+    }
+  }
+
+  // The list order IS the order the delete transaction issues these counts in
+  // (`countDependentBindingReferences` runs them one at a time). The two 062 entries follow
+  // LIVE_READ_SOURCE_CONFIG_STATUSES — draft BEFORE approved — and that order is load-bearing: an
+  // approve (no system lock) may commit between them, see the note on that constant.
+  function dependentTableQueries({ tenantId, id }) {
+    return [
+      [STOCK_PREP_SOURCE_BINDING_TABLE, { tenant_id: tenantId, external_system_id: id }],
+      [SEALED_EXPORT_STOCK_PREP_BINDING_TABLE, {
+        tenant_id: tenantId,
+        external_system_id: id,
+        status: LIVE_SEALED_EXPORT_BINDING_STATUS,
+      }],
+      ...LIVE_READ_SOURCE_CONFIG_STATUSES.map((status) => [READ_SOURCE_CONFIG_TABLE, {
+        tenant_id: tenantId,
+        system_id: id,
+        status,
+      }]),
+    ]
+  }
+
+  /**
+   * Which of the three dependent tables this deployment does NOT have — decided by SQLSTATE 42P01
+   * on an autocommit COUNT, BEFORE the delete transaction opens. The counts this probe produces are
+   * DISCARDED on purpose: they were taken with no row lock and are exactly the unprotected snapshot
+   * the lock protocol exists to replace. Only the absence set is kept; the authoritative counts are
+   * re-taken inside the transaction, under FOR UPDATE, skipping the absent tables. Any non-42P01
+   * failure propagates here exactly as it did before (fail-closed: the delete does not happen).
+   */
+  async function probeAbsentDependentTables({ tenantId, id }) {
+    const absent = new Set()
+    await Promise.all(dependentTableQueries({ tenantId, id }).map(async ([table, where]) => {
+      const result = await countDependentRows(db, table, where)
+      if (result.undefinedTable) absent.add(table)
+    }))
+    return absent
+  }
+
+  /**
+   * Second-order references at this system: stock-prep source bindings (079), read-source
+   * configs (062) and sealed-export stock-prep bindings (073). All three are tenant-scoped pointers
+   * by external-system id (073's is compared against `external_systems.id` itself at
+   * `lib/sealed-export/stock-preparation-sqlserver-source-authority.cjs:254`).
+   *
+   * NOTE WHAT IS NOT IN THE FILTER: `workspace_id`. Callers may pass a `workspaceId`; it is
+   * deliberately ignored here, unlike `countPipelineReferences`, and that asymmetry is the whole
+   * correctness of this guard:
+   *
+   *   - 079 rows are legitimately TENANT-WIDE (`workspace_id` is nullable —
+   *     `migrations/079_create_integration_stock_prep_source_binding.sql:43`), and the read path
+   *     itself resolves a tenant-wide caller onto a workspace-scoped binding through the
+   *     `single_workspace_binding` fallback (`lib/http-routes.cjs:4617-4626`). A workspace-filtered
+   *     count would therefore miss rows that the READER can still reach — a guard that goes green
+   *     while a live pointer exists, which is worse than no guard.
+   *   - 073 rows are tenant-scoped the same way (`workspace_id` nullable, `073:17`), and the reader
+   *     matches the row's own `workspace_id` against the caller's scope
+   *     (`stock-preparation-runtime-store.cjs:117`) rather than against the delete's hint.
+   *   - Widening the count only ever REFUSES more deletes. It never reveals a row and never widens
+   *     what a caller may reach: every query still carries the caller's own `tenant_id`, so another
+   *     tenant's binding is neither counted nor disclosed, and the conflict details carry counts,
+   *     never ids.
+   *
+   * 062 and 073 are filtered by status: 062's `draft`/`approved` and 073's `ACTIVE` are live
+   * pointers, 062's `retired` and 073's `RETIRED` are terminal history (see
+   * LIVE_READ_SOURCE_CONFIG_STATUSES / LIVE_SEALED_EXPORT_BINDING_STATUS). `db.countRows`'s
+   * where-builder renders a plain equality per key with no IN support (`lib/db.cjs:buildWhereClause`
+   * — an array value would be JSON-stringified into `= $n` and silently match nothing), so 062's two
+   * live statuses are counted as two equality queries and summed rather than smuggled in as a list.
+   * Those two queries run SERIALLY and draft FIRST (`dependentTableQueries` order): an approve can
+   * commit between them, and only lifecycle order keeps that row inside the sum (see
+   * LIVE_READ_SOURCE_CONFIG_STATUSES; L-12 / P-062-APPROVE-BETWEEN witness it, M-ORDER flips it).
+   *
+   * 073 is the one table here whose migration REVOKEs ALL FROM PUBLIC and grants only two named
+   * deployment roles (`073:432-446`). Where the API's own role is neither the table owner nor one of
+   * them, this count raises SQLSTATE 42501 and — like every non-42P01 failure — propagates, refusing
+   * the delete instead of silently counting zero. That is the fail-closed direction on purpose; the
+   * fix is a SELECT grant, not a swallowed error (see the design doc's residuals).
+   */
+  async function countDependentBindingReferences(executor, { tenantId, id }, { absentTables = new Set() } = {}) {
+    // ONE AT A TIME, in `dependentTableQueries` order: each count is awaited before the next is
+    // issued. NOT Promise.all — the 062 pair must run draft THEN approved (an approve may commit
+    // between them; LIVE_READ_SOURCE_CONFIG_STATUSES), and Promise.all would take that order only
+    // from the driver queueing concurrent queries on one connection in call order. On the delete
+    // transaction the statements and their order are the same as before; they just no longer depend
+    // on that queue (the in-memory L-12 pins "approved-count issued only after draft-count settled").
+    const countOne = async ([table, where]) => {
+      if (absentTables.has(table)) return 0
+      return (await countDependentRows(executor, table, where)).count
+    }
+    const counts = []
+    for (const query of dependentTableQueries({ tenantId, id })) {
+      counts.push(await countOne(query))
+    }
+    const [
+      stockPrepSourceBindingMatches,
+      sealedExportBindingMatches,
+      ...readSourceConfigMatches
+    ] = counts
+    return {
+      stockPrepSourceBindingCount: stockPrepSourceBindingMatches,
+      sealedExportBindingCount: sealedExportBindingMatches,
+      readSourceConfigCount: readSourceConfigMatches.reduce((sum, count) => sum + count, 0),
+    }
+  }
+
+  /**
+   * Delete an external system — the DELETE SIDE of the lock protocol
+   * (`lib/external-system-pointer-lock.cjs` holds the whole protocol; this comment is the half that
+   * lives here).
+   *
+   * ONE transaction, pinned to READ COMMITTED by its FIRST statement (`pinLockProtocolIsolation`),
+   * whose first READ is `SELECT ... FOR UPDATE` on the system row, THEN every reference count on
+   * the SAME transaction handle, THEN the DELETE. The pin is load-bearing: under an inherited
+   * REPEATABLE READ the snapshot is taken by the FOR UPDATE statement BEFORE its lock wait, so the
+   * counts after it cannot see a pointer that committed while it waited and the delete goes through
+   * — the writer-first interleaving dangles (see the protocol header). The lock is what turns the
+   * counts from a snapshot a concurrent writer is free to invalidate into a decision:
+   *   * writer in flight, then delete → the FOR UPDATE WAITS on the writer's KEY SHARE until it
+   *     commits; the count then SEES that pointer and refuses 409. Nothing was deleted.
+   *   * delete in flight, then writer → the writer's KEY SHARE WAITS on this FOR UPDATE until COMMIT;
+   *     its re-read then finds no row and it refuses in its own path's error shape. No pointer lands.
+   *   * a 062 APPROVE (draft -> approved) takes no lock and may commit between the delete's two 062
+   *     counts; counting draft THEN approved, serially, still sees that row (it may count it twice,
+   *     which only refuses). The order is load-bearing — see LIVE_READ_SOURCE_CONFIG_STATUSES.
+   * `integration_pipelines` (057) participates through its REAL foreign key — PostgreSQL's RI check
+   * takes the same KEY SHARE — and additionally through `pipelines.cjs` requireExternalSystem's
+   * explicit KEY SHARE, so a pipeline write that loses the race refuses as the values-free
+   * PipelineValidationError it always raised, not as a bare 23503.
+   *
+   * The 409 is thrown INSIDE the transaction, which rolls it back: a refusal never leaves the row
+   * lock held and never writes. The not-found is decided under the same lock (a row that vanished
+   * while we waited reads as absent), so the "not found during delete" branch below is a posture
+   * check, not a live path.
+   *
+   * 42P01 TOLERANCE, MOVED IN FRONT. The dependent counts tolerate a MISSING table (a deployment that
+   * never ran 079/062/073) — but a 42P01 inside the transaction would abort it. So the absence set is
+   * learned by an autocommit probe BEFORE the transaction (`probeAbsentDependentTables`; its counts
+   * are discarded, only "which tables exist" is kept) and the transaction skips those tables. Every
+   * non-42P01 failure of the probe still propagates, so the delete does not happen — unchanged.
+   */
   async function deleteExternalSystem(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
@@ -1045,37 +1440,72 @@ function createExternalSystemRegistry({
       workspace_id: workspaceId,
       id,
     }
-    const row = await db.selectOne(TABLE, where)
-    if (!row) {
-      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    if (typeof db.transaction !== 'function') {
+      // FAIL CLOSED: a helper that cannot open a transaction cannot take the row lock, and an
+      // unlocked count-then-delete is exactly the race this protocol closes. No degraded path.
+      throw new Error('deleteExternalSystem: scoped db helper with transaction is required (external-system delete lock protocol)')
     }
 
-    const references = await countPipelineReferences({ tenantId, workspaceId, id })
-    const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
-    if (referencedPipelineCount > 0) {
-      throw new ExternalSystemConflictError('external system is used by pipelines', {
-        id,
-        tenantId,
-        workspaceId,
-        referencedPipelineCount,
-        ...references,
-      })
-    }
+    const absentTables = await probeAbsentDependentTables({ tenantId, id })
 
-    const deleted = await publicRow(credentialStore, row)
-    const deleteResult = await db.deleteRows(TABLE, where)
-    const deletedCount = Array.isArray(deleteResult)
-      ? deleteResult.length
-      : Array.isArray(deleteResult?.rows)
-        ? deleteResult.rows.length
-        : Number(deleteResult) || 0
-    if (deletedCount < 1) {
-      throw new ExternalSystemNotFoundError('external system not found during delete', { id, tenantId, workspaceId })
-    }
-    return {
-      deleted: true,
-      system: deleted,
-    }
+    return db.transaction(async (trx) => {
+      if (typeof trx.selectOneForUpdate !== 'function') {
+        throw new Error('deleteExternalSystem: transaction handle with selectOneForUpdate is required (external-system delete lock protocol)')
+      }
+      // PIN, THEN LOCK. The SET is the transaction's first statement (late, it fails 25001 at a non-RC
+      // default and is a no-op at RC); nothing is read or counted before the FOR UPDATE returns. A
+      // handle that cannot pin is refused by pinLockProtocolIsolation before it issues anything.
+      await pinLockProtocolIsolation(trx)
+      const row = await trx.selectOneForUpdate(TABLE, where)
+      if (!row) {
+        throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+      }
+
+      // BOTH count sets run under the lock and BEFORE the delete, and either one being non-zero
+      // refuses it. The dependent counts are NOT a second, weaker check bolted after the pipeline
+      // one: they raise the SAME ExternalSystemConflictError (409 — `http-routes.cjs:871` maps any
+      // `*Conflict*` name), so a caller cannot tell "referenced by a pipeline" from "referenced by a
+      // binding" by status code and then treat one of them as retryable.
+      const references = await countPipelineReferences(trx, { tenantId, workspaceId, id })
+      const dependents = await countDependentBindingReferences(trx, { tenantId, id }, { absentTables })
+      const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
+      const referencedBindingCount = dependents.stockPrepSourceBindingCount
+        + dependents.sealedExportBindingCount
+        + dependents.readSourceConfigCount
+      if (referencedPipelineCount > 0 || referencedBindingCount > 0) {
+        throw new ExternalSystemConflictError(
+          // The pipeline wording is preserved EXACTLY when pipelines are what refuse, because it is
+          // already on the wire (`__tests__/http-routes.test.cjs:974`).
+          referencedPipelineCount > 0
+            ? 'external system is used by pipelines'
+            : 'external system is used by source bindings or read-source configs',
+          {
+            id,
+            tenantId,
+            workspaceId,
+            referencedPipelineCount,
+            referencedBindingCount,
+            ...references,
+            ...dependents,
+          },
+        )
+      }
+
+      const deleted = await publicRow(credentialStore, row)
+      const deleteResult = await trx.deleteRows(TABLE, where)
+      const deletedCount = Array.isArray(deleteResult)
+        ? deleteResult.length
+        : Array.isArray(deleteResult?.rows)
+          ? deleteResult.rows.length
+          : Number(deleteResult) || 0
+      if (deletedCount < 1) {
+        throw new ExternalSystemNotFoundError('external system not found during delete', { id, tenantId, workspaceId })
+      }
+      return {
+        deleted: true,
+        system: deleted,
+      }
+    })
   }
 
   // LIST, with the SAME non-null-hint widening `selectScopedRow` already does for a by-id read.
@@ -1219,9 +1649,13 @@ module.exports = {
   ExternalSystemValidationError,
   ExternalSystemNotFoundError,
   ExternalSystemConflictError,
+  EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE_CODE: CONNECTION_NOT_LIVE_CODE,
   hasPrivateConfigMutation,
   __internals: {
     TABLE,
+    LIVE_CONNECTION_FK,
+    LEGACY_CONNECTION_FK,
+    translateConnectionFkViolation,
     VALID_ROLES,
     VALID_STATUSES,
     detectCredentialFormat,

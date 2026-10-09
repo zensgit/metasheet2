@@ -40,6 +40,20 @@ export interface ProductFeatures {
    */
   approvalFwbWriteback: boolean
   /**
+   * 抄送我的 unread badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_CC_UNREAD_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/cc-unread-count. While false the approval center issues no count
+   * request and shows no badge or row dot on 抄送我的. Never inferred from role/mode/plugin state.
+   */
+  approvalCcUnreadBadge: boolean
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_MINE_OUTCOME_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/mine-outcomes/unseen-count. While false the approval center issues no
+   * count request and shows no badge or row dot on 我发起的. Never inferred from role/mode/plugin.
+   */
+  approvalMineOutcomeBadge: boolean
+  /**
    * W6-3 (#4556) OD-W6-7=(a) — group effective-policy panel gate. Mirrors the backend's two-layer
    * default-OFF switch (master `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED` env AND a per-org
    * exact allowlist — see `w6-group-effective-policy-panel-flag.ts`). No role/mode/plugin
@@ -52,6 +66,14 @@ export interface ProductFeatures {
    * an explicit boolean — never inferred from admin role, product mode, or plugin state.
    */
   elearning: boolean
+  /**
+   * Tasks (/tasks, the top-bar 任务 entry and its pending badge). Mirrors the backend's
+   * TASKS_ENABLED switch, the same switch that decides whether /api/tasks is mounted at all.
+   * Default OFF: true only from an explicit boolean in the session payload (or the authorized dev
+   * override). A session payload that carries no tasks value (an older backend) is OFF. Never
+   * inferred from admin role, product mode or plugin state.
+   */
+  tasks: boolean
   mode: ProductMode
 }
 
@@ -86,8 +108,11 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalAttachments: false,
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
+  approvalCcUnreadBadge: false,
+  approvalMineOutcomeBadge: false,
   attendanceGroupEffectivePolicyPanel: false,
   elearning: false,
+  tasks: false,
   mode: 'platform',
 }
 
@@ -268,6 +293,10 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.approval_fwb_writeback === 'boolean'
           ? featuresNode.approval_fwb_writeback
           : undefined,
+    approvalCcUnreadBadge:
+      typeof featuresNode.approvalCcUnreadBadge === 'boolean' ? featuresNode.approvalCcUnreadBadge : undefined,
+    approvalMineOutcomeBadge:
+      typeof featuresNode.approvalMineOutcomeBadge === 'boolean' ? featuresNode.approvalMineOutcomeBadge : undefined,
     attendanceGroupEffectivePolicyPanel:
       typeof featuresNode.attendanceGroupEffectivePolicyPanel === 'boolean'
         ? featuresNode.attendanceGroupEffectivePolicyPanel
@@ -275,6 +304,7 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
     elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
+    tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -396,6 +426,17 @@ function resolveFeatures(
     backend.approvalFwbWriteback,
   )
 
+  // 抄送我的 unread badge: same default-OFF discipline — only an explicit backend/override boolean.
+  const approvalCcUnreadBadge = boolOrDefault(
+    override.approvalCcUnreadBadge,
+    backend.approvalCcUnreadBadge,
+  )
+  // 我发起的 new-outcome badge: same default-OFF discipline.
+  const approvalMineOutcomeBadge = boolOrDefault(
+    override.approvalMineOutcomeBadge,
+    backend.approvalMineOutcomeBadge,
+  )
+
   // W6-3 (#4556) OD-W6-7=(a): same default-OFF discipline — only an explicit backend/override
   // boolean enables it; no admin/mode/plugin inference.
   const attendanceGroupEffectivePolicyPanel = boolOrDefault(
@@ -410,6 +451,13 @@ function resolveFeatures(
     backend.elearning,
   )
 
+  // Tasks: same default-OFF discipline. A payload without a tasks boolean (an older backend)
+  // resolves to false here; no admin/mode/plugin inference.
+  const tasks = boolOrDefault(
+    override.tasks,
+    backend.tasks,
+  )
+
   return {
     attendance,
     workflow,
@@ -420,8 +468,11 @@ function resolveFeatures(
     approvalAttachments,
     approvalCanvasV2,
     approvalFwbWriteback,
+    approvalCcUnreadBadge,
+    approvalMineOutcomeBadge,
     attendanceGroupEffectivePolicyPanel,
     elearning,
+    tasks,
     mode,
   }
 }
@@ -474,7 +525,13 @@ async function loadProductFeatures(
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
+    // Session-aware means "resolved from THIS session's payload". A load that skipped the session
+    // probe (the login, DingTalk callback and forced-password views run one right after a new token
+    // is set) resolved from an empty payload, so it must clear the mark: otherwise the router
+    // guard's next load returns early and a second sign-in in the same tab keeps features resolved
+    // without its session (tasks/elearning hidden until a hard reload). The guard's re-read hits
+    // the session those views have just primed, so it issues no extra request.
+    state.sessionAwareLoaded = requiresSessionProbe
     state.loading = false
 
     return state.features

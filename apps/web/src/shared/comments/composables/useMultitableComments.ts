@@ -182,6 +182,8 @@ export function useMultitableComments(api: CommentsApiClient) {
       // getComments hydrates reactions), so an incoming `undefined` must not
       // wipe the reactions already shown — preserve the existing aggregate.
       if (comment.reactions === undefined) merged.reactions = comments.value[index].reactions
+      // #5808: same for edit-time mention labels — only the list response carries them.
+      if (comment.mentionLabels === undefined) merged.mentionLabels = comments.value[index].mentionLabels
       comments.value[index] = merged
       return
     }

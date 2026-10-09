@@ -63,14 +63,58 @@ function stockPrepSpecFiles(): string[] {
  * NOT run) must not count as enrolment.
  */
 function isSelectedByRequiredLane(script: string, fileName: string): boolean {
-  const executable = script
+  return requiredLaneTokens(script).some((token) => fileName.includes(token))
+}
+
+/**
+ * Tokens the required lane actually passes to vitest.
+ *
+ * Q8 (2026-09-21): the lane's final `exec npx vitest run …` used to be one 11410-byte physical
+ * line and is now one token per line, backslash-continued and alphabetised (that rewrite exists to
+ * stop n concurrent spec-adding branches conflicting pairwise on a single line). The contract for
+ * every reader of this script is therefore: strip whole-line `#` comments, JOIN continuations into
+ * logical lines, and only then tokenize — never `line.startsWith('exec npx vitest run ')`, which
+ * now sees a header whose sole "token" is the continuation backslash.
+ *
+ * Before this change the function below happened to survive the rewrite by accident, because it
+ * whitespace-split the entire uncommented body and kept only `StockPreparation*` fragments — a
+ * lone `\` is simply filtered out. That is luck, not a contract: the moment a caller wants the
+ * flags, the invocation boundary, or a token family whose names could collide with a continuation
+ * artifact, the accidental version is wrong. It is written explicitly here so the next reader
+ * copies the right shape. Comment stripping stays load-bearing: this script carries a great deal
+ * of prose naming files it does NOT run.
+ */
+function requiredLaneTokens(script: string): string[] {
+  const kept = script
     .split('\n')
-    .filter((line) => !line.trim().startsWith('#'))
-    .join('\n')
-  const tokens = executable
-    .split(/\s+/)
-    .filter((token) => token.startsWith('StockPreparation'))
-  return tokens.some((token) => fileName.includes(token))
+    .map((line) => line.replace(/\r$/, ''))
+    .filter((line) => !/^\s*#/.test(line))
+
+  const logical: string[] = []
+  let buf: string | null = null
+  for (const raw of kept) {
+    const trimmedRight = raw.replace(/\s+$/, '')
+    const continued = trimmedRight.endsWith('\\')
+    const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+    buf = buf === null ? body : `${buf} ${body}`.trim()
+    if (!continued) {
+      logical.push(buf)
+      buf = null
+    }
+  }
+  if (buf !== null) logical.push(buf)
+
+  const tokens: string[] = []
+  for (const line of logical) {
+    const marker = line.indexOf('vitest run')
+    if (marker === -1) continue
+    for (const raw of line.slice(marker + 'vitest run'.length).split(/\s+/)) {
+      const token = raw.trim()
+      if (!token || token.startsWith('-')) continue
+      tokens.push(token)
+    }
+  }
+  return tokens.filter((token) => token.startsWith('StockPreparation'))
 }
 
 describe('stock-preparation web specs are enrolled in a required CI lane', () => {
@@ -111,5 +155,29 @@ describe('stock-preparation web specs are enrolled in a required CI lane', () =>
       expect(specs, `${file} must exist`).toContain(file)
       expect(isSelectedByRequiredLane(script, file), `${file} must run in the required web lane`).toBe(true)
     }
+  })
+
+  it('reads the multi-line registration block, and still refuses tokens that live only in prose', () => {
+    // Q8 decoy: pins the two properties the parser rewrite has to hold at once. A physical-line
+    // reader would see the header's lone continuation backslash and enrol nothing; a reader that
+    // forgot to strip comments would enrol a file the lane demonstrably does not run.
+    const fixture = [
+      '#!/usr/bin/env bash',
+      '# StockPreparationCommentOnlyDecoy is named here in prose but is NOT run.',
+      'exec npx vitest run \\',
+      '  StockPreparationFromAContinuedLine \\',
+      '  --reporter=dot',
+    ].join('\n')
+    expect(isSelectedByRequiredLane(fixture, 'StockPreparationFromAContinuedLine.spec.ts')).toBe(true)
+    expect(isSelectedByRequiredLane(fixture, 'StockPreparationCommentOnlyDecoy.spec.ts')).toBe(false)
+
+    // And against the real file: the block is genuinely multi-line, so the physical-line form the
+    // repo used before this change would now read zero stock-prep tokens.
+    const physical = script.split('\n').find((line) => line.startsWith('exec npx vitest run '))
+    expect(physical, 'the lane still has an exec header').toBeTruthy()
+    expect(
+      (physical as string).split(/\s+/).filter((token) => token.startsWith('StockPreparation')),
+      'a physical-line parse of the new shape yields nothing — this is why the parser was rewritten',
+    ).toEqual([])
   })
 })

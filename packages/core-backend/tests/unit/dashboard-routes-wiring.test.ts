@@ -33,6 +33,7 @@ vi.mock('../../src/multitable/loaders', () => ({
 vi.mock('../../src/multitable/permission-service', () => ({
   resolveSheetReadableCapabilities: vi.fn(async () => ({
     access: { userId: 'unit-user' },
+    sheetLiveness: 'live',
     capabilities: {
       canRead: true,
       canCreateRecord: true,
@@ -48,6 +49,7 @@ vi.mock('../../src/multitable/permission-service', () => ({
   })),
   resolveSheetCapabilities: vi.fn(async () => ({
     access: { userId: 'unit-user' },
+    sheetLiveness: 'live',
     capabilities: {
       canRead: true,
       canCreateRecord: true,

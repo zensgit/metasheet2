@@ -130,6 +130,15 @@ async function loadDeniedBySheet(query: QueryFn, sheetIds: string[], access: His
   return map
 }
 
+// Delete writers capture a pre-delete snapshot but may stamp no changed ids. Derive its keys on read;
+// every consumer below still applies the caller's field allow-set before returning ids/counts/names.
+const HISTORY_CHANGED_FIELDS_SELECT = `CASE WHEN action = 'delete' AND jsonb_typeof(snapshot) = 'object'
+  THEN ARRAY(
+    SELECT DISTINCT field_id FROM unnest(
+      COALESCE(changed_field_ids, ARRAY[]::text[]) || ARRAY(SELECT jsonb_object_keys(snapshot))
+    ) AS deleted_fields(field_id) ORDER BY field_id
+  ) ELSE changed_field_ids END AS changed_field_ids`
+
 function normalizeRevRows(rows: unknown[]): RevRow[] {
   return (rows as Array<Record<string, unknown>>).map((r) => ({
     id: String(r.id),
@@ -233,7 +242,7 @@ export async function loadHistoryBatchSummaries(
   const numericRowCap = Number(params.searchRowCap ?? SEARCH_CANDIDATE_ROW_CAP)
   const searchRowCap = Number.isFinite(numericRowCap) ? Math.max(Math.floor(numericRowCap), 1) : SEARCH_CANDIDATE_ROW_CAP
   const res = await query(
-    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at${searchQuery ? ', snapshot' : ''}
+    `SELECT id, sheet_id, record_id, version, action, source, actor_id, ${HISTORY_CHANGED_FIELDS_SELECT}, batch_id, created_at${searchQuery ? ', snapshot' : ''}
      FROM meta_record_revisions
      WHERE ${where.join(' AND ')}
      ORDER BY created_at DESC, version DESC, id DESC${searchQuery ? `\n     LIMIT ${searchRowCap}` : ''}`,
@@ -456,7 +465,7 @@ export async function estimateHistoryHasMore(
   // Fetch the FULL rows of ONLY the page's batches (complete batches, regardless of where Phase 1 stopped), then
   // build summaries reusing the exact path's per-batch construction WITH the LOCK-3 field layer (mask counts).
   const detailRes = await query(
-    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at
+    `SELECT id, sheet_id, record_id, version, action, source, actor_id, ${HISTORY_CHANGED_FIELDS_SELECT}, batch_id, created_at
      FROM meta_record_revisions
      WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = ANY($2::text[])
      ORDER BY created_at DESC, version DESC, id DESC`,
@@ -649,7 +658,7 @@ export async function loadHistoryBatchDetail(
   // instead of 500ing the whole batch-detail endpoint (mirrors record-service's delete_revision_id read).
   const detailSelect = (withRestored: boolean) =>
     query(
-      `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, snapshot, patch, created_at${withRestored ? ', restored_from_version' : ''}
+      `SELECT id, sheet_id, record_id, version, action, source, actor_id, ${HISTORY_CHANGED_FIELDS_SELECT}, batch_id, snapshot, patch, created_at${withRestored ? ', restored_from_version' : ''}
        FROM meta_record_revisions
        WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2
        ORDER BY created_at DESC, version DESC, id DESC`,

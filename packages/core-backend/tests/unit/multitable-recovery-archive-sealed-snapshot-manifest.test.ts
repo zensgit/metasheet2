@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { recoveryArchiveAttachmentNonceIdentity, sealRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-crypto'
 
 import { describe, expect, test } from 'vitest'
 
@@ -42,7 +43,7 @@ const BINDING: RecoveryArchiveManifestBinding = {
   source_vector_hash: 'b'.repeat(64),
 }
 
-function makePlan() {
+function makePlan(attachments: Record<string, unknown>[] = []) {
   const nonces = Object.fromEntries(
     RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((name, index) => [
       name,
@@ -57,7 +58,7 @@ function makePlan() {
       field_value_tombstones: [],
       link_tombstones: [],
       auto_number: [],
-      attachments_index: [],
+      attachments_index: attachments,
       permission_evidence: [],
       views_config: [],
     },
@@ -152,6 +153,36 @@ function expectManifestError(
 }
 
 describe('buildRecoveryArchiveSealedSnapshotManifest', () => {
+  test('requires an exact attachment index, ciphertext and nonce reservation set before signing', () => {
+    const plaintext = Buffer.from('synthetic binary')
+    const hash = createHash('sha256').update(plaintext).digest('hex')
+    const id = 'att_10000000-0000-4000-8000-000000000001'
+    const sourceVersion = `sha256:${hash}`
+    const plan = makePlan([{ attachment_id: id, record_id: 'record-1', field_id: 'field-1',
+      immutable_object_version: sourceVersion, plaintext_sha256: hash,
+      size_bytes: String(plaintext.length), media_type: 'application/octet-stream', deleted: true }])
+    const result = makeSealResult(plan)
+    const nonce = Buffer.alloc(12, 244)
+    const attachment = { attachmentId: id, sourceVersion, plaintextSha256: hash, sizeBytes: plaintext.length,
+      ...sealRecoveryArchiveAttachment({ binding: { generation: result.binding, attachmentId: id,
+        sourceVersion, plaintextSha256: hash }, dek: DEK, nonce, plaintext }) }
+    const reservation = { ...result.reservations[0]!, nonceHex: nonce.toString('hex'),
+      sectionName: recoveryArchiveAttachmentNonceIdentity(id) }
+    const input = { binding: BINDING, keyId: KEY_ID, plan,
+      sealResult: { ...result, sealedAttachments: [attachment], reservations: [...result.reservations, reservation] } }
+    expect(buildRecoveryArchiveSealedSnapshotManifest(input).manifest.sections.find((s) => s.name === 'attachments_index')!.row_count).toBe('1')
+    for (const patch of [
+      { attachmentId: 'other' }, { sourceVersion: 'other' }, { plaintextSha256: '0'.repeat(64) },
+      { sizeBytes: 0 }, { nonce: Buffer.from(plan[0]!.nonce) }, { authTag: Buffer.alloc(1) },
+    ]) expect(() => buildRecoveryArchiveSealedSnapshotManifest({ ...input,
+      sealResult: { ...input.sealResult, sealedAttachments: [{ ...attachment, ...patch }] },
+    })).toThrow()
+    expect(() => buildRecoveryArchiveSealedSnapshotManifest({ ...input, sealResult: result })).toThrow()
+    expect(() => buildRecoveryArchiveSealedSnapshotManifest({ ...input,
+      sealResult: { ...input.sealResult, reservations: [...result.reservations, { ...reservation, sectionName: 'attachments_index' }] },
+    })).toThrow()
+    expect(() => buildRecoveryArchiveSealedSnapshotManifest({ ...input, plan: makePlan() })).toThrow()
+  })
   test('binds all ten canonical sections to the unsigned root and exact MAC preimage', () => {
     const input = makeInput()
     const compiled = buildRecoveryArchiveSealedSnapshotManifest(input)

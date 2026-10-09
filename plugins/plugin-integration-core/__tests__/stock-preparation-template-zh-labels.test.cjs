@@ -69,15 +69,15 @@ const {
 const MAIN_LABELS_ZH = Object.freeze({
   projectNo: '项目号',
   idempotencyKey: '唯一键',
-  componentSourceId: '部件源ID',
+  componentSourceId: 'PLM 物料ID',
   parentSourceId: '父件源ID',
   parentComponentCode: '父组件图号',
   parentComponentName: '父组件名称',
-  path: 'BOM路径',
+  path: 'BOM 路径',
   depth: 'BOM层级',
   componentCode: '图号',
   componentName: '名称',
-  componentSpec: '规格',
+  componentSpec: '组件规格',
   material: '材料',
   sourceVersion: '源版本',
   rawQuantity: '单层用量',
@@ -209,6 +209,44 @@ async function withLocaleEnvAsync(value, fn) {
     return await fn()
   } finally {
     restore()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 0. 规格 P (owner 2026-09-15) -- the five main-table fields the customer saw in ENGLISH on
+//    222 (父组件图号 / 父组件名称 / PLM 物料ID / BOM 路径 / 组件规格), pinned BY NAME so that
+//    dropping or re-wording any one of them fails with a message that names the field.
+//    assertCompletenessAndFrozenIds below already covers all 33; this is the readable M3
+//    tripwire for the five the ruling is about. The parent pair keeps the strings it has had
+//    since #5446 -- 222 showed English for a rename-collision reason, not a missing labelZh.
+//    M3 (drop or change one of the five zh labels) => this function is red.
+// ---------------------------------------------------------------------------
+const SPEC_P_FIVE_FIELD_LABELS_ZH = Object.freeze({
+  parentComponentCode: '父组件图号',
+  parentComponentName: '父组件名称',
+  componentSourceId: 'PLM 物料ID',
+  path: 'BOM 路径',
+  componentSpec: '组件规格',
+})
+
+function assertSpecPFiveFieldsCarryTheirChineseLabels() {
+  const byId = Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => [f.id, f]))
+  for (const [fieldId, labelZh] of Object.entries(SPEC_P_FIVE_FIELD_LABELS_ZH)) {
+    assert.ok(byId[fieldId], `规格 P: main template still carries ${fieldId}`)
+    assert.equal(typeof byId[fieldId].labelZh, 'string', `规格 P: ${fieldId} has a Chinese label`)
+    assert.ok(byId[fieldId].labelZh.length > 0, `规格 P: ${fieldId} Chinese label is non-empty`)
+    assert.equal(byId[fieldId].labelZh, labelZh, `规格 P: ${fieldId} Chinese label is the agreed one`)
+    assert.equal(MAIN_LABELS_ZH[fieldId], labelZh, `规格 P: ${fieldId} agrees with the pinned vocabulary`)
+    // The zh name reaches a NEW install through the locale mechanism only -- never hard-coded.
+    assert.equal(pickTemplateLabel(byId[fieldId], 'zh-CN'), labelZh, `规格 P: ${fieldId} zh leg picks labelZh`)
+    assert.equal(pickTemplateLabel(byId[fieldId], 'en'), byId[fieldId].label, `规格 P: ${fieldId} en leg keeps label`)
+  }
+  // The template pair is the ONE holder of 父组件图号 / 父组件名称 (owner ruling): no other main
+  // template field may carry either Chinese name, so a future 'ext_'-style duplicate can never
+  // come back through the frozen template itself.
+  for (const labelZh of ['父组件图号', '父组件名称']) {
+    const holders = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((f) => f.labelZh === labelZh).map((f) => f.id)
+    assert.equal(holders.length, 1, `规格 P: exactly one template field is named ${labelZh}`)
   }
 }
 
@@ -729,6 +767,7 @@ async function assertRenamedSheetSurvivesInspectAndEnsure() {
 }
 
 async function main() {
+  assertSpecPFiveFieldsCarryTheirChineseLabels()
   assertCompletenessAndFrozenIds()
   assertLocaleNormalization()
   assertEnglishLeg()

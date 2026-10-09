@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 /**
  * GET /api/approvals/:id/history — guard alignment, real-DB acceptance.
@@ -28,6 +28,11 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  * grant-helper reintroduction; it is what makes THIS test actually exercise OD-S1-8 rather than
  * (as it did before this slice) coincidentally passing on the trusted-claims permission check
  * alone. The 403/403/401 tests remain seed-free by design.
+ *
+ * AMENDED AGAIN (test report 2026-10-08, T4cd): the DTO-shape tests at the end of the describe build
+ * a real instance through the create/approve path, and THAT write path takes the helper's
+ * `approvals:write` grant for its requester, like every other approval real-DB suite. The guard
+ * tests above it are unchanged and still seed nothing.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -72,6 +77,10 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
   const pool = () => poolManager.get()
   const createdInstanceIds: string[] = []
   const createdUserIds: string[] = []
+  // T4cd block (end of this describe): instances built through the real create/approve path also
+  // leave assignment/metric rows, a template, and a write grant behind.
+  const createdTemplateIds: string[] = []
+  const grantedUserIds: string[] = []
 
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
@@ -88,7 +97,17 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     try {
       if (createdInstanceIds.length > 0) {
         await pool().query(`DELETE FROM approval_records WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
+        await pool().query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
+        await pool().query(`DELETE FROM approval_metrics WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
         await pool().query(`DELETE FROM approval_instances WHERE id = ANY($1::text[])`, [createdInstanceIds])
+      }
+      if (createdTemplateIds.length > 0) {
+        await pool().query(`DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])`, [createdTemplateIds])
+        await pool().query(`DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])`, [createdTemplateIds])
+        await pool().query(`DELETE FROM approval_templates WHERE id = ANY($1::uuid[])`, [createdTemplateIds])
+      }
+      if (grantedUserIds.length > 0) {
+        await pool().query(`DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`, [grantedUserIds])
       }
       if (createdUserIds.length > 0) {
         await pool().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
@@ -238,5 +257,151 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
 
     const response = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(instanceId)}/history`)
     expect(response.status).toBe(401)
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // Test report 2026-10-08, T4cd — the DTO SHAPE of the platform branch, on an instance built
+  // through the real service path (create -> approve -> the engine's cc), never hand-inserted rows:
+  // the row shapes asserted here are exactly what `insertApprovalRecord` writes for those events.
+  //
+  // Before this fix the platform branch sent only the snake_case columns, while the approval-centre
+  // detail page reads the camelCase DTO (`occurredAt` / `actorName` / ...), so every platform row
+  // rendered no time and 「系统」 as its actor. The camelCase copies are ADDITIVE: every snake_case
+  // column is asserted unchanged beside them.
+  //
+  // Unlike the guard-alignment tests above (trusted-claims tokens, no permission rows seeded), these
+  // CREATE an instance, so the requester gets the same `approvals:write` grant every other approval
+  // real-DB suite's write path uses; the read under test is the requester's own (arm 1), exactly
+  // the tester's view. They share this describe's server: its afterAll ends the shared pool, so a
+  // second server in this file cannot start after it.
+  // -----------------------------------------------------------------------------------------------
+  async function postJson(path: string, token: string, body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
+
+  type WireRow = Record<string, unknown> & { action: string; metadata?: Record<string, unknown> }
+
+  /** start -> approval (one static approver) -> cc (one static user) -> end. */
+  async function createApprovedInstance(suffix: string): Promise<{ instanceId: string; requesterId: string; approverId: string; rows: WireRow[] }> {
+    const requesterId = `hist-dto-req-${suffix}-${TS}`
+    const approverId = `hist-dto-apr-${suffix}-${TS}`
+    const ccUserId = `hist-dto-cc-${suffix}-${TS}`
+    grantedUserIds.push(requesterId)
+    await grantApprovalWriteForIntegrationActor(requesterId)
+    const requesterToken = await devToken(baseUrl, requesterId, 'admin', '*:*')
+    const approverToken = await devToken(baseUrl, approverId, 'admin', '*:*')
+
+    const created = await postJson('/api/approval-templates', requesterToken, {
+      key: `hist-dto-${suffix}-${TS}`,
+      name: 'T4cd history DTO shape',
+      formSchema: { fields: [{ id: 'reason', type: 'text', label: 'reason', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: [approverId], approvalMode: 'single' } },
+          { key: 'cc_1', type: 'cc', config: { targetType: 'user', targetIds: [ccUserId] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_1' },
+          { key: 'e-a-c', source: 'approval_1', target: 'cc_1' },
+          { key: 'e-c-e', source: 'cc_1', target: 'end' },
+        ],
+      },
+    })
+    expect(created.status, await created.clone().text()).toBe(201)
+    const templateId = ((await created.json()) as { id: string }).id
+    createdTemplateIds.push(templateId)
+    const published = await postJson(`/api/approval-templates/${templateId}/publish`, requesterToken, { policy: { allowRevoke: true } })
+    expect(published.status, await published.clone().text()).toBe(200)
+
+    const instance = await postJson('/api/approvals', requesterToken, { templateId, formData: { reason: 'r' } })
+    expect(instance.status, await instance.clone().text()).toBe(201)
+    const instanceId = ((await instance.json()) as { id: string }).id
+    createdInstanceIds.push(instanceId)
+
+    const approved = await postJson(`/api/approvals/${instanceId}/actions`, approverToken, { action: 'approve' })
+    expect(approved.status, await approved.clone().text()).toBe(200)
+
+    const history = await getHistory(baseUrl, instanceId, await devToken(baseUrl, requesterId, 'viewer', 'approvals:read'))
+    expect(history.status, await history.clone().text()).toBe(200)
+    const body = (await history.json()) as { data: { items: WireRow[] } }
+    return { instanceId, requesterId, approverId, rows: body.data.items }
+  }
+
+  it('every row carries actorId / actorName / occurredAt (ISO) / fromStatus / toStatus equal to its unchanged snake_case column', async () => {
+    const { instanceId, requesterId, approverId, rows } = await createApprovedInstance('shape')
+
+    // 正控: the three audit rows the service wrote, with the actors the timeline must name.
+    const stored = await pool().query<{ action: string; actor_id: string }>(
+      'SELECT action, actor_id FROM approval_records WHERE instance_id = $1 ORDER BY id ASC',
+      [instanceId],
+    )
+    expect(stored.rows.map((row) => row.action).sort()).toEqual(['approve', 'cc', 'created'])
+
+    expect(rows).toHaveLength(3)
+    for (const row of rows) {
+      // snake_case columns stay exactly as before.
+      for (const column of ['occurred_at', 'actor_id', 'actor_name', 'from_status', 'to_status']) {
+        expect(Object.prototype.hasOwnProperty.call(row, column), `${row.action}: ${column}`).toBe(true)
+      }
+      expect(row.actorId).toBe(row.actor_id)
+      expect(row.actorName).toBe(row.actor_name)
+      expect(row.fromStatus).toBe(row.from_status)
+      expect(row.toStatus).toBe(row.to_status)
+      expect(typeof row.occurredAt).toBe('string')
+      expect(row.occurredAt).toBe(new Date(String(row.occurred_at)).toISOString())
+    }
+
+    const byAction = new Map(rows.map((row) => [row.action, row]))
+    expect(byAction.get('created')?.actorId).toBe(requesterId)
+    expect(byAction.get('created')?.toStatus).toBe('pending')
+    expect(byAction.get('approve')?.actorId).toBe(approverId)
+    // The engine writes the cc row under its own actor; naming it 「系统」 is the client's job.
+    expect(byAction.get('cc')?.actorId).toBe('system')
+  })
+
+  // T4cd (node half; owner approval pending under the 2026-09-20 whitelist ruling): `nodeKey` and
+  // `autoApproved` are single-key projections. Each stored row also carries keys that must stay off
+  // the wire (the created row's `requestNo`; the approve row's `approvalMode` / `aggregateComplete` /
+  // `nextNodeKey`; the cc row's `targetType` / `targetId`) — proven present below, so their absence
+  // on the wire is about the projection, not about rows that never had them.
+  it('nodeKey crosses as the stored value and is the ONLY metadata key of these rows; autoApproved crosses only as boolean true', async () => {
+    const { instanceId, requesterId, rows } = await createApprovedInstance('meta')
+
+    const stored = await pool().query<{ action: string; metadata: Record<string, unknown> | null }>(
+      'SELECT action, metadata FROM approval_records WHERE instance_id = $1',
+      [instanceId],
+    )
+    const storedByAction = new Map(stored.rows.map((row) => [row.action, row.metadata ?? {}]))
+    for (const [action, metadata] of storedByAction) {
+      expect(typeof metadata.nodeKey, `${action}: stored nodeKey`).toBe('string')
+      expect(Object.keys(metadata).filter((key) => key !== 'nodeKey').length, `${action}: other stored keys`).toBeGreaterThan(0)
+    }
+    expect(storedByAction.get('created')?.nodeKey).toBe('start')
+
+    for (const row of rows) {
+      expect(row.metadata, row.action).toEqual({ nodeKey: storedByAction.get(row.action)!.nodeKey })
+      expect(Object.prototype.hasOwnProperty.call(row, 'nodeKey'), `${row.action}: top-level nodeKey`).toBe(false)
+    }
+    const text = JSON.stringify(rows)
+    for (const offWire of ['requestNo', 'approvalMode', 'aggregateComplete', 'nextNodeKey', 'targetType', 'targetId', 'nodeEntryEpoch']) {
+      expect(text.includes(offWire), `${offWire} reached the wire`).toBe(false)
+    }
+
+    // autoApproved: the boolean true crosses; a string 'true' (a value the engine never writes) does not.
+    await pool().query(`UPDATE approval_records SET metadata = metadata || '{"autoApproved": true}'::jsonb WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    await pool().query(`UPDATE approval_records SET metadata = metadata || '{"autoApproved": "true"}'::jsonb WHERE instance_id = $1 AND action = 'cc'`, [instanceId])
+    const again = await getHistory(baseUrl, instanceId, await devToken(baseUrl, requesterId, 'viewer', 'approvals:read'))
+    expect(again.status).toBe(200)
+    const againRows = ((await again.json()) as { data: { items: WireRow[] } }).data.items
+    const againByAction = new Map(againRows.map((row) => [row.action, row]))
+    expect(againByAction.get('approve')?.metadata).toEqual({ nodeKey: storedByAction.get('approve')!.nodeKey, autoApproved: true })
+    expect(againByAction.get('cc')?.metadata).toEqual({ nodeKey: storedByAction.get('cc')!.nodeKey })
+    expect(againByAction.get('created')?.metadata).toEqual({ nodeKey: 'start' })
   })
 })

@@ -109,6 +109,13 @@ describe('approval history routing', () => {
             version: 2,
             from_version: 1,
             to_version: 2,
+            // Test report 2026-10-08 T4cd: camelCase copies of the five DTO fields, beside the
+            // unchanged snake_case columns above.
+            actorId: 'user-2',
+            actorName: 'Reviewer Two',
+            occurredAt: '2026-03-26T10:00:00.000Z',
+            fromStatus: 'pending',
+            toStatus: 'approved',
           },
         ],
         page: 2,
@@ -153,6 +160,132 @@ describe('approval history routing', () => {
       expect.stringContaining("metadata->>'commentId' IS NULL"),
       ['inst-1', 1, 1, 'policy_denied'],
     )
+  })
+
+  // Test report 2026-10-08 T4cd. The approval-centre detail page reads `occurredAt` / `actorName` /
+  // `actorId` / `fromStatus` / `toStatus`; the platform branch used to send only the snake_case
+  // columns, so every row rendered no time and 「系统」 as its actor. The real driver hands
+  // `occurred_at` over as a Date — this pins the ISO conversion, the null handling, and that no
+  // snake_case field moves.
+  it('T4cd: platform rows carry camelCase copies (ISO occurredAt from a driver Date) beside the unchanged snake_case fields', async () => {
+    pgState.pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [{ c: 3 }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'rec-created',
+            occurred_at: new Date('2026-10-08T01:02:03.456Z'),
+            actor_id: 'user-requester',
+            actor_name: 'Requester Name',
+            action: 'created',
+            comment: null,
+            from_status: null,
+            to_status: 'pending',
+            version: 1,
+            from_version: null,
+            to_version: 1,
+          },
+          {
+            id: 'rec-cc',
+            occurred_at: new Date('2026-10-08T01:02:03.456Z'),
+            actor_id: 'system',
+            actor_name: 'System',
+            action: 'cc',
+            comment: null,
+            from_status: 'pending',
+            to_status: 'pending',
+            version: 1,
+            from_version: 1,
+            to_version: 1,
+          },
+          {
+            id: 'rec-odd',
+            occurred_at: 'not-a-timestamp',
+            actor_id: null,
+            actor_name: null,
+            action: 'comment',
+            comment: 'x',
+            from_status: null,
+            to_status: null,
+            version: 1,
+            from_version: null,
+            to_version: null,
+          },
+        ],
+      })
+
+    const response = await request(pinned.url()).get('/api/approvals/inst-1/history')
+
+    expect(response.status).toBe(200)
+    const [created, cc, odd] = response.body.data.items as Array<Record<string, unknown>>
+    expect(created).toMatchObject({
+      occurred_at: '2026-10-08T01:02:03.456Z',
+      actor_id: 'user-requester',
+      actor_name: 'Requester Name',
+      from_status: null,
+      to_status: 'pending',
+      occurredAt: '2026-10-08T01:02:03.456Z',
+      actorId: 'user-requester',
+      actorName: 'Requester Name',
+      fromStatus: null,
+      toStatus: 'pending',
+    })
+    // The engine's own actor arrives as stored; turning it into 「系统」 is the client's job.
+    expect(cc).toMatchObject({ actorId: 'system', actorName: 'System', fromStatus: 'pending', toStatus: 'pending' })
+    // A value that is not a valid timestamp is null, never "Invalid Date"; null columns stay null.
+    expect(odd).toMatchObject({ occurredAt: null, actorId: null, actorName: null, fromStatus: null, toStatus: null })
+    expect(odd.occurred_at).toBe('not-a-timestamp')
+    // No metadata key appears for rows that carry none of the whitelisted values.
+    for (const item of [created, cc, odd]) {
+      expect(Object.prototype.hasOwnProperty.call(item, 'metadata')).toBe(false)
+    }
+  })
+
+  // Test report 2026-10-08 T4cd (node half) — `nodeKey` and `autoApproved` join the metadata whitelist
+  // as single-key projections (owner ruling 2026-09-20: whitelist business fields, never the whole
+  // metadata). The SELECT reads only those two key paths, and the map rebuilds each value: a
+  // non-empty string node key, and `autoApproved` only when it is the boolean true.
+  it('T4cd: projects nodeKey (non-empty string only) and autoApproved (boolean true only) as single metadata keys, never the raw aliases', async () => {
+    pgState.pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [{ c: 5 }] })
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'r-human', action: 'approve', actor_id: 'u1', history_node_key_raw: 'approval_1', history_auto_approved_raw: null },
+          { id: 'r-auto', action: 'approve', actor_id: 'system:auto-approval', history_node_key_raw: ' approval_2 ', history_auto_approved_raw: true },
+          { id: 'r-odd-auto', action: 'approve', actor_id: 'u2', history_node_key_raw: 'approval_3', history_auto_approved_raw: 'true' },
+          { id: 'r-odd-key', action: 'comment', actor_id: 'u3', history_node_key_raw: 42, history_auto_approved_raw: false },
+          { id: 'r-blank-key', action: 'comment', actor_id: 'u4', history_node_key_raw: '   ', history_auto_approved_raw: 1 },
+        ],
+      })
+
+    const response = await request(pinned.url()).get('/api/approvals/inst-1/history')
+
+    expect(response.status).toBe(200)
+    const items = response.body.data.items as Array<Record<string, unknown>>
+    const byId = new Map(items.map((item) => [item.id, item]))
+    expect(byId.get('r-human')?.metadata).toEqual({ nodeKey: 'approval_1' })
+    expect(byId.get('r-auto')?.metadata).toEqual({ nodeKey: 'approval_2', autoApproved: true })
+    // Only the boolean true crosses; a string 'true' or a number is dropped.
+    expect(byId.get('r-odd-auto')?.metadata).toEqual({ nodeKey: 'approval_3' })
+    // A non-string or blank node key is dropped; with nothing left, no metadata key at all.
+    expect(Object.prototype.hasOwnProperty.call(byId.get('r-odd-key'), 'metadata')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(byId.get('r-blank-key'), 'metadata')).toBe(false)
+    // The internal aliases never reach the wire.
+    for (const item of items) {
+      expect(Object.keys(item).filter((key) => key.endsWith('_raw'))).toEqual([])
+    }
+    // The page query reads exactly the two new key paths, never the whole metadata column.
+    const pageSql = String(pgState.pool.query.mock.calls[4][0])
+    expect(pageSql).toContain("metadata->'nodeKey' AS history_node_key_raw")
+    expect(pageSql).toContain("metadata->'autoApproved' AS history_auto_approved_raw")
+    expect(pageSql).not.toMatch(/,\s*metadata\s*,/)
+    expect(pageSql).not.toMatch(/\bmetadata\s+FROM\b/)
   })
 
   it('requires authentication for approval history', async () => {

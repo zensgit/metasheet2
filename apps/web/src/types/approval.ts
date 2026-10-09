@@ -545,6 +545,27 @@ export interface UnifiedApprovalDTO {
    * not deny.
    */
   canDecideCurrentNode?: boolean
+  /**
+   * May THIS viewer stage process evidence (过程附件) on this instance's 评论 action right now?
+   * Resolved server-side: the decision door's own seat answer (user, role and delegated seats, and
+   * the pending branch frontier of a parallel region), restricted to instances whose decisions go
+   * through the seat-gated door — so it is `false` on a legacy / `plm:` instance even where
+   * `canDecideCurrentNode` is `true`, because nothing binds process evidence there.
+   *
+   * It does not read the attachments flag; the view conjoins `approvalAttachments` itself. Read it
+   * as `=== true`: `undefined` (an older server) means no uploader, unlike `canDecideCurrentNode`
+   * above — hiding an optional uploader is the safe side, and the server's seat checks stay the
+   * authority either way.
+   */
+  canAttachProcessEvidence?: boolean
+  /**
+   * Cancel round (`workflowKey === 'approval.cancel-round'`) only — mirrors the backend DTO field.
+   * The bounded close-reason token of a round the SYSTEM closed (`round_expired` or
+   * `business_blocked:<code>`), whitelist-projected by the DETAIL read (`getApproval`) only; list rows
+   * never carry it. On a detail DTO its absence means 「not a system closure」; on a list row it means
+   * nothing — see approvals/useCancelRoundCloseReasons.ts.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`
@@ -552,6 +573,19 @@ export interface UnifiedApprovalDTO {
    * tab; callers must treat that as "no dot", never guess a value.
    */
   isRead?: boolean
+  /**
+   * 抄送我的 unread (test report 2026-10-08): populated ONLY on the 抄送我的 (cc) tab and only while
+   * the server's CC-badge switch is on — `true` when the viewer has not opened this row since the
+   * newest CC targeting them. `undefined` everywhere else; callers treat that as "no dot".
+   */
+  ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08): populated ONLY on the 我发起的 (mine) tab and only
+   * while the server's outcome-badge switch is on — `true` when the viewer's own request was decided
+   * (approved / rejected / revoked / cancelled) by someone else and not opened since.
+   * `undefined` everywhere else ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -586,8 +620,13 @@ export interface ApprovalActionRequest {
   targetNodeKey?: string
   /** P1-B add_sign — approver user IDs to pull into the current node as co-signers. */
   targetUserIds?: string[]
-  /** P1-B add_sign — `parallel` (default) or `before`. */
-  addSignMode?: 'before' | 'parallel'
+  /**
+   * P1-B add_sign — `parallel` (default) or `before`; Lock-5 L5-B (F4-S1) adds `after` (后加签):
+   * the actor's seat is consumed as an approval and the addees open a fresh round at the SAME node.
+   */
+  addSignMode?: 'before' | 'parallel' | 'after'
+  /** Lock-5 OD-L5-5(a) — required with `after` and two or more `targetUserIds`; governs their round. */
+  addSignAggregation?: 'all' | 'any'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
   /**
@@ -619,6 +658,37 @@ export interface ApprovalTemplateListItemDTO {
   latestVersionId: string | null
   createdAt: string
   updatedAt: string
+}
+
+/**
+ * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4) FE read
+ * surface. Mirrors the backend's `ApprovalTemplateGroupRow` (`ApprovalTemplateGroupService.ts`)
+ * byte-for-byte — same camelCase field set, no re-derivation on this side.
+ */
+export interface ApprovalTemplateGroupDTO {
+  id: string
+  orgId: string
+  name: string
+  sortOrder: number | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+}
+
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — the reorder
+ * endpoint's ACTUAL response shape. Mirrors the backend's `ApprovalTemplateGroupReorderResult`
+ * (`ApprovalTemplateGroupReorderService.ts`) byte-for-byte: `{id, sortOrder}` only — the reorder
+ * transaction never re-reads `name`/`createdBy`/`archivedAt` after its per-row `UPDATE`s, so those
+ * fields are NOT part of this response. Deliberately its own type, not `ApprovalTemplateGroupDTO`
+ * (which this endpoint's response was previously, incorrectly, typed as — a caller trusting the
+ * wider type for any field beyond `id`/`sortOrder` would read `undefined` at runtime despite the
+ * compiler believing otherwise).
+ */
+export interface ApprovalTemplateGroupReorderResultDTO {
+  id: string
+  sortOrder: number
 }
 
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {

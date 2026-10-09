@@ -17,6 +17,7 @@
       :directory="directory"
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
+      :can-pull="canRunPull"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
@@ -98,7 +99,7 @@
     <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
          The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
          and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
-         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         who only remembers 「示例乙型」 finds 200000006 without being told it, and the trained
          operator who types the number keeps the path they already use. -->
     <div class="sp-board__search" :class="{ 'sp-board__search--home': showHome }">
       <label class="sp-board__field">
@@ -112,8 +113,11 @@
           :placeholder="bi('项目号或名称', 'Project number or name')"
           @keyup.enter="openProject"
         >
-        <!-- D1=A: the union, not the directory alone. The home page's own caption says the list
-             holds "这台电脑最近开过的、和管理员归档过的项目" — so it has to. -->
+        <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
+             list holds 「这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目」 — so it
+             has to. A directory row is labelled by its own name; a row only this computer's memory
+             knows is labelled with the home page's words for that half of the list, verbatim. The
+             memory is written only when this page opens a project, so "opened" is literally true. -->
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
@@ -124,7 +128,7 @@
             v-for="entry in memoryOnlyProjectNos"
             :key="`memory:${entry}`"
             :value="entry"
-          >{{ bi('这台电脑最近开过的', 'Recently opened on this computer') }}</option>
+          >{{ bi('这台电脑最近开过的项目', 'A project this computer recently opened') }}</option>
         </datalist>
       </label>
       <button
@@ -345,11 +349,11 @@
             type="button"
             class="sp-board__button"
             data-testid="stock-prep-project-board-notify-next"
-            :disabled="busy || !handoff.isCurrentHandler || handoff.terminal"
+            :disabled="busy || !notifyPressable"
             :title="notifyTitle"
             @click="notifyNext"
           >
-            {{ bi('通知下一步', 'Tell the next person') }}
+            {{ notifyLabel }}
           </button>
 
           <!-- 导出Excel — the #5437 client, reused. Same route, same gate, same download trigger. -->
@@ -404,8 +408,8 @@
           </button>
           <p class="sp-board__fill-hint">
             {{ bi(
-              '打开的是备料主表。表里是这台系统上所有项目的行,请按项目号找您这一个 —— 目前还不能只显示一个项目。',
-              'This opens the stock-preparation table. It holds the rows for every project on this system, so find yours by project number — filtering it down to a single project is not available yet.',
+              '这是这套部署的备料表,请按项目号确认是您要处理的项目。',
+              'This is this deployment’s stock-preparation table — confirm the project number before you work on it.',
             ) }}
           </p>
         </template>
@@ -465,15 +469,20 @@ import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import {
+  advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  stockPreparationHandoffAdvanceWasReplay,
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
+  type StockPreparationHandoffAdvanceResult,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
 import {
-  advanceStockPreparationHandoff,
   readStockPreparationHandoff,
   readStockPreparationProjectBoard,
   type StockPreparationHandoffCursor,
@@ -487,13 +496,19 @@ import {
   stockPrepBoardErrorPlain,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
-import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
+import {
+  operatorNextStep,
+  STOCK_PREP_NOTIFY_LAST_STEP_LABEL,
+  type OperatorNextStepResult,
+} from '../../../services/integration/stockPreparation/operatorNextStep'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import {
   readStockPrepRecentProjects,
@@ -719,9 +734,11 @@ async function scrollToConfirmPanel(): Promise<void> {
  * on the panel that reports it.
  *
  * NEVER AN UNEXERCISABLE PRESS. The composed queue renders this button only for a caller who passes
- * `canOpenStockPrepProjectBoard` (operate ∧ read), and `canRunStockPrepProjectSync` is that same tier
- * plus platform admin — so every caller who can see it can run it. The panel's own `run` re-checks
- * permission and busy state anyway; this adds no second implementation of what 同步 means.
+ * `canOpenStockPrepProjectBoard` (operate ∧ read); `canRunStockPrepProjectSync` is one rung ABOVE
+ * that since R-33 (pull ∧ operate ∧ read, or platform admin), and `nextStep` below strips the
+ * pull/resync action for a caller who fails it — so every caller who can see this button can run
+ * it. The panel's own `run` re-checks permission and busy state anyway; this adds no second
+ * implementation of what 同步 means.
  */
 async function onEmbeddedResync(): Promise<void> {
   await nextTick()
@@ -794,8 +811,11 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   // same class of wrong answer as 「都清了」 for a project nobody has ever heard of.
   //
   // So the board says the honest thing FIRST — this number has no data here yet — and names the
-  // control. The administrator sentence is kept for the one case where it is true: the pull panel is
-  // absent because this caller may not press it.
+  // control. The 「请联系拉取人员」 sentence is kept for the one case where it is true: the pull panel
+  // is absent because this caller may not press it. Since R-33 (2026-10-08) that is every floor
+  // operator — pulling belongs to a holder of `stock-prep:pull` (the 拉取人员), a `stock-prep:admin`
+  // or a platform administrator — so the sentence names the 拉取人员 first, never 「备料操作权限」,
+  // which the reader already holds.
   if (canRunPull.value) {
     return {
       zh: `这个项目号在您这里还没有数据。`,
@@ -807,8 +827,8 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   return {
     zh: '这个项目号在您这里还没有数据,而拉取数据不是您能做的一步。',
     en: 'There is no data for this project number here yet, and pulling it in is not a step you can run.',
-    zhNext: '请找有备料操作权限的同事或平台管理员把它拉进来;也请顺便核对一下号码有没有打错。',
-    enNext: 'Ask a colleague with the stock-preparation operator permission, or a platform administrator, to pull it in — and check the number for a typo while you are at it.',
+    zhNext: '请联系拉取人员(或平台管理员)把它拉进来;也请顺便核对一下号码有没有打错。',
+    enNext: 'Please contact a pull operator (拉取人员) — or a platform administrator — to pull it in, and check the number for a typo while you are at it.',
   }
 })
 
@@ -930,18 +950,26 @@ const archiveText = computed<StockPrepPlainEntry>(() => {
 /**
  * 轮到谁. Three honest answers, and the first one is the important one: a deployment with no handoff
  * chain must not be told a turn it does not have.
+ *
+ * ONLY `completed` MEANS DONE. `terminal` is the LAST step being the CURRENT one, not yet handed on —
+ * reading it as "finished" told the last handler 「已经走完最后一步」 about the step still in front of them.
  */
 const turnText = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return bi('这台系统没有设置流转顺序', 'No handoff order is set up on this system')
-  if (cursor.completed || cursor.terminal) return bi('已经走完最后一步', 'The last step is done')
+  if (cursor.completed) return bi('已经走完最后一步', 'The last step is done')
   const step = cursor.currentStepKey ?? ''
   const position = cursor.stepIndex !== null && cursor.stepCount > 0
     ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
     : ''
   if (!step) return bi('还没开始', 'Not started yet')
-  return cursor.isCurrentHandler
-    ? bi(`轮到您了${position}`, `It is your turn${position}`)
+  if (cursor.isCurrentHandler) return bi(`轮到您了${position}`, `It is your turn${position}`)
+  // SOMEBODY ELSE'S STEP, by the desk's name — a bare key like `final_review` tells the floor nothing.
+  // The closed step vocabulary (plainLanguage.ts, the same one the queue labels its status line with);
+  // a key it does not know keeps today's raw text rather than a guess.
+  const plain = stockPrepHandoffStepPlain(step)
+  return plain
+    ? bi(`${plain.zh}${position}`, `${plain.en}${position}`)
     : bi(`${step}${position}`, `${step}${position}`)
 })
 
@@ -997,9 +1025,51 @@ const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
-  if (cursor.terminal) return bi('已经是最后一步了', 'This is already the last step')
+  // An owed notice is this caller's to send even when the turn is somebody else's — the queue's own
+  // invitation sentence, so the two surfaces say the same thing about the same state.
+  if (stockPreparationHandoffResendableStepKey(cursor)) {
+    return bi(
+      '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+      'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+    )
+  }
   if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
   return ''
+})
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步 — the confirmation queue's own rule (confirmationQueue.ts
+ * `stockPreparationHandoffMayPress`), so the two buttons cannot disagree about who may press.
+ *
+ * `terminal` is NOT "the chain is done": the server sets it when the LAST step is the current one and
+ * has not been handed on (http-routes.cjs, the GET /handoff answer: `terminal: !completed && stepIndex
+ * === steps.length - 1`), and pressing it there is what tells 仓库/采购. Only `completed` means nothing
+ * is left — except an OWED notice (`resendableStepKey`), which the server offers only to a handler of
+ * that hop and which stays theirs to send after the turn, or the whole chain, has moved on.
+ * The server re-checks the handler on the POST whatever this says; the page only stops hiding it.
+ */
+const notifyPressable = computed<boolean>(() => stockPreparationHandoffMayPress(handoff.value))
+
+/**
+ * WHAT A PRESS WOULD SEND, once, for everything that names it: an owed resend (the press sends THAT
+ * hop's notice, not the current step's), the LAST step (the press tells 仓库/采购, the queue's H-09),
+ * or an ordinary hand-over. The button label and the 「下一步」 bar both read this, so the two
+ * controls for one press cannot describe it in two ways.
+ */
+const notifyTarget = computed<'resend' | 'last-step' | 'next'>(() => {
+  const cursor = handoff.value
+  if (stockPreparationHandoffResendableStepKey(cursor)) return 'resend'
+  if (cursor && cursor.terminal) return 'last-step'
+  return 'next'
+})
+
+/** The button's words, the queue's own labels. */
+const notifyLabel = computed<string>(() => {
+  if (notifyTarget.value === 'resend') {
+    return bi('通知下一步(补发上一步的群消息)', 'Tell the next person (resend the previous step’s message)')
+  }
+  if (notifyTarget.value === 'last-step') return bi(STOCK_PREP_NOTIFY_LAST_STEP_LABEL.zh, STOCK_PREP_NOTIFY_LAST_STEP_LABEL.en)
+  return bi('通知下一步', 'Tell the next person')
 })
 
 /**
@@ -1023,7 +1093,6 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
  */
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
-  const cursor = handoff.value
   const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
@@ -1031,7 +1100,14 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
     pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
     justConfirmed: justConfirmed.value,
     hasExported: Boolean(board.value?.lastExportAt),
-    isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
+    // The SAME rule as the button, so the bar never offers a press the button refuses — or says
+    // 「没有等您的事」 above a last step that is still waiting on this operator.
+    isCurrentHandler: notifyPressable.value,
+    // …and the SAME words as the button: on the last step both say 「通知仓库和采购」.
+    handoffLastStep: notifyTarget.value === 'last-step',
+    // R-33: the SAME predicate as the pull button, so the two pull-driving sentences name the
+    // 拉取人员 for a floor operator instead of telling them to press a button they do not have.
+    canPull: canRunPull.value,
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run
@@ -1352,27 +1428,67 @@ function onNextStepAction(): void {
   }
 }
 
+/** Somebody else moved this step first; the server's compare-and-set refused the press (409). */
+const HANDOFF_STEP_MISMATCH_CODE = 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH'
+
 async function notifyNext(): Promise<void> {
   const current = board.value
   const cursor = handoff.value
-  if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  if (!current || !current.projectNo || !cursor || !notifyPressable.value) return
+  // THE STEP THIS PRESS COMPLETES, derived exactly as the confirmation queue derives it: the owed
+  // resend first, then the current step. The route refuses a press without it (400
+  // STOCK_PREPARATION_HANDOFF_REQUEST_INVALID) — which is what every press on this page got while it
+  // posted through a client that never sent one. No step to name means there is nothing to press for.
+  const fromStepKey = stockPreparationHandoffFromStepKey(cursor)
+  if (!fromStepKey) return
+  const projectNo = current.projectNo
   handoffNotice.value = ''
   // A WRITE: 「这一步没有保存成功」 is the right sentence when this one fails.
   await run(async () => {
-    const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    // The three outcomes are said as three different sentences because they are three different
-    // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
-    // back — the turn moved, and nobody was told.
-    if (result.notifyOutcome === 'sent') {
+    let result: StockPreparationHandoffAdvanceResult
+    try {
+      result = await advanceStockPreparationHandoff({ ...props.scope, projectNo, fromStepKey })
+    } catch (error) {
+      // 409 STEP_MISMATCH: the cursor on screen is stale — somebody else already handed this step on.
+      // Re-read it so 轮到谁 and the button show where the chain really is, then let the refusal reach
+      // the error line with its own sentence (the same entry the queue shows), never the generic
+      // 「过一会儿再点一次」: pressing again against a stale step can only be refused again.
+      if ((error as { code?: unknown })?.code === HANDOFF_STEP_MISMATCH_CODE) {
+        try {
+          handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+        } catch {
+          // The refusal is what the operator needs to read; a failed re-read must not replace it.
+        }
+      }
+      throw error
+    }
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+    // WHAT HAPPENED TO THE MESSAGE decides the sentence — not whether the turn moved. This used to key
+    // off `changed`, which told an operator whose message had just FAILED either 「这台系统没有配通知
+    // 渠道」 (a fresh advance) or 「没有重复交」 (an owed resend). The at-most-once claim is spent by
+    // then, so no later click can resend: the only fix is a word in person, and they were not told so.
+    // "Was it a plain replay" is the confirmation queue's own predicate (confirmationQueue.ts), and a
+    // message that went out wrong or not at all is said in the queue's own words (plainLanguage.ts).
+    // The three sentences that were already right — sent, no destination, replay — are unchanged.
+    const outcomePlain = result.notifyOutcome === 'sent' || result.notifyOutcome === 'no_destination'
+      ? null
+      : stockPrepHandoffOutcomePlain(result.notifyOutcome)
+    if (stockPreparationHandoffAdvanceWasReplay(result)) {
+      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
+    } else if (result.notifyOutcome === 'sent') {
       handoffNotice.value = bi('已经交给下一步,并且通知到了。', 'Handed to the next step, and they were notified.')
-    } else if (result.changed) {
+    } else if (outcomePlain) {
+      // failed / partial / skipped: the turn moved and the message did not reach everyone it should.
+      const lead = bi(outcomePlain.zh, outcomePlain.en)
+      const next = bi(outcomePlain.zhNext ?? '', outcomePlain.enNext ?? '')
+      handoffNotice.value = next ? `${lead} ${next}` : lead
+    } else {
+      // no_destination (or an older backend's not_configured): the turn moved, and there was nowhere
+      // to send. "已经通知" here would be a claim we cannot back.
       handoffNotice.value = bi(
         '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
         'Handed to the next step. This system has no notification channel configured, so no alert was sent — tell them yourself.',
       )
-    } else {
-      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
     }
   }, 'write')
 }

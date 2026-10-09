@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp } from 'vue'
 
@@ -267,6 +268,12 @@ function instance(id: string, overrides: Record<string, unknown> = {}): any {
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — instance consistency', () => {
   let app: VueApp<Element> | null = null
@@ -1411,6 +1418,9 @@ describe('ApprovalDetailView — instance consistency', () => {
   // -------------------------------------------------------------------------
   function myTurnInstance(id: string): any {
     return instance(id, {
+      // The uploader renders on the server-resolved field (together with the pipeline flag), not on
+      // the client's `isMyTurn` mirror — so this is what makes the input PRESENT in these rows.
+      canAttachProcessEvidence: true,
       assignments: [{
         assigneeId: 'user_99',
         type: 'user',
@@ -1423,8 +1433,8 @@ describe('ApprovalDetailView — instance consistency', () => {
 
   /**
    * The input, asserted PRESENT before its `disabled` is read. A vanished input (the `v-if` on
-   * `attachmentPipelineEnabled && isMyTurn` stops rendering it) must never be able to read as a
-   * refused one — that is the shape in which a three-state gate assertion goes vacuous.
+   * `attachmentPipelineEnabled && canAttachProcessEvidence` stops rendering it) must never be able
+   * to read as a refused one — that is the shape in which a three-state gate assertion goes vacuous.
    */
   function presentAttachmentInput(state: string): HTMLInputElement {
     const input = q(container!, 'approval-comment-attachment-input') as HTMLInputElement | null

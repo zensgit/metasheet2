@@ -47,6 +47,10 @@ const {
   buildFollowUpDueEventPayload,
 } = require('./lib/event-entry.cjs')
 const {
+  OBJECT_SHEET_UNAVAILABLE_CODE,
+  OBJECT_SHEET_UNAVAILABLE_REASONS,
+  classifyUnavailableObjectSheet,
+  isObjectSheetUnavailableError,
   findObjectSheetId,
   resolvePhysicalFieldIds,
   toPhysicalRecord,
@@ -392,11 +396,21 @@ function isOperationalAfterSalesStatus(status) {
   return status === 'installed' || status === 'partial'
 }
 
-function buildObjectUnavailableError(objectId) {
+/**
+ * `reason` (#5835) is ADDITIVE: code, HTTP status and message are unchanged, because the web client
+ * keys on the code alone (apps/web AfterSalesView hides the parts tab on
+ * AFTER_SALES_OBJECT_UNAVAILABLE). It exists so support can tell "never provisioned (partial install)"
+ * from "someone deleted the table" out of the response — the same absent/deleted/unknown verdict the
+ * other objects get in their hint, on the one object that keeps the install-state contract.
+ */
+function buildObjectUnavailableError(objectId, reason) {
   const label = objectId === 'partItem' ? 'part inventory' : `object ${objectId}`
   const error = new Error(`After-sales ${label} is unavailable for the current install state`)
   error.code = 'AFTER_SALES_OBJECT_UNAVAILABLE'
-  error.meta = { objectId }
+  error.meta = {
+    objectId,
+    reason: typeof reason === 'string' && reason ? reason : OBJECT_SHEET_UNAVAILABLE_REASONS.UNKNOWN,
+  }
   return error
 }
 
@@ -414,13 +428,102 @@ function sendObjectUnavailable(res, err) {
   })
 }
 
+/**
+ * #5835 — route-layer hint for the fail-closed object-sheet states raised by
+ * `findObjectSheetId` (lib/multitable-helpers.cjs).
+ *
+ * WHY A HINT AT ALL: before this, a soft-deleted object table made every read and write fall back to
+ * the RULE-DERIVED sheet id; since #5834 the core record ops refuse that id, so the operator got a
+ * bare 404 per request and no way to tell "the table was deleted" from "no such record". The guided
+ * text below is the whole point of the new code.
+ *
+ * The message is built HERE, from the reason alone — never from `err.message` — so the user-facing
+ * text stays values-free (no project id, no sheet id, no tenant, no record value) whatever a future
+ * thrower puts in the error. `details` repeats the LOGICAL object id and the reason for support.
+ * Both fields are ALLOW-LISTED, not copied: the reason must be an OWN key of the hint table (a
+ * prototype key such as 'constructor' or '__proto__' would otherwise pass a truthiness lookup and
+ * ship a function / `{}` as the message), and the object id must be one this app actually declares
+ * (app.manifest.json), so a future thrower cannot put a sheet id or a project id on the wire.
+ *
+ * WHICH REPAIR THE HINTS NAME. 'deleted' means the deterministic id is still owned by a soft-deleted
+ * row, and RE-INSTALL CANNOT FIX THAT: core `ensureSheet` inserts nothing, reads back null and throws
+ * `Failed to ensure sheet: <id>` (provisioning.ts), which the installer escalates to a status='failed'
+ * ledger row + 500 core-object-failed — after which every route answers AFTER_SALES_NOT_INSTALLED and
+ * this hint becomes unreachable. So the 'deleted' hint points at RESTORE only. The 'absent' hint does
+ * point at 开通, but does not promise it succeeds: an install that lost its sheet BEFORE the registry
+ * backfill migration also classifies as 'absent' (see classifyUnavailableObjectSheet).
+ *
+ * 409, not 404: the same "this object is not usable in the current install state" answer that
+ * `sendObjectUnavailable` already gives for the part inventory, and deliberately distinct from the
+ * record-level 404 NOT_FOUND that the same catch blocks map right below it.
+ */
+const OBJECT_SHEET_UNAVAILABLE_HINTS = Object.freeze({
+  [OBJECT_SHEET_UNAVAILABLE_REASONS.DELETED]:
+    '售后对象表已删除，请先恢复该表后重试；重新开通无法修复已删除的表，如无法恢复请联系管理员',
+  [OBJECT_SHEET_UNAVAILABLE_REASONS.ABSENT]:
+    '售后对象表尚未开通，请先开通售后应用后重试；若开通失败，该表可能曾被删除，请联系管理员恢复',
+  [OBJECT_SHEET_UNAVAILABLE_REASONS.UNKNOWN]: '售后对象表当前不可用，请确认售后应用已开通且对象表未被删除',
+})
+
+/**
+ * The logical object ids this app declares — the only values allowed into `details.objectId`.
+ * Derived from the manifest so it cannot drift from the objects the installer provisions.
+ */
+const AFTER_SALES_OBJECT_IDS = Object.freeze(
+  (Array.isArray(appManifest.objects) ? appManifest.objects : [])
+    .map((objectDescriptor) =>
+      objectDescriptor && typeof objectDescriptor.id === 'string' ? objectDescriptor.id : null,
+    )
+    .filter((objectId) => Boolean(objectId)),
+)
+
+function sendObjectSheetUnavailable(res, err) {
+  const reason =
+    err &&
+    typeof err.reason === 'string' &&
+    Object.prototype.hasOwnProperty.call(OBJECT_SHEET_UNAVAILABLE_HINTS, err.reason)
+      ? err.reason
+      : OBJECT_SHEET_UNAVAILABLE_REASONS.UNKNOWN
+  const objectId =
+    err && err.meta && typeof err.meta.objectId === 'string' ? err.meta.objectId : null
+  res.status(409).json({
+    ok: false,
+    error: {
+      code: OBJECT_SHEET_UNAVAILABLE_CODE,
+      message: OBJECT_SHEET_UNAVAILABLE_HINTS[reason],
+      details: {
+        objectId: AFTER_SALES_OBJECT_IDS.includes(objectId) ? objectId : null,
+        reason,
+      },
+    },
+  })
+}
+
+/**
+ * The PART INVENTORY's own refusal, kept as it was on purpose (#5835).
+ *
+ * partItem is the one object that a PARTIAL install legitimately leaves unprovisioned, and the web
+ * client reads AFTER_SALES_OBJECT_UNAVAILABLE as "hide the parts tab" (apps/web AfterSalesView) —
+ * a shipped contract with its own pinned tests, so the CODE, the STATUS and the MESSAGE stay as they
+ * were. What changed (#5835) is that it now also classifies: `details.reason` carries the same
+ * absent/deleted/unknown verdict as OBJECT_SHEET_UNAVAILABLE, so a deleted parts table is no longer
+ * indistinguishable from a partial install in the response. The web tab still just hides itself —
+ * that residual is deliberate and named in the route-ledger test's EXEMPT_ROUTES.
+ *
+ * The `findObjectSheetId` tail is NOT a second refusal path: it is reached only when the host has no
+ * `findObjectSheet` at all, and on such a host `findObjectSheetId` cannot throw
+ * OBJECT_SHEET_UNAVAILABLE either (it takes its own `getObjectSheetId` branch).
+ */
 async function requireProvisionedObjectSheetId(provisioning, projectId, objectId) {
   if (provisioning && typeof provisioning.findObjectSheet === 'function') {
     const sheet = await provisioning.findObjectSheet({ projectId, objectId })
     if (sheet && typeof sheet.id === 'string' && sheet.id) {
       return sheet.id
     }
-    throw buildObjectUnavailableError(objectId)
+    throw buildObjectUnavailableError(
+      objectId,
+      await classifyUnavailableObjectSheet(provisioning, projectId, objectId),
+    )
   }
 
   return findObjectSheetId(provisioning, projectId, objectId)
@@ -1282,6 +1385,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales list tickets failed', err)
           res.status(500).json({
             ok: false,
@@ -1395,6 +1502,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales create ticket failed', err)
           res.status(500).json({
             ok: false,
@@ -1502,6 +1613,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales update ticket failed', err)
           res.status(500).json({
             ok: false,
@@ -1591,6 +1706,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales delete ticket failed', err)
@@ -1689,6 +1808,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales create installed asset failed', err)
@@ -1799,6 +1922,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales update installed asset failed', err)
           res.status(500).json({
             ok: false,
@@ -1889,6 +2016,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales delete installed asset failed', err)
@@ -2029,6 +2160,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales list installed assets failed', err)
@@ -2179,6 +2314,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales list service records failed', err)
           res.status(500).json({
             ok: false,
@@ -2271,6 +2410,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales create customer failed', err)
@@ -2415,6 +2558,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales list customers failed', err)
@@ -2973,6 +3120,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales create follow-up failed', err)
           res.status(500).json({
             ok: false,
@@ -3063,6 +3214,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales delete follow-up failed', err)
@@ -3171,6 +3326,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales update follow-up failed', err)
@@ -3321,6 +3480,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales list follow-ups failed', err)
           res.status(500).json({
             ok: false,
@@ -3411,6 +3574,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales delete customer failed', err)
@@ -3519,6 +3686,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales update customer failed', err)
@@ -3662,6 +3833,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales create service record failed', err)
           res.status(500).json({
             ok: false,
@@ -3770,6 +3945,10 @@ module.exports = {
             })
             return
           }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
+            return
+          }
           logger.error && logger.error('after-sales update service record failed', err)
           res.status(500).json({
             ok: false,
@@ -3860,6 +4039,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales delete service record failed', err)
@@ -3985,6 +4168,10 @@ module.exports = {
               ok: false,
               error: { code: err.code, message: err.message },
             })
+            return
+          }
+          if (isObjectSheetUnavailableError(err)) {
+            sendObjectSheetUnavailable(res, err)
             return
           }
           logger.error && logger.error('after-sales refund request failed', err)

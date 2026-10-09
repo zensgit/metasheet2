@@ -186,6 +186,11 @@ describeIfDatabase('T3-6 approval record projection (real DB)', () => {
     // (APPROVAL_ORG_UNRESOLVED) before this suite's own assertions run.
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`, [REQUESTER])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:act') ON CONFLICT DO NOTHING`, [APPROVER])
+    // F9c: the §6a silence probe below SAVES a send_notification rule aimed at APPROVER. Rule save now
+    // resolves the selectable-people roster (loadSheetMemberUserIdSet = active + GLOBAL multitable
+    // read/write) and refuses an outsider, so the probe's recipient has to be a real member — otherwise
+    // the fixture would fail at createRule for a product-correct reason and never reach its assertion.
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [APPROVER])
     // isAdmin() is resolved from user_roles (not users.is_admin), so make ADMIN a real admin there.
     await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`, [ADMIN])
 

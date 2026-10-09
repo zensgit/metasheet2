@@ -26,7 +26,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
 import {
   HierarchyCycleError,
@@ -37,6 +37,7 @@ import {
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import { mintOperation, sealOperation, OperationLedger } from './operation-ledger'
 import {
   notifyRecordSubscribersBestEffort,
@@ -575,11 +576,11 @@ export class RecordWriteService {
         }
 
         if (field.type === 'select') {
-          if (typeof change.value !== 'string') {
+          const verdict = classifySelectCellValue(change.value, field.options ?? [])
+          if (verdict === 'not_string') {
             throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
           }
-          const allowed = new Set(field.options ?? [])
-          if (change.value !== '' && !allowed.has(change.value)) {
+          if (verdict === 'not_in_options') {
             throw new RecordValidationError(`Invalid select option for ${change.fieldId}: ${change.value}`)
           }
         }
@@ -838,6 +839,15 @@ export class RecordWriteService {
       } else {
         await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
       }
+      // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
+      // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
+      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the conversion flag AND the writer fence are both on.
+      await assertFieldSchemaUnchangedAfterFence(
+        query,
+        sheetId,
+        fieldById,
+        [...changesByRecord.values()].flatMap((changes) => changes.map((change) => change.fieldId)),
+      )
       // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
       // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
       // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.
@@ -860,8 +870,10 @@ export class RecordWriteService {
       // injected sheet-member loader (h.loadSheetMemberUserIds) so the existing unit seam is preserved.
       const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId, h.loadSheetMemberUserIds)
 
-      // #16: source each person field's restrictToMemberGroupIds from the property-bearing `fields`
-      // list (the per-change `fieldById` guard does not carry property). Built once per patch op.
+      // #16: source each person field's restrictToMemberGroupIds from the `fields` list. (The per-change
+      // `fieldById` guard ALSO carries `property` on both write paths — routes/univer-meta.ts
+      // buildFieldMutationGuardMap and the Yjs bridge guard in index.ts — but this map is built once per
+      // patch op from the field list rather than per change.) Built once per patch op.
       const personRestrictByFieldId = new Map<string, string[]>()
       for (const f of fields as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
         if (!f || f.type !== 'person') continue

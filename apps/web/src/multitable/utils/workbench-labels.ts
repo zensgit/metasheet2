@@ -50,7 +50,15 @@ export type WorkbenchLabelKey =
   | 'toast.buttonRunSuccess' | 'toast.buttonRunFailed'
   | 'toast.linkedRecordsUpdateFailed'
   | 'toast.fieldCreateFailed' | 'toast.fieldUpdateFailed' | 'toast.fieldDeleteFailed'
+  // #5707 follow-up: DELETE /api/multitable/fields/:fieldId answers a CODED 409
+  // MANAGED_FIELD_DELETE_REFUSED when the field sits on a plugin-managed sheet. The server prose
+  // is English and values-free; this is the localized copy the field manager shows instead --
+  // picked by CODE, exactly like the sheet-level toast.sheetPluginManaged above.
+  | 'toast.fieldManagedRefused'
   | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
+  // #6075 round 3 (S2): the toolbar's sort/filter write was rejected (403 without canManageViews, 400 hidden-filter
+  // mismatch, network) — values-free on purpose: no rules, no field names, no server prose.
+  | 'toast.sortFilterSaveFailed'
   | 'toast.sheetAccessRefreshFailed'
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
@@ -73,6 +81,8 @@ export type WorkbenchLabelKey =
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
+  // #5813: the header Comments button ends an in-progress comment edit (see onToggleComments).
+  | 'confirm.discardCommentEdit'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // B1-S1 D0-A: default confirm copy for a side-effecting button run (used when
   // the button's own confirm.message is blank).
@@ -96,6 +106,9 @@ export type WorkbenchLabelKey =
   | 'saveTpl.submit' | 'saveTpl.saving' | 'saveTpl.cancel' | 'saveTpl.close'
   | 'saveTpl.errorNoName' | 'saveTpl.errorNoFields' | 'saveTpl.failed'
   | 'saveTpl.successTitle' | 'saveTpl.warningsTitle' | 'saveTpl.openCenter'
+  // A10 phase 1(客户反馈 2026-09-24 #8):对话框说清楚存的是哪张表/哪些视图,
+  // 且成功后给一句「装出来是什么」的说明。
+  | 'saveTpl.viewsLabel' | 'saveTpl.viewsNote' | 'saveTpl.installNote'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -201,9 +214,16 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.fieldCreateFailed': { en: 'Failed to create field', zh: '创建字段失败' },
   'toast.fieldUpdateFailed': { en: 'Failed to update field', zh: '更新字段失败' },
   'toast.fieldDeleteFailed': { en: 'Failed to delete field', zh: '删除字段失败' },
+  // Values-free on purpose: no plugin id, no sheet/field name, no server prose -- the same
+  // discipline the backend message keeps, so the copy cannot leak what the refusal is about.
+  'toast.fieldManagedRefused': {
+    en: "This table is managed by an application; its fields cannot be deleted here. Use the application's own flow.",
+    zh: '这张表由应用托管，字段不能在这里删除；请通过应用侧流程处理。',
+  },
   'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
   'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
   'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
+  'toast.sortFilterSaveFailed': { en: 'Sort/filter could not be saved to the view', zh: '排序/筛选未能保存到视图' },
   'toast.sheetAccessRefreshFailed': { en: 'Failed to refresh sheet access', zh: '刷新数据表权限失败' },
   'toast.sheetCreateBlocked': {
     en: 'Sheet creation requires multitable write access.',
@@ -237,17 +257,32 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
   'toast.sheetDeleted': { en: 'Sheet deleted', zh: '数据表已删除' },
   'toast.sheetDeleteFailed': { en: 'Failed to delete sheet', zh: '删除数据表失败' },
+  // A6 (customer feedback 2026-09-24 #1b): the old copy said the sheet "cannot be deleted" and
+  // stopped there, with no next step. The trash icon is now HIDDEN for a managed sheet
+  // (MetaCapabilities.canDeleteSheet, see /context), so a caller only reaches this 409 through a
+  // stale client or a direct API call.
+  //
+  // Adversarial-review round (#6089 S2/S3) removed three claims the first draft made that the
+  // product does not back: "uninstall or reconfigure the owning plugin" does not remove the sheet
+  // (the `plugin_multitable_object_registry` row survives an uninstall — nothing in this repo deletes
+  // it), "per-project cleanup is planned" is an unapproved roadmap promise, and "contact an
+  // administrator" is circular — the toast is shown to the actor with lifecycle authority, i.e.
+  // already an administrator by this route's own gate. The copy now names the path that WORKS TODAY,
+  // in terms generic enough for any plugin-managed sheet (stock-prep, staging, after-sales): filter
+  // and bulk-delete the rows in the grid (MetaGridTable.vue's `grid.deleteSelected`), and restore a
+  // mistaken delete from the toolbar's History → Deleted records (HistoryCenterModal.vue's
+  // '已删除的记录' / 'Deleted records' tab).
   'toast.sheetPluginManaged': {
-    en: 'This sheet is managed by a plugin and cannot be deleted from the UI.',
-    zh: '该表由插件托管，不能在界面删除。',
+    en: 'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its data, filter the rows you want and delete them in bulk from the grid; rows deleted by mistake can be restored from the toolbar’s History → Deleted records.',
+    zh: '这张表由插件维护，不能整表删除。要清理其中的数据，可以在表格里筛选后批量删除行；删错的行可在工具栏「历史 → 已删除的记录」中恢复。',
   },
   'toast.sheetSystemManaged': {
     en: 'This sheet is managed by the system and cannot be deleted.',
     zh: '该表由系统托管，不能删除。',
   },
   'toast.sheetAlreadyDeleted': {
-    en: 'This sheet was already deleted. An administrator can restore it through the API.',
-    zh: '该数据表已被删除，管理员可通过接口恢复。',
+    en: 'This sheet was already deleted. An authorized administrator can restore it from the recycle bin.',
+    zh: '该数据表已被删除，有权限的管理员可从回收站恢复整表。',
   },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
@@ -263,6 +298,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'confirm.discardRecordChanges': {
     en: 'Discard unsaved record changes?',
     zh: '放弃未保存的记录更改吗？',
+  },
+  'confirm.discardCommentEdit': {
+    en: 'Discard your unsaved edit to this comment?',
+    zh: '放弃对这条评论未保存的修改吗？',
   },
   'confirm.buttonRun': {
     en: 'Run this button action?',
@@ -326,6 +365,28 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'saveTpl.fieldsLabel': { en: 'Fields to include', zh: '包含的字段' },
   'saveTpl.selectAll': { en: 'Select all', zh: '全选' },
   'saveTpl.selectNone': { en: 'Clear all', zh: '全不选' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示,说清楚保存/不保存的边界。
+  // N1(2026-09-26 对抗评审):上一版文案说"与实际抽取范围逐字对应"是假话——custom-template-store.ts
+  // 的 extractTemplateSheets 只认 groupInfo.fieldId / groupInfo.fieldIds[0](嵌套分组的第 2/3 级
+  // 一律丢),而且日历/看板会用到 dateFieldId/titleFieldId/groupByFieldId,旧文案一个字都没提。
+  // 这里按实际抽取逻辑逐项列出,不再用一句空泛的"分组"糊弄过去。
+  // N-5(第二轮对抗评审):「不保存」也要列全——extractTemplateSheets 从 view.config 只读
+  // dateFieldId/titleFieldId,时间轴/甘特的起止字段、层级视图的 parentFieldId、列顺序/列宽
+  // 全部不进模板,旧文案只说了筛选和排序。
+  'saveTpl.viewsLabel': { en: 'Views included', zh: '包含的视图' },
+  'saveTpl.viewsNote': {
+    en: 'Views save name, type, grouping (first level only), hidden columns, and the calendar/kanban fields. Not saved: filters, sort, column order and widths, timeline/gantt start and end fields, hierarchy parent field.',
+    zh: '视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；不保存筛选、排序、列顺序与列宽、时间轴/甘特的起止字段、层级的父级字段',
+  },
+  // N3(2026-09-26 对抗评审):旧文案"表头和视图相同的空表"过度承诺——link/lookup/rollup/formula/
+  // button 这些字段会被降级成文本列(DOWNGRADED_FIELD_TYPES,custom-template-store.ts),装出来的
+  // 表头**不是**逐字一样。用"关联/公式等列会变成文本列"说清楚这一半真相。
+  // N-5(第二轮对抗评审):英文版原来漏了 button(以及模板不支持的其它类型,同样降级为文本),
+  // 中英两版都点名按钮。
+  'saveTpl.installNote': {
+    en: 'Using this template creates a new base with an empty table. Link, lookup, rollup, formula, button and other unsupported columns become plain text columns.',
+    zh: '使用模板会新建工作区，其中是空表；关联/公式/按钮等列会变成文本列',
+  },
   'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
   'saveTpl.shareHint': {
     en: 'Unchecked: only you can see this template.',
@@ -356,6 +417,18 @@ export function workbenchLabel(key: WorkbenchLabelKey, isZh: boolean): string {
 }
 
 // --- Interpolation helpers (not keys) ---
+
+// saveTplSource: A10 phase 1(客户反馈 2026-09-24 #8)——「把当前数据表存为模板」对话框的
+// 来源行,baseName/sheetName 都是用户数据,原样拼进去不翻译。
+// N7(2026-09-26 对抗评审):bases 列表是异步加载的(loadBases() 在 onMounted 里跑),对话框在
+// 那次请求落地前打开时 baseName 会是空串——`来源：/ 订单`(空前缀 + 斜杠)比不写工作区名更难看、
+// 更像是坏了。工作区名未知时只显示数据表名,不留一个空的 "/" 前缀。
+export function saveTplSource(baseName: string, sheetName: string, isZh: boolean): string {
+  const trimmedBase = baseName.trim()
+  const trimmedSheet = sheetName.trim()
+  if (!trimmedBase) return isZh ? `来源：${trimmedSheet}` : `Source: ${trimmedSheet}`
+  return isZh ? `来源：${trimmedBase} / ${trimmedSheet}` : `Source: ${trimmedBase} / ${trimmedSheet}`
+}
 
 // conflictMessage: `{field} changed elsewhere.[ Latest version is {v}.] Reload
 // the row or retry your edit.` — the version segment is OPTIONAL (omitted when
@@ -444,11 +517,11 @@ export function recordNotFound(recordId: string, isZh: boolean): string {
 
 // Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
 // states the consequence honestly: records are hidden with the sheet (soft delete), and only an
-// administrator can bring it back through the API — there is no recycle-bin UI in this slice.
+// authorized administrator can bring it back from the sheet recycle bin.
 export function sheetDeleteConfirm(sheetName: string, isZh: boolean): string {
   return isZh
-    ? `删除数据表「${sheetName}」？记录会一并隐藏，可由管理员通过接口恢复。`
-    : `Delete sheet "${sheetName}"? Its records are hidden with it; an administrator can restore it through the API.`
+    ? `删除数据表「${sheetName}」？记录会一并隐藏，有权限的管理员可从回收站恢复整表。`
+    : `Delete sheet "${sheetName}"? Its records are hidden with it; an authorized administrator can restore the table from the recycle bin.`
 }
 
 // Sheet-delete failure copy, chosen by the server's error CODE (the codes are stable contracts;
@@ -463,6 +536,21 @@ export function sheetDeleteErrorMessage(
     case 'SHEET_SYSTEM_MANAGED': return workbenchLabel('toast.sheetSystemManaged', isZh)
     case 'SHEET_DELETED': return workbenchLabel('toast.sheetAlreadyDeleted', isZh)
     default: return error?.message || workbenchLabel('toast.sheetDeleteFailed', isZh)
+  }
+}
+
+// Field-delete failure copy, chosen by the server's error CODE, mirroring sheetDeleteErrorMessage.
+// #5707 made DELETE /api/multitable/fields/:fieldId answer 409 MANAGED_FIELD_DELETE_REFUSED for a
+// field on a plugin-managed sheet; its message is English (and values-free), so surfacing it raw
+// left zh-CN users reading English. Unknown codes keep the previous behaviour: the server's own
+// message when it sent one, else the generic failure toast.
+export function fieldDeleteErrorMessage(
+  error: { code?: string; message?: string } | null | undefined,
+  isZh: boolean,
+): string {
+  switch (error?.code) {
+    case 'MANAGED_FIELD_DELETE_REFUSED': return workbenchLabel('toast.fieldManagedRefused', isZh)
+    default: return error?.message || workbenchLabel('toast.fieldDeleteFailed', isZh)
   }
 }
 

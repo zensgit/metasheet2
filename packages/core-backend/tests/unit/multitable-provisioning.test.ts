@@ -969,3 +969,47 @@ describe('ensureFields pre-read rides the caller-supplied query fn (P0-S S3)', (
     expect(fields).toEqual(before)
   })
 })
+
+// ── the plugin's own provisioning paths never traverse the managed-field delete guard ───────────
+// routes/univer-meta.ts `DELETE /fields/:fieldId` refuses every field on a registry-registered sheet
+// (src/multitable/managed-field-delete-guard.ts). That guard lives on the HTTP route; `ensureObject`
+// and `ensureMissingObjectFields` are called by plugins with a query function and never pass through
+// an Express router, so the guard cannot affect them BY CONSTRUCTION. This cell pins the observable
+// half of that claim: the whole SQL set the two paths issue contains no DELETE at all (there is no
+// plugin "deprovision" of multitable fields) and never the guard's registry read.
+describe('plugin provisioning path vs the managed-field delete guard (DELETE /fields/:fieldId)', () => {
+  const PROJECT = 'tenant_42:after-sales'
+  const DESCRIPTOR = {
+    id: 'installedAsset',
+    name: 'Installed Asset',
+    fields: [
+      { id: 'assetCode', name: 'Asset Code', type: 'string' as const },
+      { id: 'serialNo', name: 'Serial No', type: 'string' as const },
+    ],
+  }
+
+  it('ensureObject + ensureMissingObjectFields issue no DELETE and never the guard\'s plugin_multitable_object_registry read', async () => {
+    const { query: inner, fields } = createQuery()
+    const issued: string[] = []
+    const query: MultitableProvisioningQueryFn = async (sql, params) => {
+      issued.push(sql.replace(/\s+/g, ' ').trim())
+      return inner(sql, params)
+    }
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    const repaired = await ensureMissingObjectFields({
+      query,
+      projectId: PROJECT,
+      objectId: DESCRIPTOR.id,
+      fields: [{ id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const }],
+    })
+
+    expect(repaired.addedFieldIds).toHaveLength(1)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+    expect(issued.length).toBeGreaterThan(0)
+    expect(issued.filter((sql) => /^DELETE\b/i.test(sql))).toEqual([])
+    expect(issued.filter((sql) => /plugin_multitable_object_registry/i.test(sql))).toEqual([])
+    // every provisioned field id has the deterministic shape the guard module documents
+    for (const id of repaired.addedFieldIds) expect(id).toMatch(/^fld_[0-9a-f]{24}$/)
+  })
+})

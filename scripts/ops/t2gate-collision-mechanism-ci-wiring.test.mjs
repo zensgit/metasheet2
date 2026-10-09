@@ -18,6 +18,13 @@ import {
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
 
+// `spawnPythonSync`'s stub-driven contract coverage. Imported (not duplicated) so it executes in
+// the required no-DB `test` job through THIS file's already-wired `node --test` step — the shared
+// YAML bridge below depends on that resolution, and .github/workflows/plugin-tests.yml wires each
+// scripts/ops guard by name, so a standalone new file would run nowhere. Same precedent as this
+// file hosting the shared helper's mutation coverage (see the header note).
+import './python-interpreter.test.mjs'
+
 // `extractTestExcludeArrayBody` / `quotedExcludeEntries` / `isQuotedInTestExclude` originated in
 // THIS file and are re-exported here (via the shared module) so any pre-existing external import
 // of them from this path keeps working; #4612 gate-confirm P2-1 promoted their DEFINITIONS into
@@ -177,13 +184,24 @@ test('synthetic: no top-level test.exclude — coverage.exclude-only must NOT fa
   )
 })
 
-test('synthetic positive: exact quoted entry inside direct test.exclude passes', () => {
-  const ok = [
+/**
+ * The synthetic positive fixture, LF-terminated. Hoisted so the CRLF line-ending decoys below
+ * compare against the SAME bytes the positive case asserts on — the equality claim there is
+ * "CRLF parses byte-identically to LF", which is only meaningful on one shared fixture.
+ *
+ * It deliberately carries a `//` comment whose text contains an apostrophe: that is the exact
+ * shape that made a CRLF parse diverge (the unstripped comment's `'` shifts quote pairing for
+ * every entry after it).
+ */
+function okExcludeConfigLf() {
+  return [
     "export default defineConfig({",
     '  test: {',
+    "    // keep this suite out of the no-DB job — it's real-DB only (apostrophe is load-bearing)",
     '    exclude: [',
     "      '**/node_modules/**',",
     `      '${FILE}',`,
+    "      // decoy in a comment: 'tests/integration/never-excluded.db.test.ts' (don't count it)",
     '    ],',
     '    coverage: {',
     '      exclude: [',
@@ -193,9 +211,84 @@ test('synthetic positive: exact quoted entry inside direct test.exclude passes',
     '  },',
     '})',
   ].join('\n')
+}
+
+test('synthetic positive: exact quoted entry inside direct test.exclude passes', () => {
+  const ok = okExcludeConfigLf()
   assert.equal(isQuotedInTestExclude(ok, FILE), true)
   // Sibling coverage.exclude path must not be confused with the direct entry.
   assert.equal(isQuotedInTestExclude(ok, 'tests/**'), false)
+  // A path that only appears inside a `//` comment INSIDE the array is not an entry.
+  assert.equal(isQuotedInTestExclude(ok, 'tests/integration/never-excluded.db.test.ts'), false)
+  assert.deepEqual(quotedExcludeEntries(extractTestExcludeArrayBody(ok)), ['**/node_modules/**', FILE])
+})
+
+// ---------------------------------------------------------------------------
+// LINE ENDINGS: a CRLF checkout must parse byte-identically to LF.
+//
+// Before the normalization in `extractTestExcludeArrayBody`, `quotedExcludeEntries`' per-line
+// `//` strip silently no-opped on CRLF input (`.` does not match `\r`; `$` without `m` anchors
+// only at end-of-input), so the apostrophe in the first comment shifted quote pairing and the
+// parse degraded into garbage. These decoys pin the fix in BOTH directions: CRLF must now agree
+// with LF, and the LF path must be untouched (byte-for-byte), which is what keeps CI — Linux,
+// LF checkouts — behaving exactly as before.
+// ---------------------------------------------------------------------------
+
+test('synthetic: a CRLF fixture parses byte-identically to the same fixture with LF endings', () => {
+  const lf = okExcludeConfigLf()
+  const crlf = lf.replace(/\n/g, '\r\n')
+  assert.ok(crlf.includes('\r\n'), 'CRLF fixture really has CRLF endings')
+
+  const bodyLf = extractTestExcludeArrayBody(lf)
+  const bodyCrlf = extractTestExcludeArrayBody(crlf)
+  assert.ok(bodyLf != null && bodyCrlf != null, 'both must find the direct test.exclude array')
+  assert.equal(bodyCrlf, bodyLf, 'CRLF array body must be byte-identical to the LF array body')
+  assert.equal(/\r/.test(bodyCrlf), false, 'no carriage return may survive into the array body')
+
+  const entriesLf = quotedExcludeEntries(bodyLf)
+  const entriesCrlf = quotedExcludeEntries(bodyCrlf)
+  assert.equal(entriesCrlf.length, entriesLf.length, 'CRLF must not invent or drop entries')
+  assert.deepEqual(entriesCrlf, entriesLf)
+  assert.deepEqual(entriesCrlf, ['**/node_modules/**', FILE])
+  assert.equal(entriesCrlf.some((entry) => /[\r\n]/.test(entry)), false, 'no entry may contain a line terminator')
+
+  assert.equal(isQuotedInTestExclude(crlf, FILE), true)
+  assert.equal(isQuotedInTestExclude(crlf, 'tests/**'), false)
+  assert.equal(isQuotedInTestExclude(crlf, 'tests/integration/never-excluded.db.test.ts'), false)
+})
+
+test('synthetic: LF input is passed through untouched — the returned body is a literal substring of the ORIGINAL source (CI/Linux behavior is bit-for-bit unchanged)', () => {
+  const lf = okExcludeConfigLf()
+  const body = extractTestExcludeArrayBody(lf)
+  assert.ok(body != null)
+  // If normalization rewrote anything on an LF source, the body could not be found verbatim in it.
+  assert.ok(lf.includes(body), 'LF body must appear verbatim in the untouched LF source')
+  assert.equal(lf.indexOf(body), lf.indexOf("\n      '**/node_modules/**',"), 'body starts right after the `[`')
+})
+
+test('synthetic: the real vitest.config.ts parses identically whether the checkout is CRLF or LF', () => {
+  // The repo file is read from disk exactly as the guards read it, then compared against its own
+  // LF/CRLF twins. Windows checkouts (core.autocrlf=true) produce the CRLF form; CI produces LF.
+  const raw = readFileSync(VITEST_CFG, 'utf8')
+  const lf = raw.replace(/\r\n?/g, '\n')
+  const crlf = lf.replace(/\n/g, '\r\n')
+
+  const bodyLf = extractTestExcludeArrayBody(lf)
+  const bodyCrlf = extractTestExcludeArrayBody(crlf)
+  assert.ok(bodyLf != null, 'the real config must expose a direct test.exclude array')
+  assert.equal(bodyCrlf, bodyLf)
+
+  const entriesLf = quotedExcludeEntries(bodyLf)
+  const entriesCrlf = quotedExcludeEntries(bodyCrlf)
+  assert.equal(entriesCrlf.length, entriesLf.length)
+  assert.deepEqual(entriesCrlf, entriesLf)
+  assert.equal(
+    entriesLf.some((entry) => /[\r\n]/.test(entry)),
+    false,
+    'no exclude entry may contain a line terminator — that is the CRLF garbage signature',
+  )
+  assert.equal(isQuotedInTestExclude(crlf, FILE), isQuotedInTestExclude(lf, FILE))
+  assert.equal(isQuotedInTestExclude(crlf, FILE), true)
 })
 
 // ---------------------------------------------------------------------------

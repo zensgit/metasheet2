@@ -427,9 +427,10 @@ describeIfDatabase('W4C-3b R0 central approval (real DB)', () => {
     )
     await pool.query(
       `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, status, approval_instance_id, metadata)
-       VALUES ($1::uuid, $2, $3, CURRENT_DATE, 'leave', 'pending', $4, '{}'::jsonb)`,
-      [requestId, subjectUser, orgId, opts.instanceId],
+         (id, user_id, org_id, work_date, request_type, status, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1::uuid, $2, $3, CURRENT_DATE, 'leave', 'pending', $4, $5, '{}'::jsonb)`,
+      [requestId, subjectUser, orgId, opts.instanceId, ATTENDANCE_APPROVAL_WORKFLOW_KEY],
     )
     if (opts.withAssignmentFrom) {
       await pool.query(

@@ -6,6 +6,8 @@ import {
   RECOVERY_ARCHIVE_AEAD_KEY_BYTES,
   reserveThenSealRecoveryArchiveSections,
   type RecoveryArchiveKeyCustodyAdapter,
+  type RecoveryArchiveCustodyInput,
+  type RecoveryArchiveNonceReservationSink,
   type RecoveryArchiveTransactionDepthProbe,
 } from '../../src/multitable/recovery-archive-crypto'
 import type {
@@ -35,11 +37,16 @@ export interface RecoveryArchiveDurableFixtureObject {
 }
 
 export interface RecoveryArchiveDurableFixture {
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly custodyCalls: readonly string[]
   readonly rootHash: string
   readonly manifestMac: Uint8Array
   readonly objects: readonly RecoveryArchiveDurableFixtureObject[]
+}
+
+export interface RecoveryArchiveFixtureKeyMaterial {
+  readonly dek: Uint8Array
+  readonly wrappedDek: Uint8Array
 }
 
 export async function createRecoveryArchiveDurableFixture(input: {
@@ -49,9 +56,12 @@ export async function createRecoveryArchiveDurableFixture(input: {
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
   readonly objectExpiresAt: string
+  readonly keyMaterial?: RecoveryArchiveFixtureKeyMaterial
+  readonly keyCustody?: RecoveryArchiveCustodyInput
+  readonly reserveNonces?: RecoveryArchiveNonceReservationSink
 }): Promise<RecoveryArchiveDurableFixture> {
   const custodyCalls: string[] = []
-  const keyCustody = createFixtureKeyCustody(input.keyId, custodyCalls)
+  const keyCustody = input.keyCustody ?? createFixtureKeyCustody(input.keyId, custodyCalls, input.keyMaterial)
   const plan = buildRecoveryArchiveSnapshotPlan({
     sectionRows: input.sectionRows,
     coverageCandidates: [],
@@ -79,7 +89,7 @@ export async function createRecoveryArchiveDurableFixture(input: {
     transactionDepth: input.transactionDepth,
     dekSource: { kind: 'produce' },
     sections: plan,
-    reserveNonces: async () => {},
+    reserveNonces: input.reserveNonces ?? (async () => {}),
   })
   const authenticated = await authenticateRecoveryArchiveSealedSnapshotManifest({
     sealedManifest: buildRecoveryArchiveSealedSnapshotManifest({
@@ -147,12 +157,13 @@ export async function createRecoveryArchiveDurableFixture(input: {
   })
 }
 
-function createFixtureKeyCustody(
+export function createFixtureKeyCustody(
   keyId: string,
   calls: string[],
+  material?: RecoveryArchiveFixtureKeyMaterial,
 ): RecoveryArchiveKeyCustodyAdapter {
-  const dek = randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES)
-  const wrappedDek = randomBytes(48)
+  const dek = material ? Buffer.from(material.dek) : randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES)
+  const wrappedDek = material ? Buffer.from(material.wrappedDek) : randomBytes(48)
   return {
     async produceGenerationDek(request) {
       calls.push('produce')

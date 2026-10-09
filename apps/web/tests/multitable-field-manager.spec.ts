@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
@@ -1489,6 +1492,38 @@ describe('MetaFieldManager — lossless retype in the edit panel', () => {
       expect(updateSpy.mock.calls[0][1].type).toBe('longText')
     } finally { app.unmount(); container.remove() }
   })
+
+  // F8A: the way back. A PLAIN long text is just a string, so text is offered; a RICH
+  // one is not (its cells hold HTML, which a text field shows as bare markup). The
+  // dropdown reads the SOURCE field's stored property — same rule the server enforces
+  // against the DB row, so the two can only disagree in the safe direction.
+  it('a plain long text field offers [long text, text] and emits type:string', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({ id: 'fld_notes', name: 'Notes', type: 'longText', property: {} })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(['longText', 'string'])
+      select.value = 'string'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+      clickSave(container)
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy.mock.calls[0][1].type).toBe('string')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a RICH long text field offers no text target at all (read-only type label)', async () => {
+    const { container, app } = mountWithField({
+      id: 'fld_rich', name: 'Rich notes', type: 'longText', property: { rich: true },
+    })
+    try {
+      await openConfig(container)
+      expect(container.querySelector('[data-test="config-type-select"]')).toBeNull()
+    } finally { app.unmount(); container.remove() }
+  })
 })
 
 // The split between "the user picked a new type" and "the stored type moved" is what
@@ -1711,9 +1746,14 @@ describe('MetaFieldManager — retype survives the background metadata refresh',
 // ---------------------------------------------------------------------------
 // Whole-table golden for the retype whitelist. The per-type assertions above only
 // prove the rows they name, so a careless ADD to LOSSLESS_RETYPE (multiSelect, date,
-// longText -> string …) used to land with every test still green. The table IS the
-// safety boundary — the backend PATCH does a raw UPDATE with no value migration — so
-// widening it must require editing this golden.
+// person -> string …) used to land with every test still green. Widening the table
+// must require editing this golden.
+//
+// F8A (2026-09-11): this table is no longer the only wall — the server enforces the
+// SAME whitelist on PATCH /fields/:fieldId (core-backend field-retype-whitelist.ts,
+// 400 FIELD_RETYPE_NOT_LOSSLESS). Both sides are pinned to one shared fixture by the
+// mirror block below; this golden stays because it is the SHAPE lock (an exact table,
+// never toMatchObject/objectContaining) that makes a widening visible in review.
 // ---------------------------------------------------------------------------
 describe('LOSSLESS_RETYPE table shape', () => {
   it('contains exactly the owner-approved source rows and targets', () => {
@@ -1728,9 +1768,10 @@ describe('LOSSLESS_RETYPE table shape', () => {
       phone: ['string'],
       barcode: ['string'],
       string: ['longText'],
+      longText: ['string'],
     })
     expect(Object.keys(LOSSLESS_RETYPE).sort()).toEqual([
-      'barcode', 'currency', 'email', 'number', 'percent', 'phone', 'rating', 'select', 'string', 'url',
+      'barcode', 'currency', 'email', 'longText', 'number', 'percent', 'phone', 'rating', 'select', 'string', 'url',
     ])
     // every offered target is itself a plain scalar the raw UPDATE keeps readable
     const targets = new Set(Object.values(LOSSLESS_RETYPE).flat())
@@ -1738,17 +1779,36 @@ describe('LOSSLESS_RETYPE table shape', () => {
   })
 
   it('offers nothing for the directions the module documents as excluded', () => {
-    // array <-> scalar, rich-HTML exposure, display-semantics changes
+    // array <-> scalar, display-semantics changes, unverified storage shapes
     expect(losslessRetypeTargets('multiSelect')).toEqual([])
+    expect(losslessRetypeTargets('person')).toEqual([])
+    expect(losslessRetypeTargets('boolean')).toEqual([])
     expect(losslessRetypeTargets('date')).toEqual([])
     expect(losslessRetypeTargets('dateTime')).toEqual([])
-    expect(losslessRetypeTargets('longText')).toEqual([])
+    expect(losslessRetypeTargets('duration')).toEqual([])
+    expect(losslessRetypeTargets('qrcode')).toEqual([])
     // computed / structural types are never a source either
     for (const excluded of RETYPE_EXCLUDED_TARGET_TYPES) {
       expect(losslessRetypeTargets(excluded)).toEqual([])
     }
     expect(losslessRetypeTargets(null)).toEqual([])
     expect(losslessRetypeTargets('nope')).toEqual([])
+  })
+
+  // F8A's one new direction, and the property that gates it. The rich check is NOT in
+  // the table (a table row cannot express "unless property.rich"), so it needs its own
+  // rows here — deleting the `rich` clause in losslessRetypeTargets reddens this test.
+  it('long text offers text back ONLY while it is not rich', () => {
+    expect(losslessRetypeTargets('longText')).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', {})).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', { rich: false })).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', { rich: 'true' })).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', undefined)).toEqual(['string'])
+    // rich === true: the cells hold HTML a text field would render as bare markup
+    expect(losslessRetypeTargets('longText', { rich: true })).toEqual([])
+    // the gate is longText-specific: a rich-looking property on another source changes nothing
+    expect(losslessRetypeTargets('string', { rich: true })).toEqual(['longText'])
+    expect(losslessRetypeTargets('number', { rich: true })).toEqual(['string'])
   })
 
   it('never surfaces a backend-excluded type as a target, even if the table says so', () => {
@@ -1758,6 +1818,63 @@ describe('LOSSLESS_RETYPE table shape', () => {
       }
       expect(losslessRetypeTargets(source)).not.toContain(source)
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // F8A: the BROWSER side of the shared truth table. The SAME file on disk drives the
+  // server side against core-backend/src/multitable/field-retype-whitelist.ts — the
+  // copy that actually refuses the write — from
+  // packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts (the
+  // detailed matrix) and, redundantly, from
+  // packages/core-backend/tests/integration/multitable-context.api.test.ts.
+  // BOTH run in CI's required `test` job: the narrowing file via the blanket
+  // `pnpm --filter @metasheet/core-backend test` step (plugin-tests.yml:844, default vitest
+  // glob — it is just never named individually), the integration file via the real-DB step
+  // (plugin-tests.yml:1306). An earlier comment here called the narrowing file
+  // "developer-machine only" — that was false and is corrected.
+  // PRECISELY: changing ONE implementation without
+  // touching the fixture turns THAT SIDE'S OWN run red; changing the fixture turns
+  // the OTHER side red too. (Not "one edit reddens the far side" — it does not.)
+  // ---------------------------------------------------------------------------
+  describe('parity with the server whitelist (shared truth table)', () => {
+    const TRUTH_TABLE_PATH = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../packages/core-backend/tests/fixtures/field-retype-truth-table.json',
+    )
+    interface RetypeTruthTable {
+      excludedTargetTypes: string[]
+      table: Record<string, string[]>
+      targetCases: Array<{ name: string; sourceType: string; property?: unknown; expected: string[] }>
+      pairCases: Array<{ name: string; sourceType: string; property?: unknown; targetType: string; lossless: boolean }>
+    }
+    const table = JSON.parse(readFileSync(TRUTH_TABLE_PATH, 'utf8')) as RetypeTruthTable
+
+    it('reads a non-trivial table (a silently emptied fixture must not pass as green)', () => {
+      expect(table.targetCases.length).toBeGreaterThanOrEqual(20)
+      expect(table.pairCases.length).toBeGreaterThanOrEqual(20)
+      expect(table.targetCases.some((row) => row.expected.length === 0)).toBe(true)
+      expect(table.pairCases.some((row) => row.lossless === false)).toBe(true)
+      expect(table.pairCases.some((row) => row.lossless === true)).toBe(true)
+    })
+
+    it('the dropdown table IS the fixture table, row for row', () => {
+      expect(LOSSLESS_RETYPE).toEqual(table.table)
+      expect(Array.from(RETYPE_EXCLUDED_TARGET_TYPES).sort()).toEqual([...table.excludedTargetTypes].sort())
+    })
+
+    it.each(table.targetCases.map((row) => [row.name, row] as const))(
+      'losslessRetypeTargets: %s',
+      (_name, row) => {
+        expect(losslessRetypeTargets(row.sourceType, row.property)).toEqual(row.expected)
+      },
+    )
+
+    it.each(table.pairCases.map((row) => [row.name, row] as const))(
+      'offered-as-lossless: %s',
+      (_name, row) => {
+        expect(losslessRetypeTargets(row.sourceType, row.property).includes(row.targetType)).toBe(row.lossless)
+      },
+    )
   })
 
   // The golden above only proves the CURRENT table has no excluded target, so the
@@ -1966,5 +2083,186 @@ describe('MetaFieldManager — a retype leaves the old type validation behind', 
       expect('type' in payload).toBe(false)
       expect(payload.property.validation).toEqual([{ type: 'min', params: { value: 10 } }])
     } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
+  })
+})
+
+describe('MetaFieldManager drag-to-reorder (feedback B)', () => {
+  const FIELDS = [
+    { id: 'fld_a', name: 'Alpha', type: 'string', property: {} },
+    { id: 'fld_b', name: 'Bravo', type: 'string', property: {} },
+    { id: 'fld_c', name: 'Charlie', type: 'string', property: {} },
+  ]
+
+  function mountManager(fields = FIELDS) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const app = createApp({
+      render: () => h(MetaFieldManager, {
+        visible: true,
+        sheetId: 'sheet_1',
+        sheets: [],
+        fields,
+        onUpdateField: updateSpy,
+      }),
+    })
+    app.mount(container)
+    return { container, app, updateSpy }
+  }
+
+  const rows = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.meta-field-mgr__row')) as HTMLElement[]
+
+  /** jsdom 27 has neither DragEvent nor a DataTransfer constructor; the component keeps the dragged
+   *  id in a ref (the MetaHierarchyView.vue variant), so a bare bubbling Event is enough. */
+  const fire = (el: HTMLElement, type: string) => el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }))
+
+  const arrow = (row: HTMLElement, title: string) =>
+    row.querySelector(`.meta-field-mgr__action[title="${title}"]`) as HTMLButtonElement
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  // --- The golden the drag path has to match, byte for byte ---
+  it('the down arrow emits update-field with the destination index', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      arrow(rows(container)[0], 'Move down').click()
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledWith('fld_a', { order: 1 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('dragging a row onto a lower row persists through the SAME call shape as the arrows', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      fire(list[2], 'drop')
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledWith('fld_a', { order: 2 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('dragging a row upward emits the destination index too', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[2], 'dragstart')
+      fire(list[0], 'dragover')
+      await nextTick()
+      fire(list[0], 'drop')
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledWith('fld_c', { order: 0 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('shows a drop placeholder on the hovered row while dragging, on the landing edge', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      let list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      list = rows(container)
+      expect(list[0].className).toContain('meta-field-mgr__row--dragging')
+      // dragging DOWN lands after the hovered row
+      expect(list[2].className).toContain('meta-field-mgr__row--drop-after')
+      expect(list[1].className).not.toContain('meta-field-mgr__row--drop')
+
+      // leaving the row clears the placeholder again
+      fire(list[2], 'dragleave')
+      await nextTick()
+      expect(rows(container)[2].className).not.toContain('meta-field-mgr__row--drop')
+
+      // and dragging UP lands before the hovered row
+      fire(rows(container)[2], 'dragend')
+      await nextTick()
+      list = rows(container)
+      fire(list[2], 'dragstart')
+      fire(list[0], 'dragover')
+      await nextTick()
+      expect(rows(container)[0].className).toContain('meta-field-mgr__row--drop-before')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('ignores a drop onto the row itself (same index = no write)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[1], 'dragstart')
+      fire(list[1], 'dragover')
+      await nextTick()
+      fire(list[1], 'drop')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+      expect(rows(container)[1].className).not.toContain('meta-field-mgr__row--drop')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('persists nothing when the drag is cancelled (Escape / dropped outside the list)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      // Escape / a drop outside a row surfaces as dragend with no drop.
+      fire(list[0], 'dragend')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+      expect(rows(container)[0].className).not.toContain('meta-field-mgr__row--dragging')
+      expect(rows(container)[2].className).not.toContain('meta-field-mgr__row--drop')
+
+      // a stray drop AFTER the cancel must stay a no-op as well
+      fire(rows(container)[2], 'drop')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('keeps the arrow buttons focusable, enabled and bounded (keyboard path does not regress)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      expect(arrow(list[0], 'Move up').disabled).toBe(true)
+      expect(arrow(list[0], 'Move down').disabled).toBe(false)
+      expect(arrow(list[2], 'Move down').disabled).toBe(true)
+      // native <button>: tab-reachable, Enter/Space-activatable, no tabindex override, and the new
+      // grip adds no tab stop of its own.
+      expect(arrow(list[1], 'Move up').tagName).toBe('BUTTON')
+      expect(arrow(list[1], 'Move up').getAttribute('tabindex')).toBeNull()
+      expect(list[1].querySelector('.meta-field-mgr__grip')?.getAttribute('aria-hidden')).toBe('true')
+      expect(list[1].querySelector('.meta-field-mgr__grip')?.getAttribute('tabindex')).toBeNull()
+
+      arrow(list[2], 'Move up').click()
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledWith('fld_c', { order: 1 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a row being renamed is not draggable (the rename input keeps native caret dragging)', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      expect(rows(container)[0].getAttribute('draggable')).toBe('true')
+      ;(rows(container)[0].querySelector('.meta-field-mgr__action[title="Rename"]') as HTMLButtonElement).click()
+      await nextTick()
+      expect(rows(container)[0].getAttribute('draggable')).toBe('false')
+      expect(rows(container)[1].getAttribute('draggable')).toBe('true')
+    } finally { app.unmount(); container.remove() }
   })
 })

@@ -29,6 +29,11 @@ function spyServices(): { services: DurableDeliveryServices; calls: Call[] } {
     },
     projectionService: { reconcile: rec('reconcile') as unknown as (id: string) => Promise<unknown> },
     webhookService: { deliverEvent: rec('deliverEvent') as unknown as (e: never, p: unknown) => Promise<unknown> },
+    recordApprovalService: { handleApprovalCompletion: rec('handleApprovalCompletion') as unknown as (e: never) => Promise<void> },
+    todoMirrorService: {
+      handleApprovalTaskCreated: rec('todoMirrorTaskCreated') as unknown as (e: never) => Promise<void>,
+      handleApprovalCompletion: rec('todoMirrorCompletion') as unknown as (e: never) => Promise<void>,
+    },
   }
   return { services, calls }
 }
@@ -122,6 +127,64 @@ describe('buildDurableConsumerHandlers — durable consumer_key → real product
     await expect(
       handlers['webhook-event-bridge'](claimed({ consumerKey: 'webhook-event-bridge', eventType: 'multitable.record.moved', payload: {} })),
     ).rejects.toThrow(/no webhook mapping/)
+  })
+
+  test('multitable-record-approval (manifest v2) delegates the completion event to the record-approval sink', async () => {
+    const { services, calls } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    await handlers['multitable-record-approval'](
+      claimed({ consumerKey: 'multitable-record-approval', eventType: 'approval.approved', payload: approvalPayload, manifestVersion: 2 }),
+    )
+    // The SAME sink object the eventBus leg subscribes — one idempotent handler, two legs.
+    expect(calls).toEqual([{ method: 'handleApprovalCompletion', args: [approvalPayload] }])
+  })
+
+  test('multitable-record-approval ACKs an approval that is not record-linked (sink no-ops; never a throw)', async () => {
+    const services = {
+      ...spyServices().services,
+      // The real sink resolves with { applied: false } when the UPDATE matches no submission row; the
+      // adapter must treat that as SUCCESS (a throw here would dead-letter every ordinary approval).
+      recordApprovalService: { handleApprovalCompletion: async () => undefined },
+    } as DurableDeliveryServices
+    const handlers = buildDurableConsumerHandlers(services)
+    await expect(
+      handlers['multitable-record-approval'](
+        claimed({ consumerKey: 'multitable-record-approval', eventType: 'approval.rejected', payload: { approval: { instanceId: 'not_a_record_submission' } }, manifestVersion: 2 }),
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  test('dingtalk-todo-mirror (manifest v3) routes task_created to the create half and the four completions to the retire half', async () => {
+    const { services, calls } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    const taskPayload = { version: 1, eventId: 'evt_task_1', eventType: 'approval.task_created', approval: { instanceId: 'appr_inst_9' }, task: { nodeKey: 'n1', entryEpoch: 1, assigneeUserId: 'u1' } }
+    await handlers['dingtalk-todo-mirror'](
+      claimed({ consumerKey: 'dingtalk-todo-mirror', eventType: 'approval.task_created', payload: taskPayload, manifestVersion: 3 }),
+    )
+    for (const t of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
+      await handlers['dingtalk-todo-mirror'](
+        claimed({ consumerKey: 'dingtalk-todo-mirror', eventType: t, payload: approvalPayload, manifestVersion: 3 }),
+      )
+    }
+    expect(calls.map((c) => c.method)).toEqual([
+      'todoMirrorTaskCreated',
+      'todoMirrorCompletion',
+      'todoMirrorCompletion',
+      'todoMirrorCompletion',
+      'todoMirrorCompletion',
+    ])
+    expect(calls[0].args).toEqual([taskPayload])
+  })
+
+  test('dingtalk-todo-mirror THROWS on an event type manifest v3 never routes to it (never a silent drop)', async () => {
+    const { services, calls } = spyServices()
+    const handlers = buildDurableConsumerHandlers(services)
+    await expect(
+      handlers['dingtalk-todo-mirror'](
+        claimed({ consumerKey: 'dingtalk-todo-mirror', eventType: 'multitable.record.created', payload: {}, manifestVersion: 3 }),
+      ),
+    ).rejects.toThrow(/unroutable event type/)
+    expect(calls).toEqual([])
   })
 
   test('the REAL handler set is manifest-complete (registry keys === every routed consumer_key, bidirectional)', () => {

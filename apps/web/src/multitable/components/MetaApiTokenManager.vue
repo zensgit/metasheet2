@@ -435,6 +435,7 @@ import type {
 import type { MultitableApiClient } from '../api/client'
 import { MtButton, MtIconButton } from '../ui'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import {
   apiDeliveryResultLabel,
   apiDingTalkDeliverySourceLabel,
@@ -604,12 +605,9 @@ const canSaveDingTalkGroup = computed(() => {
     && !dingTalkGroupSecretValidationMessage.value
 })
 
+// 客户反馈 2026-09-24 #4c follow-up: the business-timezone day, `YYYY-MM-DD` — not the browser's day / locale.
 function formatDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString()
-  } catch {
-    return iso
-  }
+  return formatBusinessTimestamp(iso, { precision: 'day' }) ?? iso
 }
 
 function maskDingTalkWebhookUrl(url: string): string {

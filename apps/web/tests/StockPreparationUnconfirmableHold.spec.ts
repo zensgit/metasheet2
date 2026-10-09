@@ -8,7 +8,7 @@ import { STOCK_PREPARATION_CARRY_CONFLICT_TYPES as CARRY_CONFLICT_TYPES } from '
 // 缺件行不该邀请操作员走进死胡同 — the confirmation queue's unconfirmable rows.
 //
 // THE PROBLEM THIS CLOSES (observed 2026-09-04 against the customer's own PLM, project
-// `1-20232045`): a BOM line pointing at a part absent from the source parts library holds its rows
+// `1-20000001`): a BOM line pointing at a part absent from the source parts library holds its rows
 // as `missing_component`. Reconcile ledgers them, they appear in this queue as `pending`, and the
 // page offered the same "我来决定…" button and the same three actions it offers a duplicate group.
 // Every one of them fails: the confirm endpoint implements exactly one conflict type
@@ -145,7 +145,7 @@ async function loadQueueWith(rows: unknown[]): Promise<HTMLDivElement> {
   const root = mountView()
   await flush()
   const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
-  input.value = '1-20232045'
+  input.value = '1-20000001'
   input.dispatchEvent(new Event('input'))
   await nextTick()
   ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()

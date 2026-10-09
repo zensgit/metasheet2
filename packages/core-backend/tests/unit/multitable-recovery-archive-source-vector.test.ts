@@ -5,6 +5,9 @@ import { describe, expect, test } from 'vitest'
 import { canonicalizeRecoveryArchiveJson } from '../../src/multitable/recovery-archive-manifest'
 import {
   computeRecoveryArchiveSourceVectorHash,
+  computeRecoveryArchiveCheckpointVectorHash,
+  RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_DOMAIN,
+  RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_FORMAT_VERSION,
   RECOVERY_ARCHIVE_SOURCE_VECTOR_DOMAIN,
   RECOVERY_ARCHIVE_SOURCE_VECTOR_FORMAT_VERSION,
   RECOVERY_ARCHIVE_SOURCE_VECTOR_HEAD_KEYS,
@@ -159,7 +162,7 @@ describe('Time Machine D2 source-vector hash', () => {
       'RECOVERY_ARCHIVE_SOURCE_VECTOR_INVALID_HEADS',
     )
 
-    for (const kind of ['ordinary', 'restore_chunk', 'restore_aggregate', 'unknown']) {
+    for (const kind of ['ordinary', 'restore_chunk', 'restore_aggregate', 'section_checkpoint', 'unknown']) {
       expectCode(
         () => computeRecoveryArchiveSourceVectorHash(heads([{ sourceHeadKind: kind }])),
         'RECOVERY_ARCHIVE_SOURCE_VECTOR_UNKNOWN_KIND',
@@ -305,5 +308,59 @@ describe('Time Machine D2 source-vector hash', () => {
   test('null-prototype ordinary data descriptors still hash', () => {
     const nullProto = heads().map((head) => Object.assign(Object.create(null), head))
     expect(computeRecoveryArchiveSourceVectorHash(nullProto).hash).toBe(GOLDEN_HASH)
+  })
+})
+
+describe('manual repeat-capture checkpoint vector v2 (identity only)', () => {
+  const checkpoints = () => heads().map((head) => ({ ...head, sourceHeadKind: 'section_checkpoint' }))
+
+  test('has its own fixed domain/version and immutable canonical identity', () => {
+    const input = checkpoints()
+    const result = computeRecoveryArchiveCheckpointVectorHash(input)
+    const body = GOLDEN_BODY.replace('"format_version":1', '"format_version":2')
+      .replaceAll('section_bootstrap', 'section_checkpoint')
+    expect(RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_FORMAT_VERSION).toBe(2)
+    expect(RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_DOMAIN).toBe('metasheet2:multitable:recovery-archive:source-vector:v2')
+    expect(result.formatVersion).toBe(2)
+    expect(result.preimage).toBe(`${RECOVERY_ARCHIVE_CHECKPOINT_VECTOR_DOMAIN}\u0000${body}`)
+    expect(result.hash).toBe(createHash('sha256').update(result.preimage).digest('hex'))
+    expect(result.hash).toBe('d83bce59176b558f3d18a5775543791b14ce6a2252508d9c40ad6a73029aedf5')
+    expect(result.hash).not.toBe(GOLDEN_HASH)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(Object.isFrozen(result.heads)).toBe(true)
+    expect(result.heads.every(Object.isFrozen)).toBe(true)
+    input[0].headSeq = '999'
+    expect(result.heads[0].headSeq).toBe('101')
+    expect(result.preimage).not.toContain('row_count')
+    expect(result.preimage).not.toContain('source_hash')
+  })
+
+  test.each(['section_bootstrap', 'ordinary', 'restore_chunk', 'restore_aggregate', 'archive_snapshot'])('does not accept %s as checkpoint proof', (kind) => {
+    const input = checkpoints()
+    input[0].sourceHeadKind = kind
+    expectCode(() => computeRecoveryArchiveCheckpointVectorHash(input), 'RECOVERY_ARCHIVE_SOURCE_VECTOR_UNKNOWN_KIND')
+  })
+
+  test('refuses incomplete, mixed, repeated and reordered identities', () => {
+    expectCode(() => computeRecoveryArchiveCheckpointVectorHash(checkpoints().slice(1)), 'RECOVERY_ARCHIVE_SOURCE_VECTOR_INVALID_HEADS')
+    const duplicate = checkpoints()
+    duplicate[1].operationId = duplicate[0].operationId
+    expectCode(() => computeRecoveryArchiveCheckpointVectorHash(duplicate), 'RECOVERY_ARCHIVE_SOURCE_VECTOR_DUPLICATE_IDENTITY')
+    const reordered = checkpoints()
+    ;[reordered[0], reordered[1]] = [reordered[1], reordered[0]]
+    expectCode(() => computeRecoveryArchiveCheckpointVectorHash(reordered), 'RECOVERY_ARCHIVE_SOURCE_VECTOR_SECTION_MISMATCH')
+    const extra = checkpoints().map((head) => ({ ...head, source_hash: 'a'.repeat(64) }))
+    expectCode(() => computeRecoveryArchiveCheckpointVectorHash(extra), 'RECOVERY_ARCHIVE_SOURCE_VECTOR_INVALID_KEYS')
+  })
+
+  test('retains bigint precision and binds every head identity', () => {
+    const baseline = computeRecoveryArchiveCheckpointVectorHash(checkpoints())
+    for (let index = 0; index < 9; index++) {
+      const input = checkpoints()
+      input[index].headSeq = TWO_POW_53_PLUS_1
+      const result = computeRecoveryArchiveCheckpointVectorHash(input)
+      expect(result.heads[index].headSeq).toBe(TWO_POW_53_PLUS_1)
+      expect(result.hash).not.toBe(baseline.hash)
+    }
   })
 })

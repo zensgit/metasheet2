@@ -176,6 +176,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
   isPlatformAppAccessible,
+  isPlatformAppFeatureEnabled,
   resolvePlatformAppInstallState,
   resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
@@ -218,7 +219,8 @@ const appId = computed(() => String(route.params.appId || ''))
 const app = computed(() => {
   const found = apps.value.find((item) => item.id === appId.value) || null
   if (!found) return null
-  return isPlatformAppAccessible(found) ? found : null
+  // A switched-off product feature (today: 云课堂 / elearning) renders the same "not found" state.
+  return isPlatformAppAccessible(found) && isPlatformAppFeatureEnabled(found) ? found : null
 })
 const visibleNavigationItems = computed(() =>
   (app.value?.navigation ?? []).filter((item) => item.location !== 'hidden'),

@@ -265,6 +265,11 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
                VALUES ($1,$2,$1,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO UPDATE SET is_active = TRUE`, [uid, `${uid}@card.test`])
     }
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:read') ON CONFLICT DO NOTHING`, [CREATOR])
+    // F9c: the placement spec saves a plain send_notification rule with CREATOR as its recipient, and
+    // rule save now refuses a recipient outside the selectable-people roster (loadSheetMemberUserIdSet
+    // = active + GLOBAL multitable read/write). Without this grant that createRule would 400 before the
+    // spec reaches the card-placement assertion it actually exists to make.
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [CREATOR])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:write') ON CONFLICT DO NOTHING`, [REQUESTER])
     // Lock-11 §10 arm (a) fixture delta: REQUESTER needs exactly one active
     // user_orgs membership or the real createApproval/startApproval call below 422s

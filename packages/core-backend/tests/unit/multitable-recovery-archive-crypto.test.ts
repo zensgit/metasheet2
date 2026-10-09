@@ -38,6 +38,8 @@ import {
   type RecoveryArchiveTransactionDepthProbe,
 } from "../../src/multitable/recovery-archive-crypto";
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from "../../src/multitable/recovery-archive-contract";
+import { decodeRecoveryArchivePreparedEnvelope, encodeRecoveryArchivePreparedEnvelope, uploadRecoveryArchivePreparedCapture } from "../../src/multitable/recovery-archive-prepared-upload";
+import { sealRecoveryArchiveAttachment, openRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-crypto';
 
 const WORKSPACE = "ws_d2h_unit";
 const BASE = "base_d2h_unit";
@@ -53,6 +55,100 @@ const PLAINTEXT = Buffer.from(
 );
 const CREATED_AT = "2026-08-26T00:00:00.000Z";
 const EXPIRES_AT = "2027-08-26T00:00:00.000Z";
+
+describe('attachment object AEAD domain', () => {
+  test('reserves attachment nonces with all ten sections under the same generation DEK', async () => {
+    const key = randomBytes(32)
+    const plaintext = Buffer.from('synthetic attachment')
+    const original = Buffer.from(plaintext)
+    const nonce = randomBytes(12)
+    const originalNonce = Buffer.from(nonce)
+    let reserved = 0
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(), keyCustody: createTestCustody({ dek: key }), transactionDepth: depthProbe(0),
+      dekSource: { kind: 'produce' }, sections: fullSnapshotSections(),
+      attachments: [{ attachmentId: 'att_10000000-0000-4000-8000-000000000001', sourceVersion: 'source-v1', plaintext, nonce }],
+      reserveNonces: async (rows) => {
+        reserved = rows.length
+        expect(rows).toHaveLength(11)
+        expect(rows[10]!.sectionName).toBe(`attachment:${createHash('sha256').update('att_10000000-0000-4000-8000-000000000001').digest('hex')}`)
+        expect(rows[10]!.nonceHex).toBe(originalNonce.toString('hex'))
+        expect(new Set(rows.map((row) => row.dekFingerprint)).size).toBe(1)
+        plaintext.fill(0); nonce.fill(0)
+      },
+    })
+    expect(reserved).toBe(11)
+    expect(result.sealedAttachments).toHaveLength(1)
+    const object = result.sealedAttachments![0]!
+    expect(openRecoveryArchiveAttachment({ binding: { generation: result.binding,
+      attachmentId: object.attachmentId, sourceVersion: object.sourceVersion,
+      plaintextSha256: object.plaintextSha256 }, dek: key, sealed: object })).toEqual(original)
+    const durable = encodeRecoveryArchivePreparedEnvelope(result)
+    expect(JSON.parse(durable.toString()).version).toBe(3)
+    expect(decodeRecoveryArchivePreparedEnvelope(durable).attachments).toEqual(result.sealedAttachments)
+    const wire = JSON.parse(durable.toString())
+    for (const mutate of [
+      (value: typeof wire) => { value.version = 2 },
+      (value: typeof wire) => { value.attachments[0].plaintext = 'forbidden' },
+      (value: typeof wire) => { value.attachments[0].sourceVersion = '' },
+      (value: typeof wire) => { value.attachments[0].sizeBytes++ },
+      (value: typeof wire) => { value.attachments[0].nonce = value.sections[0].nonce },
+      (value: typeof wire) => { value.attachments[0].authTag = 'AA==' },
+      (value: typeof wire) => { value.attachments.push(value.attachments[0]) },
+      (value: typeof wire) => { value.attachments = [] },
+    ]) {
+      const changed = structuredClone(wire)
+      mutate(changed)
+      expect(() => decodeRecoveryArchivePreparedEnvelope(Buffer.from(JSON.stringify(changed))))
+        .toThrow('RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID')
+    }
+    key.fill(0)
+  })
+
+  test('rejects section/attachment nonce reuse before custody and refuses reservation failure before sealing', async () => {
+    const sections = fullSnapshotSections()
+    const custody = createTestCustody()
+    const input = { binding: generationBinding(), keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: 'produce' as const }, sections,
+      attachments: [{ attachmentId: '10000000-0000-4000-8000-000000000001', sourceVersion: 'source-v1', plaintext: Buffer.from('blob'), nonce: sections[0]!.nonce }],
+      reserveNonces: async () => { throw new Error('synthetic reservation refusal') } }
+    await expect(reserveThenSealRecoveryArchiveSections(input)).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_DUPLICATE_NONCE_IN_BATCH')
+    expect(custody.calls).toEqual([])
+    let sealed = 0
+    await expect(reserveThenSealRecoveryArchiveSections({ ...input,
+      attachments: [{ ...input.attachments[0]!, nonce: randomBytes(12) }],
+      sealSection: (value) => { sealed += 1; return sealRecoveryArchiveSection(value) },
+    })).rejects.toThrow('RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED')
+    expect(sealed).toBe(0)
+  })
+
+  test('roundtrips binary bytes and rejects attachment, source-version and generation substitution', () => {
+    const dek = randomBytes(32)
+    const plaintext = Buffer.from([0, 255, 1, 2, 0, 42])
+    const bound = { generation: { ...generationBinding(), wrappedDekId: WRAPPED_DEK_ID, dekFingerprint: 'a'.repeat(64) },
+      attachmentId: 'synthetic-attachment', sourceVersion: 'sha256:' + recoveryArchivePlaintextSha256(plaintext),
+      plaintextSha256: recoveryArchivePlaintextSha256(plaintext) }
+    const sealed = sealRecoveryArchiveAttachment({ binding: bound, dek, nonce: randomBytes(12), plaintext })
+    expect(openRecoveryArchiveAttachment({ binding: bound, dek, sealed })).toEqual(plaintext)
+    for (const changed of [
+      { ...bound, attachmentId: 'another-attachment' },
+      { ...bound, sourceVersion: 'another-version' },
+      { ...bound, generation: { ...bound.generation, sheetId: 'another-sheet' } },
+      { ...bound, generation: { ...bound.generation, generationId: randomUUID() } },
+    ]) expect(() => openRecoveryArchiveAttachment({ binding: changed, dek, sealed }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    expect(() => openRecoveryArchiveSection({ binding: { ...bound.generation,
+      sectionName: 'attachments_index', plaintextSha256: bound.plaintextSha256 }, dek, ...sealed }))
+      .toThrow()
+    const corrupted = { ...sealed, authTag: Buffer.from(sealed.authTag) }
+    corrupted.authTag[0] = corrupted.authTag[0]! ^ 1
+    expect(() => openRecoveryArchiveAttachment({ binding: bound, dek, sealed: corrupted }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    expect(() => sealRecoveryArchiveAttachment({ binding: bound, dek, nonce: randomBytes(12), plaintext: Buffer.from('different') }))
+      .toThrow('RECOVERY_ARCHIVE_ATTACHMENT_CRYPTO_INVALID')
+    dek.fill(0)
+  })
+})
 
 function fingerprintOfDek(dek: Uint8Array): string {
   return createHmac("sha256", Buffer.from(dek))
@@ -227,6 +323,149 @@ async function capture(
   }
   throw new Error("expected_recovery_archive_crypto_refusal");
 }
+
+describe("Prepared sealed-envelope continuation", () => {
+  test("closed envelope roundtrips exact ciphertext and rejects malformed wire fields", async () => {
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(), keyCustody: createTestCustody(), transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: fullSnapshotSections(), reserveNonces: async () => {},
+    });
+    const payload = encodeRecoveryArchivePreparedEnvelope(result);
+    const decoded = decodeRecoveryArchivePreparedEnvelope(payload);
+    expect(decoded.sections).toEqual(result.sealedSections);
+    expect(decoded.wrappedDek).toEqual(Buffer.from(result.wrappedDek));
+    expect(decoded.binding).toEqual(result.binding);
+    const mutations = [
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.rawDek = "forbidden"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.binding.extra = true; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections.pop(); },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections.reverse(); },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].nonce = "!"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[1].nonce = wire.sections[0].nonce; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].authTag = "AA=="; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.sections[0].plaintext = "forbidden"; },
+      (wire: { [key: string]: unknown; binding: Record<string, unknown>; sections: Record<string, unknown>[]; wrappedDek: string }) => { wire.wrappedDek = ""; },
+    ];
+    for (const mutate of mutations) {
+      const wire = JSON.parse(payload.toString());
+      mutate(wire);
+      expect(() => decodeRecoveryArchivePreparedEnvelope(Buffer.from(JSON.stringify(wire))))
+        .toThrow("RECOVERY_ARCHIVE_PREPARED_ENVELOPE_INVALID");
+    }
+  });
+
+  test("interrupted upload resumes persisted ciphertext without another capture or nonce reservation", async () => {
+    const binding = generationBinding();
+    const custody = createTestCustody();
+    let stored: Buffer | null = null;
+    let depth = 0;
+    let captures = 0;
+    let reservations = 0;
+    let allowed = true;
+    const uploads: Buffer[] = [];
+    const query = async (text: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
+      if (text.includes("pg_current_xact_id")) return { rows: [{ xid: "1" }] };
+      if (text.includes("FOR UPDATE")) return { rows: [{ generation_id: binding.generationId }] };
+      if (text.startsWith("INSERT")) { stored ??= Buffer.from(params![5] as Buffer); return { rows: [] }; }
+      return { rows: stored ? [{ payload: stored, payload_sha256: createHash("sha256").update(stored).digest("hex") }] : [] };
+    };
+    const input = {
+      binding, owner: { generationId: binding.generationId, ownerKind: "archive_builder", ownerId: "test",
+        ownerFence: "1", sourceVectorHash: "a".repeat(64) },
+      transaction: async <T,>(work: (q: typeof query) => Promise<T>): Promise<T> => {
+        depth++; try { return await work(query); } finally { depth--; }
+      },
+      checkAuthority: async () => { if (!allowed) throw new Error("AUTHORITY_REVOKED"); },
+      transactionDepth: { currentTransactionDepth: () => depth },
+      capture: async () => { captures++; return {
+        binding, keyCustody: custody, transactionDepth: depthProbe(0), dekSource: { kind: "produce" as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => { reservations++; },
+      }; },
+      upload: async (_envelope: unknown, section: RecoveryArchiveSealedSection) => {
+        expect(depth).toBe(0); expect(stored).not.toBeNull(); uploads.push(Buffer.from(section.ciphertext));
+        throw new Error("SYNTHETIC_UPLOAD_INTERRUPTION");
+      },
+    };
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input,
+      capture: async () => ({
+        binding, keyCustody: custody, transactionDepth: depthProbe(0), dekSource: { kind: "produce" as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => {},
+        attachments: [{ attachmentId: "10000000-0000-4000-8000-000000000001", sourceVersion: "version-1",
+          plaintext: Buffer.from("attachment bytes"), nonce: Buffer.alloc(12, 240) }],
+      }),
+    })).rejects.toThrow("RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED");
+    expect(stored).toBeNull();
+    expect(uploads).toEqual([]);
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("SYNTHETIC_UPLOAD_INTERRUPTION");
+    const original = Buffer.from(stored!);
+    await uploadRecoveryArchivePreparedCapture({ ...input, capture: async () => { throw new Error("MUST_NOT_RECAPTURE"); },
+      upload: async (_envelope, section) => { uploads.push(Buffer.from(section.ciphertext)); section.ciphertext.fill(0); },
+    });
+    expect(captures).toBe(1); expect(reservations).toBe(1);
+    expect(uploads).toHaveLength(11); expect(uploads[0]).toEqual(uploads[1]); expect(stored).toEqual(original);
+    allowed = false;
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow("AUTHORITY_REVOKED");
+    expect(uploads).toHaveLength(11);
+    allowed = true;
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input, binding: { ...binding, sheetId: "different" } }))
+      .rejects.toThrow("RECOVERY_ARCHIVE_PREPARED_UPLOAD_BINDING_MISMATCH");
+    expect(uploads).toHaveLength(11);
+    await expect(uploadRecoveryArchivePreparedCapture({ ...input,
+      upload: async () => { allowed = false; uploads.push(Buffer.from("one")); },
+    })).rejects.toThrow("AUTHORITY_REVOKED");
+    expect(uploads).toHaveLength(12);
+  });
+
+  test('attachment interruption resumes exact ciphertext without source or custody and refuses missing attachment uploader', async () => {
+    const binding = generationBinding();
+    let stored: Buffer | null = null;
+    let captures = 0;
+    let reservations = 0;
+    let sectionUploads = 0;
+    const delivered: Buffer[] = [];
+    const query = async (text: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
+      if (text.includes('pg_current_xact_id')) return { rows: [{ xid: '1' }] };
+      if (text.includes('FOR UPDATE')) return { rows: [{ generation_id: binding.generationId }] };
+      if (text.startsWith('INSERT')) { stored ??= Buffer.from(params![5] as Buffer); return { rows: [] }; }
+      return { rows: stored ? [{ payload: stored, payload_sha256: createHash('sha256').update(stored).digest('hex') }] : [] };
+    };
+    const input = {
+      binding, owner: { generationId: binding.generationId, ownerKind: 'archive_builder', ownerId: 'test',
+        ownerFence: '1', sourceVectorHash: 'a'.repeat(64) },
+      transaction: async <T,>(work: (q: typeof query) => Promise<T>): Promise<T> => work(query),
+      checkAuthority: async () => {}, transactionDepth: depthProbe(0),
+      capture: async () => { captures++; return {
+        binding, keyCustody: createTestCustody(), transactionDepth: depthProbe(0), dekSource: { kind: 'produce' as const },
+        sections: fullSnapshotSections(), reserveNonces: async () => { reservations++; },
+        attachments: [1, 2].map((id) => ({ attachmentId: `att_${id}`, sourceVersion: `version-${id}`,
+          plaintext: Buffer.from(`synthetic-blob-${id}`), nonce: Buffer.alloc(12, 230 + id) })),
+      }; },
+      upload: async () => { sectionUploads++; },
+      uploadAttachment: async (_envelope: unknown, attachment: { ciphertext: Buffer }) => {
+        expect(stored).not.toBeNull(); delivered.push(Buffer.from(attachment.ciphertext));
+        throw new Error('SYNTHETIC_ATTACHMENT_INTERRUPTION');
+      },
+    };
+    await expect(uploadRecoveryArchivePreparedCapture(input)).rejects.toThrow('SYNTHETIC_ATTACHMENT_INTERRUPTION');
+    const original = Buffer.from(stored!);
+    const resume = { ...input, capture: async (): Promise<never> => { throw new Error('MUST_NOT_RECAPTURE'); } };
+    await expect(uploadRecoveryArchivePreparedCapture({ ...resume, uploadAttachment: undefined }))
+      .rejects.toThrow('RECOVERY_ARCHIVE_ATTACHMENT_UPLOAD_REQUIRED');
+    expect(sectionUploads).toBe(10);
+    await uploadRecoveryArchivePreparedCapture({ ...resume, uploadAttachment: async (envelope, object) => {
+      delivered.push(Buffer.from(object.ciphertext));
+      envelope.attachments![1]!.ciphertext.fill(0);
+    } });
+    expect(captures).toBe(1); expect(reservations).toBe(1);
+    expect(delivered).toHaveLength(3);
+    expect(delivered[0]).toEqual(delivered[1]);
+    expect(delivered[2]).toEqual(decodeRecoveryArchivePreparedEnvelope(original).attachments![1]!.ciphertext);
+    expect(stored).toEqual(original);
+    await expect(uploadRecoveryArchivePreparedCapture({ ...resume,
+      authenticateCapture: async (): Promise<never> => { throw new Error('MUST_NOT_RESIGN'); },
+    })).rejects.toThrow('RECOVERY_ARCHIVE_PREPARED_MANIFEST_REQUIRED');
+  });
+});
 
 describe("Phase D2h AEAD seal/open", () => {
   test("round trips the exact plaintext bytes under the exact AAD binding", () => {
@@ -1925,6 +2164,51 @@ describe("Phase D2h reservation before encryption and upload", () => {
     expect(Buffer.from(fingerprintView ?? [])).toEqual(
       Buffer.alloc(RECOVERY_ARCHIVE_AEAD_KEY_BYTES),
     );
+  });
+
+  test("interrupted upload cannot re-encrypt changed source bytes with an already reserved generation nonce", async () => {
+    const custody = createTestCustody();
+    const plan = fullSnapshotSections();
+    const binding = generationBinding();
+    // This models durable registry state across invocations, not a process/DB restart proof.
+    const reserved = new Set<string>();
+    const reserveNonces: Parameters<typeof reserveThenSealRecoveryArchiveSections>[0]["reserveNonces"] = async (rows) => {
+      const keys = rows.map((row) => `${row.dekFingerprint}:${row.nonceHex}`);
+      if (keys.some((key) => reserved.has(key))) {
+        throw new Error("recovery_archive_nonce_reservation_conflict");
+      }
+      keys.forEach((key) => reserved.add(key));
+    };
+    const first = harness();
+    expect(await asyncCodeOf(() => reserveThenSealRecoveryArchiveSections({
+      binding, keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: plan, reserveNonces,
+      sealSection: first.sealSection,
+      uploadSealedSection: async (section) => {
+        await first.uploadSealedSection(section);
+        throw new Error("synthetic_upload_interruption");
+      },
+    }))).toBe("RECOVERY_ARCHIVE_CRYPTO_PROVIDER_FAILED");
+    expect(reserved.size).toBe(10);
+    expect(first.sealCalls).toHaveLength(10);
+    expect(first.uploadCalls).toHaveLength(1);
+    const originalCiphertext = Buffer.from(first.uploadCalls[0].ciphertext);
+
+    const retry = harness();
+    const changedPlan = plan.map((section) => ({
+      ...section, plaintext: Buffer.from('{"changed":"after interruption"}'),
+    }));
+    expect(changedPlan[0].plaintext).not.toEqual(plan[0].plaintext);
+    expect(await asyncCodeOf(() => reserveThenSealRecoveryArchiveSections({
+      binding, keyCustody: custody, transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" }, sections: changedPlan, reserveNonces,
+      sealSection: retry.sealSection, uploadSealedSection: retry.uploadSealedSection,
+    }))).toBe("RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED");
+    expect(retry.sealCalls).toEqual([]);
+    expect(retry.uploadCalls).toEqual([]);
+    expect(reserved.size).toBe(10);
+    expect(Buffer.from(first.uploadCalls[0].ciphertext)).toEqual(originalCiphertext);
+    expect(custody.calls).not.toContain("macManifestRoot");
   });
 
   test("a refused (duplicate) reservation leaves zero seal calls, zero uploads, zero ciphertext", async () => {

@@ -42,7 +42,7 @@
 
 1. CI 打包(main 合后 SHA,tag `r10`)→ scp → 备份 → 就地升级脚本 → 健康检查。
 2. 动作 JSON 加 `projectSubtree`(`parentIdField=Parent_OBJ_ID`、`pathIdField=path_id`、深度 1、节点/根上限默认),`declaredBridge` 不改(预检那条 blocker 与找根轴无关,已写明)。按第 7 步写法重载 env 重启。
-3. 对项目 `2-20231625` 试算:期望子树发现 6 张表头、6 个根件出行、缺子件的行进确认队列并显示"去源系统补"提示;导出走一遍。证据(values-free)记入 `222-rehearsal-full-run-20260904.md` §10。
+3. 对项目 `<项目号B>` 试算:期望子树发现 6 张表头、6 个根件出行、缺子件的行进确认队列并显示"去源系统补"提示;导出走一遍。证据(values-free)记入 `222-rehearsal-full-run-20260904.md` §10。
 4. 注册 222 每日 06:00 **只试算**计划任务:建专用管理员服务账号(登录禁用、租户绑定),签 7 天令牌写入仅管理员可读的文件,脚本从环境变量读;跑一次核对日志 values-free、退出码正确。
 5. runbook 与交付说明加"子树桥接怎么开、看什么"。
 
@@ -53,7 +53,7 @@
 
 三件并行,各自 worktree:
 
-**W3a 缺件清单**(sonnet 调研 → opus 设计 → sonnet 实现 → opus 审)。客户在真实数据上第一件事就是撞 `missing_component`;现在只告诉他"去源系统补",不告诉补哪个。目标:试算面板列出缺件(零件号、所在 BOM、父件、层级),可复制、可导出 CSV。完成判据:前端 spec 登记进 `run-required-web-tests.sh`,守卫测试过;222 上对 `2-20231625` 看到 45 个缺件条目(此前实测数)。
+**W3a 缺件清单**(sonnet 调研 → opus 设计 → sonnet 实现 → opus 审)。客户在真实数据上第一件事就是撞 `missing_component`;现在只告诉他"去源系统补",不告诉补哪个。目标:试算面板列出缺件(零件号、所在 BOM、父件、层级),可复制、可导出 CSV。完成判据:前端 spec 登记进 `run-required-web-tests.sh`,守卫测试过;222 上对 `<项目号B>` 看到 45 个缺件条目(此前实测数)。
 
 **W3b 源绑定解析器 workspace 回退**(sonnet 实现 → opus 审)。第三处 workspace 洞:reconcile 从 principal 推 `workspace=null`,UI 用 `default`,两边读不到同一条绑定,现在靠"两处各写一条"顶着。调研发现方向与 #5471 **相反**(UI 写在 `'default'`,后台用 null 读),照抄修不了。裁定方向 B:null 调用者在租户下恰有一条非 null 绑定时回退取用,≥2 条拒绝(fail-closed),精确命中优先,非 null hint 未命中仍不回退(保住既有测试)。完成判据:只写 UI 那一处两边都读到;222 上线后删掉 null 那条绑定,拉取与对账仍通。根因(Web 把租户写进 workspaceId)记为 owner 决策。
 

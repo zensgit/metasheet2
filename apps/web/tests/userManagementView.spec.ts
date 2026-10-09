@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
 
@@ -1606,7 +1607,7 @@ describe('UserManagementView', () => {
 
     const inputs = Array.from(container!.querySelectorAll('.user-admin__panel--create input'))
     const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名') as HTMLInputElement | undefined
-    const usernameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '用户名（可选）') as HTMLInputElement | undefined
+    const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）') as HTMLInputElement | undefined
     const mobileInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '手机号（可选）') as HTMLInputElement | undefined
     const employeeNoInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '员工号（可选）') as HTMLInputElement | undefined
     const departmentInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '部门（可选）') as HTMLInputElement | undefined
@@ -1697,6 +1698,119 @@ describe('UserManagementView', () => {
       },
     ])
     expect(container?.textContent).not.toContain('首次设置密码链接：')
+  })
+
+  describe('create-user validation copy (customer feedback 20261008 #1)', () => {
+    async function submitCreateUserAgainst(error: Record<string, unknown>, fields: { name: string; username: string; password: string }): Promise<void> {
+      const fallback = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (url.pathname === '/api/admin/users' && (init?.method || 'GET').toUpperCase() === 'POST') {
+          callLog.push(String(input))
+          return createJsonResponse({ ok: false, error }, 400)
+        }
+        return fallback(input, init)
+      })
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      const passwordInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '可选：初始密码')
+      if (!nameInput || !usernameInput || !passwordInput) throw new Error('Create-user form inputs not found')
+      for (const [input, value] of [[nameInput, fields.name], [usernameInput, fields.username], [passwordInput, fields.password]] as const) {
+        input.value = value
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => Boolean(container!.querySelector('.user-admin__status--error')))
+    }
+
+    function errorBannerText(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() || ''
+    }
+
+    it('states both rules in the create form and labels the login-name field', async () => {
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(20)
+
+      const loginNameRule = container!.querySelector('[data-create-user-rule="login-name"]')?.textContent || ''
+      const passwordRule = container!.querySelector('[data-create-user-rule="password"]')?.textContent || ''
+      expect(loginNameRule).toContain('小写字母、数字和 . _ -')
+      expect(loginNameRule).toContain('中文姓名请填「姓名」栏')
+      expect(passwordRule).toContain('8–128 位')
+      expect(passwordRule).toContain('大写字母、小写字母和数字')
+      expect(passwordRule).toContain('不能包含 123456、password')
+      const usernameInput = container!.querySelector<HTMLInputElement>('.user-admin__panel--create input[aria-label="登录名（可选）"]')
+      expect(usernameInput?.getAttribute('placeholder')).toBe('登录名（可选，小写字母/数字）')
+    })
+
+    it('renders the weak-pattern password failure as a Chinese sentence instead of the English server message', async () => {
+      await submitCreateUserAgainst({
+        code: 'PASSWORD_POLICY_FAILED',
+        message: 'Password does not meet requirements',
+        details: {
+          details: ['Password contains a common weak pattern'],
+          reasons: ['weak_pattern'],
+        },
+      }, { name: '测试员', username: 'operator.a', password: '123456Asd' })
+
+      expect(errorBannerText()).toBe('密码不符合要求：不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(errorBannerText()).not.toContain('Password')
+    })
+
+    it('renders the non-ASCII login-name failure as a Chinese sentence that points at the 姓名 field', async () => {
+      await submitCreateUserAgainst({
+        code: 'INVALID_USERNAME',
+        message: 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed',
+        details: { rule: 'login_name_ascii' },
+      }, { name: '测试员', username: '测试员', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏')
+      expect(errorBannerText()).not.toContain('Username')
+    })
+
+    it('falls back to the server message for an unmapped code', async () => {
+      await submitCreateUserAgainst({
+        code: 'USERNAME_ALREADY_EXISTS',
+        message: 'User with this username already exists',
+      }, { name: '测试员', username: 'operator.a', password: '12345Asd' })
+
+      expect(errorBannerText()).toBe('User with this username already exists')
+    })
+
+    it('maps every password reason in order, keeps an en variant, and falls back when it cannot map', () => {
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'too_long', 'no_lowercase', 'no_uppercase', 'no_digit', 'weak_pattern'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；不超过 128 位；要有小写字母；要有大写字母；要有数字；不能包含 123456、password、qwerty、abc123、letmein、admin 这类常见片段（不区分大小写）')
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { reasons: ['too_short', 'no_digit'] },
+      }, 'en')).toBe('Password does not meet requirements: at least 8 characters; at least one number')
+      expect(describeCreateUserError({
+        code: 'INVALID_USERNAME',
+        details: { rule: 'login_name_ascii' },
+      }, 'en')).toContain('put a Chinese name in the Name field')
+      // An unknown reason next to a known one keeps the server's index-aligned English string.
+      expect(describeCreateUserError({
+        code: 'PASSWORD_POLICY_FAILED',
+        details: { details: ['Password must be at least 8 characters long', 'Some future rule'], reasons: ['too_short', 'future_rule'] },
+      }, 'zh')).toBe('密码不符合要求：至少 8 位；Some future rule')
+      // No mapping at all -> null, so the view keeps the server message.
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { details: ['x'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'PASSWORD_POLICY_FAILED', details: { reasons: ['future_rule'] } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME', details: { rule: 'something_else' } }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
+      expect(describeCreateUserError({ code: 'USER_ALREADY_EXISTS', message: 'x' }, 'zh')).toBeNull()
+      expect(describeCreateUserError(undefined, 'zh')).toBeNull()
+    })
   })
 
   it('can auto-focus a user from directory query params', async () => {
@@ -1822,5 +1936,168 @@ describe('UserManagementView', () => {
     await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
 
     expect(container?.textContent).toContain('Delta')
+  })
+
+  describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
+    // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
+    const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'
+    const DINGTALK_NOTICE = '钉钉扫码登录信息暂时无法加载，请刷新页面后重试。'
+    const ADMISSION_NOTICE = '成员准入信息暂时无法加载，请刷新页面后重试。'
+    const NAMESPACE_NOTICE = '插件使用准入信息暂时无法加载，请刷新页面后重试。'
+
+    type SidePanelFailure = 'none' | 'server-500' | 'server-500-no-id' | 'server-500-bad-id' | 'network'
+
+    function installSidePanelFailures(failures: { dingtalk: SidePanelFailure; admission: SidePanelFailure }) {
+      const base = createApiImplementation(callLog)
+      const respond = (kind: SidePanelFailure, code: string, correlationId: string) => {
+        if (kind === 'network') throw new TypeError('Failed to fetch')
+        const error: Record<string, unknown> = { code, message: SERVER_TEXT }
+        if (kind === 'server-500') error.correlationId = correlationId
+        if (kind === 'server-500-bad-id') error.correlationId = `${SERVER_TEXT} id`
+        return createJsonResponse({ ok: false, error }, 500)
+      }
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (failures.dingtalk !== 'none' && /^\/api\/admin\/users\/[^/]+\/dingtalk-access$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.dingtalk, 'DINGTALK_ACCESS_FAILED', 'probe-corr-6163-dingtalk')
+        }
+        if (failures.admission !== 'none' && /^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) {
+          callLog.push(String(input))
+          return respond(failures.admission, 'MEMBER_ADMISSION_FAILED', 'probe-corr-6163-admission')
+        }
+        return base(input, init)
+      })
+      return failures
+    }
+
+    function topBanner(): HTMLElement | null {
+      return container!.querySelector('section.user-admin > p.user-admin__status')
+    }
+
+    function blockNotice(testId: string): HTMLElement | null {
+      return container!.querySelector(`[data-testid="${testId}"]`)
+    }
+
+    function sectionTitleOf(element: HTMLElement): string {
+      return element.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim() ?? ''
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/dingtalk-access'))
+        && callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('shows each failure in its own block with the page sentence and the reference number; the top banner is not written and the server text appears nowhere', async () => {
+      installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      const dingtalkNotice = blockNotice('dingtalk-access-load-failure')!
+      expect(sectionTitleOf(dingtalkNotice)).toBe('钉钉扫码登录')
+      expect(dingtalkNotice.textContent).toContain(DINGTALK_NOTICE)
+      expect(dingtalkNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-dingtalk')
+
+      const admissionNotice = blockNotice('member-admission-load-failure')!
+      expect(sectionTitleOf(admissionNotice)).toBe('成员准入')
+      expect(admissionNotice.textContent).toContain(ADMISSION_NOTICE)
+      expect(admissionNotice.querySelector('small')?.textContent?.trim()).toBe('排查编号：probe-corr-6163-admission')
+
+      // The plugin-usage block does not claim that there is no data.
+      const namespaceNotice = blockNotice('namespace-admission-load-failure')!
+      expect(sectionTitleOf(namespaceNotice)).toBe('插件使用')
+      expect(namespaceNotice.textContent).toContain(NAMESPACE_NOTICE)
+      expect(container!.textContent).not.toContain('暂无插件使用准入信息')
+
+      // A load failure, not a configuration state: no "not configured" wording in the notices.
+      for (const notice of [dingtalkNotice, admissionNotice, namespaceNotice]) {
+        expect(notice.textContent).not.toMatch(/未配置|未开通|不可用/)
+      }
+
+      expect(topBanner()).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('Unsupported state')
+      expect(container!.textContent).not.toContain('DINGTALK_ACCESS_FAILED')
+      expect(container!.textContent).not.toContain('MEMBER_ADMISSION_FAILED')
+    })
+
+    it('leaves the top banner exactly as it was when a refresh of either block fails', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'none', admission: 'none' })
+      await mountPage()
+
+      // Put a known message in the banner first (a successful plugin-usage change).
+      const namespaceCard = container!.querySelector('.user-admin__role-card--namespace')
+      const openButton = Array.from(namespaceCard?.querySelectorAll('button') ?? []).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
+      if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
+      openButton.click()
+      await waitForCondition(() => topBanner()?.textContent?.includes('已开通 crm 插件使用') ?? false)
+      const bannerBefore = { text: topBanner()!.textContent, className: topBanner()!.className }
+
+      failures.dingtalk = 'server-500'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+
+      failures.admission = 'server-500'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') !== null)
+      await flushUi(8)
+
+      expect({ text: topBanner()!.textContent, className: topBanner()!.className }).toEqual(bannerBefore)
+      expect(container!.textContent).not.toContain('MK6163')
+    })
+
+    it('a successful reload after a failure clears the block notice and shows the data again', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500', admission: 'server-500' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+      expect(container!.textContent).toContain('服务端已启用钉钉登录')
+      expect(container!.textContent).not.toContain(DINGTALK_NOTICE)
+      // The other block's failure is its own: still shown.
+      expect(blockNotice('member-admission-load-failure')).not.toBeNull()
+
+      failures.admission = 'none'
+      findButtonByText(container!, '刷新准入状态').click()
+      await waitForCondition(() => blockNotice('member-admission-load-failure') === null)
+      expect(blockNotice('namespace-admission-load-failure')).toBeNull()
+      expect(container!.textContent).toContain('平台账号已启用')
+      expect(container!.textContent).toContain('插件使用未开通')
+      expect(container!.textContent).not.toContain(ADMISSION_NOTICE)
+      expect(container!.textContent).not.toContain(NAMESPACE_NOTICE)
+      expect(topBanner()).toBeNull()
+    })
+
+    it('shows no reference number when the body has none or a malformed one, and a network failure gets the same sentence', async () => {
+      const failures = installSidePanelFailures({ dingtalk: 'server-500-no-id', admission: 'server-500-bad-id' })
+      await mountPage()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null && blockNotice('member-admission-load-failure') !== null)
+
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(blockNotice('member-admission-load-failure')!.textContent).toContain(ADMISSION_NOTICE)
+      expect(blockNotice('member-admission-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('MK6163')
+      expect(container!.textContent).not.toContain('排查编号')
+
+      failures.dingtalk = 'none'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') === null)
+
+      failures.dingtalk = 'network'
+      findButtonByText(container!, '刷新钉钉状态').click()
+      await waitForCondition(() => blockNotice('dingtalk-access-load-failure') !== null)
+      expect(blockNotice('dingtalk-access-load-failure')!.textContent).toContain(DINGTALK_NOTICE)
+      expect(blockNotice('dingtalk-access-load-failure')!.querySelector('small')).toBeNull()
+      expect(container!.textContent).not.toContain('Failed to fetch')
+      expect(topBanner()).toBeNull()
+    })
   })
 })

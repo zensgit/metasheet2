@@ -3708,6 +3708,11 @@ describe('plugin-after-sales routes', () => {
         message: 'After-sales part inventory is unavailable for the current install state',
         details: {
           objectId: 'partItem',
+          // #5835: additive classification so support can tell "never provisioned (partial install)"
+          // from "someone deleted the table". 'unknown' here because this harness's provisioning
+          // fake exposes no `isSheetOwnedByProject` predicate to ask. Code, status and message are
+          // unchanged - the web client keys on the code alone to hide the parts tab.
+          reason: 'unknown',
         },
       },
     })
@@ -3808,6 +3813,11 @@ describe('plugin-after-sales routes', () => {
         message: 'After-sales part inventory is unavailable for the current install state',
         details: {
           objectId: 'partItem',
+          // #5835: additive classification so support can tell "never provisioned (partial install)"
+          // from "someone deleted the table". 'unknown' here because this harness's provisioning
+          // fake exposes no `isSheetOwnedByProject` predicate to ask. Code, status and message are
+          // unchanged - the web client keys on the code alone to hide the parts tab.
+          reason: 'unknown',
         },
       },
     })
@@ -4014,6 +4024,11 @@ describe('plugin-after-sales routes', () => {
         message: 'After-sales part inventory is unavailable for the current install state',
         details: {
           objectId: 'partItem',
+          // #5835: additive classification so support can tell "never provisioned (partial install)"
+          // from "someone deleted the table". 'unknown' here because this harness's provisioning
+          // fake exposes no `isSheetOwnedByProject` predicate to ask. Code, status and message are
+          // unchanged - the web client keys on the code alone to hide the parts tab.
+          reason: 'unknown',
         },
       },
     })
@@ -4140,6 +4155,11 @@ describe('plugin-after-sales routes', () => {
         message: 'After-sales part inventory is unavailable for the current install state',
         details: {
           objectId: 'partItem',
+          // #5835: additive classification so support can tell "never provisioned (partial install)"
+          // from "someone deleted the table". 'unknown' here because this harness's provisioning
+          // fake exposes no `isSheetOwnedByProject` predicate to ask. Code, status and message are
+          // unchanged - the web client keys on the code alone to hide the parts tab.
+          reason: 'unknown',
         },
       },
     })

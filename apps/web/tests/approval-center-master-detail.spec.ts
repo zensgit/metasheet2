@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   createApp,
@@ -93,6 +94,9 @@ const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
 const getApprovalSpy = vi.fn()
+// Pane mark-read (test report 2026-10-08): opening an item in the wide-screen pane records the read,
+// the same presence write the full detail page makes on load.
+const markApprovalReadSpy = vi.fn().mockResolvedValue({ ok: true })
 // member-display-identity (2026-08-19): defaults to "nothing resolves" — matches this file's
 // pre-existing raw-id-shaped fixtures (zero producers of `metadata.assigneeName`).
 const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
@@ -105,6 +109,7 @@ vi.mock('../src/approvals/api', () => ({
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
   getApproval: (...args: [string]) => getApprovalSpy(...args),
+  markApprovalRead: (...args: [string]) => markApprovalReadSpy(...args),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
 }))
 
@@ -428,6 +433,12 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
+
 describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -451,6 +462,7 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     listTemplatesSpy.mockClear()
     getApprovalSpy.mockClear()
     getApprovalSpy.mockReset()
+    markApprovalReadSpy.mockReset().mockResolvedValue({ ok: true })
     resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     __resetResolvedDirectoryNamesForTests()
     mockRoute.name = 'approval-list'
@@ -928,6 +940,38 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(getApprovalSpy).toHaveBeenCalledTimes(1)
   })
 
+  // Test report 2026-10-08 T4b (gate r1 P3-4): a `?detail=` deep link to an instance that is NOT on
+  // the loaded page renders the single-fetch detail, which the list's own summary resolve never sees.
+  // Its summary still names a 人员 (user) value once a list row sharing the template has loaded that
+  // template's schema — here the schema arrives only AFTER the pane opened — and the pane never
+  // fetches a template of its own (the summary stays cache-only).
+  it('T4b: a deep-linked pane row off the loaded page names its 人员 summary value once the shared schema loads', async () => {
+    const MEMBER_ID = '5b8e2f14-9c3a-4d71-a0e6-2f9d4c7b1a83'
+    const schemaFetch = deferred<any>()
+    getTemplateSpy.mockReset().mockReturnValue(schemaFetch.promise)
+    resolveApprovalDirectoryUsersSpy.mockReset().mockImplementation(async (ids: string[]) =>
+      (ids.includes(MEMBER_ID) ? [{ id: MEMBER_ID, name: '王五' }] : []))
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_deep', '采购申请', { templateId: 'tpl_t4b', formSnapshot: { fld_owner: MEMBER_ID } }))
+    mockRoute.query = { detail: 'apv_deep' }
+    mockPendingApprovals.value = [pendingRow('apv_list', '出差报销', { templateId: 'tpl_t4b', formSnapshot: {} })]
+    await mountView()
+    await flushUi(8)
+
+    const pane = () => container!.querySelector('[data-testid="approval-detail-pane"]')
+    expect(pane()?.textContent).toContain('采购申请')
+    expect(container!.querySelector('[data-el-row="apv_deep"]')).toBeNull()
+    expect(pane()?.querySelector('.approval-detail-pane__summary')).toBeNull()
+
+    schemaFetch.resolve({ formSchema: { fields: [{ id: 'fld_owner', type: 'user', label: '人员' }] } })
+    await flushUi(12)
+
+    expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(MEMBER_ID)
+    expect(pane()?.querySelector('.approval-detail-pane__summary')?.textContent).toContain('人员：王五')
+    expect(pane()?.textContent).not.toContain(MEMBER_ID)
+    // One template fetch, for the list row; none for the pane.
+    expect(getTemplateSpy).toHaveBeenCalledTimes(1)
+  })
+
   // -------------------------------------------------------------------------
   // Zero regression: row selection must NOT reload the list or wipe an in-progress batch
   // selection. This is the exact incident the narrowed `route.query` watcher fix prevents — see
@@ -961,6 +1005,148 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-testid="approval-batch-approve"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-batch-reject"]')).toBeTruthy()
     expect(container!.querySelector('[data-testid="approval-mark-all-read"]')).toBeTruthy()
+  })
+
+  // -------------------------------------------------------------------------
+  // Pane mark-read (test report 2026-10-08, T3/T6). Opening an item in the pane is opening it: the
+  // full detail page records the read on load, the pane did not, so a wide-screen user who only
+  // previewed items never cleared an unread dot or badge. These pin that the pane now records the
+  // read exactly once per rendered selection, and only for a selection it actually rendered.
+  // -------------------------------------------------------------------------
+  describe('pane selection records the read (test report 2026-10-08)', () => {
+    it('WIDE: selecting a row marks THAT item read exactly once, after the pane rendered it', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_1')
+    })
+
+    it('WIDE: the unread dot of the row read in the pane clears in place, and the badge is re-polled', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [
+        pendingRow('apv_1', '出差报销', { isRead: false }),
+        pendingRow('apv_2', '采购申请', { isRead: false }),
+      ]
+      await mountView()
+      const dotOf = (id: string) => container!
+        .querySelector(`[data-el-row="${id}"]`)
+        ?.querySelector('[data-testid="approval-row-unread-dot"]') ?? null
+      expect(dotOf('apv_1')).toBeTruthy()
+      expect(dotOf('apv_2')).toBeTruthy()
+      const pollsBefore = getPendingCountSpy.mock.calls.length
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(dotOf('apv_1')).toBeNull()
+      // Only the row that was read; its neighbour keeps the server's verdict.
+      expect(dotOf('apv_2')).toBeTruthy()
+      expect(getPendingCountSpy.mock.calls.length).toBeGreaterThan(pollsBefore)
+    })
+
+    it('WIDE: a failed mark-read is silent and leaves the dot as the server reported it', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      markApprovalReadSpy.mockRejectedValue(new Error('offline'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销', { isRead: false })]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-el-row="apv_1"] [data-testid="approval-row-unread-dot"]')).toBeTruthy()
+      expect(container!.querySelector('[data-testid="approval-detail-pane"]')).toBeTruthy()
+    })
+
+    it('WIDE: a pane fetch that fails marks nothing (the item was never shown)', async () => {
+      getApprovalSpy.mockRejectedValue(new Error('boom'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+    })
+
+    it('WIDE: a selection superseded before its fetch settles marks only the row that ended up shown', async () => {
+      const d1 = deferred<any>()
+      getApprovalSpy.mockReturnValueOnce(d1.promise).mockResolvedValueOnce(pendingRow('apv_2', '采购申请'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      ;(container!.querySelector('[data-el-row="apv_2"]') as HTMLElement).click()
+      await flushUi()
+      d1.resolve(pendingRow('apv_1', '出差报销'))
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_2')
+    })
+
+    it('WIDE: Up/Down navigation marks each row it shows in the pane', async () => {
+      getApprovalSpy.mockImplementation((id: string) => Promise.resolve(pendingRow(id, id === 'apv_1' ? '出差报销' : '采购申请')))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }))
+      await flushUi(8)
+
+      expect(markApprovalReadSpy.mock.calls.map((call) => call[0])).toEqual(['apv_1', 'apv_2'])
+    })
+
+    it('WIDE: a fresh mount restoring `?detail=<id>` marks that item read once', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockRoute.query = { detail: 'apv_1' }
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      await flushUi(8)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_1')
+    })
+
+    it('WIDE: the pane refresh that follows a list reload does not mark the item again', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+
+      // A search (Enter in the search box) reloads the list through loadCurrentTab(), which re-runs
+      // the open pane's single fetch — the refresh must not record a second read.
+      const fetchesBefore = getApprovalSpy.mock.calls.length
+      const searchInput = container!.querySelector('[data-testid="approval-search-input"]') as HTMLInputElement
+      searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+      await flushUi(8)
+      expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+      expect(getApprovalSpy.mock.calls.length).toBe(fetchesBefore + 1)
+      expect(markApprovalReadSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('DEFAULT (non-wide) width: a row click navigates to the detail page and the center itself marks nothing', async () => {
+      setViewport('default')
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi(8)
+
+      expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_1' } })
+      expect(markApprovalReadSpy).not.toHaveBeenCalled()
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -1173,5 +1359,128 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
       expect(getApprovalSpy).toHaveBeenCalledTimes(2)
       expect(getApprovalSpy).toHaveBeenLastCalledWith('apv_1')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of the desktop detail pane
+// (ApprovalCenterDetailPane.vue): a loaded pending row with an unresolved and a named approver,
+// and a failed detail fetch without a message (approvalCenterDetailPaneController.ts fallback).
+// Only the pane subtree is scanned — the rest of ApprovalCenterView is scanned in
+// approvalCenterDesktopEmptyTextI18n.spec.ts. ASCII fixtures. The shared popconfirm stub above
+// shows neither its title nor its button texts and teleports a 确认 button into document.body,
+// so this describe registers a local variant that renders all three inside the pane.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const ScanElPopconfirm = defineComponent({
+    name: 'ElPopconfirm',
+    props: { title: String, confirmButtonText: String, cancelButtonText: String },
+    setup(props, { slots }) {
+      return () => h('span', { 'data-el-popconfirm': 'scan' }, [
+        h('span', props.title ?? ''),
+        h('span', props.confirmButtonText ?? ''),
+        h('span', props.cancelButtonText ?? ''),
+        ...(slots.reference ? slots.reference() : []),
+      ])
+    },
+  })
+
+  const asciiRow = (id: string) => ({
+    ...pendingRow(id, `Request ${id}`),
+    requester: { name: 'Requester One' },
+    assignments: [
+      { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      { id: 'asg_2', type: 'user', assigneeId: 'user_42', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: { assigneeName: 'Approver Two' } },
+    ],
+  })
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    mockPendingApprovals.value = []
+    mockMyApprovals.value = []
+    mockCcApprovals.value = []
+    mockCompletedApprovals.value = []
+    mockProcessedApprovals.value = []
+    mockLoading.value = false
+    getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
+    getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
+    getApprovalSpy.mockReset()
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    mockRoute.name = 'approval-list'
+    mockRoute.query = {}
+    setViewport('wide')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountAndSelect(id: string) {
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    app = createApp(defineComponent({ setup: () => () => h(ApprovalCenterView as any) }))
+    app.component('ElTabs', ElTabs)
+    app.component('ElTabPane', ElTabPane)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElPagination', ElPagination)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElDialog', ElDialog)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElPopconfirm', ScanElPopconfirm)
+    app.component('ElBadge', ElBadge)
+    app.component('ElTooltip', ElTooltip)
+    app.component('ElIcon', ElIcon)
+    app.component('ElSkeleton', ElSkeleton)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+    ;(container!.querySelector(`[data-el-row="${id}"]`) as HTMLElement).click()
+    await flushUi(8)
+  }
+
+  const pane = () => container!.querySelector('[data-testid="approval-detail-pane"]') as HTMLElement | null
+
+  it('loaded pane is English only (approver labels, step, quick actions); en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    getApprovalSpy.mockResolvedValue(asciiRow('apv_1'))
+    mockPendingApprovals.value = [asciiRow('apv_1')]
+    await mountAndSelect('apv_1')
+    expect(pane(), 'pane open').toBeTruthy()
+    expect(pane()!.textContent).toContain('Approver Two')
+    expect(pane()!.textContent).toMatch(/Member \d/)
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(pane()!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en again)')
+  })
+
+  it('a failed detail fetch without a message shows the English fallback', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    getApprovalSpy.mockRejectedValue('network down')
+    mockPendingApprovals.value = [asciiRow('apv_1')]
+    await mountAndSelect('apv_1')
+    expect(container!.querySelector('[data-testid="approval-detail-pane-error"]')?.textContent).toContain('Failed to load details')
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane error (en)')
   })
 })

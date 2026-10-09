@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import MetaImportModal from '../src/multitable/components/MetaImportModal.vue'
@@ -138,6 +138,165 @@ describe('MetaImportModal', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  // #5809 refuter round — the record build (person / link lookups) happens before the workbench gets
+  // anything, so cancelling or closing during it must stop it and emit nothing.
+  describe('#5809 cancelling while records are still being built', () => {
+    // Unmounted even when an assertion fails, so a failure here cannot leak a modal into later tests.
+    const cleanups: Array<() => void> = []
+    afterEach(() => {
+      for (const cleanup of cleanups.splice(0)) cleanup()
+    })
+
+    function mountBuilding() {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const onImport = vi.fn()
+      const onCancelImport = vi.fn()
+      const release: Array<() => void> = []
+      const signals: Array<AbortSignal | undefined> = []
+      const resolver = vi.fn((_rawValue: string, _field: unknown, context?: { signal?: AbortSignal }) => {
+        signals.push(context?.signal)
+        return new Promise((resolve) => {
+          release.push(() => resolve(['u_fake']))
+        })
+      })
+      const visible = ref(true)
+      const Harness = defineComponent({
+        setup() {
+          return { visible }
+        },
+        render() {
+          return h(MetaImportModal, {
+            visible: this.visible,
+            fields: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: {} }],
+            fieldResolvers: { fld_owner: resolver },
+            importing: false,
+            result: null,
+            onClose: vi.fn(),
+            onCancelImport,
+            onImport,
+          })
+        },
+      })
+      const app = createApp(Harness)
+      app.mount(container)
+      cleanups.push(() => {
+        app.unmount()
+        container.remove()
+      })
+      return { onImport, onCancelImport, release, signals, visible }
+    }
+
+    async function startBuild() {
+      await flushUi()
+      const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+      textarea.value = 'Owner' + String.fromCharCode(10) + 'Fake A' + String.fromCharCode(10) + 'Fake B'
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+      await flushUi()
+      Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+        .find((button) => button.textContent?.includes('Import 2 record'))
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+    }
+
+    it('"Cancel import" aborts the build, emits no import and returns to the mapping with a notice', async () => {
+      const harness = mountBuilding()
+      await startBuild()
+      expect(harness.signals).toHaveLength(1)
+      expect(harness.signals[0]?.aborted).toBe(false)
+
+      Array.from(document.body.querySelectorAll('.meta-import__btn'))
+        .find((button) => button.textContent?.includes('Cancel import'))
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(harness.signals[0]?.aborted).toBe(true)
+      expect(harness.onCancelImport).toHaveBeenCalledTimes(1)
+
+      for (const settle of harness.release.splice(0)) settle()
+      await flushUi()
+      await flushUi()
+
+      expect(harness.onImport).not.toHaveBeenCalled()
+      // The second row was never resolved.
+      expect(harness.signals).toHaveLength(1)
+      expect(document.body.querySelector('.meta-import__build-cancelled')?.textContent).toContain('Import cancelled')
+      expect(Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+        .some((button) => button.textContent?.includes('Import 2 record'))).toBe(true)
+    })
+
+    it('closing the modal mid-build aborts it and emits no import', async () => {
+      const harness = mountBuilding()
+      await startBuild()
+
+      harness.visible.value = false
+      await flushUi()
+      expect(harness.signals[0]?.aborted).toBe(true)
+      for (const settle of harness.release.splice(0)) settle()
+      await flushUi()
+      await flushUi()
+
+      expect(harness.onImport).not.toHaveBeenCalled()
+    })
+
+    it('a build failure that is not a cancel stays an error (no cancel notice, nothing emitted)', async () => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const onImport = vi.fn()
+      const errors: unknown[] = []
+      // Reading this field's resolver blows up — the only way to make the build itself reject.
+      const fieldResolvers = new Proxy({} as Record<string, unknown>, {
+        get(target, key) {
+          if (key === 'fld_owner') throw new Error('fake build failure')
+          return Reflect.get(target, key)
+        },
+      })
+      const app = createApp({
+        render() {
+          return h(MetaImportModal, {
+            visible: true,
+            fields: [{ id: 'fld_owner', name: 'Owner', type: 'person', property: {} }],
+            fieldResolvers,
+            importing: false,
+            result: null,
+            onClose: vi.fn(),
+            onImport,
+          })
+        },
+      })
+      app.config.errorHandler = (error) => {
+        errors.push(error)
+      }
+      app.mount(container)
+      cleanups.push(() => {
+        app.unmount()
+        container.remove()
+      })
+      await startBuild()
+      await flushUi()
+
+      expect(errors).toHaveLength(1)
+      expect((errors[0] as Error).message).toBe('fake build failure')
+      expect(onImport).not.toHaveBeenCalled()
+      expect(document.body.querySelector('.meta-import__build-cancelled')).toBeNull()
+    })
+
+    it('an uncancelled build still emits once', async () => {
+      const harness = mountBuilding()
+      await startBuild()
+      for (const settle of harness.release.splice(0)) settle()
+      await flushUi()
+      for (const settle of harness.release.splice(0)) settle()
+      await flushUi()
+      await flushUi()
+
+      expect(harness.onImport).toHaveBeenCalledTimes(1)
+      expect(harness.onImport.mock.calls[0][0].records).toEqual([{ fld_owner: ['u_fake'] }, { fld_owner: ['u_fake'] }])
+      expect(document.body.querySelector('.meta-import__build-cancelled')).toBeNull()
+    })
   })
 
   it('uses generic duplicate copy in the result view', async () => {

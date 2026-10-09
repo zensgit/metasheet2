@@ -120,7 +120,7 @@ export function validateDelegationForm(form: DelegationForm): string | null {
   if (!form.delegatorUserId.trim()) return '请填写委托人'
   if (!form.delegateeUserId.trim()) return '请填写被委托人'
   if (form.delegatorUserId.trim() === form.delegateeUserId.trim()) return '委托人与被委托人不能相同'
-  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定模板范围需要选择模板'
+  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定表单范围需要选择表单'
   if (!form.startAt || !form.endAt) return '请填写时间窗'
   if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'
   return null
@@ -149,11 +149,14 @@ export interface OwnDelegationForm {
 
 export type OwnCreateDelegationPayload = Omit<CreateDelegationPayload, 'delegatorUserId'>
 
-export function validateOwnDelegationForm(form: OwnDelegationForm): string | null {
-  if (!form.delegateeUserId.trim()) return '请填写被委托人'
-  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定模板范围需要选择模板'
-  if (!form.startAt || !form.endAt) return '请填写时间窗'
-  if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'
+// O-8 / F8-1: the self-service form (MyDelegationView.vue) follows the shell locale through a
+// required `isZh`. `validateDelegationForm` above serves the admin DelegationSettingsView.vue, which
+// is slice F8-2 and stays zh-CN until then.
+export function validateOwnDelegationForm(form: OwnDelegationForm, isZh: boolean): string | null {
+  if (!form.delegateeUserId.trim()) return isZh ? '请填写被委托人' : 'Enter the delegate.'
+  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return isZh ? '指定表单范围需要选择表单' : 'Choose a form for a single-form delegation.'
+  if (!form.startAt || !form.endAt) return isZh ? '请填写时间窗' : 'Enter the start and end time.'
+  if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return isZh ? '结束时间必须晚于开始时间' : 'The end time must be later than the start time.'
   return null
 }
 

@@ -63,6 +63,19 @@ test.describe('issue #4355 employee overview first viewport', () => {
       expect(aboveFold(measured.punch, 900), `${state}: punch above the fold`).toBe(true)
       expect(aboveFold(measured.status, 900), `${state}: status above the fold`).toBe(true)
       expect(aboveFold(measured.attention, 900), `${state}: attention above the fold`).toBe(true)
+      await expect(page.locator('[data-attendance-hero-cta="check_in"]')).toBeVisible()
+      await expect(page.locator('[data-attendance-hero-cta="check_out"]')).toBeVisible()
+      await expect(page.locator('[data-selfservice-card="actions"] .attendance-ew__tile')).toHaveCount(4)
+      if (state === 'missing') {
+        await expect(page.locator('[data-attendance-todo-mark]')).toHaveAttribute('data-attendance-todo-tone', 'makeup')
+      }
+      if (state === 'normal') {
+        await expect(page.locator('[data-attendance-todo-empty]')).toBeVisible()
+        await expect(page.locator('[data-attendance-todo-mark]')).toHaveAttribute('data-attendance-todo-tone', 'clear')
+      }
+      if (state !== 'pending') {
+        await expect(page.locator('[data-attendance-request-empty]')).toBeVisible()
+      }
       await noHorizontalOverflow(page)
       await page.screenshot({ path: `${OUT}/attendance-ew-1440x900-${state}.png`, fullPage: false })
     }

@@ -17,6 +17,10 @@ import ApprovalFormFieldInspector, {
   INSPECTOR_INVALID_BUFFER_MESSAGE,
   INSPECTOR_LAST_DETAIL_COLUMN_MESSAGE,
   INSPECTOR_LAST_FIELD_MESSAGE,
+  INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+  INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE,
+  INSPECTOR_RECORD_LINK_LOADING_MESSAGE,
+  INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE,
   INSPECTOR_RETYPE_REFUSAL_PREFIX,
   type FormFieldInspectorCommand,
 } from '../src/approvals/components/ApprovalFormFieldInspector.vue'
@@ -29,10 +33,16 @@ import {
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
+  validateTemplateFormFields,
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import type { DetailColumnDraft } from '../src/approvals/detailField'
+import {
+  RECORD_LINK_TARGET_UNAVAILABLE,
+  validateRecordLinkPinAgainstLoadedCatalog,
+  type RecordLinkAuthoringCatalog,
+} from '../src/approvals/recordLinkField'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -96,6 +106,10 @@ interface InspectorHarness {
   pressEnter(testid: string): Promise<void>
   changeSelect(testid: string, value: string): Promise<void>
   toggle(testid: string): Promise<void>
+  /** Parent-owned record-link catalog seam (F0 gate #2): the test plays the parent. */
+  setRecordLinkCatalog(next: RecordLinkAuthoringCatalog | null): Promise<void>
+  /** How many retry/load intents the inspector emitted to its parent. */
+  recordLinkCatalogRetries(): number
   unmount(): void
 }
 
@@ -109,6 +123,8 @@ async function mountInspector(
     optionValueFactory?: () => string
     /** Force every executed command to this failure (for canned refusals). */
     executeOverride?: (command: FormFieldInspectorCommand) => FormAdapterResult | null
+    /** Parent-owned record-link catalog snapshot (omitted = the inspector's default). */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   } = {},
 ): Promise<InspectorHarness> {
   const container = document.createElement('div')
@@ -120,6 +136,10 @@ async function mountInspector(
   )
   const commands: FormFieldInspectorCommand[] = []
   const exposedRef = ref<InspectorExposed | null>(null)
+  const recordLinkCatalogRef = shallowRef<RecordLinkAuthoringCatalog | null | undefined>(
+    options.recordLinkCatalog,
+  )
+  let recordLinkCatalogRetries = 0
 
   function runCommand(command: FormFieldInspectorCommand): FormAdapterResult | null {
     commands.push(command)
@@ -205,6 +225,10 @@ async function mountInspector(
           readOnly: options.readOnly ?? false,
           execute: runCommand,
           optionValueFactory: options.optionValueFactory,
+          recordLinkCatalog: recordLinkCatalogRef.value,
+          onRetryRecordLinkCatalog: () => {
+            recordLinkCatalogRetries += 1
+          },
           ref: exposedRef,
         })
     },
@@ -267,6 +291,11 @@ async function mountInspector(
       el.dispatchEvent(new Event('change', { bubbles: true }))
       await nextTick()
     },
+    async setRecordLinkCatalog(next) {
+      recordLinkCatalogRef.value = next
+      await nextTick()
+    },
+    recordLinkCatalogRetries: () => recordLinkCatalogRetries,
     unmount() {
       app.unmount()
       container.remove()
@@ -1112,5 +1141,339 @@ describe('ApprovalFormFieldInspector — settlePendingEdits (FB-D7 selection-swi
     await inspector.selectField('local_2')
     expect(inspector.vm.isDirty()).toBe(false)
     expect(inspector.input('approval-form-field-inspector-label').value).toBe('字段 2')
+  })
+})
+
+// --- record-link target pickers (delta §3.4; parity ledger deferral (3)) -----
+
+/**
+ * Delta §3.4: the inspector renders "record-link base/sheet typed pickers"; no raw base/sheet id is
+ * ever accepted as text or rendered as copy. The catalog stays PARENT-OWNED (F0 gate #2): this
+ * spec plays the parent through `recordLinkCatalog` and counts the retry/load intents the inspector
+ * emits. Every pick is a typed `update-properties` command through the same adapter path; a base
+ * change carries BOTH pins in ONE command (one history entry), clearing a sheet that does not
+ * belong to the new base.
+ */
+describe('ApprovalFormFieldInspector — record-link target pickers (delta §3.4)', () => {
+  const BASE_SELECT = 'approval-form-field-inspector-record-link-base'
+  const SHEET_SELECT = 'approval-form-field-inspector-record-link-sheet'
+  const SUMMARY = 'approval-form-field-inspector-record-link-summary'
+
+  function catalog(
+    overrides: Partial<RecordLinkAuthoringCatalog> = {},
+  ): RecordLinkAuthoringCatalog {
+    return {
+      bases: [
+        { id: 'base_alpha', name: '销售空间' },
+        { id: 'base_beta', name: '客服空间' },
+      ],
+      sheets: [
+        { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+        { id: 'sheet_alpha_2', name: '合同表', baseId: 'base_alpha' },
+        { id: 'sheet_beta_1', name: '工单表', baseId: 'base_beta' },
+      ],
+      loading: false,
+      loaded: true,
+      error: '',
+      ...overrides,
+    }
+  }
+
+  function optionTexts(select: HTMLSelectElement): string[] {
+    return Array.from(select.options).map((option) => option.textContent?.trim() ?? '')
+  }
+
+  function optionValues(select: HTMLSelectElement): string[] {
+    return Array.from(select.options).map((option) => option.value)
+  }
+
+  function selectedText(select: HTMLSelectElement): string {
+    return select.options[select.selectedIndex]?.textContent?.trim() ?? ''
+  }
+
+  function recordLinkIssues(draft: TemplateAuthoringDraft): string[] {
+    const loaded = catalog()
+    return validateTemplateFormFields(draft, null, {
+      loaded: loaded.loaded,
+      sheets: loaded.sheets,
+    }).filter((issue) => issue.includes('关联记录'))
+  }
+
+  it('renders typed base/sheet pickers with business names only; the sheet picker waits for a base; no raw id anywhere in the copy', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link', label: '关联订单' }), field(2)],
+      { recordLinkCatalog: catalog() },
+    )
+    const base = inspector.select(BASE_SELECT)
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(optionTexts(base)).toEqual(['请选择目标空间', '销售空间', '客服空间'])
+    expect(optionValues(base)).toEqual(['', 'base_alpha', 'base_beta'])
+    expect(base.value).toBe('')
+    expect(base.disabled).toBe(false)
+    expect(sheet.disabled).toBe(true)
+    expect(optionTexts(sheet)).toEqual(['请选择目标表'])
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE,
+    )
+    expect(inspector.root.textContent).not.toMatch(/base_alpha|base_beta|sheet_alpha|sheet_beta/)
+    // No free-text id entry: the record-link section has selects only.
+    expect(
+      inspector.root.querySelectorAll(
+        '[data-testid="approval-form-field-inspector-record-link"] input',
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('base then sheet = one typed command each through the adapter; sheet options are scoped to the chosen base; the publish validation then has no record-link issue', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link', label: '关联订单' }), field(2)],
+      { recordLinkCatalog: catalog() },
+    )
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([
+      '字段 关联订单（关联记录）需要选择目标空间与目标表',
+    ])
+
+    await inspector.changeSelect(BASE_SELECT, 'base_alpha')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { recordLinkBaseId: 'base_alpha', recordLinkSheetId: '' },
+      },
+    ])
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(sheet.disabled).toBe(false)
+    expect(optionTexts(sheet)).toEqual(['请选择目标表', '订单表', '合同表'])
+
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_alpha_2')
+    expect(inspector.commands).toHaveLength(2)
+    expect(inspector.commands[1]).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkSheetId: 'sheet_alpha_2' },
+    })
+    const pinned = inspector.session().draft.fields[0]
+    expect(pinned).toMatchObject({
+      type: 'record-link',
+      recordLinkBaseId: 'base_alpha',
+      recordLinkSheetId: 'sheet_alpha_2',
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+    expect(inspector.select(BASE_SELECT).value).toBe('base_alpha')
+    expect(inspector.select(SHEET_SELECT).value).toBe('sheet_alpha_2')
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+    )
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+  })
+
+  it('changing the base is ONE command carrying both pins: a sheet outside the new base is cleared', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      { recordLinkCatalog: catalog() },
+    )
+    await inspector.changeSelect(BASE_SELECT, 'base_beta')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { recordLinkBaseId: 'base_beta', recordLinkSheetId: '' },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: '',
+    })
+    expect(optionTexts(inspector.select(SHEET_SELECT))).toEqual(['请选择目标表', '工单表'])
+    expect(inspector.select(SHEET_SELECT).value).toBe('')
+  })
+
+  it('choosing the empty base option clears BOTH pins in one command (the clearable picker), which lifts the record-link retype lock on a fresh field', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      { recordLinkCatalog: catalog() },
+    )
+    await inspector.changeSelect('approval-form-field-inspector-type', 'text')
+    expect(inspector.session().draft.fields[0].type).toBe('record-link')
+    expect(inspector.status()).toContain(DEPENDENCY_KIND_BUSINESS_LABELS.record_link_config)
+
+    await inspector.changeSelect(BASE_SELECT, '')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkBaseId: '', recordLinkSheetId: '' },
+    })
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      recordLinkBaseId: '',
+      recordLinkSheetId: '',
+    })
+    await inspector.changeSelect('approval-form-field-inspector-type', 'text')
+    expect(inspector.session().draft.fields[0].type).toBe('text')
+  })
+
+  it('a stale (unavailable) pin shows the values-free 目标不可用 option and the SAME message the publish check reports; re-picking repairs it', async () => {
+    const stale = field(1, {
+      type: 'record-link',
+      label: '客户关联',
+      recordLinkBaseId: 'base_gone',
+      recordLinkSheetId: 'sheet_gone',
+    })
+    const inspector = await mountInspector([stale, field(2)], {
+      recordLinkCatalog: catalog(),
+    })
+    const base = inspector.select(BASE_SELECT)
+    const sheet = inspector.select(SHEET_SELECT)
+    expect(base.value).toBe('base_gone')
+    expect(selectedText(base)).toBe(RECORD_LINK_TARGET_UNAVAILABLE)
+    expect(sheet.value).toBe('sheet_gone')
+    expect(selectedText(sheet)).toBe(RECORD_LINK_TARGET_UNAVAILABLE)
+    const publishMessage = validateRecordLinkPinAgainstLoadedCatalog(stale, {
+      loaded: true,
+      sheets: catalog().sheets,
+    })
+    expect(publishMessage).not.toBeNull()
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(publishMessage!)
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([publishMessage])
+    expect(inspector.root.textContent).not.toMatch(/base_gone|sheet_gone/)
+
+    await inspector.changeSelect(BASE_SELECT, 'base_alpha')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkBaseId: 'base_alpha', recordLinkSheetId: '' },
+    })
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+    expect(inspector.q(`[data-testid="${SUMMARY}"]`).textContent).toContain(
+      INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE,
+    )
+  })
+
+  it('catalog failure renders the parent-owned values-free error with 重试; retry is an intent emitted to the parent, never a command', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link' }), field(2)],
+      {
+        recordLinkCatalog: catalog({
+          bases: [],
+          sheets: [],
+          loaded: false,
+          error: '关联表目录加载失败，请重试',
+        }),
+      },
+    )
+    const error = inspector.q(
+      '[data-testid="approval-form-field-inspector-record-link-catalog-error"]',
+    )
+    expect(error.textContent).toContain('关联表目录加载失败，请重试')
+    inspector
+      .q('[data-testid="approval-form-field-inspector-record-link-catalog-retry"]')
+      .click()
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+    expect(inspector.commands).toEqual([])
+
+    await inspector.setRecordLinkCatalog(catalog())
+    expect(
+      inspector.root.querySelector(
+        '[data-testid="approval-form-field-inspector-record-link-catalog-error"]',
+      ),
+    ).toBeNull()
+    expect(optionTexts(inspector.select(BASE_SELECT))).toEqual([
+      '请选择目标空间',
+      '销售空间',
+      '客服空间',
+    ])
+  })
+
+  it('while loading both pickers are disabled and busy; focusing a picker of an unloaded catalog requests ONE load; a loaded catalog requests none', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      {
+        recordLinkCatalog: catalog({ bases: [], sheets: [], loaded: false, loading: true }),
+      },
+    )
+    expect(inspector.select(BASE_SELECT).disabled).toBe(true)
+    expect(inspector.select(SHEET_SELECT).disabled).toBe(true)
+    expect(inspector.select(BASE_SELECT).getAttribute('aria-busy')).toBe('true')
+    expect(inspector.root.textContent).toContain(INSPECTOR_RECORD_LINK_LOADING_MESSAGE)
+
+    await inspector.setRecordLinkCatalog(
+      catalog({ bases: [], sheets: [], loaded: false, loading: false }),
+    )
+    inspector.select(BASE_SELECT).dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+
+    await inspector.setRecordLinkCatalog(catalog())
+    inspector.select(BASE_SELECT).dispatchEvent(new Event('focus'))
+    inspector.select(SHEET_SELECT).dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(inspector.recordLinkCatalogRetries()).toBe(1)
+    expect(inspector.root.textContent).not.toContain(INSPECTOR_RECORD_LINK_LOADING_MESSAGE)
+  })
+
+  it('a loaded catalog with no readable base explains the empty state instead of leaving a silent empty picker', async () => {
+    const inspector = await mountInspector(
+      [field(1, { type: 'record-link' }), field(2)],
+      { recordLinkCatalog: catalog({ bases: [], sheets: [] }) },
+    )
+    expect(optionTexts(inspector.select(BASE_SELECT))).toEqual(['请选择目标空间'])
+    expect(inspector.root.textContent).toContain(INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE)
+  })
+
+  it('retyping a field INTO record-link reaches the pickers (no configuration dead-end)', async () => {
+    const inspector = await mountInspector([field(1), field(2)], {
+      recordLinkCatalog: catalog(),
+    })
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    await inspector.changeSelect('approval-form-field-inspector-type', 'record-link')
+    expect(inspector.session().draft.fields[0].type).toBe('record-link')
+    await inspector.changeSelect(BASE_SELECT, 'base_beta')
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_beta_1')
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      type: 'record-link',
+      recordLinkBaseId: 'base_beta',
+      recordLinkSheetId: 'sheet_beta_1',
+    })
+    expect(recordLinkIssues(inspector.session().draft)).toEqual([])
+  })
+
+  it('pickers render only for record-link fields and never in read-only mode', async () => {
+    const inspector = await mountInspector(
+      [field(1), field(2, { type: 'record-link' })],
+      { recordLinkCatalog: catalog() },
+    )
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    await inspector.selectField('local_2')
+    expect(inspector.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).not.toBeNull()
+
+    const readOnly = await mountInspector([field(1, { type: 'record-link' })], {
+      readOnly: true,
+      recordLinkCatalog: catalog(),
+    })
+    expect(readOnly.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
+    expect(readOnly.root.querySelector('select')).toBeNull()
   })
 })

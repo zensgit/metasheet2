@@ -5,7 +5,7 @@
 ## 0. 裁定:实现前必修的三项(来自对抗审查)
 
 1. **越界防护(安全级)**:子树遍历的**每一次** `read(plan.pathInfo.object, {parent: node})` 与 `read(plan.bomHead.object, {path_id: node})` 都必须用 `matchesByField` 做后置过滤,只保留真正匹配过滤键的行——与订单路径 :911 处的做法一致。原因:`bridge:legacy-sql-readonly` 源可能返回 `filtersApplied:false`(全表),`readAll` 不校验过滤是否生效;不后置过滤,一次 BFS 会把全库 PathInfo 当成子节点,继而读到其它项目/共享零件库的 BOM。`visited` 与 `maxSubtreeDepth` 对此无效。
-2. **去重必须覆盖全部已展开零件,不只是根**:维护"本次已展开的 componentSourceId 集合"(含子件),子树根命中即跳过并计数 `subtreeRootsSkippedAlreadyExpanded`。原因:零件 B 既是订单根 A 的子件、又是子树根时,`idempotencyKey` 分别为 `{P,B,"A",["A","B"]}` 与 `{P,B,null,["B"]}`,规划器视为两行,写入后导出双算。另:同一零件在子树内有多张表头(600028853 有 2 张)→ 按 `part_id` 去重并按版本择一,否则同键两根必然 `duplicate_expanded_key` 挂起。
+2. **去重必须覆盖全部已展开零件,不只是根**:维护"本次已展开的 componentSourceId 集合"(含子件),子树根命中即跳过并计数 `subtreeRootsSkippedAlreadyExpanded`。原因:零件 B 既是订单根 A 的子件、又是子树根时,`idempotencyKey` 分别为 `{P,B,"A",["A","B"]}` 与 `{P,B,null,["B"]}`,规划器视为两行,写入后导出双算。另:同一零件在子树内有多张表头(<零件ID-1> 有 2 张)→ 按 `part_id` 去重并按版本择一,否则同键两根必然 `duplicate_expanded_key` 挂起。
 3. **读预算要真的存在**:`maxReadCount`/`maxElapsedMs` 是可选项,222 未设即不生效;`maxPages` 是每次 `readAll` 内部归零的分页数,不是总量。要求:`maxSubtreeDepth ≤ 4`、`maxSubtreeNodes ≤ 2000`、`maxSubtreeRoots ≤ 500` 做**代码硬顶**(normalize 时超顶即拒);**启用 `projectSubtree` 时强制要求计划带 `maxReadCount`**,否则 normalize 报错。超限一律 global error(`subtree_node_limit_exceeded`/`subtree_root_limit_exceeded`/`subtree_cycle_detected`),不进 `LARGE_BOM_BOUNDED_ERROR_TYPES`。
 
 
@@ -16,7 +16,7 @@
 6. **定时拉取的服务账号必须租户绑定**:`requireTableActionAccess` 对持 integration legacyGate 的用户直接放行、跳过 operator-scope 租户校验,只剩 `resolveTenantId`;无租户声明的 token 会被 `x-tenant-id` 请求头决定租户。脚本发请求前解码(不验签)JWT payload,无 `tenantId` 声明即拒绝运行(`--allow-tenantless` 显式放开,默认关);runbook 同样写明。
 7. **`lastPulledAt` 的静默偏差**:`readPullTargetRowFacts` 分页到 `PULL_TARGET_MAX_PAGES` 后返回 `bounded:true`,此时对子集取 max 偏小且不可见。`bounded===true` 时不报 max:`lastPulledAt=null` + `lastPulledAtBounded:true`,前端显示"行数超过看板上限,未统计"。
 
-审查里被实证**推翻**的一条:第 10 条"仓库内无证据表明 `BomHeadInfo.path_id` 存在" —— 2026-09-05 在客户测试 PLM 上只读执行 `SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` 与 `SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` 均成功,列名以此为准(夹具同名)。第 12 条"缺件行不阻止 apply、静默丢 40–60%"与 222 实测不符:缺件行由规划器以 hold 进入确认队列,`plan.valid=false` → `manual_confirm_required`,apply 被挡(2026-09-04 项目 1-20232045 实测);保留为待复核而非事实。
+审查里被实证**推翻**的一条:第 10 条"仓库内无证据表明 `BomHeadInfo.path_id` 存在" —— 2026-09-05 在客户测试 PLM 上只读执行 `SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` 与 `SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` 均成功,列名以此为准(夹具同名)。第 12 条"缺件行不阻止 apply、静默丢 40–60%"与 222 实测不符:缺件行由规划器以 hold 进入确认队列,`plan.valid=false` → `manual_confirm_required`,apply 被挡(2026-09-04 项目 <项目号C> 实测);保留为待复核而非事实。
 
 ## 1. 子树桥接方案
 
@@ -25,7 +25,7 @@
 ### 1.1 语义规则
 - 【去重是能不能 apply 的前提,不是优化】订单根与子树根若指向同一个零件,两行的 idempotencyKey 逐字节相同——makeIdempotencyKey(C:/Users/zhou/Downloads/dev/metasheet/plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs:467)只吃 {projectNo, componentSourceId, parentSourceId:null, path:[id]},两条路径这四项完全一致。冲突规划器按 idempotencyKey 分组(stock-preparation-conflict-planner.cjs:485-499),重复组 defaultPolicy 是 'hold'(:758-761)→ 整个计划变 manual_confirm、canApply=false。所以规则必须写死:**订单根先跑并登记 rootsBySourceId,子树根命中已登记的 componentSourceId 就跳过并计数 subtreeRootsSkippedByOrder**。
 - 【根数量】没有订单明细就没有 rawQuantity。建议 rawQuantity=totalQuantity=1,并在 summary/evidence 里加计数 rootQuantitySource:{orderDetail:N, subtreeDefault:M}(是计数,不是行上的业务值,值面不泄漏)。绝不能传 null/'' 走 parseQuantity:该函数的 hold-not-zero 规矩(:429-448)会把空值判成 invalid_quantity。若 owner 拒绝默认 1,替代姿态是发 rowError missing_root_quantity —— 但那样 222 上一行都拉不出来。
-- 【深度】新增 maxSubtreeDepth(默认 1,建议硬上限 ≤4),与 BOM 的 maxDepth(:17 DEFAULT_MAX_DEPTH=20)是**两个互不相干的深度**:一个数文件夹层级,一个数 BOM 层级。默认 1 正好覆盖 222 实测形态(项目 2-20231625 的 6 个 BOM 表头挂在深度 1 的子节点上)。另加 includeSelf(默认 true):项目节点自身也查一次 bomHead,代价是 1 次读。
+- 【深度】新增 maxSubtreeDepth(默认 1,建议硬上限 ≤4),与 BOM 的 maxDepth(:17 DEFAULT_MAX_DEPTH=20)是**两个互不相干的深度**:一个数文件夹层级,一个数 BOM 层级。默认 1 正好覆盖 222 实测形态(项目 <项目号B> 的 6 个 BOM 表头挂在深度 1 的子节点上)。另加 includeSelf(默认 true):项目节点自身也查一次 bomHead,代价是 1 次读。
 - 【读预算自动接入,不写新预算代码】子树的每一次 read 都走同一个闭包 read() → readAll(:351)→ assertReadBudget(:334-350),所以 maxPages / maxReadCount / maxElapsedMs 原样生效。另加 maxSubtreeNodes(默认 200)与 maxSubtreeRoots(默认 200)两个**结构性**上限,超限发 global error subtree_node_limit_exceeded / subtree_root_limit_exceeded。
 - 【新上限的错误类型不许进 LARGE_BOM_BOUNDED_ERROR_TYPES】照 READ_CURSOR_BROKEN_ERROR_TYPE 的先例(:24-38 的整段说明):那四个类型的含义是「BOM 太大,改走后台任务」,把子树节点超限塞进去,只会让一线被指引去重跑一次必然再撞同一个上限的读。
 - 【超限必须是 global error,不能是 rowError】planner 的 missingFromPlmPolicy 恒为 'mark_inactive'(stock-preparation-conflict-planner.cjs:212-222):根集合被截断一半,等于把上一次拉进来的行大面积置为无效。global error → errors.length>0 → status 'failed' → canApply=false,是唯一安全姿态;rowError 会让一次残缺的根发现「成功」落库。
@@ -69,7 +69,7 @@
 - 【配置翻转是破坏性的】关掉子树后的下一次拉取,会把子树来的行按 missingFromPlm 全部置为无效(conflict-planner.cjs:212-222 的 mark_inactive 是 v1 唯一允许值)。人工列会保留,但备料状态会变。这不是 bug,是语义,必须写进文档并由 owner 认可。
 - 【dry-run token 会 fail-closed】token 绑定 revision;在 dry-run 与 apply 之间改这段配置 → TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH。行为正确,但现场会困惑,改配置必须在没有在飞 token 时做。
 - 【快照与批次身份全变】根集合变大 → batchId 变、snapshot diff 全量变化,历史快照与新快照不可直接比。
-- 【222 测试库的真实数据会大面积报缺料】文档已实测:子树里挂 BOM 的项目 2-20231625,根零件下 40–60% 子件不在物料表(docs/development/takeover-beiliao-20260821/222-rehearsal-full-run-20260904.md:24)。这些会变成 rowError missing_component(不是 HARD blocking —— HARD 只有 missing_child_bom,table-actions.cjs:80),但 canApply 由 hasGlobalErrors/plan.valid 共同决定,**必须在 222 上真跑一次**才敢说能演示,不能靠推断。
+- 【222 测试库的真实数据会大面积报缺料】文档已实测:子树里挂 BOM 的项目 <项目号B>,根零件下 40–60% 子件不在物料表(docs/development/takeover-beiliao-20260821/222-rehearsal-full-run-20260904.md:24)。这些会变成 rowError missing_component(不是 HARD blocking —— HARD 只有 missing_child_bom,table-actions.cjs:80),但 canApply 由 hasGlobalErrors/plan.valid 共同决定,**必须在 222 上真跑一次**才敢说能演示,不能靠推断。
 - 【读放大】6 个根各带一棵 BOM,再加文件夹 BFS,读次数明显上升;若部署已把 maxReadCount 配得紧,会更早撞 read_count_exceeded,被判为 large BOM 而路由到后台任务路径(那条路径只能靠人 POST 推进,见 B 部分)。
 - 【预检的两轴要在报告里说清】detectedBridge 仍会是 order-module,而实际根来自子树。若消费方(人或脚本)把 detectedBridge 读成「行从哪来」,就会读错。topology.subtree 必须显式,且文档要写明这两个轴各回答什么问题。
 
@@ -139,7 +139,7 @@
 
 【9. declaredBridge 是一个标量,承载不了两条轴】http-routes.cjs:6128 `firstString(input.declaredBridge)`,查询键白名单 :1421。一个部署无法同时声明 order-module(解 undecidableAtCap,:1291)和 project-subtree。222 上更直接:当前 verdict 就是 no-go,blocker 是 bom_store_signals_conflict/volume-undecidable-at-cap,runbook 明写「**这个僵局没有声明参数可用**(declaredBridge 只覆盖 order-module/DesignBom 这条桥)」(222-deploy-window-runbook-20260901.md:112)。另外 DECLARABLE_BRIDGES 会被回显给一线:NO_BOM_BRIDGE 的 `declarableBridges`(:1526)和 400 文案「declaredBridge must name one of the two bridge candidates」+ `allowed`(http-routes.cjs:6133-6135)。加第三个值等于把一个**证明上解不了该 blocker**的选项摆进修复清单,并让产品文案变成假话 —— 这不是「路由测试断言同步」。
 
-【10. 那两列在仓库里没有任何证据】仓库自己的 222 列对照表记的是 `DN_PDM_PathInfo | OBJ_ID`、`DN_PDM_BomHeadInfo | part_id, bom_id, SysVer, bom_able`(222-rehearsal-full-run-20260904.md:79-86);唯一记录在案的 Parent_OBJ_ID 属于 **PathExAttrInfo**(同表;runbook:115)。没有任何文件记录 BomHeadInfo.path_id、也没有「2-20231625 的 6 张表头挂在深度 1」「137 张无项目祖先」。方案的默认 maxSubtreeDepth=1 建立在我在仓库里找不到的实测上,而它自己提的 DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT 按已记录的目录形态就会触发。
+【10. 那两列在仓库里没有任何证据】仓库自己的 222 列对照表记的是 `DN_PDM_PathInfo | OBJ_ID`、`DN_PDM_BomHeadInfo | part_id, bom_id, SysVer, bom_able`(222-rehearsal-full-run-20260904.md:79-86);唯一记录在案的 Parent_OBJ_ID 属于 **PathExAttrInfo**(同表;runbook:115)。没有任何文件记录 BomHeadInfo.path_id、也没有「<项目号B> 的 6 张表头挂在深度 1」「137 张无项目祖先」。方案的默认 maxSubtreeDepth=1 建立在我在仓库里找不到的实测上,而它自己提的 DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT 按已记录的目录形态就会触发。
 
 【11. 夹具守卫的方向说反了】testSchemaCoversReadPlan(__tests__/stock-preparation-synthetic-sql-fixture.test.cjs:363-420)断言:恰好 7 张表(`assert.equal(schema.size, sections.length)`)、默认计划每个字段都有列、以及「nothing in the DDL that the plan never reads」—— 后者是对 **PLM_STOCK_PREPARATION_BOM_READ_PLAN**(方案刻意不放子树进去的那个)算的。于是 Parent_OBJ_ID / path_id 只能**永久**登记进 SCHEMA_COLUMNS_NOT_READ_BY_PLAN,而那份清单自己的断言是 `assert.ok(!required.has(key), '… stale — the plan DOES read it')`。被当成「唯一能自证的地方」的守卫,最后是在给这两列出具「永不被读」的证明。
 
@@ -155,11 +155,11 @@
 
 状态:222 现网配置(INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON 未设 maxReadCount / maxElapsedMs → stock-preparation-table-actions.cjs:290-291 给 undefined → bom-expansion.cjs:334-349 的两条预算判断全程为空操作),source 绑定 bridge:legacy-sql-readonly(bom-expansion.cjs:40-43 允许),readPlan 打开 projectSubtree,取方案默认 maxSubtreeDepth=1 / maxSubtreeNodes=200 / maxSubtreeRoots=200。
 
-输入:一线对项目 2-20231625 点一次 dry-run(B2a 注册的 dataScopeRef 就是这一个项目号,http-routes.cjs:4082)。Bridge 对 `{Parent_OBJ_ID: <项目节点>}` 这次读返回 filtersApplied:false(bridge-agent-readonly-adapter.cjs:469 的合法返回;测试 bridge-agent-readonly-adapter.test.cjs:169/195 就是这个形状)。
+输入:一线对项目 <项目号B> 点一次 dry-run(B2a 注册的 dataScopeRef 就是这一个项目号,http-routes.cjs:4082)。Bridge 对 `{Parent_OBJ_ID: <项目节点>}` 这次读返回 filtersApplied:false(bridge-agent-readonly-adapter.cjs:469 的合法返回;测试 bridge-agent-readonly-adapter.test.cjs:169/195 就是这个形状)。
 
 后果链:
 1) readAll(:352-393)只把 filtersApplied 记进 stat,不校验;discoverSubtreeRoots 也没有 matchesByField 二次过滤 → 第一次 BFS 读回 PathInfo 全表 1189 行(runbook:115),全部当作「项目节点的深度 1 子节点」入队。visited Set 每个节点只见一次,subtree_cycle_detected **不触发**;maxSubtreeDepth=1 也不触发,因为越界就发生在深度 1 这一次读。
-2) 对前 200 个节点各读一次 bomHead,拿到 143 张表头里挂在无项目祖先节点下的那 137 张,其 part_id 成为根 —— 这些零件属于别的项目/共享零件库。B2a 第 4 步只校验请求里的 projectNo(b2a-trial-registry.cjs:1237-1244),第 5 步对象域因复用同名表必然通过(:1247-1259),证据里仍写 dataScopeRef=2-20231625。**跨项目数据以「本项目备料行」的身份落库,且授权凭证与审计都显示没越界。**
+2) 对前 200 个节点各读一次 bomHead,拿到 143 张表头里挂在无项目祖先节点下的那 137 张,其 part_id 成为根 —— 这些零件属于别的项目/共享零件库。B2a 第 4 步只校验请求里的 projectNo(b2a-trial-registry.cjs:1237-1244),第 5 步对象域因复用同名表必然通过(:1247-1259),证据里仍写 dataScopeRef=<项目号B>。**跨项目数据以「本项目备料行」的身份落库,且授权凭证与审计都显示没越界。**
 3) 每个根走 readPart→expandChildren,路径各自独立、无全局零件 visited(:876-879 只查单路径),887 个零件的共享子 DAG 被重复展开;每行 ≥3 次读,唯一终止是 maxRows=10000(:18)→ 一次同步 HTTP 请求里 3 万次以上 PLM 往返,没有 maxElapsedMs 可以打断它。
 4) 撑到 maxRows 时 pushRow(:746-752)推 max_rows_exceeded;方案的第二段没有 `if (errors.length > 0) return` 守卫,剩余根继续读、并对每个根重复 push 同一个 global error。
 5) 若 2) 里两个节点的表头指向同一个 part_id(143 表头对 887 零件),两条子树根的 idempotencyKey 逐字节相同(:467),planner groupByKey(:487-501)判重、defaultPolicy 'hold'(:758)→ 整个计划 manual_confirm、canApply=false,方案专门为此写的去重规则只覆盖「订单根 vs 子树根」,拦不住。
@@ -186,7 +186,7 @@ makeIdempotencyKey(plugins/plugin-integration-core/lib/stock-preparation-bom-exp
 
 ═══ 二、子树根集合**自身**就会撞 key(方案完全没写这条)═══
 
-方案的 discoverSubtreeRoots 对每个节点读 bomHead,filters 只有 {[pathIdField]: nodeId},**不带 SysVer**;isActiveBomHead(:451-461,注意方案写的 :383 是错的)对 null/'' 一律判 active。实测客户库:零件 600028853 有 **2 张表头**(docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md:116)。两张表头 → 同一个 part_id → 同一个 rootSourceId → 两行 **idempotencyKey 逐字节相同** → defaultPolicy 'hold'(conflict-planner.cjs:755、915)→ plan.valid=false → dryRunStatus 'manual_confirm_required'(table-actions.cjs:1295)。同一装配挂在两个文件夹节点下也一样。方案把去重说成「apply 的前提」,却只防了它想到的那一半。
+方案的 discoverSubtreeRoots 对每个节点读 bomHead,filters 只有 {[pathIdField]: nodeId},**不带 SysVer**;isActiveBomHead(:451-461,注意方案写的 :383 是错的)对 null/'' 一律判 active。实测客户库:零件 <零件ID-1> 有 **2 张表头**(docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md:116)。两张表头 → 同一个 part_id → 同一个 rootSourceId → 两行 **idempotencyKey 逐字节相同** → defaultPolicy 'hold'(conflict-planner.cjs:755、915)→ plan.valid=false → dryRunStatus 'manual_confirm_required'(table-actions.cjs:1295)。同一装配挂在两个文件夹节点下也一样。方案把去重说成「apply 的前提」,却只防了它想到的那一半。
 
 ═══ 三、根数量=1 正是 parseQuantity 明文拒绝的那类捏造乘数 ═══
 
@@ -228,7 +228,7 @@ __tests__/stock-preparation-synthetic-sql-fixture.test.cjs:63:`SCHEMA_COLUMNS_NO
 
 **全仓没有任何文档或夹具记录 BomHeadInfo 有 path_id,或 PathInfo 有 Parent_OBJ_ID。** 方案的整条「BomHeadInfo.path_id」前提是未经证实的。
 
-同时,方案引 `222-rehearsal-full-run-20260904.md:23-27` 支持「项目 2-20231625 的 6 个 BOM 表头挂在深度 1 的子节点上」以论证 maxSubtreeDepth 默认 1。该文件里 2-20231625 只出现在**第 24 行**,原文是「唯一子树里挂着 BOM 的项目 2-20231625 的 BOM 也残缺(根零件下 40–60% 子件不在物料表)」——「6 个表头」「深度 1」「挂在子节点上」**一个字都没有**。默认深度的唯一依据是伪引用。
+同时,方案引 `222-rehearsal-full-run-20260904.md:23-27` 支持「项目 <项目号B> 的 6 个 BOM 表头挂在深度 1 的子节点上」以论证 maxSubtreeDepth 默认 1。该文件里 <项目号B> 只出现在**第 24 行**,原文是「唯一子树里挂着 BOM 的项目 <项目号B> 的 BOM 也残缺(根零件下 40–60% 子件不在物料表)」——「6 个表头」「深度 1」「挂在子节点上」**一个字都没有**。默认深度的唯一依据是伪引用。
 
 ═══ 九、222 上根本走不到方案设想的 large-BOM 后台路径 ═══
 
@@ -288,7 +288,7 @@ isActiveBomHead 实为 :451-461(方案写 :383);rowFromPart 实为 :612(写 :679
 - 是否值得为「上次同步时间 / 同步失败可见」新增一条审计动作 + 数据库 check 约束迁移?还是先用行级 lastPlmRefreshAt 的最大值凑合(只能证明成功过的那次,记不下失败)?
 
 ## 5. 实测依据(222 → 客户测试 PLM,2026-09-05 只读)
-项目 `2-20231625` → 节点 15013536,子树 14 节点(深度 0/1/2 = 1/9/4),6 个 BOM 表头全在深度 1,6 个根件全在物料表。逐张(bom_id/明细/缺子件):600028990/15013551 10 行缺 1;600029067/15013552 9 行缺 1;600029077/15013553 4 行缺 2;600029048/15013573 13 行缺 7;600028853/15013572 59 行缺 33;600029083/15013550 14 行全缺。全库 143 表头中 137 挂在无项目祖先节点下(共享零件库)——子树遍历必须限定在项目节点后代内。
+项目 `<项目号B>` → 节点 <节点ID-3>,子树 14 节点(深度 0/1/2 = 1/9/4),6 个 BOM 表头全在深度 1,6 个根件全在物料表。逐张(bom_id/明细/缺子件):<零件ID-2>/<BOM-ID-2> 10 行缺 1;<零件ID-3>/<BOM-ID-3> 9 行缺 1;<零件ID-4>/<BOM-ID-4> 4 行缺 2;<零件ID-5>/<BOM-ID-5> 13 行缺 7;<零件ID-1>/<BOM-ID-1> 59 行缺 33;<零件ID-6>/<BOM-ID-6> 14 行全缺。全库 143 表头中 137 挂在无项目祖先节点下(共享零件库)——子树遍历必须限定在项目节点后代内。
 
 ## 6. 实现后的审查与实证记录(2026-09-05/06)
 
@@ -366,7 +366,7 @@ isActiveBomHead 实为 :451-461(方案写 :383);rowFromPart 实为 :612(写 :679
 ### W2 222 实证(2026-09-06 00:15–00:20)
 **过程**:222 升 r10(pg_dump 2.13MB 备份),升级脚本 8 步全过(440 文件哈希 OK,迁移 0,健康 200)。开启子树:readPlan 插入 maxReadCount 30000 + projectSubtree 块。
 
-**实证结果**:试算 2-20231625 status manual_confirm_required,rowsExpanded 135,readCount 399,7.0s,subtree nodesVisited 10/rootsDiscovered 6/rootsExpanded 6/rootsWithoutChildren 1。开子树前 0 行。
+**实证结果**:试算 <项目号B> status manual_confirm_required,rowsExpanded 135,readCount 399,7.0s,subtree nodesVisited 10/rootsDiscovered 6/rootsExpanded 6/rootsWithoutChildren 1。开子树前 0 行。
 
 **教训**:实测走通了基本路径,但后续需走一遍完整链(导出,cron 定时)。
 

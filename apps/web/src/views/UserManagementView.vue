@@ -51,13 +51,21 @@
       <div class="user-admin__section-head">
         <div>
           <h2>创建用户</h2>
-          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。密码需至少 8 位，包含大小写字母和数字。</p>
+          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
+          <p class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
+          <p class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
         </div>
       </div>
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
-        <input v-model.trim="createForm.username" class="user-admin__search" type="text" placeholder="用户名（可选）" />
+        <input
+          v-model.trim="createForm.username"
+          class="user-admin__search"
+          type="text"
+          placeholder="登录名（可选，小写字母/数字）"
+          aria-label="登录名（可选）"
+        />
         <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
         <input v-model.trim="createForm.employeeNo" class="user-admin__search" type="text" placeholder="员工号（可选）" />
         <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
@@ -503,6 +511,10 @@
                 {{ loadingAdmission ? '刷新中...' : '刷新准入状态' }}
               </button>
             </div>
+            <div v-if="memberAdmissionLoadFailure" class="user-admin__block-error" data-testid="member-admission-load-failure">
+              <p>成员准入信息暂时无法加载，请刷新页面后重试。</p>
+              <small v-if="memberAdmissionLoadFailure.correlationId">排查编号：{{ memberAdmissionLoadFailure.correlationId }}</small>
+            </div>
             <div v-if="memberAdmission" class="user-admin__chips">
               <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.accountEnabled, 'user-admin__chip--danger': !memberAdmission.accountEnabled }">
                 {{ memberAdmission.accountEnabled ? '平台账号已启用' : '平台账号未启用' }}
@@ -569,6 +581,9 @@
                 </div>
               </article>
             </div>
+            <div v-else-if="memberAdmissionLoadFailure" class="user-admin__block-error" data-testid="namespace-admission-load-failure">
+              <p>插件使用准入信息暂时无法加载，请刷新页面后重试。</p>
+            </div>
             <div v-else class="user-admin__empty">
               暂无插件使用准入信息
             </div>
@@ -614,6 +629,10 @@
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingDingTalk || !access" @click="void loadDingTalkAccess(access.user.id)">
                 {{ loadingDingTalk ? '刷新中...' : '刷新钉钉状态' }}
               </button>
+            </div>
+            <div v-if="dingtalkAccessLoadFailure" class="user-admin__block-error" data-testid="dingtalk-access-load-failure">
+              <p>钉钉扫码登录信息暂时无法加载，请刷新页面后重试。</p>
+              <small v-if="dingtalkAccessLoadFailure.correlationId">排查编号：{{ dingtalkAccessLoadFailure.correlationId }}</small>
             </div>
             <div v-if="dingtalkAccess" class="user-admin__chips">
               <span class="user-admin__chip" :class="{ 'user-admin__chip--permission': dingtalkAccess.requireGrant }">
@@ -801,6 +820,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
+import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
 
 type ManagedUser = {
   id: string
@@ -945,6 +965,10 @@ type NamespaceAdmission = {
   effective: boolean
   hasRole: boolean
   updatedAt: string | null
+}
+
+type SidePanelLoadFailure = {
+  correlationId: string | null
 }
 
 type CreateUserForm = {
@@ -1095,6 +1119,11 @@ const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+// #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
+// sentence and (when the server sent one) the request's correlation id — never in the top banner and
+// never with the server's error text.
+const dingtalkAccessLoadFailure = ref<SidePanelLoadFailure | null>(null)
+const memberAdmissionLoadFailure = ref<SidePanelLoadFailure | null>(null)
 const profileDraftName = ref('')
 const profileDraftMobile = ref('')
 const profileDraftEmployeeNo = ref('')
@@ -1102,6 +1131,7 @@ const profileDraftDepartment = ref('')
 const profileDraftPosition = ref('')
 const profileDraftHireDate = ref('')
 const appliedUserNavigationKey = ref('')
+const createUserRuleHints = getCreateUserRuleHints('zh')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -1894,6 +1924,21 @@ function buildInviteUrl(token: string): string {
   return `/accept-invite?token=${encodeURIComponent(token)}`
 }
 
+const CORRELATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+
+/**
+ * The only thing this page takes from a failed side-panel read's body: `error.correlationId`, and
+ * only when it has the shape the backend's correlation middleware gives it. The error text is never
+ * read (#6163).
+ */
+function readSidePanelLoadFailure(payload: Record<string, unknown>): SidePanelLoadFailure {
+  const error = payload.error
+  const candidate = error && typeof error === 'object' ? (error as Record<string, unknown>).correlationId : undefined
+  return {
+    correlationId: typeof candidate === 'string' && CORRELATION_ID_PATTERN.test(candidate) ? candidate : null,
+  }
+}
+
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
     return await response.json() as Record<string, unknown>
@@ -2152,6 +2197,8 @@ async function selectUser(userId: string): Promise<void> {
   createdTemporaryPassword.value = ''
   dingtalkAccess.value = null
   memberAdmission.value = null
+  dingtalkAccessLoadFailure.value = null
+  memberAdmissionLoadFailure.value = null
   try {
     access.value = await fetchUserAccessOrThrow(userId)
     syncProfileDraftFromAccess()
@@ -2195,6 +2242,7 @@ async function handleUserNavigationChange(): Promise<void> {
 async function loadDingTalkAccess(userId?: string): Promise<void> {
   if (!userId) {
     dingtalkAccess.value = null
+    dingtalkAccessLoadFailure.value = null
     return
   }
 
@@ -2203,13 +2251,16 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载钉钉登录状态失败'))
+      dingtalkAccess.value = null
+      dingtalkAccessLoadFailure.value = readSidePanelLoadFailure(payload)
+      return
     }
 
     dingtalkAccess.value = payload.data as DingTalkAccess
-  } catch (error) {
+    dingtalkAccessLoadFailure.value = null
+  } catch {
     dingtalkAccess.value = null
-    setStatus(error instanceof Error ? error.message : '加载钉钉登录状态失败', 'error')
+    dingtalkAccessLoadFailure.value = { correlationId: null }
   } finally {
     loadingDingTalk.value = false
   }
@@ -2218,6 +2269,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
 async function loadMemberAdmission(userId?: string): Promise<void> {
   if (!userId) {
     memberAdmission.value = null
+    memberAdmissionLoadFailure.value = null
     return
   }
 
@@ -2226,7 +2278,9 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员准入失败'))
+      memberAdmission.value = null
+      memberAdmissionLoadFailure.value = readSidePanelLoadFailure(payload)
+      return
     }
 
     const data = payload.data as Record<string, unknown> | undefined
@@ -2234,9 +2288,10 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
       ...(data as MemberAdmission),
       namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
     }
-  } catch (error) {
+    memberAdmissionLoadFailure.value = null
+  } catch {
     memberAdmission.value = null
-    setStatus(error instanceof Error ? error.message : '加载成员准入失败', 'error')
+    memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
     loadingAdmission.value = false
   }
@@ -2463,6 +2518,9 @@ async function createUser(): Promise<void> {
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as Record<string, unknown> | undefined
+      // Known validation codes render Chinese copy; anything else keeps the server message.
+      const localizedError = describeCreateUserError(errorPayload, 'zh')
+      if (localizedError) throw new Error(localizedError)
       const detailText = Array.isArray(errorPayload?.details) ? `：${(errorPayload?.details as string[]).join('；')}` : ''
       throw new Error(String(errorPayload?.message || '创建用户失败') + detailText)
     }
@@ -2897,6 +2955,25 @@ onUnmounted(() => {
 .user-admin__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.user-admin__block-error {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.user-admin__block-error p {
+  margin: 0;
+}
+
+.user-admin__block-error small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .user-admin__source-banner {
