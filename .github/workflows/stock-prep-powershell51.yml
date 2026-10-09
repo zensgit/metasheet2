@@ -41,7 +41,7 @@ concurrency:
 jobs:
   stock-prep-powershell51:
     name: stock-prep PowerShell 5.1 acceptance
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, ms2-win]
 
     steps:
       - name: Checkout repository
