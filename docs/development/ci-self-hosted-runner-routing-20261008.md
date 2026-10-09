@@ -1,12 +1,13 @@
 # 必需检查经 `MS2_PLUGIN_RUNNER` 切到自托管 runner
 
 - 日期: 2026-10-08
-- 基线: `origin/main` `9c34e1a002ce99ca089e379e4f8b899a1aab2c23`（2026-10-09 merge 对齐；上一基线 `fc139c868ea9ceba8c15eb133437342bfcedbbe9`，原先从 `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` 开出）
+- 基线: `origin/main` `8f90307d5a5c36c7b9958b88b0b8cf0d6f9110cb`（2026-10-09 merge 对齐；上一基线 `9c34e1a002ce99ca089e379e4f8b899a1aab2c23`，再上一基线 `fc139c868ea9ceba8c15eb133437342bfcedbbe9`，原先从 `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` 开出）
 - 参照: `afd32b704`（`ci(plugin-tests): route the test job through the MS2_PLUGIN_RUNNER variable`，#6247）
 - 性质: Draft。只改必需检查的 `runs-on`。不合并。
 - 2026-10-09 协调修订：移除与 #6272 重叠的 `web-tests.yml` 修改；前端由 #6272 独立使用 `MS2_WEB_RUNNER`，本 PR 不改它。
 - 2026-10-09 对齐：merge `fc139c868`，不 rebase。main 上多出的 4 个提交没有改本 PR 路由的 8 个 workflow，merge 无冲突。
 - 2026-10-09 再对齐：merge `9c34e1a002`，不 rebase。该提交只改审批前端 9 个文件，没有敏感路径，merge 无冲突。
+- 2026-10-09 再对齐：merge `8f90307d5a`，不 rebase。`5a7e7897b` 改的是 `plugin-tests.yml`（本 PR 不改这个文件）和 decision-register；`8f90307d5a` 只加两份 stock-prep ADR。都没有碰到本 PR 的 8 个 workflow，merge 无冲突。
 
 `9d65b8318` 之后、合入前的 main 提交：
 
@@ -17,8 +18,10 @@
 | `65e8ee7c7` | 审批未读/结果角标，默认关 | workflow：`approval-realdb-list-scope.yml`、`approval-web-guard.yml`。`packages/core-backend/vitest.config.ts`。无迁移、pins、drain、checkpoint、timemachine |
 | `fc139c868` | staging window smoke 打进 runner bundle | workflow：`attendance-staging-window-runner.yml`。无迁移、pins、drain、checkpoint、`vitest.config.ts`、timemachine |
 | `9c34e1a002` | 审批人员字段显示名，不显示成员 id | 无。只改 `apps/web` 审批相关 9 个文件 |
+| `5a7e7897b` | 迁移前重建 `metasheet_test`，`test` job 超时 150 分钟 | workflow：`plugin-tests.yml`（不是本 PR 改的 8 个文件）。decision-register。无迁移、pins、drain、checkpoint、`vitest.config.ts`、timemachine |
+| `8f90307d5a` | stock-prep 项目备料表 ADR | 无。两份 ADR 文档 |
 
-这 3 个 workflow 与本 PR 改的 8 个文件不重叠。`9c34e1a002` 也不碰这 8 个文件。
+这 3 个 workflow 与本 PR 改的 8 个文件不重叠。`9c34e1a002`、`5a7e7897b`、`8f90307d5a` 也不碰这 8 个文件。
 
 变量未设置时，表达式求值为 `ubuntu-latest`，与改前的托管 runner 相同。仓库变量 `MS2_PLUGIN_RUNNER` 设成一个自托管 runner 标签后，下面列出的 job 改到该标签。删掉变量即回到 `ubuntu-latest`。
 
@@ -227,3 +230,5 @@ sealed-export-package-provenance.test.cjs OK
 2026-10-09 对齐 `fc139c868` 之后再算一次：`computePackageProvenancePinSet` 与冻结清单不一致 0 条。冻结清单与现场重算都是 63 个 SHA-256、66 个叶子字段。`node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 输出 `sealed-export-package-provenance.test.cjs OK`。
 
 2026-10-09 对齐 `9c34e1a002` 之后再算一次：不一致仍是 0 条，63 个 SHA-256、66 个叶子字段。同一 provenance 测试输出 `sealed-export-package-provenance.test.cjs OK`。
+
+2026-10-09 对齐 `8f90307d5a` 之后再算一次：不一致仍是 0 条，63 个 SHA-256、66 个叶子字段。同一 provenance 测试输出 `sealed-export-package-provenance.test.cjs OK`。
