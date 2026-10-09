@@ -56,6 +56,7 @@ const targetAttachmentPath = join(args.workRoot, 'target', 'attachments')
 const recoverySecret = randomBytes(32)
 const jwtSecret = randomBytes(48).toString('hex')
 const children = new Set<ChildProcess>()
+const custodySessions = new Set<LocalCustodySession>()
 type OwnedDatabaseIdentity = { name: string; oid: string; owner: string; system_identifier: string }
 const ownedDatabases = new Map<string, OwnedDatabaseIdentity>()
 let workRootCreated = false
@@ -151,11 +152,11 @@ async function loadRuntimeDependencies(): Promise<void> {
 }
 
 async function main(): Promise<Record<string, unknown>> {
-  await loadRuntimeDependencies()
   let admin: Pool | undefined
   let result: Record<string, unknown> | undefined
   let primaryError: unknown
   try {
+    await loadRuntimeDependencies()
     assert.equal(process.env.NODE_ENV, 'test')
     assert.equal(RECOVERY_ARCHIVE_V1_SECTION_NAMES.length, 10)
     await assertPathMissing(args.workRoot)
@@ -234,6 +235,7 @@ async function main(): Promise<Record<string, unknown>> {
     })
     await sourceCustodyStore.putBackup(randomUUID(), initialBackup)
     const sourceSession = createLocalCustodySession(sourceRuntime.depth)
+    custodySessions.add(sourceSession)
     sourceSession.unlock({ custodyId, recoverySecret, backup: initialBackup })
     const sourceAdmission = sourceSession.admitForArchive(custodyId)
     const rotatedReceipt = await sourceCustodyStore.putBackup(
@@ -274,7 +276,8 @@ async function main(): Promise<Record<string, unknown>> {
     assert.equal(manualSourceNonces.length, 11)
     assert.deepEqual(sourceCapturedAuthority.attachmentObjects?.map(object => object.attachmentId), [manual.attachmentId])
     assert.equal(sourceCapturedAuthority.attachmentObjects![0].binding.generationId, manual.generationId)
-    assert.equal((await readLiveRows(sourceRuntime.query, manual.sheetId)).length, 5001)
+    const manualSourceLiveRows = await readLiveRows(sourceRuntime.query, manual.sheetId)
+    assert.equal(manualSourceLiveRows.length, 5001)
     sourceSession.lock()
     assert.equal(sourceSession.isUnlocked(), false)
 
@@ -342,6 +345,9 @@ async function main(): Promise<Record<string, unknown>> {
     assert.deepEqual(targetNonces.map((row) => row.section_name), [...RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
     const importedRows = await readLiveRows(targetRuntime.query, fixture.fixture.sheetId)
     assert.equal(hashRows(importedRows), sourceLiveHash)
+    const importedManualRows = await readLiveRows(targetRuntime.query, manual.sheetId)
+    assert.equal(importedManualRows.length, 5001, 'RECOVERY_LOCAL_BACKUP_MANUAL_IMPORT_COUNT_MISMATCH')
+    assert.deepEqual(importedManualRows, manualSourceLiveRows, 'RECOVERY_LOCAL_BACKUP_MANUAL_IMPORT_ROWS_MISMATCH')
 
     const targetProvider = await createRecoveryArchiveFileStoreProvider({
       basePath: targetArchive,
@@ -357,6 +363,7 @@ async function main(): Promise<Record<string, unknown>> {
     })
     const copiedBackup = await targetCustodyStore.readBackup(rotatedReceipt)
     const targetSession = createLocalCustodySession(targetRuntime.depth)
+    custodySessions.add(targetSession)
     targetSession.unlock({ custodyId, recoverySecret, backup: copiedBackup })
     const targetAdmission = targetSession.admitForArchive(custodyId)
     assert.notEqual(targetAdmission.keyId, fixture.archivedKeyId)
@@ -536,6 +543,10 @@ async function main(): Promise<Record<string, unknown>> {
     assert.deepEqual(await readNonceTuples(targetRuntime.query, manual.generationId), manualSourceNonces)
     const finalNonces = await readNonceTuples(targetRuntime.query, fixture.fixture.generationId)
     assert.deepEqual(finalNonces, sourceNonces)
+    assert.equal(await readFile(join(targetArchive, '.metasheet-archive-root'), 'utf8'), storeId,
+      'RECOVERY_LOCAL_BACKUP_STORE_ID_CHANGED')
+    assert.deepEqual(await targetCustodyStore.readBackup(rotatedReceipt), copiedBackup,
+      'RECOVERY_LOCAL_BACKUP_CUSTODY_BACKUP_CHANGED')
     result = {
       result: 'PASS',
       fixture: 'synthetic-owned-two-database-backup-set',
@@ -581,6 +592,9 @@ async function main(): Promise<Record<string, unknown>> {
   }
 
   const cleanupFailures: string[] = []
+  for (const session of custodySessions) session.lock()
+  custodySessions.clear()
+  recoverySecret.fill(0)
   for (const child of [...children]) {
     try {
       await stopChild(child)
@@ -624,8 +638,6 @@ async function main(): Promise<Record<string, unknown>> {
       cleanupFailures.push('work_root')
     }
   }
-  recoverySecret.fill(0)
-
   let residue: { databases: number; backends: number; paths: number; workers: number } | undefined
   try {
     residue = {
