@@ -905,6 +905,7 @@ export async function renewRecoveryArchiveRestoreJobLease(
           AND worker_owner_id = $4
           AND worker_fence = $5::bigint
           AND lease_until = $6::timestamptz
+          AND lease_until > clock_timestamp()
           AND $2::timestamptz > clock_timestamp()
           AND $2::timestamptz <= resume_deadline
           AND resume_deadline > clock_timestamp()

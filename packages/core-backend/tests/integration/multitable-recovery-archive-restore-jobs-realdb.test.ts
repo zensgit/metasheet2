@@ -2985,6 +2985,52 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     }])
   })
 
+  test('refuses renewal when the database lease expires after its locked read', async () => {
+    const fixture = await seedVerifiedArchive('lease_renewal_boundary')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
+    const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+      token, plan, identity: restoreRequestIdentity(fixture),
+      resumeDeadline: await databaseFuture(120_000), recheckAuthority: async () => true,
+    })
+    const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+    const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+      workerOwnerId: `${PREFIX}_renewal_boundary_worker`, leaseUntil: await databaseFuture(10_000),
+    })
+    const readLease = () => q(`SELECT row_version::text, lease_until::text, worker_owner_id, worker_fence::text
+      FROM public.meta_recovery_archive_jobs WHERE id=$1::uuid`, [accepted.id])
+    const before = (await readLease()).rows
+    let observedLiveRead = false
+    let renewalUpdateIssued = false
+    const delayedTransaction: RecoveryArchiveRestoreJobTransaction = work => transaction(query => work(async (sql, params) => {
+      if (sql.includes('SET lease_until = $2::timestamptz')) renewalUpdateIssued = true
+      const result = await query(sql, params)
+      if (sql.includes('FROM public.meta_recovery_archive_jobs') && sql.includes('AS lease_live')) {
+        expect(result.rows).toHaveLength(1)
+        expect((result.rows[0] as { lease_live: boolean }).lease_live).toBe(true)
+        observedLiveRead = true
+        // Only database time advances; no persisted lease/deadline is rewritten.
+        await query(`SELECT pg_sleep(GREATEST(0,
+          EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))::double precision + 0.01)`, [claim.leaseUntil])
+      }
+      return result
+    }))
+    try {
+      await expect(renewRecoveryArchiveRestoreJobLease(delayedTransaction, claim, {
+        leaseUntil: await databaseFuture(60_000),
+      })).rejects.toEqual(new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'))
+      expect(observedLiveRead).toBe(true)
+      expect(renewalUpdateIssued).toBe(true)
+      expect((await readLease()).rows).toEqual(before)
+    } finally {
+      await expect(cancelRecoveryArchiveRestoreJob(transaction, {
+        ...restoreRequestIdentity(fixture), jobId: accepted.id,
+        replayHorizonMs: 0, recheckAuthority: async () => true,
+      })).resolves.toMatchObject({ state: 'cancelled_zero_write', completedCount: '0' })
+    }
+  }, 30_000)
+
   test('bounds renewal by the immutable deadline and lets only one concurrent lease CAS win', async () => {
     const fixture = await seedVerifiedArchive('lease_renewal')
     const plan = compilePlan(fixture)
