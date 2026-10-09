@@ -12,9 +12,9 @@
 
 1. **已落 `main`**：M0 普查与锁（#5845）、M1 裁决（2026-09-26）、任务 B 纯函数（#6086、#6102）、M2 后端（#6062）与前端（#6092）、任务 C 纯函数（#6123）、前端门禁 R-28（#6173）、staging runner 三件（#6158、#6167、#6177）、M3 后端（#6229）与前端（#6159）。锁正文 §0–§11、§13–§15 于 2026-09-26 ratify，§12 门表于 2026-09-28 ratify（PR #5845 评论 5871552862）。
 2. **staging**：运行 `main` `7137688372` 的镜像，`TASKS_ENABLED=true`，M2 与 M3 的迁移已应用（含 `task_comments`）；生产未动；三个 P1 开关在任何环境都未打开。
-3. **Draft，未合并**：任务 D（#6186）、锁 R01 增补（#6248）、M4 PR-3a（#6266）、M4 PR-3c（#6269，叠在 #6266 上）、M4 前端（#6265）、任务 E（#6249）；M4 PR-3b 在本地分支完成 S0–S7（含门审修复与收口），尚未发布；对门审修复轮与 S7 head 的独立复闸已完成，其条目的修复与核对仍在进行（§5）。#6126（M3 HTTP 契约文档）仍是开着的 Draft，实现已由 #6229 落 `main`，处置待 owner 点名（§6.1）。M4 起每一阶段的合并都要 owner 另行点名；推荐的合并序是 #6248 → #6266 → PR-3b → #6269 → #6265（§6）。
+3. **Draft，未合并**：任务 D（#6186）、锁 R01 增补（#6248）、M4 PR-3a（#6266）、M4 PR-3b（#6281，以 #6266 为基）、M4 PR-3c（#6269，叠在 #6266 上）、M4 前端（#6265）、任务 E（#6249）。#6126（M3 HTTP 契约文档）仍是开着的 Draft，实现已由 #6229 落 `main`，处置待 owner 点名（§6.1）。M4 起每一阶段的合并都要 owner 另行点名；推荐的合并序是 #6248 → #6266 → #6281 → #6269 → #6265（§6）。
 4. **未开始**：M5 的路由 PR-4a / 4b / 4c 与前端 FE-d / e / f，按 2026-10-09 的裁决在 M4 合并授权之后才起 Draft。
-5. **验证面**：每个 PR 都有独立多视角闸审（每条发现三票反驳；PR-3b 复闸条目的修复与核对仍在进行，见 §5）、单测、真库 lane（本地 PostgreSQL 15.17；PR-3b 与 PR-3c 闸修复后的 lane 另在另一台机器的 PostgreSQL 16.15 上跑过，PR-3a 自己的记录把 postgres:16 记为 NOT RUN，见 §5）、专属鉴权门、源码变异证明；M3 后端另有合并前对 `main` 的合并预演与 staging 部署 + 冒烟。未跑的项目逐条列在 §5。
+5. **验证面**：每个 PR 都有独立多视角闸审（每条发现三票反驳）、单测、真库 lane（本地 PostgreSQL 15.17；PR-3b 与 PR-3c 闸修复后的 lane 另在另一台机器的 PostgreSQL 16.15 上跑过，PR-3a 自己的记录把 postgres:16 记为 NOT RUN，见 §5）、专属鉴权门、源码变异证明；M3 后端另有合并前对 `main` 的合并预演与 staging 部署 + 冒烟。未跑的项目逐条列在 §5。
 
 ---
 
@@ -61,7 +61,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 | 任务 D | 无 I/O 纯函数（清单、分组、提醒、通知、设置、分页、实时） | #6186 | Draft | `630e85ead8` |
 | 锁 R01 增补 | §11 M4 行拆写、§12 门 23–26 与 `arm-set` 子集行 | #6248 | Draft | `69a7c08f8f` |
 | M4 PR-3a | 一条迁移（8 张 P1 表 + `tasks.remind_at`）、清单 / 成员 / 清单项 / 分组 / 设置路由、日期写入与 PATCH、分页、R04、R17 / N2 | #6266 | Draft | `68e40323bd` |
-| M4 PR-3b | outbox producer、调度器、投递 worker、钉钉通道、N1、三个开关 | 本地分支 `claude/tasks-m4-pr3b`（未发布） | 本地完成 S0–S7（含门审修复与收口）；复闸已完成，其条目的修复与核对进行中 | `38011e4eaf`（复闸所审的 head；绿线 head `36c8b01e0f`，其后只改两份 MD；修复会追加提交，发布时以 PR 为准） |
+| M4 PR-3b | outbox producer、调度器、投递 worker、钉钉通道、N1、三个开关 | #6281（Draft，base `claude/tasks-m4-pr3a`） | S0–S7 与 S7 之后的再门审修复（S-gate2）完成 | `2974ba5363`（单提交，父提交为 #6266 的 `68e40323bd`；绿线 head `4837f1ffdd`） |
 | M4 PR-3c | 红点实时失效（socket 扇出） | #6269（base = PR-3a 分支） | Draft | `3edd133ae0` |
 | M4 前端 | 设置页、详情编辑、清单、成员、分组板、i18n、实时订阅 | #6265 | Draft | `5e73a6b8f3` |
 | 任务 E | 无 I/O 纯函数（民用日期 / 依赖 / 里程碑 / 重复 / 字段 / 附件 / 投影 / 导出） | #6249 | Draft | `d6c84264ff` |
@@ -104,7 +104,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 | D（M4） | #6186 | `task-lists`、`task-groups`、`task-reminders`、`task-notifications`、`task-settings`、`task-pagination`、`task-realtime`；改 `task-ids`（两个前缀）、`task-dates`（一条注释） | 清单角色闭集与动作真相表、成员 / 所有权转换、清单项双事件；分组与整数重排；提醒缺省算法、扫描窗、四族 `source_key`、每日汇总 TS / SQL；收件人网格与优先级；设置闭集与 PATCH 合并；分页 1..100 与稳定排序键；写前写后负责人并集 |
 | E（M5） | #6249 | `task-civil-date`、`task-dependencies`、`task-milestone`、`task-recurrence`、`task-fields`、`task-attachments`、`task-projection`、`task-export` | 民用日期；依赖无环（允许菱形）与双端授权；里程碑；重复规则闭集、下一期、派生计划、系列删除；字段六型闭集、config 闭合 schema、三层权限、值可见性；附件白名单与上限、下载判定四道 gate、响应头；投影 id 推导与候选正则、列目录、视图规格、no-op 摘要、能力夹钳；CSV 导出格中和 |
 | PR-3a 补 | #6266 | `task-list-access`、`task-edit`；`task-access` 加 `buildTaskByIdCondition` / `buildTaskInListCondition` / `canChangeCompletion` / `canChangeTaskMembers`；`task-lists` / `task-groups` / `task-settings` 追加 | 清单与分组的 org 单点子句、按 id / 按清单取行、日期与 PATCH 的校验与规划、清单项与成员的组合谓词 |
-| PR-3b 补 | 本地分支 | `task-notification-text`、`task-delivery-protocol`；`task-reminders` / `task-notifications` 追加；`task-access` 加 `buildTaskByIdAnyStateCondition`；`task-list-access` 加 `buildTaskListsOfTaskCondition` | 文案与转义、投递退避 / 分类 / 优先级 / 新鲜度、扫描 SQL 片段、汇总到点判定 |
+| PR-3b 补 | #6281 | `task-notification-text`、`task-delivery-protocol`；`task-reminders` / `task-notifications` 追加；`task-access` 加 `buildTaskByIdAnyStateCondition`；`task-list-access` 加 `buildTaskListsOfTaskCondition` | 文案与转义、投递退避 / 分类 / 优先级 / 新鲜度、扫描 SQL 片段、汇总到点判定 |
 
 共同规则：时间一律显式传入 `now`；没有变化就没有事件；事件名只取锁 §4.2 两个闭集；不新增 `Intl.DateTimeFormat` 调用点；`src/tasks/` 不 import 数据库层、`pg`、`crypto`。任务 E 把门 20 的 harness 加严为从语法树读取导入（2026-10-09 已同意）。
 
@@ -232,7 +232,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 | #6186 任务 D | 任务单测 22 文件 684 格，第四轮后 689 格；全量 17999 / 0 失败；两条 CI `tsc` 命令零输出；eslint 零新增 | — | — | 28 处（9 手工 + 19 脚本化，还原后 `git diff` 哈希一致）+ 第四轮 5 处，全部变红 | 4 轮独立复核（第 3 轮 13 项含两处实测确认的真缺陷：`offset: 1e300` 静默通过、`2026-02-30` 静默滚动；第 4 轮 6 项 0 P1） | head `50feb0d01b` CI 26 绿 / 1 跳过；其后只改注释与文档的 `630e85ead8` 在托管 runner 作业未启动期间推送，检查未能启动 |
 | #6248 锁 R01 增补 | 锁内两条自检（`arm-set` 键不重复、门号 1–26；R01 涉及的 18 行逐字存在）exit 0，负控（删 `M4\|23\|整门` 或 `M4\|19\|清单角色`）exit 1 | — | — | — | —；PR 正文列 13 处「起草方设计（需要 owner 确认）」与 1 项「需要 owner 回答」（§7） | CI 21 / 21 绿；抬头评论 id 占位待 owner 亲写确认后回填 |
 | #6266 M4 PR-3a | 任务单测 29 文件 1160 格；全量 20445（本机 5 个文件因环境失败，与本 PR 无关）；`tsc` 0 | 16 文件 708 格 ×3（PG 15.17）：`task-m4-schema` 59、`-list-roles` 50（含 `gate19m4` 25 格）、`-paging-settings` 77、`-dates` 107、`-lists` 66、`-list-members` 44、`-list-items` 25、`-groups` 38、`-org-members` 46 + M2 / M3 七文件 93 + 103；PG16：本 PR 的记录记为 NOT RUN（本地只有 15.17）；这 16 个文件 708 格只作为子集在 PR-3b 与 PR-3c 的 16.15 lane 里跑过（§5） | 86 格（P0-A 8 条 + M3 13 条 + M4 30 条路由的门 1 / 门 2 / 门 16，路由人口 51 有负控；清单第二租户读格在 trust-off 下） | 手工 458（457 红、1 等价）；文件内负控（门 1 / 8 / 13 / 19 与负控 1–7）每遍 lane 或鉴权门都跑 | S1–S3 + S4 闸、S5 + 修复切片闸（7 条：0 P1、1 P2、4 P3、2 NIT）、S6 + S7 闸（9 条 8 成立，处置见记录 §S67F.1）、S8–S10 增量闸（3 P2 + 14 P3 / NIT）；每轮有修复切片，最后一轮修复本身未再过闸 | 迁移在一次性库 `up → down → up` 与 `search_path` 置空的 `pg_restore` 核过；`staging-tasks-smoke` preflight 加三张表；head `68e40323bd` 在托管 runner 作业未启动期间推送，52 项检查未能启动 |
-| PR-3b（本地） | 任务线单测 38 文件 1503 格；全量 19008 passed（失败的是记录里同一组 5 个与本线无关的文件）；manifest 39 / 39、102 / 102；`tsc` 0 | 20 文件 792 ×3（另一台机器 PostgreSQL 16.15，记录 §S7.4；第三遍一格 M3 并发格超时，该文件单独重跑三遍 33 / 33；新文件 `task-m4-outbox` 21、`-delivery` 28、`-scheduler` 24、`-dingtalk` 11） | 86 | 不同 mutant 288（S0 13、S1 62、S2 35、S3 15、S4 42、S5 47、S6 32、门审修复 42），287 红、1 等价；S3 收尾在 S3 head 重跑 S2 / S3 的 50 个，S7 重跑 3 个 | 设计评审 34 条（33 采纳、1 部分采纳）；S2–S6 门审 6 项确认 + 14 行 P3 / NIT 全处置（停机退还、leader 会话界限与心跳、钉钉分类负控、floor 语句钉住、脱敏规则、措辞）；对门审修复轮与 S7 head 的独立复闸已完成，其条目的修复与核对进行中（记录 §S7.5 记为未在本片里跑） | 未发布、无 CI；发布方式为重建的单提交，父提交为 #6266 的 `68e40323bd`（记录 S-gate.9，S7 更正） |
+| #6281 M4 PR-3b | 任务线单测 38 文件 1519 格（S7 时 1503）；全量 19024 passed（失败的是记录里同一组 5 个与本线无关的文件）；manifest 39 / 39、102 / 102；`tsc` 0 | 20 文件 795 ×3（另一台机器 PostgreSQL 16.15，记录 §S-gate2.4；新文件 `task-m4-outbox` 21、`-delivery` 30、`-scheduler` 25、`-dingtalk` 11） | 86 | 不同 mutant 310（S0 13、S1 62、S2 35、S3 15、S4 42、S5 47、S6 32、门审修复 42、再门审修复 22），309 红、1 等价；执行 367 次（记录 总览.3） | 设计评审 34 条（33 采纳、1 部分采纳）；S2–S6 门审 6 项确认 + 14 行 P3 / NIT 全处置（停机退还、leader 会话界限与心跳、钉钉分类负控、floor 语句钉住、脱敏规则、措辞）；S7 之后的再门审 2 项确认 + 1 项未确认与 17 行 P3 / NIT：2 项全部处置，18 行里 15 行改正或加格、3 行记为已知限制（记录 总览.4）；其后的独立核验 0 P1 / 0 P2（PR 正文「再核验」） | 以非 `main` 分支为基，`plugin-tests`、`web-tests`、contracts 与 `migration-replay` 不触发（记录 总览.5） |
 | #6269 M4 PR-3c | 新单测 `task-counts-realtime` 17、`task-counts-touchpoints` 62（含写入者普查格与「提交后才发送」前提格）；任务子集 31 文件 1239；`tsc` 0 | 首轮本地 PG 15.17：17 文件 727 ×3；闸修复后：17 文件 729 ×3 在另一台机器的 PostgreSQL 16.15（记录 §10.3；新文件 `task-m4-realtime` 21，`gate26\|` 前缀，候选） | 86 | 37 全杀；闸修复后 32（31 杀、1 按设计存活）+ 真库 7 全杀；文件内负控甲 / 乙 / 丙 / 关注人与接线负控各有「控件的控件」 | 闸审 14 条全处置（记录 §10.2）：1 P2（门 26 没有一格让操作者本身是负责人）、5 P3、8 NIT；闸审另做了随机写入对拍、并发写入与真实 socket 连接的核对（PR 正文） | R01 (iii)：在 PR-3a + PR-3c 的 head 上把锁 `M2\|` 27 行、`M3\|` 2 行逐行重跑并记控件（验证记录 §6）；head `3edd133ae0` 在托管 runner 作业未启动期间推送，39 项检查未能启动 |
 | #6265 M4 前端 | 24 个 whole-file spec 1933 格；`vue-tsc` 0；必需 web lane 本地全跑；D = T = G = 23 | — | — | 599（595 红、4 等价） | 设计评审 27 条全处置、无驳回（设计 §15）；实现闸审 8 P2 + 1 未确认项 + 18 P3 / NIT 全处置（验证记录「闸审之后的修复」） | 推送前按 head 的树把提交历史重建为单个提交；真机走查一次（Chromium、中文、PR-3a 后端 `f4a0eb532c` + 一次性库）11 步都得到预期结果，顺手发现并修了写后焦点丢失（`[fe-48]`）；head `f82f24b8ab` 与 `5e73a6b8f3` 都在托管 runner 作业未启动期间推送，检查未能启动 |
 | #6249 任务 E | 任务单测 30 文件 958 格（另按三个进程时区各跑一遍）；门 20 35 / 35；`'x'` 探针与 import 图 44 / 44；全量 20199 / 20243（5 个已知环境失败文件）；两条 `tsc` 零输出；eslint 零问题 | — | — | 76 / 76 在最终代码重跑；复审后新守卫 77 / 77 | 闸审 0 P1（PR 正文）、10 P2（验证 §7.1）+ 22 P3 / NIT，全部处置（其中 3 条推送时的动作在推送时完成，验证 §7.2） | head `82eea91fc3` CI 25 绿 / 1 跳过；只改标签的 `d6c84264ff` 在托管 runner 作业未启动期间推送，检查未能启动 |
@@ -257,7 +257,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 
 ## 5. NOT RUN（明确未跑）
 
-1. **CI**：托管 runner 作业在 2026-10-08 至 2026-10-09 间两度未启动（与代码无关），期间推送的 head 的检查在数秒内以失败结束、零步骤，不代表测试结论：#6186 `630e85ead8`、#6266 `68e40323bd`、#6269 `3edd133ae0`、#6265 `f82f24b8ab` / `5e73a6b8f3`、#6249 `d6c84264ff`、#6278 `c980f78015`。PR-3b 未发布，无 CI。恢复后须在各 head 上重跑；以 PR-3a 分支为基的 PR（#6269）不触发 `plugin-tests`、`web-tests`、contracts、`migration-replay`，这些守卫只有本地结果。
+1. **CI**：托管 runner 作业在 2026-10-08 至 2026-10-09 间两度未启动（与代码无关），期间推送的 head 的检查在数秒内以失败结束、零步骤，不代表测试结论：#6186 `630e85ead8`、#6266 `68e40323bd`、#6269 `3edd133ae0`、#6265 `f82f24b8ab` / `5e73a6b8f3`、#6249 `d6c84264ff`、#6278 `c980f78015`。托管 runner 已于 2026-10-09 恢复；各 head 须重跑；以 PR-3a 分支为基的 PR（#6281、#6269）不触发 `plugin-tests`、`web-tests`、contracts、`migration-replay`，这些守卫只有本地结果。
 2. **真实钉钉**：PR-3b 的 token 请求与发送都是替身，没有任何网络请求；R01 第 ④ 部分（`post-merge|23|staging真投递`：在 staging 做一次真实投递、outbox 留下一行）要 runner 加三个开关的输入、钉钉凭据与目录绑定，另行授权。
 3. **M4 上 staging**：M4 迁移未应用到任何共享环境；PR-3a §12-Q10 的二选一未裁；三个 P1 开关在所有环境关闭。
 4. **R01 (iii) 的最终 head**：PR-3a + PR-3b + PR-3c + M4 前端合在一起的 head 不存在；`M2|` / `M3|` 全部行只在 PR-3a + PR-3c 的 head 上重跑过；门 26 整行要 PR-3c 与 FE-c 同时在才可能绿。
@@ -268,7 +268,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 9. **锁与门表**：`i-m4` 未入锁；门 19 的 M4 视图格、门 21 / 22 的 M4 行、门 23–26 全部候选；门 9、锁序控件、`src/multitable/task-*` 扫描根首个可跑为 M5；M5 候选门 M5-a…g 未编号。
 10. **全量单测**：PR-3c 闸修复那一轮与 PR-3b 的若干切片没有重跑全量（只跑任务子集），上一次全量在各自记录的 head 上；本机 5 个与本线无关的文件（4 个 multitable-recovery、1 个考勤插件布局）因环境失败，未修。
 11. **其他**：M3 契约里 `TASK_BUSY` 的 3 秒是否改 1 秒待 owner；PR-3b §13-Q23 / Q24 的两种情形没有格；leader 会话的 TCP keepalive 界限未采用；Node 18 未跑（`main` 已去掉矩阵）；任务 D 的 `isInDailyDigest`（TS）与 `buildTaskDailyDigestCondition`（SQL）的双形对拍留给 PR-3b 的真库格（`task-m4-scheduler` 有一格让两形在同一批 10 个任务上选出同样的 6 个，记录 §S5.5）。
-12. **独立复闸**：PR-3a 的 S8–S10 闸修复本身未再过闸（其记录如此声明）；PR-3b 对门审修复轮与 S7 head 的独立复闸已于 2026-10-09 完成（记录 §S7.5 记为未在本片里跑），其条目的修复与核对仍在进行，结果随 PR-3b 的验证记录登记，在此之前不发布。
+12. **独立复闸**：PR-3a 的 S8–S10 闸修复本身未再过闸（其记录如此声明）；PR-3b 的再门审修复（S-gate2）之后另做了一轮独立核验（0 P1 / 0 P2，PR 正文「再核验」），其后只改了文档与源码注释的措辞，未再过闸。
 
 ---
 
@@ -280,7 +280,7 @@ M4 / M5 的裁决另排除：清单删除与任何硬删作业（R13）；`tasks
 |---|---|---|
 | 1 | #6248 锁 R01 增补 | owner 在该 PR 上亲写确认评论（锁 §14-2），回填抬头的评论 id 并再推；锁内五句仍说 §12 门表 PROPOSED 的陈旧文字是否勘误由 owner 定；合并后 R01 的 `M4\|` 子集行与门 23–26 才计分 |
 | 2 | #6266 PR-3a | 以 `main` 为基；必需检查在 CI 恢复后全绿；R01 (i)(ii) 的格由 lane 与鉴权门承载；#6186 拟按「被本 PR 取代」关闭（§12-Q15）；合并后 staging 的二选一（§12-Q10）必须在任何 `tasks_enabled=true` 的部署之前裁定；`tasks-realdb` 在 `main` 跑过之后由 owner 追加进必需检查（门 17 ③）；合并前按 `main` 届时的最大迁移前缀复核本 PR 的迁移名仍排最后，否则改名、PR-3b 分支随之改名（PR 正文「合并前须知」） |
-| 3 | PR-3b | 复闸条目的修复与核对完成之前不发布；以 PR-3a 分支为基、重建为单提交（父提交为 #6266 的 head）后发布；与 PR-3c 在六个回调上的冲突按 PR-3c 设计 §10 的唯一非机械一步处理；无 DDL；三个开关的 staging 输入另需 runner 改动（§13-Q8） |
+| 3 | #6281 PR-3b | 以 PR-3a 分支为基的单提交（父提交为 #6266 的 head）；与 PR-3c 在六个回调上的冲突按 PR-3c 设计 §10 的唯一非机械一步处理；无 DDL；三个开关的 staging 输入另需 runner 改动（§13-Q8） |
 | 4 | #6269 PR-3c | 叠在 #6266 上；合并时在包含 PR-3b 的 head 上重跑 R01 (iii)（`M2\|` 27 行、`M3\|` 2 行）；门 26 后端格与 FE-c 前端格同行 |
 | 5 | #6265 M4 前端 | 在 PR-3a 之后；FE-c 已推入；必需 web lane 与 `plugin-tests` 的 `.tokens` 守卫在 CI 上跑过；真机与 PR-3c 后端的联调仍 NOT RUN |
 | — | #6249 任务 E | M5 纯函数，只建新文件；合并归 M5 的点名；任务 D 下次 rebase 时把 `addCivilDays` 改为 import |
@@ -330,7 +330,7 @@ M4 退出条件（锁 R01 增补的 §11 M4 行）：① 两条既有 `M4|` 行�
 - 任务 D（#6186，`630e85ead8`）：`claude/tasks-d-pure:docs/development/task-d-m4-pure-functions-design-20260930.md` / `-verification-20260930.md`
 - 锁 R01 增补（#6248，`69a7c08f8f`）：`claude/tasks-lock-r01:docs/development/task-feature-design-lock-20260917.md`（相对 `main` 只改抬头、§11、§12）
 - M4 PR-3a（#6266，`68e40323bd`）：`claude/tasks-m4-pr3a:docs/development/task-m4-pr3a-backend-design-20260930.md` / `-verification-20260930.md`
-- M4 PR-3b（本地 `38011e4eaf`，绿线 head `36c8b01e0f`）：`claude/tasks-m4-pr3b:docs/development/task-m4-pr3b-backend-design-20261001.md` / `-verification-20261001.md`
+- M4 PR-3b（#6281，`2974ba5363`，绿线 head `4837f1ffdd`）：`claude/tasks-m4-pr3b:docs/development/task-m4-pr3b-backend-design-20261001.md` / `-verification-20261001.md`
 - M4 PR-3c（#6269，`3edd133ae0`）：`claude/tasks-m4-pr3c:docs/development/task-m4-pr3c-backend-design-20261008.md` / `-verification-20261008.md`
 - M4 前端（#6265，`5e73a6b8f3`）：`claude/tasks-m4-frontend:docs/development/task-m4-frontend-design-20261007.md` / `-verification-20261007.md`
 - 任务 E（#6249，`d6c84264ff`）：`claude/tasks-e-pure:docs/development/task-e-m5-pure-functions-design-20261007.md` / `-verification-20261007.md`
