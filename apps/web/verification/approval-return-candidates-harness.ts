@@ -19,34 +19,54 @@
 // real node, and a cc join is a pass-through for the server's trail walker
 // (`ApprovalGraphExecutor.listVisitedApprovalNodeKeysUntil`), which lets only approval nodes join
 // the trail and jumps the fork straight to its join. So for a cursor at approval_2 the server's own
-// legal set is exactly [approval_1], and the `server-list` fixture is what a real server sends.
+// legal set is exactly [approval_1]. Every node names the person who acts there — approval_1 部门经理,
+// approval_p1 法务专员, approval_3 总经理, and the viewer at handler_1, approval_p2 and approval_2 — so
+// the seats, the history actors and the graph agree.
 //
-// HISTORY, newest-first (the order `GET /api/approvals/:id/history` serves): created @start,
-// approve @approval_1, cc @cc_1, handle @handler_1, approve @approval_p1 (joinMode 'any', so that
-// branch alone joined the region), approve @approval_2, and a 退回 @approval_3 back to approval_2 —
-// the cursor, which is why history still holds approval_3, downstream of it. The client mirror must
-// therefore drop cc_1 / handler_1 (not approval nodes), approval_p1 (inside the parallel region),
+// EVERY FIXTURE IS A STATE THE SERVER CAN BE IN, in the shape the wire carries:
+//   * the detail read (`GET /api/approvals/:id`, ApprovalBridgeService.getApproval) ships
+//     `currentNodeType` — the frozen graph's type at the stored cursor, which is THIS graph's type
+//     there, since the graph is the pinned version — plus `canDecideCurrentNode` /
+//     `canAttachProcessEvidence` (both `true`: a template-runtime instance and a seat at a decidable
+//     node; the uploader stays off because the attachment pipeline is off below) and, from #6293
+//     on, `returnableNodeKeys`; never `currentNodeKeys`. An action response
+//     (ApprovalProductService.getApproval) ships `currentNodeKeys` and never `currentNodeType`;
+//   * `/history` rows carry only the whitelisted metadata keys (routes/approval-history.ts selects
+//     five single-key paths). Of those, this story writes just `nodeKey`: `targetNodeKey`,
+//     `nextNodeKey`, `targetType`, `handlerMode`, … never reach a client. Rows the server writes in
+//     ONE transaction share `occurred_at` (`DEFAULT now()`) and `ORDER BY occurred_at DESC` has no
+//     tiebreak, so the order among them below is one order the server may serve (newest insert
+//     first). The view keeps the order it is given.
+//
+// THE MAIN HISTORY (cursor approval_2), newest first: a 退回 @approval_3 back to approval_2; approve
+// @approval_2; the region's any-mode join in one transaction — cc @join_1, the system `sign`
+// @approval_p1 that cancelled the viewer's approval_p2 seat, approve @approval_p1; handle
+// @handler_1; cc @cc_1 and approve @approval_1 in one transaction; created @start. The client mirror
+// must drop cc_1 / join_1 / handler_1 (not approval nodes), approval_p1 (inside the parallel region),
 // approval_3 (not upstream of the cursor) and approval_2 (the cursor) and keep only approval_1.
 //
 // `?scenario=` (required; an unknown or missing value throws instead of falling back):
-//   server-list    — the DTO carries `returnableNodeKeys: ['approval_1']` (detail-read shape:
-//                    `currentNodeType: 'approval'`, the viewer's seat on approval_2).
-//   server-empty   — server-list with `returnableNodeKeys: []`.
-//   client-mirror  — server-list with the field DELETED (an older server): the mirror decides.
-//   handler-cursor — client-mirror with `currentNodeType: 'handler'` and nothing else changed, so the
-//                    DTO's own type is the only thing that differs from client-mirror.
-//   parallel-state — client-mirror in the ACTION-RESPONSE shape: cursor at the fork `parallel_1`,
-//                    `currentNodeKeys: ['approval_p1', 'approval_p2']`, no `currentNodeType`, the
-//                    viewer's seat on approval_p1.
-//   submit         — server-list, with ONLY the store's `executeAction` wrapped: every request is
-//                    recorded on `window.__RC_ACTION_REQUESTS__` and resolved with the displayed
-//                    instance. No HTTP, and the original action is never called.
-// `&template=drifted` (with server-list or client-mirror): the template has moved on to a LATER
-// version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned version is loaded — what an
-// ordinary member has once the template is edited (the version endpoint is admin-gated). The view
-// then has no graph of its own: the server's list still decides, and without it the legacy
-// unfiltered list comes back. This pair is what makes a NON-empty server list discriminating: with
-// the graph in place the mirror happens to compute the same [approval_1].
+//   server-list      — detail read: cursor approval_2, the viewer's seat there, the main history,
+//                      `returnableNodeKeys: ['approval_1']` (what the walker yields here).
+//   server-empty     — server-list with `returnableNodeKeys: []`.
+//   client-mirror    — server-list with the field DELETED (a server before #6293): the mirror decides.
+//   handler-cursor   — older-server detail read with the cursor AT handler_1 (so `currentNodeType:
+//                      'handler'` and this graph agree) and the viewer's seat there; history is the
+//                      first pass up to cc @cc_1, which already holds approval_1 — upstream, visited,
+//                      so the mirror would offer it if the handler gate did not hide 退回.
+//   parallel-state   — older-server ACTION RESPONSE right after the viewer handled handler_1: cursor
+//                      at the fork `parallel_1`, `currentNodeKeys: ['approval_p1', 'approval_p2']`,
+//                      no `currentNodeType`, seats for 法务专员 on approval_p1 and the viewer on
+//                      approval_p2; history is the first pass up to handle @handler_1.
+//   submit           — server-list, with ONLY the store's `executeAction` wrapped: every request is
+//                      recorded on `window.__RC_ACTION_REQUESTS__` and resolved with the displayed
+//                      instance. No HTTP, and the original action is never called.
+// `&template=drifted` (with server-list, client-mirror or handler-cursor): the template has moved on
+// to a LATER version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned version is loaded —
+// what an ordinary member has once the template is edited (the version endpoint is admin-gated).
+// The view then has no graph of its own: the server's list still decides; without it the legacy
+// unfiltered list comes back; and at a handler cursor the DTO's own `currentNodeType` is the only
+// thing left that says "handler".
 //
 // `window.__RC_READY__` turns true once the fixture is in place; a harness failure sets
 // `window.__RC_ERROR__` instead, so the paired spec (approval-return-candidates.spec.ts) fails with
@@ -89,39 +109,54 @@ const SCENARIOS = [
   'submit',
 ] as const
 type Scenario = (typeof SCENARIOS)[number]
+const DRIFTABLE: readonly Scenario[] = ['server-list', 'client-mirror', 'handler-cursor']
 
 const INSTANCE_ID = 'apv_5'
 const TEMPLATE_ID = 'tpl_1'
 const PINNED_VERSION_ID = 'ver_1_1'
 const LATER_VERSION_ID = 'ver_1_2'
-const VIEWER_ID = 'user_current'
 
-function approvalNode(key: string, name: string): ApprovalNode {
+type Person = { id: string; name: string }
+const VIEWER: Person = { id: 'user_current', name: '当前审批人' }
+/** The dev-mode instance's requester (`mockApproval`). */
+const REQUESTER: Person = { id: 'user_1', name: '张三' }
+const MANAGER: Person = { id: 'user_manager', name: '部门经理' }
+const LEGAL: Person = { id: 'user_legal', name: '法务专员' }
+const GM: Person = { id: 'user_gm', name: '总经理' }
+/** The engine's own actor for cc and aggregate-cancel `sign` rows (`insertCcEvents`). */
+const SYSTEM: Person = { id: 'system', name: 'System' }
+
+function approvalNode(key: string, name: string, assignee: Person): ApprovalNode {
   return {
     key,
     type: 'approval',
     name,
-    config: { assigneeType: 'user', assigneeIds: [VIEWER_ID], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+    config: { assigneeType: 'user', assigneeIds: [assignee.id], approvalMode: 'single', emptyAssigneePolicy: 'error' },
   }
 }
 
 const RETURN_GATE_GRAPH: ApprovalGraph = {
   nodes: [
     { key: 'start', type: 'start', name: '提交申请', config: {} },
-    approvalNode('approval_1', '部门经理初审'),
+    approvalNode('approval_1', '部门经理初审', MANAGER),
     { key: 'cc_1', type: 'cc', name: '抄送人事', config: { targetType: 'user', targetIds: ['user_hr'] } },
-    { key: 'handler_1', type: 'handler', name: '资料补正办理', config: { assigneeSources: [] } },
+    {
+      key: 'handler_1',
+      type: 'handler',
+      name: '资料补正办理',
+      config: { assigneeSources: [{ kind: 'static_user', userIds: [VIEWER.id] }] },
+    },
     {
       key: 'parallel_1',
       type: 'parallel',
       name: '并行会签',
       config: { branches: ['edge_p1', 'edge_p2'], joinMode: 'any', joinNodeKey: 'join_1' },
     },
-    approvalNode('approval_p1', '法务会签'),
-    approvalNode('approval_p2', '合规会签'),
+    approvalNode('approval_p1', '法务会签', LEGAL),
+    approvalNode('approval_p2', '合规会签', VIEWER),
     { key: 'join_1', type: 'cc', name: '会签结果抄送', config: { targetType: 'user', targetIds: ['user_hr'] } },
-    approvalNode('approval_2', '财务复核'),
-    approvalNode('approval_3', '总经理终审'),
+    approvalNode('approval_2', '财务复核', VIEWER),
+    approvalNode('approval_3', '总经理终审', GM),
     { key: 'end', type: 'end', name: '流程结束', config: {} },
   ],
   edges: [
@@ -145,13 +180,17 @@ function hoursIn(hours: number): string {
   return new Date(STORY_START + hours * 3_600_000).toISOString()
 }
 
+/**
+ * One `/history` row as the platform wire serves it: `metadata` holds `nodeKey`, the only
+ * whitelisted key this story writes.
+ */
 function historyRow(
   id: string,
   action: string,
-  actor: { id: string; name: string },
+  actor: Person,
   comment: string | null,
   hours: number,
-  metadata: Record<string, unknown>,
+  nodeKey: string,
 ): UnifiedApprovalHistoryDTO {
   return {
     id,
@@ -162,33 +201,43 @@ function historyRow(
     fromStatus: action === 'created' ? null : 'pending',
     toStatus: 'pending',
     occurredAt: hoursIn(hours),
-    metadata,
+    metadata: { nodeKey },
   }
 }
 
-// Newest first, as `/history` serves it (`ORDER BY occurred_at DESC`).
-const HISTORY: UnifiedApprovalHistoryDTO[] = [
-  historyRow('rc_hist_7', 'return', { id: 'user_gm', name: '总经理' }, '请财务重新核对金额', 30, {
-    nodeKey: 'approval_3',
-    targetNodeKey: 'approval_2',
-  }),
-  historyRow('rc_hist_6', 'approve', { id: VIEWER_ID, name: '当前审批人' }, '金额无误', 26, { nodeKey: 'approval_2' }),
-  historyRow('rc_hist_5', 'approve', { id: 'user_legal', name: '法务专员' }, '条款无异议', 20, { nodeKey: 'approval_p1' }),
-  historyRow('rc_hist_4', 'handle', { id: 'user_clerk', name: '行政专员' }, '资料已补正', 12, { nodeKey: 'handler_1' }),
-  historyRow('rc_hist_3', 'cc', { id: 'system', name: 'System' }, null, 4, { nodeKey: 'cc_1' }),
-  historyRow('rc_hist_2', 'approve', { id: 'user_manager', name: '部门经理' }, '同意', 3, { nodeKey: 'approval_1' }),
-  historyRow('rc_hist_1', 'created', { id: 'user_1', name: '张三' }, null, 0, { nodeKey: 'start' }),
-]
+// The first pass, oldest rows; every history below ends with (newest-first) a suffix of these.
+const CREATED = historyRow('rc_hist_created', 'created', REQUESTER, null, 0, 'start')
+const APPROVE_1 = historyRow('rc_hist_approve_1', 'approve', MANAGER, '同意', 3, 'approval_1')
+const CC_1 = historyRow('rc_hist_cc_1', 'cc', SYSTEM, null, 3, 'cc_1')
+const HANDLE_1 = historyRow('rc_hist_handle_1', 'handle', VIEWER, '资料已补正', 12, 'handler_1')
 
-function viewerSeat(nodeKey: string): ApprovalAssignmentDTO {
+// Newest first, as `/history` serves it (`ORDER BY occurred_at DESC`); see the header for ties.
+const MAIN_HISTORY: UnifiedApprovalHistoryDTO[] = [
+  historyRow('rc_hist_return_3', 'return', GM, '请财务重新核对金额', 30, 'approval_3'),
+  historyRow('rc_hist_approve_2', 'approve', VIEWER, '金额无误', 26, 'approval_2'),
+  historyRow('rc_hist_cc_join', 'cc', SYSTEM, null, 20, 'join_1'),
+  historyRow('rc_hist_sign_p1', 'sign', SYSTEM, null, 20, 'approval_p1'),
+  historyRow('rc_hist_approve_p1', 'approve', LEGAL, '条款无异议', 20, 'approval_p1'),
+  HANDLE_1,
+  CC_1,
+  APPROVE_1,
+  CREATED,
+]
+/** Cursor at handler_1: approval_1 decided, the flow passed cc_1 in the same transaction. */
+const HANDLER_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [CC_1, APPROVE_1, CREATED]
+/** Cursor at the fork: the viewer's handle at handler_1 opened both branches. */
+const PARALLEL_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [HANDLE_1, CC_1, APPROVE_1, CREATED]
+
+/** An ordinary seat as the detail read lists it (`metadata` is the row's own, `{}` here). */
+function seat(person: Person, nodeKey: string): ApprovalAssignmentDTO {
   return {
-    id: `rc_seat_${nodeKey}`,
+    id: `rc_seat_${nodeKey}_${person.id}`,
     type: 'user',
-    assigneeId: VIEWER_ID,
+    assigneeId: person.id,
     sourceStep: 3,
     nodeKey,
     isActive: true,
-    metadata: { assigneeName: '当前审批人' },
+    metadata: {},
   }
 }
 
@@ -200,8 +249,13 @@ function parseScenario(raw: string | null): Scenario {
   return scenario
 }
 
-function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): UnifiedApprovalDTO {
-  const serverList: UnifiedApprovalDTO = {
+interface Fixture {
+  approval: UnifiedApprovalDTO
+  history: UnifiedApprovalHistoryDTO[]
+}
+
+function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): Fixture {
+  const detailRead: UnifiedApprovalDTO = {
     ...loaded,
     status: 'pending',
     currentStep: 3,
@@ -215,31 +269,41 @@ function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): UnifiedAppr
       allowReturn: true,
       commentRequired: 'reject_only',
     },
-    assignments: [viewerSeat('approval_2')],
+    assignments: [seat(VIEWER, 'approval_2')],
+    canDecideCurrentNode: true,
+    canAttachProcessEvidence: true,
     returnableNodeKeys: ['approval_1'],
   }
-  const clientMirror: UnifiedApprovalDTO = { ...serverList }
-  delete clientMirror.returnableNodeKeys
+  const olderServer: UnifiedApprovalDTO = { ...detailRead }
+  delete olderServer.returnableNodeKeys
 
   switch (scenario) {
     case 'server-list':
     case 'submit':
-      return serverList
+      return { approval: detailRead, history: MAIN_HISTORY }
     case 'server-empty':
-      return { ...serverList, returnableNodeKeys: [] }
+      return { approval: { ...detailRead, returnableNodeKeys: [] }, history: MAIN_HISTORY }
     case 'client-mirror':
-      return clientMirror
+      return { approval: olderServer, history: MAIN_HISTORY }
     case 'handler-cursor':
-      return { ...clientMirror, currentNodeType: 'handler' }
+      return {
+        approval: {
+          ...olderServer,
+          currentNodeKey: 'handler_1',
+          currentNodeType: 'handler',
+          assignments: [seat(VIEWER, 'handler_1')],
+        },
+        history: HANDLER_FIRST_PASS,
+      }
     case 'parallel-state': {
       const actionResponse: UnifiedApprovalDTO = {
-        ...clientMirror,
+        ...olderServer,
         currentNodeKey: 'parallel_1',
         currentNodeKeys: ['approval_p1', 'approval_p2'],
-        assignments: [viewerSeat('approval_p1')],
+        assignments: [seat(LEGAL, 'approval_p1'), seat(VIEWER, 'approval_p2')],
       }
       delete actionResponse.currentNodeType
-      return actionResponse
+      return { approval: actionResponse, history: PARALLEL_FIRST_PASS }
     }
   }
 }
@@ -261,8 +325,8 @@ async function main(): Promise<void> {
     throw new Error(`return-candidates harness: unknown &template=${templateMode}`)
   }
   const drifted = templateMode === 'drifted'
-  if (drifted && scenario !== 'server-list' && scenario !== 'client-mirror') {
-    throw new Error('return-candidates harness: &template=drifted pairs only with server-list or client-mirror')
+  if (drifted && !DRIFTABLE.includes(scenario)) {
+    throw new Error(`return-candidates harness: &template=drifted pairs only with ${DRIFTABLE.join(', ')}`)
   }
 
   // Same session/locale setup as the member-action harness: the spec asserts the shipped zh-CN
@@ -278,7 +342,7 @@ async function main(): Promise<void> {
   useAuth().primeSession({
     data: {
       user: {
-        id: VIEWER_ID,
+        id: VIEWER.id,
         roles: ['admin'],
         permissions: ['approvals:read', 'approvals:act'],
       },
@@ -343,8 +407,9 @@ async function main(): Promise<void> {
         approvalGraph: RETURN_GATE_GRAPH,
         runtimeGraph: { ...RETURN_GATE_GRAPH, policy: { allowRevoke: true } },
       }
-  store.history = HISTORY
-  store.activeApproval = fixtureFor(scenario, loaded)
+  const fixture = fixtureFor(scenario, loaded)
+  store.history = fixture.history
+  store.activeApproval = fixture.approval
 
   if (scenario === 'submit') {
     window.__RC_ACTION_REQUESTS__ = []

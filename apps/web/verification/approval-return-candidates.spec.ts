@@ -10,25 +10,31 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //
 // Graph (identity-consistent with the instance: template tpl_1, latestVersionId = pinned ver_1_1):
 //   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ join_1 → approval_2 → approval_3 → end
-// History holds approval_1, cc_1, handler_1, approval_p1, approval_2 and approval_3 (a 退回 from
-// approval_3 back to approval_2), so every exclusion rule has a visited key to drop.
+// Every fixture is a state the server can be in, in the wire's shape (see the harness header): the
+// main history holds approval_1, cc_1, handler_1, approval_p1, join_1, approval_2 and approval_3
+// (a 退回 from approval_3 back to approval_2), so every exclusion rule has a visited key to drop;
+// the handler and parallel scenarios carry the first pass that leads to their cursor.
 //
-//   scenario (harness)               | expectation                                | production rule pinned
-//   ---------------------------------|--------------------------------------------|---------------------------------------------
-//   server-list                      | 退回 shown; options exactly [approval_1]    | the DTO's `returnableNodeKeys` is the list
-//   server-empty                     | no 退回 button                              | `[]` hides 退回 although the mirror would offer one
-//   client-mirror                    | 退回 shown; options exactly [approval_1]    | no server field → mirror: own graph, approval
-//                                    |                                            | nodes only, outside parallel regions, upstream
-//                                    |                                            | of the cursor, cursor itself excluded
-//   handler-cursor                   | no 退回 button                              | `currentNodeType: 'handler'` alone hides 退回
-//   parallel-state                   | no 退回 button                              | a parallel frontier / fork cursor hides 退回
-//   submit                           | request {action:'return',                  | the chosen option's KEY is what is sent
-//                                    |   targetNodeKey:'approval_1'}              |
-//   server-list & template=drifted   | options exactly [approval_1]               | the server list decides even with no own graph
-//   client-mirror & template=drifted | the legacy unfiltered list, /history order | no own graph (drift) → the pre-filter list
+//   scenario (harness)                | expectation                                | production rule pinned
+//   ----------------------------------|--------------------------------------------|---------------------------------------------
+//   server-list                       | 退回 shown; options exactly [approval_1]    | the DTO's `returnableNodeKeys` is the list
+//   server-empty                      | no 退回 button                              | `[]` hides 退回 although the mirror would offer one
+//   client-mirror                     | 退回 shown; options exactly [approval_1]    | no server field → mirror: own graph, approval
+//                                     |                                            | nodes only, outside parallel regions, upstream
+//                                     |                                            | of the cursor, cursor itself excluded
+//   handler-cursor                    | no 退回 button                              | a cursor AT a handler node hides 退回 (DTO type
+//                                     |                                            | and own graph agree; history holds approval_1)
+//   parallel-state                    | no 退回 button                              | a parallel frontier / fork cursor hides 退回
+//   submit                            | request {action:'return',                  | the chosen option's KEY is what is sent
+//                                     |   targetNodeKey:'approval_1'}              |
+//   server-list & template=drifted    | options exactly [approval_1]               | the server list decides even with no own graph
+//   client-mirror & template=drifted  | the legacy unfiltered list, /history order | no own graph (drift) → the pre-filter list
+//   handler-cursor & template=drifted | no 退回 button                              | with no own graph, the DTO's `currentNodeType`
+//                                     |                                            | alone hides 退回
 //
-// The two drifted rows are what make a NON-empty server list discriminating: with the graph in place
-// the mirror computes the same [approval_1], so `server-list` alone cannot tell the two paths apart.
+// The drifted server-list row is what makes a NON-empty server list discriminating: with the graph
+// in place the mirror computes the same [approval_1], so `server-list` alone cannot tell the two
+// paths apart.
 //
 // Every scenario first proves the action bar is there (the 转交 button: same `canDecide` /
 // desktop gates as 退回), so a missing 退回 button can only mean an empty candidate list.
@@ -38,9 +44,11 @@ const HARNESS = '/verification/approval-return-candidates-harness.html'
 // Node names of the harness graph. None occurs in the dev-mode template, so a label below also
 // proves the view named its options from the harness graph.
 const APPROVAL_1 = '部门经理初审'
-// No graph of its own: every visited key but the cursor / start / end, in `/history` order
-// (newest first): approval_3, approval_p1, handler_1, cc_1, approval_1.
-const LEGACY_UNFILTERED = ['总经理终审', '法务会签', '资料补正办理', '抄送人事', APPROVAL_1]
+// No graph of its own: every visited key but the cursor / start / end, first occurrence in the
+// order the history was given (newest first): approval_3, join_1, approval_p1, handler_1, cc_1,
+// approval_1. Rows of one server transaction tie on `occurred_at`, so this pins that the view keeps
+// the order it is served, not an order the server guarantees among tied rows.
+const LEGACY_UNFILTERED = ['总经理终审', '会签结果抄送', '法务会签', '资料补正办理', '抄送人事', APPROVAL_1]
 
 async function openHarness(page: Page, query: string): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 960 })
@@ -118,7 +126,7 @@ test('client-mirror: without the server field only approval_1 survives (cc / han
   await expectReturnOptions(page, '?scenario=client-mirror', [APPROVAL_1], 'rc-client-mirror-1440.png')
 })
 
-test('handler-cursor: currentNodeType handler alone hides 退回 (client-mirror otherwise unchanged)', async ({ page }) => {
+test('handler-cursor: a cursor at handler_1 hides 退回 although history holds the upstream approval_1', async ({ page }) => {
   await expectNoReturnButton(page, '?scenario=handler-cursor')
 })
 
@@ -154,4 +162,8 @@ test('template drifted: the server list still decides — exactly approval_1, wh
 
 test('template drifted, no server field: the legacy unfiltered list comes back in /history order', async ({ page }) => {
   await expectReturnOptions(page, '?scenario=client-mirror&template=drifted', LEGACY_UNFILTERED, 'rc-drifted-legacy-1440.png')
+})
+
+test('template drifted, handler cursor: with no own graph the DTO\'s currentNodeType alone hides 退回', async ({ page }) => {
+  await expectNoReturnButton(page, '?scenario=handler-cursor&template=drifted')
 })
