@@ -54,7 +54,7 @@ permissions:
 jobs:
   recovery-schema-drift:
     name: recovery-schema-drift
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MS2_RECOVERY_DB_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 25
     services:
       postgres:

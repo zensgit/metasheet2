@@ -40,7 +40,7 @@ permissions:
 jobs:
   contract:
     name: ssh host-key pin contract (fail-closed known_hosts)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
