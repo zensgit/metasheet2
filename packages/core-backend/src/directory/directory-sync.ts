@@ -2450,7 +2450,9 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
-  )
+  ).catch((error: unknown) => {
+    throw uniqueViolationAsConflict(error)
+  })
 
   return summarizeIntegration(result.rows[0])
 }
@@ -2774,7 +2776,9 @@ export async function updateDirectoryIntegration(
       scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
-  )
+  ).catch((error: unknown) => {
+    throw uniqueViolationAsConflict(error)
+  })
 
   return summarizeIntegration(result.rows[0])
 }
@@ -3719,6 +3723,21 @@ export class DirectorySyncLeaseLostError extends Error {
 
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
+}
+
+/**
+ * A unique_violation from the directory_integrations INSERT / UPDATE is the caller colliding with an existing
+ * row, not a system fault: answer it as a DirectoryConflictError whose sentence names the rule that fired and
+ * never carries the driver text. Anything else is returned unchanged.
+ */
+function uniqueViolationAsConflict(error: unknown): unknown {
+  if (!isUniqueViolation(error)) return error
+  const constraint = (error as { constraint?: unknown }).constraint
+  return new DirectoryConflictError(
+    constraint === 'one_active_local_integration_per_org'
+      ? 'This organization already has an active local directory integration'
+      : 'A directory integration with this name already exists for this provider',
+  )
 }
 
 /**

@@ -10,7 +10,7 @@
  *   - Untyped failure at every clause: the awaited service rejects with `Error('MARKER_x7q_<n>')`. A 5xx answer
  *     carries the route's own code and its FIXED sentence; neither the body nor any header contains the marker;
  *     where the route logs, the marker reached logger.warn (the text moved to the log, it did not vanish). The
- *     five literal-400 provider-diagnostic sites are 4xx, outside that rule: they are pinned as they are (400,
+ *     five literal-400 echo sites (provider, transport or database-driver text) are 4xx, outside that rule: they are pinned as they are (400,
  *     the route's code, the caught text), so changing them is a visible decision.
  *   - The three typed directory-sync errors through every sendDirectoryFailure site: 400 / 404 / 409 with the
  *     typed sentence and the route's code; the specific branches in front of the helper still win; a batch
@@ -148,7 +148,7 @@ type Outcome =
   | { kind: 'helper'; code: string; fallback: string }
   /** A fixed 5xx sentence written in the handler itself. */
   | { kind: 'fixed'; status: number; code: string; message: string; logged: boolean }
-  /** A literal-400 provider-diagnostic site left as it is: it still echoes (4xx, outside the 5xx rule). */
+  /** A literal-400 echo site (provider, transport or database-driver text) left as it is: it still echoes (4xx, outside the 5xx rule). */
   | { kind: 'echo400'; code: string }
 interface Site {
   /** `VERB /path` of the router registration, or `fn:<name>` of the request helper, enclosing the clause. */
@@ -645,7 +645,7 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(calls).toEqual(listed)
   })
 
-  it('the five literal-400 provider-diagnostic sites are the only echo sites left', () => {
+  it('the five literal-400 echo sites (provider, transport or database-driver text) are the only echo sites left', () => {
     expect(ECHO_400_SITES.map((s) => s.outcome.kind === 'echo400' && s.outcome.code)).toEqual([
       'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
       'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED',
@@ -719,7 +719,7 @@ describe('an untyped failure at every catch clause answers a fixed 5xx sentence 
   }
 })
 
-describe('the five literal-400 provider-diagnostic sites still echo (4xx, outside the 5xx rule) — pinned so a change is visible', () => {
+describe('the five literal-400 echo sites (provider, transport or database-driver text) still echo (4xx, outside the 5xx rule) — pinned so a change is visible', () => {
   for (const site of ECHO_400_SITES) {
     const outcome = site.outcome
     if (outcome.kind !== 'echo400') continue
