@@ -509,7 +509,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
     // S1 (ADR adr-stock-prep-project-sheets-20261008 §3): the PROJECT-SHEET OVERLAY MARKER. Set only
-    // by the registry's `applyProjectTarget` below, never by a deploy-time config, and spread
+    // by the registry's `applyProjectTarget` below — the registry's config drain STRIPS the key from
+    // deploy-time config (`withoutDeployTimeProjectTargetMarker`, R4), so this spread only ever sees
+    // the marker on a resolved action a route is re-normalizing — and spread
     // CONDITIONALLY for the same reason every block above is: with the project-sheets switch off no
     // lookup ever carries it, so every normalized action — and every snapshot, hash and response
     // built from one — is byte-identical to pre-S1. Routes read it to decide whether the resolved
@@ -839,6 +841,22 @@ function normalizeActionList(actions) {
 }
 
 /**
+ * R4 (S1 fix round 1): the `projectTarget` overlay marker is the REGISTRY's to set (`applyProjectTarget`
+ * below) and nobody else's. `normalizeStockPreparationActionConfig` keeps the key when it is present
+ * because the routes re-normalize a RESOLVED action through it (`assertStockPreparationTargetReady`)
+ * and the marker must survive that trip — which also means a deploy-time config that happened to
+ * carry the key would be normalized with it, and a route would then treat the env target as a
+ * registry-resolved project sheet (the gate's project branch and the tenant wall both key off the
+ * marker). So the config drain strips it: switch on or off, a deployment cannot stamp the marker on
+ * itself. Non-objects pass through untouched so the normalizer still raises its own 422.
+ */
+function withoutDeployTimeProjectTargetMarker(action) {
+  if (!isPlainObject(action) || !('projectTarget' in action)) return action
+  const { projectTarget: _ignored, ...deployTime } = action
+  return deployTime
+}
+
+/**
  * The registry, and THE ONE SEAM THAT MAKES REBINDING A SOURCE A RUNTIME ACT.
  *
  * `actions` is still the deploy-time config, still drained into a Map ONCE at construction (which
@@ -894,16 +912,20 @@ function normalizeActionList(actions) {
 function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding, resolveProjectTarget } = {}) {
   const configs = new Map()
   for (const action of normalizeActionList(actions)) {
-    const normalized = normalizeStockPreparationActionConfig(action)
+    const normalized = normalizeStockPreparationActionConfig(withoutDeployTimeProjectTargetMarker(action))
     configs.set(normalized.actionId, normalized)
   }
   const sourceBindingResolver = typeof resolveSourceBinding === 'function' ? resolveSourceBinding : null
   // S1: the PROJECT-SHEET overlay (ADR §3 「统一接缝」), applied AFTER the source binding. Wired by the
   // route layer only when the registry store exists; the resolver itself reads the switch PER CALL
-  // and answers null while it is off, so a wired resolver with the switch off is byte-identical to no
-  // resolver at all. The same three fail-closed rules the source binding states apply: a throw
-  // propagates (ABSENT / ARCHIVED / PROJECT_NO_REQUIRED are the resolver's own typed refusals), null
-  // means NO OVERRIDE, and a lookup without a tenant is refused rather than skipped.
+  // and answers null while it is off, so for every lookup that carries a tenant a wired resolver
+  // with the switch off answers byte-identically to no resolver at all (T-03 pins it deep-equal).
+  // The one thing that does NOT follow the switch is the tenant-scope rule below: a wired resolver
+  // refuses a tenant-less lookup 500 TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED BEFORE the resolver
+  // (and so the switch) is consulted — the same rule the source binding applies, and every shipped
+  // route lookup carries a tenant. The same three fail-closed rules the source binding states apply:
+  // a throw propagates (ABSENT / ARCHIVED / PROJECT_NO_REQUIRED are the resolver's own typed
+  // refusals), null means NO OVERRIDE, and a lookup without a tenant is refused rather than skipped.
   const projectTargetResolver = typeof resolveProjectTarget === 'function' ? resolveProjectTarget : null
 
   async function applyProjectTarget(action, input) {

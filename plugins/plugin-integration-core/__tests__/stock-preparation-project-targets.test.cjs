@@ -88,14 +88,16 @@ function makeMemoryDb() {
   const rows = []
   const calls = []
   const matches = (row, where) => Object.entries(where).every(([c, v]) => (row[c] === undefined ? null : row[c]) === (v === undefined ? null : v))
-  return {
+  const api = {
     rows,
     calls,
+    async transaction(fn) { calls.push('transaction'); return fn({ ...api, async advisoryXactLock() { calls.push('advisoryXactLock') } }) },
     async selectOne(_t, where) { calls.push('selectOne'); return rows.find((r) => matches(r, where)) || null },
     async select(_t, { where } = {}) { calls.push('select'); return rows.filter((r) => matches(r, where || {})) },
     async insertOne(_t, row) { calls.push('insertOne'); const s = { archived_at: null, ...row }; rows.push(s); return [s] },
     async countRows(_t, where) { calls.push('countRows'); return rows.filter((r) => matches(r, where || {})).length },
   }
+  return api
 }
 
 function makeStore(db = makeMemoryDb()) {
@@ -310,6 +312,33 @@ test('T-04 switch ON: active overlays, archived splits by purpose, absent / miss
     resolveProjectTargetForAction({ store: null, provisioning, projectId: PROJECT_ID, tenantId: TENANT, projectNo: PROJECT, targetPurpose: 'write', env: ON }),
     StockPreparationProjectTargetError, 501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE',
   )
+})
+
+// ── T-08 (R4): the overlay marker is the registry's alone ───────────────────────────────────────
+
+test('T-08 (R4) a deploy-time config carrying `projectTarget` is drained WITHOUT it; only the registry stamps the marker', async () => {
+  const marker = { projectNo: PROJECT, status: 'active', deploymentTargetObjectId: ENV_OBJECT }
+  const stamped = { ...envAction(), projectTarget: marker }
+  const bare = createStockPreparationTableActionRegistry({ actions: [envAction()] })
+  const fromStamped = createStockPreparationTableActionRegistry({ actions: [stamped] })
+  for (const input of LOOKUP_SHAPES) {
+    const actual = await fromStamped.getTableAction({ ...input, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+    assert.ok(!('projectTarget' in actual), `no marker from deploy-time config for ${JSON.stringify(input)}`)
+    assert.deepEqual(actual, await bare.getTableAction({ ...input, actionId: PLM_STOCK_PREPARATION_ACTION_ID }))
+  }
+  assert.deepEqual(await fromStamped.listTableActions(), await bare.listTableActions())
+  // The strip is on the CONFIG DRAIN, not on the normalizer: a resolved action a route re-normalizes
+  // keeps the marker the registry stamped...
+  const { store } = makeStore()
+  await store.create({ tenantId: TENANT, projectNo: PROJECT, sheetId: 'sheet_p1', objectId: deriveProjectSheetObjectId(TENANT, PROJECT) })
+  const wired = createStockPreparationTableActionRegistry({ actions: [stamped], resolveProjectTarget: resolverFor({ store, provisioning: makeProvisioning(), env: ON }) })
+  const resolved = await wired.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID, tenantId: TENANT, projectNo: PROJECT })
+  assert.deepEqual(resolved.projectTarget, marker)
+  assert.deepEqual(assertStockPreparationTargetReady(resolved).projectTarget, marker)
+  // ...while a readiness lookup on the same stamped config, switch on, still carries none.
+  const readiness = await wired.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID, tenantId: TENANT, projectNo: PROJECT, targetPurpose: 'readiness' })
+  assert.ok(!('projectTarget' in readiness))
+  assert.equal(readiness.target.sheetId, ENV_SHEET)
 })
 
 // ── T-05: the write gate ─────────────────────────────────────────────────────────────────────────

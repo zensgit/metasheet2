@@ -366,7 +366,11 @@ function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived
 async function resolveBoundActionTarget({ tableActions, tenantId, actionId }) {
   if (!tableActions || typeof tableActions.getTableAction !== 'function' || !actionId) return null
   try {
-    const action = await tableActions.getTableAction({ tenantId, actionId })
+    // S1 / R2: this is the deployment's ENV binding probe (the carry target the preflight reports on),
+    // not a per-project lookup, so it declares the readiness purpose the large-BOM job routes declare:
+    // the project-sheet overlay skips it, and with the switch on it no longer throws
+    // PROJECT_NO_REQUIRED (which the catch below would have swallowed into `configured: false`).
+    const action = await tableActions.getTableAction({ tenantId, actionId, targetPurpose: 'readiness' })
     const target = action && action.target
     return isPlainObject(target) ? target : null
   } catch (error) {
@@ -483,26 +487,30 @@ async function computeStockPreparationPreflight({
   const checks = {}
 
   // ---- 0. 一个项目一张备料表 (S1) — INFORMATIONAL, NEVER A BLOCKER --------------------------------
-  // The switch state, how many project sheets this tenant has registered (archived INCLUDED, the
-  // same count the 200-row cap reads), and how many G1 roles are configured. Values-free: a
-  // boolean, two integers and env KEY names. Off is the correct posture of a release that ships S1
-  // with the switch closed (ADR §8), so there is nothing to fix and no `fix` line.
-  let registeredCount = null
-  if (projectTargetStore && typeof projectTargetStore.count === 'function' && tenantId) {
-    try {
-      registeredCount = await projectTargetStore.count({ tenantId })
-    } catch (error) {
-      registeredCount = null
+  // How many project sheets this tenant has registered (archived INCLUDED, the same count the
+  // 200-row cap reads) and how many G1 roles are configured. Values-free: a boolean, two integers
+  // and env KEY names. EMITTED ONLY WHILE THE SWITCH IS ON (R3): ADR §3 promises the switch-off
+  // response is byte-identical to pre-S1, so with the switch off there is no `projectSheets` key
+  // and the registry is not even counted. Off is the correct posture of a release that ships S1
+  // with the switch closed (ADR §8), so there is nothing to fix and no `fix` line either way.
+  if (stockPreparationProjectSheetsEnabled(env)) {
+    let registeredCount = null
+    if (projectTargetStore && typeof projectTargetStore.count === 'function' && tenantId) {
+      try {
+        registeredCount = await projectTargetStore.count({ tenantId })
+      } catch (error) {
+        registeredCount = null
+      }
     }
+    checks.projectSheets = Object.freeze({
+      enabled: true,
+      switchEnv: PROJECT_SHEETS_ENABLED_ENV,
+      grantRolesEnv: PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+      grantRoleCount: resolveProjectSheetGrantRoleIds(env).length,
+      registeredCount,
+      registeredLimit: MAX_PROJECT_TARGETS_PER_TENANT,
+    })
   }
-  checks.projectSheets = Object.freeze({
-    enabled: stockPreparationProjectSheetsEnabled(env),
-    switchEnv: PROJECT_SHEETS_ENABLED_ENV,
-    grantRolesEnv: PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
-    grantRoleCount: resolveProjectSheetGrantRoleIds(env).length,
-    registeredCount,
-    registeredLimit: MAX_PROJECT_TARGETS_PER_TENANT,
-  })
 
   // ---- 1. the confirmation-decision LEDGER -------------------------------------------------
   // A managed multitable object that the SQL migration chain does not create. Without it the
