@@ -143,6 +143,7 @@ export async function captureLocalManualArchive(input: {
 }
 
 interface ManualRestoreInput {
+  readonly signal?: AbortSignal
   readonly runtime: Pick<Runtime, 'query'>
   readonly identity: Identity
   readonly generationId: string
@@ -156,24 +157,32 @@ interface ManualRestoreInput {
 export async function restoreImportedManualArchiveOverHttp(
   input: ManualRestoreInput, base: string, headers: Record<string, string>,
 ): Promise<string> {
+  const request = (url: string, options: RequestInit): Promise<Response> => {
+    input.signal?.throwIfAborted()
+    return fetch(url, input.signal ? { ...options, signal: input.signal } : options)
+  }
+  const query: RecoveryArchiveRestoreJobQuery = (text, values) => {
+    input.signal?.throwIfAborted()
+    return input.runtime.query(text, values)
+  }
   const route = `${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive`
-  const response = await fetch(`${route}/catalog/${input.generationId}`, { headers })
+  const response = await request(`${route}/catalog/${input.generationId}`, { headers })
   assert.equal(response.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_CATALOG_FAILED')
   const body = await response.json() as { ok?: boolean; data?: { generationId?: string } }
   assert.equal(body.ok, true)
   assert.equal(body.data?.generationId, input.generationId)
 
-  const before = await input.runtime.query(
+  const before = await query(
     `SELECT data, version FROM public.meta_records WHERE id=$1 AND sheet_id=$2`,
     [input.recordId, input.identity.sheetId],
   )
   const capturedData = { [input.fieldId]: 'captured', [input.attachmentFieldId]: [input.attachmentId] }
   assert.deepEqual(before.rows, [{ data: capturedData, version: 1 }])
-  const priorRestores = await input.runtime.query(
+  const priorRestores = await query(
     `SELECT count(*)::int AS count FROM public.meta_record_revisions
       WHERE record_id=$1 AND source='restore'`, [input.recordId],
   )
-  await input.runtime.query(
+  await query(
     `UPDATE public.meta_records
         SET data=jsonb_set(jsonb_set(data, ARRAY[$2::text], to_jsonb('edited'::text)),
                            ARRAY[$3::text], '[]'::jsonb), version=version+1
@@ -182,7 +191,7 @@ export async function restoreImportedManualArchiveOverHttp(
   )
 
   const scope = { kind: 'selected_fields', recordIds: [input.recordId], fieldIds: [input.attachmentFieldId] }
-  const preview = await fetch(`${route}/preview`, {
+  const preview = await request(`${route}/preview`, {
     method: 'POST', headers,
     body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope }),
   })
@@ -207,12 +216,12 @@ export async function restoreImportedManualArchiveOverHttp(
     [input.attachmentFieldId])
   assert.equal(previewBody.data?.summary?.effectiveWriteCount, 1)
   assert.equal(typeof previewBody.data?.previewIdentity, 'string')
-  assert.deepEqual((await input.runtime.query(
+  assert.deepEqual((await query(
     `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
   )).rows, [{ data: { ...capturedData, [input.fieldId]: 'edited', [input.attachmentFieldId]: [] }, version: 2 }])
 
   const executeBody = JSON.stringify({ previewIdentity: previewBody.data!.previewIdentity, scope })
-  const applied = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
+  const applied = await request(`${route}/execute`, { method: 'POST', headers, body: executeBody })
   assert.equal(applied.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_EXECUTE_FAILED')
   const appliedBody = await applied.json() as { ok?: boolean; data?: {
     revertedCount?: number; resurrectedCount?: number; deletedCount?: number
@@ -221,27 +230,27 @@ export async function restoreImportedManualArchiveOverHttp(
   assert.equal(appliedBody.data?.revertedCount, 1)
   assert.equal(appliedBody.data?.resurrectedCount, 0)
   assert.equal(appliedBody.data?.deletedCount, 0)
-  const after = (await input.runtime.query(
+  const after = (await query(
     `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
   )).rows
   assert.deepEqual(after, [{ data: { ...capturedData, [input.fieldId]: 'edited' }, version: 3 }])
-  const restoreCount = await input.runtime.query(
+  const restoreCount = await query(
     `SELECT count(*)::int AS count FROM public.meta_record_revisions
       WHERE record_id=$1 AND source='restore'`, [input.recordId],
   )
   assert.equal((restoreCount.rows[0] as { count?: number } | undefined)?.count,
     Number((priorRestores.rows[0] as { count?: number } | undefined)?.count) + 1)
-  const replay = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
+  const replay = await request(`${route}/execute`, { method: 'POST', headers, body: executeBody })
   assert.equal(replay.status, 409)
-  assert.deepEqual((await input.runtime.query(
+  assert.deepEqual((await query(
     `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
   )).rows, after)
   // Fresh preview after attachment-only apply preserves every scalar delta.
-  assert.deepEqual((await input.runtime.query(
+  assert.deepEqual((await query(
     `SELECT count(*)::int AS count FROM public.meta_records
       WHERE sheet_id=$1 AND data->>$2='edited'`, [input.identity.sheetId, input.fieldId],
   )).rows, [{ count: 5001 }])
-  const asyncPreview = await fetch(`${route}/preview`, { method: 'POST', headers,
+  const asyncPreview = await request(`${route}/preview`, { method: 'POST', headers,
     body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope: { kind: 'whole_sheet' } }) })
   assert.equal(asyncPreview.status, 200)
   const asyncBody = await asyncPreview.json() as typeof previewBody
@@ -251,7 +260,7 @@ export async function restoreImportedManualArchiveOverHttp(
   assert.equal(asyncBody.data?.executionKind, 'async')
   assert.equal(asyncBody.data?.summary?.effectiveWriteCount, 5001)
   assert.equal(typeof asyncBody.data?.previewIdentity, 'string')
-  const accepted = await fetch(`${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive/jobs/accept`, {
+  const accepted = await request(`${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive/jobs/accept`, {
     method: 'POST', headers, body: JSON.stringify({ previewIdentity: asyncBody.data!.previewIdentity }),
   })
   assert.equal(accepted.status, 202)

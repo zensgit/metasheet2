@@ -7,7 +7,7 @@ const recordIds = Array.from({ length: 5001 }, (_, index) => `record-${String(in
 const recordId = recordIds[2500]
 afterEach(() => vi.restoreAllMocks())
 
-function fixture(asyncCount = 5001, executionKind = 'async') {
+function fixture(asyncCount = 5001, executionKind = 'async', abortAtPreview?: AbortController) {
   let edited = false
   let applied = false
   const requests: Array<{ url: string; body: Record<string, unknown> }> = []
@@ -31,6 +31,7 @@ function fixture(asyncCount = 5001, executionKind = 'async') {
     if (target.includes('/catalog/')) return reply({ generationId })
     if (target.endsWith('/preview')) {
       const async = (body.scope as { kind: string }).kind === 'whole_sheet'
+      abortAtPreview?.abort(new Error('synthetic parent loss'))
       return reply({ generationId, executable: true, blockedReason: null,
         executionKind: async ? executionKind : 'sync', previewIdentity: async ? 'async-token' : 'sync-token',
         summary: { effectiveWriteCount: async ? asyncCount : 1, reverts: [{ recordId, fieldIds: ['file'] }] } })
@@ -43,7 +44,7 @@ function fixture(asyncCount = 5001, executionKind = 'async') {
     if (target.endsWith('/jobs/accept')) return reply({ jobId, totalCount: '5001' }, 202)
     throw new Error('unexpected request')
   })
-  return { requests, input: { runtime: { query }, identity: { sheetId: 'sheet', actorId: 'actor' },
+  return { requests, query, input: { runtime: { query }, identity: { sheetId: 'sheet', actorId: 'actor' },
     generationId, recordId, recordIds, fieldId: 'scalar', attachmentFieldId: 'file', attachmentId: 'attachment' } }
 }
 
@@ -69,5 +70,26 @@ describe('same archive LOCAL HTTP verification sequence', () => {
     const f = fixture(5001, 'sync')
     await expect(restoreImportedManualArchiveOverHttp(f.input, 'http://synthetic.test', {})).rejects.toThrow()
     expect(f.requests.some(request => request.url.endsWith('/jobs/accept'))).toBe(false)
+  })
+
+  it('starts no HTTP or SQL work when the parent has already disappeared', async () => {
+    const cancellation = new AbortController()
+    const f = fixture()
+    cancellation.abort(new Error('synthetic parent loss'))
+    await expect(restoreImportedManualArchiveOverHttp({ ...f.input, signal: cancellation.signal },
+      'http://synthetic.test', {})).rejects.toThrow('synthetic parent loss')
+    expect(f.requests).toEqual([])
+    expect(f.query).not.toHaveBeenCalled()
+  })
+
+  it('carries parent cancellation into HTTP and starts no later SQL or execute after preview', async () => {
+    const cancellation = new AbortController()
+    const f = fixture(5001, 'async', cancellation)
+    await expect(restoreImportedManualArchiveOverHttp({ ...f.input, signal: cancellation.signal },
+      'http://synthetic.test', {})).rejects.toThrow('synthetic parent loss')
+    expect(f.requests.map(request => request.url.split('/').at(-1))).toEqual([generationId, 'preview'])
+    expect(f.query).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(fetch).mock.calls.map(([, options]) => options?.signal))
+      .toEqual([cancellation.signal, cancellation.signal])
   })
 })

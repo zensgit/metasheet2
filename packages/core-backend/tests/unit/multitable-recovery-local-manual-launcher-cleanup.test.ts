@@ -25,13 +25,14 @@ function stopLauncher() {
   const source = readFileSync(new URL('../../scripts/verify-recovery-local-manual-target.mts', import.meta.url), 'utf8')
   const parsed = ts.createSourceFile('manual-target.mts', source, ts.ScriptTarget.ESNext, true)
   const functions = parsed.statements.filter((statement): statement is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(statement) && statement.name?.text === 'stopLauncher')
-  expect(functions.length).toBe(1)
-  const program = ts.transpileModule(`${functions[0]!.getText(parsed)}\nstopLauncher`, {
+    ts.isFunctionDeclaration(statement) && ['stopLauncher', 'stopLauncherOnce'].includes(statement.name?.text ?? ''))
+  expect(functions.length).toBe(2)
+  const program = ts.transpileModule(`${functions.map(statement => statement.getText(parsed)).join('\n')}\n;stopLauncher`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None },
   })
   // Run the actual private stop helper with simulated processes and time only.
-  return new Script(program.outputText).runInNewContext({ assert, setTimeout, clearTimeout }) as
+  return new Script(program.outputText).runInNewContext({ assert, setTimeout, clearTimeout,
+    stoppingLaunchers: new WeakMap() }) as
     (child: Launcher, requireGraceful: boolean) => Promise<void>
 }
 

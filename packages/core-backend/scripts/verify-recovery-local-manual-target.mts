@@ -17,6 +17,33 @@ const require = createRequire(import.meta.url)
 const backend = fileURLToPath(new URL('../', import.meta.url))
 const launcher = fileURLToPath(new URL('./start-recovery-local.mts', import.meta.url))
 const rollbackWitness = fileURLToPath(new URL('./verify-recovery-local-rollback.mts', import.meta.url))
+const ownedChildren = new Set<ChildProcess>()
+const stoppingLaunchers = new WeakMap<ChildProcess, Promise<void>>()
+const parentCancellation = new AbortController()
+let activeSecret: Uint8Array | undefined
+let runSettled = false
+
+function assertParentAttached(): void {
+  parentCancellation.signal.throwIfAborted()
+  assert.notEqual(process.connected, false, 'RECOVERY_LOCAL_BACKUP_MANUAL_PARENT_DISCONNECTED')
+}
+
+function registerChild(child: ChildProcess): ChildProcess {
+  ownedChildren.add(child)
+  child.once('exit', () => ownedChildren.delete(child))
+  return child
+}
+
+async function onParentDisconnect(): Promise<void> {
+  if (runSettled || parentCancellation.signal.aborted) return
+  parentCancellation.abort(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_PARENT_DISCONNECTED'))
+  activeSecret?.fill(0)
+  try {
+    await Promise.allSettled([...ownedChildren].map(child => stopLauncher(child, false)))
+  } finally {
+    process.exit(1)
+  }
+}
 
 export interface ManualTargetInput {
   readonly databaseName: string
@@ -47,6 +74,7 @@ async function send(message: { kind: 'manual-target-done'; rollbackTableCount: n
 }
 
 async function run(input: ManualTargetInput): Promise<number> {
+  assertParentAttached()
   assert.equal(process.env.NODE_ENV, 'test')
   assert.equal(process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED, 'true')
   assert.equal(process.env.MULTITABLE_ENABLE_WRITER_FENCE, 'true')
@@ -63,7 +91,10 @@ async function run(input: ManualTargetInput): Promise<number> {
   const { poolManager } = require('../src/integration/db/connection-pool.ts') as typeof import('../src/integration/db/connection-pool')
 
   const pool: Pool = new PgPool({ connectionString: process.env.DATABASE_URL, max: 4, application_name: 'tm_local_manual_target', connectionTimeoutMillis: 1000 })
-  const query: RecoveryArchiveRestoreJobQuery = (text, values) => pool.query(text, values)
+  const query: RecoveryArchiveRestoreJobQuery = (text, values) => {
+    assertParentAttached()
+    return pool.query(text, values)
+  }
   let service: ChildProcess | undefined
   try {
     const identity = await query('SELECT current_database() AS database_name')
@@ -91,7 +122,7 @@ async function run(input: ManualTargetInput): Promise<number> {
     await waitForListener(port)
     const origin = `http://127.0.0.1:${port}`
     const login = await fetch(`${origin}/api/auth/login`, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120_000),
+      method: 'POST', redirect: 'error', signal: AbortSignal.any([parentCancellation.signal, AbortSignal.timeout(120_000)]),
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: `${input.identity.actorId}@example.test`, password: input.password }),
     })
@@ -99,7 +130,7 @@ async function run(input: ManualTargetInput): Promise<number> {
     const loginBody = await login.json() as { data?: { token?: unknown } }
     assert.equal(typeof loginBody.data?.token, 'string')
     const jobId = await restoreImportedManualArchiveOverHttp({
-      runtime: { query }, identity: input.identity,
+      runtime: { query }, identity: input.identity, signal: parentCancellation.signal,
       generationId: input.generationId, recordId: input.recordId, recordIds: input.recordIds,
       fieldId: input.fieldId, attachmentFieldId: input.attachmentFieldId,
       attachmentId: input.attachmentId,
@@ -248,10 +279,12 @@ async function readChunks(query: RecoveryArchiveRestoreJobQuery, jobId: string) 
     Array<{ chunk_index: number; state: string; committed_count: string | null; operation_id: string | null }>
 }
 async function assertOrdinaryWriterBlocked(pool: Pool, input: ManualTargetInput): Promise<void> {
+  assertParentAttached()
   const { fenceWriterEntry, SheetWriterBlockedError } = require('../src/multitable/canonical-sheet-fence.ts') as typeof import('../src/multitable/canonical-sheet-fence')
   const client = await pool.connect()
   let reachedWrite = false
   try {
+    assertParentAttached()
     await client.query('BEGIN')
     await assert.rejects(async () => {
       await fenceWriterEntry((text, values) => client.query(text, values), input.identity.sheetId)
@@ -291,11 +324,12 @@ async function waitForNoListener(port: number): Promise<void> {
 }
 
 function launch(recoveryConfig: string, appConfig: string, targetRoot: string, port: number): ChildProcess {
-  return spawn(process.execPath, ['--import', 'tsx', launcher, recoveryConfig], {
+  assertParentAttached()
+  return registerChild(spawn(process.execPath, ['--import', 'tsx', launcher, recoveryConfig], {
     cwd: backend,
     env: targetEnvironment(appConfig, targetRoot, port),
     stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'ipc'],
-  })
+  }))
 }
 
 function targetEnvironment(appConfig: string, targetRoot: string, port: number): NodeJS.ProcessEnv {
@@ -315,12 +349,13 @@ function targetEnvironment(appConfig: string, targetRoot: string, port: number):
 }
 
 async function probeFlagOff(input: ManualRollbackInput, appConfig: string, targetRoot: string): Promise<ManualRollbackResult> {
-  const child = fork(rollbackWitness, [], {
+  assertParentAttached()
+  const child = registerChild(fork(rollbackWitness, [], {
     cwd: backend, execArgv: ['--import', 'tsx'],
     env: { ...targetEnvironment(appConfig, targetRoot, 0),
       MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'false', MULTITABLE_ENABLE_WRITER_FENCE: 'false' },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  })
+  }))
   child.stdout?.on('data', () => {})
   child.stderr?.on('data', () => {})
   let timer: NodeJS.Timeout | undefined
@@ -362,6 +397,7 @@ async function reserveLoopbackPort(): Promise<number> {
 }
 
 async function canConnect(port: number): Promise<boolean> {
+  assertParentAttached()
   return new Promise(resolve => {
     const socket = connect({ host: '127.0.0.1', port })
     const finish = (connected: boolean) => { socket.destroy(); resolve(connected) }
@@ -399,6 +435,7 @@ async function waitForLocked(child: ChildProcess): Promise<void> {
 }
 
 async function writePipeSecret(child: ChildProcess, secret: Uint8Array): Promise<void> {
+  assertParentAttached()
   const pipe = child.stdio[3]
   assert.ok(pipe && 'end' in pipe)
   const payload = Buffer.from(secret)
@@ -413,6 +450,16 @@ async function writePipeSecret(child: ChildProcess, secret: Uint8Array): Promise
 }
 
 async function stopLauncher(child: ChildProcess, requireGraceful: boolean): Promise<void> {
+  let stopping = stoppingLaunchers.get(child)
+  if (!stopping) {
+    stopping = stopLauncherOnce(child, requireGraceful)
+    stoppingLaunchers.set(child, stopping)
+  }
+  await stopping
+  if (requireGraceful) assert.deepEqual({ code: child.exitCode, signal: child.signalCode }, { code: 0, signal: null })
+}
+
+async function stopLauncherOnce(child: ChildProcess, requireGraceful: boolean): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
     if (requireGraceful) assert.deepEqual({ code: child.exitCode, signal: child.signalCode }, { code: 0, signal: null })
     return
@@ -443,21 +490,33 @@ async function stopLauncher(child: ChildProcess, requireGraceful: boolean): Prom
   if (requireGraceful) assert.deepEqual(result, { code: 0, signal: null })
 }
 
+process.once('disconnect', onParentDisconnect)
+if (process.connected === false) void onParentDisconnect()
+
 process.once('message', (input: ManualTargetInput) => {
   void (async () => {
+    activeSecret = input.local.recoverySecret
     try {
+      assertParentAttached()
       const rollbackTableCount = await run(input)
+      assertParentAttached()
       await send({ kind: 'manual-target-done', rollbackTableCount })
     } catch (error) {
+      process.exitCode = 1
       const code = error instanceof Error && /^RECOVERY_[A-Z0-9_]+$/.test(error.message)
         ? error.message : 'RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_FAILED'
       const frames = error instanceof Error
         ? [...(error.stack ?? '').matchAll(/\/(verify-recovery-local-manual-(?:http\.ts|target\.mts)):(\d+)/g)]
           .map((match) => `${match[1]}:${match[2]}`) : []
-      await send({ kind: 'manual-target-error', code, frames })
-      process.exitCode = 1
+      if (!parentCancellation.signal.aborted && process.connected !== false) {
+        await send({ kind: 'manual-target-error', code, frames }).catch(() => {})
+      }
     } finally {
-      process.disconnect()
+      activeSecret?.fill(0)
+      activeSecret = undefined
+      runSettled = true
+      process.removeListener('disconnect', onParentDisconnect)
+      if (process.connected) process.disconnect()
     }
   })()
 })
