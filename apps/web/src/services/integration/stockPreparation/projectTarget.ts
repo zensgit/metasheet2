@@ -405,7 +405,7 @@ export type StockPrepProjectPullOutcome =
   | { kind: 'cancelled'; stage: 'create' | 'repull' }
   /** No sheet yet, and this caller cannot create one. */
   | { kind: 'contact_puller' }
-  /** Archived: read-only until a puller restores it (S4: 「恢复并重新拉取」 when `mayRestore`). */
+  /** Archived: no pull (nor decisions / handoff) until a puller restores it — the grid itself stays fillable (S4: 「恢复并重新拉取」 when `mayRestore`). */
   | { kind: 'archived'; mayRestore: boolean; state: StockPrepProjectTargetState }
   /** The create (or the repair's replay) was refused; nothing was pulled. */
   | { kind: 'create_refused'; status: number; code: string | null }

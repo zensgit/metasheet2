@@ -18,7 +18,13 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //              same pull runs again and asks the 「重新拉取」 question; anyone else reads 「请联系拉取人员
 //              恢复」 and gets no button; a refused restore stops with its code and pulls nothing.
 //   PA-COPY    the S2 placeholder 「恢复入口随后上线」 is gone; every new refusal code has its own
-//              two-line zh + en sentence.
+//              two-line zh + en sentence; (fix round 1) no archived-state sentence says the grid is
+//              frozen — archiving stops the pull, the decisions and the handoff, and the archived lines
+//              say the sheet can still be filled in.
+//   Fix round 1 also pins three client guards: the board's restore control needs the client's PULL
+//   capability even when the server says `may.restore`; the board's archive control needs the
+//   server's `may.archive` even for a puller; the panel's 「恢复并重新拉取」 needs `canRun` (the auth
+//   snapshot is reactive in this suite, so losing the pull right with the notice on screen is a test).
 //   PA-ALIGN   the two new manifest controls render for EXACTLY the actors the SERVER grants (the plugin
 //              module, imported live) on the line they live on; the client rows are byte-equal to the
 //              plugin's (F-01 for these rows).
@@ -30,6 +36,8 @@ const h = vi.hoisted(() => ({
   permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'] as string[],
   roles: [] as string[],
   apiFetch: vi.fn(),
+  // Bumped to make a computed that read the access snapshot re-evaluate (fix round 1).
+  authTick: null as null | { value: number },
 }))
 
 vi.mock('../src/composables/useLocale', () => ({
@@ -40,15 +48,22 @@ vi.mock('../src/composables/useLocale', () => ({
   }),
 }))
 
-vi.mock('../src/composables/useAuth', () => ({
-  useAuth: () => ({
-    getToken: () => 'session-token',
-    clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: h.roles.includes('admin'), email: '', roles: h.roles, permissions: h.permissions }),
-    hasAdminAccess: () => h.roles.includes('admin'),
-    hasPermission: (permission: string) => h.permissions.includes(permission),
-  }),
-}))
+vi.mock('../src/composables/useAuth', () => {
+  if (!h.authTick) h.authTick = ref(0)
+  return {
+    useAuth: () => ({
+      getToken: () => 'session-token',
+      clearToken: vi.fn(),
+      getAccessSnapshot: () => {
+        // Reading the tick makes every computed over the snapshot reactive to a permission change.
+        void h.authTick!.value
+        return { isAdmin: h.roles.includes('admin'), email: '', roles: h.roles, permissions: h.permissions }
+      },
+      hasAdminAccess: () => h.roles.includes('admin'),
+      hasPermission: (permission: string) => h.permissions.includes(permission),
+    }),
+  }
+})
 
 vi.mock('../src/utils/api', async () => {
   const actual = await vi.importActual<typeof import('../src/utils/api')>('../src/utils/api')
@@ -76,6 +91,7 @@ import type { StockPreparationProjectSyncApi } from '../src/services/integration
 import {
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_PROJECT_TARGET_PLAIN,
+  STOCK_PREP_SYNC_REASON_PLAIN,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
@@ -442,6 +458,23 @@ describe('PA-BOARD — 项目备料页 archives and restores the project\'s own 
     root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: targetDouble([], [targetState()]) })
     await flush()
     expect(testid(root, 'stock-prep-project-target-archive')).toBeNull()
+    // Fix round 1: the same for RESTORE — a server that (wrongly) said `may.restore` on an archived
+    // sheet cannot make the floor's restore button appear.
+    unmountAll()
+    routeBoardApi()
+    root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: targetDouble([], [ARCHIVED(true)]) })
+    await flush()
+    expect(testid(root, 'stock-prep-project-target-status')?.dataset.targetStatus).toBe('archived')
+    expect(testid(root, 'stock-prep-project-target-restore')).toBeNull()
+  })
+
+  it('a puller whose server says may.archive = false gets no archive button (the server decides the state fit)', async () => {
+    routeBoardApi()
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: targetDouble([], [targetState({ may: { create: false, archive: false, restore: false } })]) })
+    await flush()
+    expect(testid(root, 'stock-prep-project-target-status')?.dataset.targetStatus).toBe('active')
+    expect(testid(root, 'stock-prep-project-target-archive')).toBeNull()
+    expect(testid(root, 'stock-prep-project-target-restore')).toBeNull()
   })
 })
 
@@ -480,6 +513,20 @@ describe('PA-PANEL — 「恢复并重新拉取」 in the pull panel', () => {
     await press(root, 'stock-prep-project-sync-target-prompt-confirm')
     expect(log).toContain('dryRun')
     expect(log).toContain('apply')
+  })
+
+  it('「恢复并重新拉取」 needs canRun: a puller who loses the pull right with the archived notice on screen loses the button', async () => {
+    const log: string[] = []
+    const root = mount(StockPreparationProjectSyncPanel as Component, { scope: SCOPE, api: syncDouble(log), targetApi: targetDouble(log, [ARCHIVED()]) })
+    await nextTick()
+    await typeAndRun(root)
+    expect(testid(root, 'stock-prep-project-sync-target-notice')?.dataset.notice).toBe('archived')
+    expect(testid(root, 'stock-prep-project-sync-restore'), 'present while the caller can pull').not.toBeNull()
+    h.permissions = [...FLOOR]
+    h.authTick!.value += 1
+    await flush()
+    expect(testid(root, 'stock-prep-project-sync-target-notice')?.dataset.notice, 'the notice itself stays').toBe('archived')
+    expect(testid(root, 'stock-prep-project-sync-restore'), 'gone once canRun is false').toBeNull()
   })
 
   it('the floor operator: 「请联系拉取人员恢复」 and no restore button', async () => {
@@ -534,6 +581,51 @@ describe('PA-COPY — the words', () => {
       expect(entry, key).toBeTruthy()
       expect(entry.zh.trim().length, `${key}.zh`).toBeGreaterThan(0)
       expect(entry.en.trim().length, `${key}.en`).toBeGreaterThan(0)
+    }
+  })
+
+  it('(fix round 1) archiving never claims the grid is frozen — the archived lines say the sheet can still be filled in', () => {
+    const P = STOCK_PREP_PROJECT_TARGET_PLAIN
+    const archivedLines: Array<[string, { zh: string; en: string; zhNext?: string; enNext?: string }]> = [
+      ['status_archived', P.status_archived],
+      ['restore_pending', P.restore_pending],
+      ['confirm_archive', P.confirm_archive],
+      ['confirm_restore', P.confirm_restore],
+      ['archived_done', P.archived_done],
+      ['restored_done', P.restored_done],
+      ['STOCK_PREPARATION_PROJECT_ARCHIVED', STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_ARCHIVED],
+      ['STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED', STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED],
+      ['PLAN_PROJECT_SHEET_ARCHIVED', STOCK_PREP_SYNC_REASON_PLAIN.PLAN_PROJECT_SHEET_ARCHIVED],
+    ]
+    // Phrasings that say (or imply) the grid stops taking input once archived.
+    const FROZEN_ZH = ['不能再拉取或改动', '只能打开查看', '拉取或填写', '拉取和填写', '继续用']
+    const FROZEN_EN = ['or changed', 'or fill', 'and filled again', 'opened and read']
+    for (const [key, entry] of archivedLines) {
+      expect(entry, key).toBeTruthy()
+      for (const text of [entry.zh, entry.zhNext ?? '']) {
+        for (const frozen of FROZEN_ZH) expect(text, `${key}: 「${frozen}」`).not.toContain(frozen)
+      }
+      for (const text of [entry.en, entry.enNext ?? '']) {
+        for (const frozen of FROZEN_EN) expect(text.toLowerCase(), `${key}: "${frozen}"`).not.toContain(frozen)
+      }
+    }
+    // ...and the lines a reader meets on an archived sheet SAY it can still be filled in.
+    for (const [key, entry] of [
+      ['status_archived', P.status_archived],
+      ['confirm_archive', P.confirm_archive],
+      ['archived_done', P.archived_done],
+      ['restore_pending', P.restore_pending],
+    ] as const) {
+      expect(entry.zh, key).toContain('填写')
+      expect(entry.en.toLowerCase(), key).toContain('fill')
+    }
+    for (const [key, entry] of [
+      ['STOCK_PREPARATION_PROJECT_ARCHIVED', STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_ARCHIVED],
+      ['STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED', STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED],
+      ['PLAN_PROJECT_SHEET_ARCHIVED', STOCK_PREP_SYNC_REASON_PLAIN.PLAN_PROJECT_SHEET_ARCHIVED],
+    ] as const) {
+      expect(String(entry.zhNext ?? ''), key).toContain('填写')
+      expect(String(entry.enNext ?? '').toLowerCase(), key).toContain('fill')
     }
   })
 

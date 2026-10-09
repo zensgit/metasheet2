@@ -54,6 +54,9 @@ const PROJECT_TARGET_CREATE_LOCK_PREFIX = 'stock-prep-project-target:'
 // fact, the same words); the other two are distinct so a client can say "someone already archived it"
 // / "it is not archived" instead of a generic conflict.
 const PROJECT_TARGET_ABSENT_CODE = 'STOCK_PREPARATION_PROJECT_ABSENT'
+// S4 fix round 1: the resolver's own code for "archived" — the create replay answers it when the row
+// flipped to archived after the route's first read.
+const PROJECT_TARGET_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ARCHIVED'
 const PROJECT_TARGET_ALREADY_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED'
 const PROJECT_TARGET_NOT_ARCHIVED_CODE = 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED'
 
@@ -314,7 +317,39 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     })
   }
 
-  return { get, list, count, create, archive, restore }
+  /**
+   * S4 fix round 1 — THE CREATE REPLAY'S GUARD. The create route reads the row OUTSIDE any lock (it
+   * must, to choose between the create and the replay leg), so an archive can commit between that
+   * read and the replay's heal — which would then re-run the G1 grant (and audit it) and may
+   * re-install packs onto an archived sheet. This runs `fn(row)` INSIDE one transaction that first
+   * takes the SAME per-tenant advisory lock archive / restore / create take, reads the row FOR
+   * UPDATE and refuses unless it is still ACTIVE (409 STOCK_PREPARATION_PROJECT_ARCHIVED; a row gone
+   * is ABSENT). The lock is HELD while `fn` runs, so an archive that arrives during the heal waits for
+   * it to finish instead of slipping in between the check and the writes. `fn`'s own host writes are
+   * not part of this transaction (it only holds the lock); a throw from `fn` propagates.
+   */
+  async function withActiveRowLocked(input = {}, fn) {
+    const { tenantId, projectNo } = scope(input)
+    if (typeof fn !== 'function') {
+      throw new Error('withActiveRowLocked: a callback is required')
+    }
+    return db.transaction(async (trx) => {
+      if (!trx || typeof trx.advisoryXactLock !== 'function' || typeof trx.selectOneForUpdate !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock and selectOneForUpdate')
+      }
+      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo })
+      if (!current) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ABSENT_CODE, 'this project has no registered stock-preparation sheet', { field: 'projectNo' })
+      }
+      if (current.status !== 'active') {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ARCHIVED_CODE, 'this project\'s stock-preparation sheet was archived; restore it instead of creating a second one', { field: 'projectNo' })
+      }
+      return fn(rowToPublicTarget(current))
+    })
+  }
+
+  return { get, list, count, create, archive, restore, withActiveRowLocked }
 }
 
 module.exports = {
@@ -322,6 +357,7 @@ module.exports = {
   PROJECT_TARGET_STATUSES,
   PROJECT_TARGET_CREATE_LOCK_PREFIX,
   PROJECT_TARGET_ABSENT_CODE,
+  PROJECT_TARGET_ARCHIVED_CODE,
   PROJECT_TARGET_ALREADY_ARCHIVED_CODE,
   PROJECT_TARGET_NOT_ARCHIVED_CODE,
   SCOPE_CONSTRAINT,

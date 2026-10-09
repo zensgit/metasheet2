@@ -43,6 +43,9 @@
 //   C-11 (S4) the confirm route hands `confirmConfirmationDecision` the archived-project hook only
 //        while the switch is on, the hook refuses 409 ARCHIVED from the registry keyed by the
 //        verified tenant, and the module calls it on the located row BEFORE any state check or patch.
+//   C-12 (S4 fix round 1) the create REPLAY heals only inside `store.withActiveRowLocked`: the grant
+//        heal, the pack plan and the pack install all sit inside that callback (on the row the lock
+//        re-read), and no replay heal call remains outside it.
 //
 // Mutation: delete `projectNo` from any one lookup, or change a `'source'` to `'write'`, or drop a
 // wall call, and the corresponding check reds naming the handler.
@@ -349,6 +352,31 @@ check('C-11 (S4) confirm: the archived-project hook is wired only with the switc
   }
 })
 
+check('C-12 (S4 fix round 1) the create replay heals only inside the locked re-check of its registry row', () => {
+  const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
+  const lockAt = body.indexOf('await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {')
+  assert.notEqual(lockAt, -1, 'the replay goes through withActiveRowLocked, keyed by the scope tenant and the path number')
+  const lockEnd = body.indexOf('\n        })\n', lockAt)
+  assert.notEqual(lockEnd, -1, 'the locked callback closes')
+  const inside = body.slice(lockAt, lockEnd)
+  for (const call of ['healGrant(locked)', 'planPacks()', 'installPacks(replayPlan, locked.objectId)']) {
+    assert.ok(inside.includes(call), `the replay's ${call} runs inside the locked callback`)
+  }
+  const replayLeg = body.slice(body.indexOf('      if (registered) {'), body.indexOf('      } else {', body.indexOf('      if (registered) {')))
+  assert.ok(!/healGrant\(registered\)/.test(replayLeg), 'no grant heal on the unlocked read remains in the replay leg')
+  assert.ok(!/installPacks\([^)]*registered\.objectId\)/.test(replayLeg), 'no pack heal on the unlocked read remains in the replay leg')
+  const STORE_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-project-target-store.cjs'), 'utf8').replace(/\r\n/g, '\n'))
+  const fnStart = STORE_CODE.indexOf('async function withActiveRowLocked(')
+  assert.notEqual(fnStart, -1, 'the store exposes the locked re-check')
+  const fn = STORE_CODE.slice(fnStart, STORE_CODE.indexOf('\n  }\n', fnStart))
+  const lockCall = fn.indexOf('await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)')
+  const readCall = fn.indexOf('trx.selectOneForUpdate(')
+  const statusCheck = fn.indexOf("if (current.status !== 'active') {")
+  const callback = fn.indexOf('return fn(rowToPublicTarget(current))')
+  assert.ok(lockCall !== -1 && lockCall < readCall && readCall < statusCheck && statusCheck < callback, 'lock → FOR UPDATE read → active check → callback, in that order, on the transaction handle')
+})
+
 check('C-09 (S2) create: plan + pre-flight before provisioning, install before register; replay: grant heal before the pack heal', () => {
   const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
   const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
@@ -361,10 +389,10 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   const provisionAt = body.indexOf('provisionProjectSheet(')
   const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
   const registerAt = body.indexOf('store.create(')
-  // REPLAY leg.
-  const replayGrantAt = body.indexOf('grant = await healGrant(registered)')
+  // REPLAY leg (S4 fix round 1: inside the locked re-check — C-12 pins the enclosure).
+  const replayGrantAt = body.indexOf('const lockedGrant = await healGrant(locked)')
   const replayPlanAt = body.indexOf('const replayPlan = await planPacks()')
-  const healAt = body.indexOf('installPacks(replayPlan, registered.objectId)')
+  const healAt = body.indexOf('installPacks(replayPlan, locked.objectId)')
   assert.ok(lookupAt !== -1 && planAt !== -1 && lookupAt < planAt, 'the env binding is read before the plan')
   assert.ok(createPlanAt !== -1 && preflightAt !== -1 && createPlanAt < preflightAt, 'create: the plan precedes the pre-flight')
   assert.ok(capAt !== -1 && preflightAt < capAt, 'create: every sheet-independent refusal precedes the cap read')

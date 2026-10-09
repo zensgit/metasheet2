@@ -9009,9 +9009,24 @@ function requireStockPreparationAudit() {
         // pack missing from the sheet's own ledger, at an older version, or whose `ext_` columns the
         // field-existence probe no longer finds is (re)installed; one already in place costs no
         // host write.
-        grant = await healGrant(registered)
-        const replayPlan = await planPacks()
-        packs = await installPacks(replayPlan, registered.objectId)
+        //
+        // S4 fix round 1 (R-38): the `existing` read above is OUTSIDE the tenant lock, and an archive
+        // can commit after it. So the heal runs inside `withActiveRowLocked`: the registry row is
+        // re-read under the SAME per-tenant advisory lock archive / restore take, an archived row
+        // refuses 409 STOCK_PREPARATION_PROJECT_ARCHIVED before any grant or pack write, and the lock
+        // is held across the heal so an archive arriving meanwhile waits for it.
+        if (typeof store.withActiveRowLocked !== 'function') {
+          throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+        }
+        const healed = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+          const lockedGrant = await healGrant(locked)
+          const replayPlan = await planPacks()
+          const lockedPacks = await installPacks(replayPlan, locked.objectId)
+          return { row: locked, grant: lockedGrant, packs: lockedPacks }
+        })
+        registered = healed.row
+        grant = healed.grant
+        packs = healed.packs
       } else {
         // THE CREATE. Every refusal decidable without the sheet comes BEFORE provisioning (S2 fix
         // round 1, the cap boundary): band coverage, the installer's own sheet-independent

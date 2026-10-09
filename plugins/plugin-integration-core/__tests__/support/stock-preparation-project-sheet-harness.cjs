@@ -41,6 +41,10 @@ function clone(value) {
 function makeMemoryDb() {
   const tables = new Map()
   const calls = []
+  // S4 fix round 1: the advisory lock is a REAL per-key FIFO mutex here, released when the
+  // transaction's callback settles — so a suite can force the interleaving a missing (or released
+  // too early) lock would allow, instead of a lock that only records that it was asked for.
+  const lockTails = new Map()
   const rowsOf = (table) => {
     if (!tables.has(table)) tables.set(table, [])
     return tables.get(table)
@@ -52,7 +56,24 @@ function makeMemoryDb() {
     rowsOf,
     async transaction(fn) {
       calls.push('transaction')
-      return fn({ ...api, async advisoryXactLock(key) { calls.push(`advisoryXactLock:${key}`) } })
+      const releases = []
+      const trx = {
+        ...api,
+        async advisoryXactLock(key) {
+          calls.push(`advisoryXactLock:${key}`)
+          const previous = lockTails.get(key) || Promise.resolve()
+          let release
+          const held = new Promise((resolve) => { release = resolve })
+          lockTails.set(key, previous.then(() => held))
+          await previous
+          releases.push(release)
+        },
+      }
+      try {
+        return await fn(trx)
+      } finally {
+        for (const release of releases) release()
+      }
     },
     async selectOne(table, where) { calls.push(`selectOne:${table}`); return rowsOf(table).find((r) => matches(r, where)) || null },
     async select(table, { where, limit } = {}) {

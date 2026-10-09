@@ -36,6 +36,11 @@
 //        ledger row names an archived project is 409 ARCHIVED and the ledger is NOT patched; 录入值回读
 //        still answers; restore → the same confirm succeeds; switch off → the registry is never
 //        consulted and the confirm is unchanged; a registry read that fails refuses (fail-closed).
+//   A-10 (fix round 1) THE CREATE-REPLAY RACE, forced on the harness's real per-key mutex: (a) an
+//        archive that commits right after the create route's unlocked read makes the replay refuse
+//        409 ARCHIVED with no grant, no pack write and no audit row of its own; (b) an archive that
+//        arrives WHILE the replay heals waits for the heal (the lock is held across it) and then
+//        archives.
 //
 // Synthetic values only.
 
@@ -347,8 +352,15 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
 }
 
-/** Status + error code: what "the route answered the same" compares (a 200 is `200:ok`). */
+/** Status + error code: the short form a failure message names (a 200 is `200:ok`). */
 const outcome = (res) => `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
+/** The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. */
+const fullAnswer = (res) => JSON.stringify({
+  status: res.statusCode,
+  body: res.body === undefined ? null : res.body,
+  headers: res.headers || {},
+  sent: res.sentBuffer === undefined ? null : Buffer.from(res.sentBuffer).toString('base64'),
+})
 
 test('A-08 the §6 route table on one archived project: every write row refuses 409 ARCHIVED with no effect; every read row answers exactly as before the archive', async () => {
   const handoffCalls = []
@@ -396,11 +408,18 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
       policiesList: () => projectSheet.call(h.routes, 'GET', POLICIES_PATH, { user: PLATFORM_ADMIN, params: { actionId: ACTION_ID }, query: { tenantId: TENANT, projectNo: PROJECT } }),
     }
     const before = {}
-    for (const [label, run] of Object.entries(reads)) before[label] = outcome(await run())
+    const beforeFull = {}
+    for (const [label, run] of Object.entries(reads)) {
+      const res = await run()
+      before[label] = outcome(res)
+      beforeFull[label] = fullAnswer(res)
+    }
     assert.equal(before.board, '200:ok', `the board answers while active: ${before.board}`)
     assert.equal(before.export, '200:ok', `the export answers while active: ${before.export}`)
     assert.equal(before.handoffStatus, '200:ok')
     assert.equal(before.policiesList, '200:ok')
+    const targetBefore = await getTarget(h, FLOOR)
+    assert.equal(targetBefore.statusCode, 200)
 
     // ARCHIVE.
     const archived = await archive(h, PULLER)
@@ -440,13 +459,23 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     assert.equal(applyJob.status, 'queued', 'the approved apply job did not run a chunk')
     assert.equal(applyJob.checkpoint.nextDecisionIndex, 0)
 
-    // THE READ ROWS, AFTER: exactly what they answered before the archive.
+    // THE READ ROWS, AFTER: byte-identical to what they answered before the archive (status, body,
+    // headers, the exported workbook).
     for (const [label, run] of Object.entries(reads)) {
-      assert.equal(outcome(await run()), before[label], `${label} answers exactly as before the archive`)
+      const res = await run()
+      assert.equal(outcome(res), before[label], `${label} answers exactly as before the archive`)
+      assert.equal(fullAnswer(res), beforeFull[label], `${label}: the whole answer is byte-identical`)
     }
+    // GET target still reads; only the lifecycle fields move.
     const target = await getTarget(h, FLOOR)
     assert.equal(target.statusCode, 200)
     assert.equal(target.body.data.status, 'archived')
+    const withoutLifecycle = (data) => {
+      const { status: _status, archivedAt: _archivedAt, may: _may, ...rest } = data
+      return rest
+    }
+    assert.deepEqual(withoutLifecycle(target.body.data), withoutLifecycle(targetBefore.body.data), 'GET target: only status, archivedAt and may.* change')
+    assert.notEqual(target.body.data.archivedAt, targetBefore.body.data.archivedAt)
 
     // RESTORE → the same lane is open again (positive control for every 409 above).
     assert.equal((await restore(h, PULLER)).statusCode, 200)
@@ -458,6 +487,67 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     if (previousMvp === undefined) delete process.env[MVP_PERSIST_ENV]
     else process.env[MVP_PERSIST_ENV] = previousMvp
   }
+})
+
+test('A-10 (fix round 1) the create-replay race: an archive after the unlocked read → 409 ARCHIVED, nothing healed; an archive during the heal waits for it', async () => {
+  const create = (h) => projectSheet.call(h.routes, 'POST', TARGET_PATH, { user: PULLER, params: { projectNo: PROJECT }, body: {} })
+  const packWrites = (h) => h.db.calls.filter((call) => call.startsWith(`upsertOne:${projectSheet.PACK_INSTALL_TABLE}`) || call.startsWith(`insertOne:${projectSheet.PACK_INSTALL_TABLE}`)).length
+
+  // (a) The route's FIRST registry read (outside any lock) answers ACTIVE; a real archive, through its
+  // own route, commits immediately after it — the window the locked re-check exists to close.
+  let h = mount({ grantRoleIds: ['stock-prep_frontline'] })
+  try {
+    h.seedRegistryRow(PROJECT)
+    const unlockedRead = h.db.selectOne
+    let raced = false
+    h.db.selectOne = async (table, where) => {
+      const row = await unlockedRead.call(h.db, table, where)
+      if (!raced && table === projectSheet.PROJECT_TARGET_TABLE && row && row.status === 'active') {
+        raced = true
+        const snapshot = { ...row }
+        const archived = await archive(h, PULLER)
+        assert.equal(archived.statusCode, 200, `the racing archive commits: ${JSON.stringify(archived.body)}`)
+        return snapshot
+      }
+      return row
+    }
+    const res = await create(h)
+    assert.ok(raced, 'the interleaving was forced')
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_ARCHIVED')
+    assert.deepEqual({ ...res.body.error.details }, { field: 'projectNo' })
+    assert.deepEqual(h.provisioning.grantCalls, [], 'the G1 grant was NOT re-run on the archived sheet')
+    assert.ok(!h.provisioning.calls.some((call) => ['ensureMissingObjectFields', 'patchObjectFieldProperty', 'ensureObject'].includes(call[0])), 'no pack or sheet write')
+    assert.equal(packWrites(h), 0, 'no pack ledger write')
+    assert.deepEqual(h.auditAppends.map((entry) => entry.action), ['project_target_archive'], 'only the archive is audited')
+    assert.equal(h.registryRows()[0].status, 'archived')
+  } finally { h.restore() }
+
+  // (b) The replay is INSIDE its heal (the G1 grant port is mid-call) when an archive arrives: the
+  // archive must wait for the per-tenant lock the replay holds, then archive.
+  h = mount({ grantRoleIds: ['stock-prep_frontline'] })
+  try {
+    h.seedRegistryRow(PROJECT)
+    const grantPort = h.provisioning.grantSheetRoleWrite
+    let archiveInFlight = null
+    let statusWhileHealing = null
+    h.provisioning.grantSheetRoleWrite = async (input) => {
+      if (!archiveInFlight) {
+        archiveInFlight = archive(h, PULLER)
+        for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => { setImmediate(resolve) })
+        statusWhileHealing = h.registryRows()[0].status
+      }
+      return grantPort.call(h.provisioning, input)
+    }
+    const replay = await create(h)
+    assert.equal(replay.statusCode, 200, JSON.stringify(replay.body))
+    assert.equal(replay.body.data.created, false)
+    assert.equal(statusWhileHealing, 'active', 'the archive did not slip in while the replay was healing')
+    const archived = await archiveInFlight
+    assert.equal(archived.statusCode, 200, `the archive then goes through: ${JSON.stringify(archived.body)}`)
+    assert.equal(h.registryRows()[0].status, 'archived')
+    assert.deepEqual(h.auditAppends.map((entry) => entry.action), ['project_target_grant', 'project_target_archive'], 'the heal finished (and was audited) before the archive')
+  } finally { h.restore() }
 })
 
 // ── A-09: confirm 裁决 on the ledger substrate ─────────────────────────────────────────────────────

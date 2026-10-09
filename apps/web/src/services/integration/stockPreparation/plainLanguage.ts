@@ -794,11 +794,14 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '备料表由拉取人员新建:有拉取权限的人按「从PLM拉取数据」时,系统会先问是否为它新建一张表。没有拉取权限请联系拉取人员。',
     enNext: 'A pull operator creates the sheet: when someone with pull permission presses 从PLM拉取数据, the system first asks whether to create one. Without that permission, contact a pull operator.',
   }),
+  // S4 fix round 1: archiving stops the PULL, the decisions and the handoff — it does NOT freeze the
+  // grid (grants are untouched; 「打开(已归档)」 still deep-links to the fill view), so no sentence may
+  // say the sheet cannot be filled in.
   STOCK_PREPARATION_PROJECT_ARCHIVED: Object.freeze({
-    zh: '这个项目的备料表已经归档,只能打开查看,不能再拉取或改动。',
-    en: 'This project’s stock-preparation sheet is archived: it can be opened and read, but not pulled into or changed.',
-    zhNext: '要继续用,请联系拉取人员恢复这张表;恢复后再拉取。不会新建第二张表。',
-    enNext: 'To use it again, ask a pull operator to restore it, then pull. A second sheet is never created.',
+    zh: '这个项目的备料表已经归档,不能再拉取、确认裁决或通知下一步,所以这一步没有做,什么都没有改动。',
+    en: 'This project’s stock-preparation sheet is archived, so it can no longer be pulled into and its decisions and handoff are paused; this step was not done and nothing changed.',
+    zhNext: '表本身还在,有这张表权限的人仍可以打开并照常填写。要恢复拉取和裁决,请联系拉取人员恢复这张表;不会新建第二张表。',
+    enNext: 'The sheet itself is still there, and anyone with access to it can still open it and fill it in. To pull or decide again, ask a pull operator to restore it; a second sheet is never created.',
   }),
   STOCK_PREPARATION_PROJECT_TARGET_LIMIT: Object.freeze({
     zh: '这家工厂的项目备料表已经到上限(含已归档的),这次没有新建。',
@@ -818,8 +821,8 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED: Object.freeze({
     zh: '这个项目的备料表已经是归档状态了(可能同事刚刚归档过),这次没有改动。',
     en: 'This project’s stock-preparation sheet is already archived (perhaps a colleague just archived it); nothing changed.',
-    zhNext: '不用再归档;要继续拉取或填写,请拉取人员恢复这张表。',
-    enNext: 'No need to archive it again. To pull into or fill it again, a pull operator restores it.',
+    zhNext: '不用再归档;表里仍可以照常填写。要恢复拉取和裁决,请拉取人员恢复这张表。',
+    enNext: 'No need to archive it again; the sheet can still be filled in as usual. To pull or decide again, a pull operator restores it.',
   }),
   STOCK_PREPARATION_PROJECT_NOT_ARCHIVED: Object.freeze({
     zh: '这个项目的备料表没有归档(可能同事刚刚恢复过),这次没有改动。',
@@ -1834,8 +1837,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_PROJECT_SHEET_ARCHIVED: Object.freeze({
     zh: '这个项目的备料表已经归档,不能再拉取',
     en: 'This project’s stock-preparation sheet is archived, so it cannot be pulled into',
-    zhNext: '要继续用,请联系拉取人员恢复这张表;什么都没有改动。',
-    enNext: 'To use it again, ask a pull operator to restore the sheet. Nothing was changed.',
+    zhNext: '表里仍可以照常填写;要再拉取,请联系拉取人员恢复这张表。什么都没有改动。',
+    enNext: 'The sheet can still be filled in as usual; to pull into it again, ask a pull operator to restore it. Nothing was changed.',
   }),
   PLAN_TARGET_NOT_OURS: Object.freeze({
     zh: '系统核对不了这张备料表属于您的工厂,为保护数据没有试算',
@@ -2241,8 +2244,8 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
     en: 'This project has its own stock-preparation sheet.',
   }),
   status_archived: Object.freeze({
-    zh: '这个项目的备料表已归档,可以打开查看,不能再拉取或改动。',
-    en: 'This project’s stock-preparation sheet is archived: it can be opened and read, not pulled into or changed.',
+    zh: '这个项目的备料表已归档:不能再拉取、确认裁决或通知下一步;表里仍可以打开和照常填写。',
+    en: 'This project’s stock-preparation sheet is archived: it can no longer be pulled into, and its decisions and handoff are paused; it can still be opened and filled in as usual.',
   }),
   absent_can_create: Object.freeze({
     zh: '按「从PLM拉取数据」时,系统会先问您是否为它新建一张备料表。',
@@ -2259,8 +2262,8 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
   // S4 (R-38): the restore entry exists now — 「恢复这张表」 on this line and 「恢复并重新拉取」 in the pull
   // panel, both for a pull operator only.
   restore_pending: Object.freeze({
-    zh: '您可以恢复这张表,恢复后可以继续拉取和填写;现在也可以先打开查看。',
-    en: 'You can restore this sheet; after that it can be pulled into and filled again. You can open and read it now.',
+    zh: '您可以恢复这张表,恢复后可以重新拉取、确认裁决和通知下一步;在那之前表里也照样可以打开和填写。',
+    en: 'You can restore this sheet; after that it can be pulled into again and its decisions and handoff resume. Until then it can still be opened and filled in.',
   }),
   confirm_create: Object.freeze({
     zh: '将为这个项目号新建一张备料表:',
@@ -2289,12 +2292,12 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
   confirm_write_action: Object.freeze({ zh: '确认写入', en: 'Write it' }),
   confirm_write_cancel: Object.freeze({ zh: '先不写', en: 'Not now' }),
   confirm_archive: Object.freeze({
-    zh: '归档后这张表和里面的数据都还在,只是不能再拉取或改动;拉取人员可以随时恢复。',
-    en: 'After archiving, the sheet and its data stay; it just cannot be pulled into or changed. A pull operator can restore it at any time.',
+    zh: '归档后这张表和里面的数据都还在,有表权限的人仍可以打开和照常填写;只是不能再拉取、确认裁决或通知下一步。拉取人员可以随时恢复。',
+    en: 'After archiving, the sheet and its data stay and anyone with access can still open it and fill it in; it just can no longer be pulled into, and its decisions and handoff are paused. A pull operator can restore it at any time.',
   }),
   confirm_restore: Object.freeze({
-    zh: '恢复后可以继续拉取和填写;不会新建第二张表。',
-    en: 'After restoring, the sheet can be pulled into and filled again; no second sheet is created.',
+    zh: '恢复后可以重新拉取、确认裁决和通知下一步;不会新建第二张表。',
+    en: 'After restoring, the sheet can be pulled into again and its decisions and handoff resume; no second sheet is created.',
   }),
   remove_vs_archive: Object.freeze({
     zh: '「从列表移除」只在这台电脑上、不删数据;「归档项目」由拉取人员操作,可以恢复。',
@@ -2314,12 +2317,12 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
   confirm_restore_action: Object.freeze({ zh: '确认恢复', en: 'Restore it' }),
   confirm_lifecycle_cancel: Object.freeze({ zh: '先不改', en: 'Not now' }),
   archived_done: Object.freeze({
-    zh: '已归档:表和里面的数据都还在,可以打开查看;要继续拉取或填写,请先恢复。',
-    en: 'Archived: the sheet and its data are all still there and can be opened and read. To pull into or fill it again, restore it first.',
+    zh: '已归档:表和里面的数据都还在,仍可以打开和照常填写;要再拉取、确认裁决或通知下一步,请先恢复。',
+    en: 'Archived: the sheet and its data are all still there and can still be opened and filled in. To pull, decide or hand off again, restore it first.',
   }),
   restored_done: Object.freeze({
-    zh: '已恢复:可以继续拉取和填写,用的还是原来那张表。',
-    en: 'Restored: it can be pulled into and filled again — it is the same sheet as before.',
+    zh: '已恢复:可以重新拉取、确认裁决和通知下一步,用的还是原来那张表。',
+    en: 'Restored: it can be pulled into again and its decisions and handoff resume — it is the same sheet as before.',
   }),
   // S2 fix round 1 (refuter #5): the state read failed for a reason other than "switch off". The flow
   // STOPS — it never falls back to the old run on a guess — and offers to read again.
