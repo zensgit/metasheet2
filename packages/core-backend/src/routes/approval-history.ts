@@ -118,6 +118,52 @@ function extractRiderAttachmentIds(raw: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === 'string')
 }
 
+/**
+ * Test report 2026-10-08, T4cd — camelCase copies of the platform branch's row fields. ADDITIVE ONLY.
+ *
+ * The platform branch returns the raw `approval_records` columns (snake_case), while the history
+ * DTO every member surface reads is camelCase: `UnifiedApprovalHistoryDTO` (both the web type and
+ * the backend's), the `plm:` branch above (`ApprovalBridgeService.loadLocalHistory`), and the
+ * OpenAPI contract, which names the camelCase fields canonical and the snake_case ones deprecated
+ * aliases. The approval-centre detail page reads only the camelCase names, so on every platform
+ * instance it rendered no action time and attributed every row, the requester's own submission
+ * included, to 「系统」.
+ *
+ * The five copies are derived from columns the SELECT below already reads — no new column, no
+ * metadata key, no change to the WHERE clause, the row set or the order. The snake_case fields stay
+ * byte-for-byte for the readers that consume them (the multitable record approval card reads both
+ * spellings). `occurredAt` is always an ISO-8601 string (the driver hands `occurred_at` over as a
+ * `Date`); a value that is not a valid timestamp becomes `null`, never `"Invalid Date"`.
+ */
+function toIsoTimestampOrNull(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString()
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+  }
+  return null
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+export function camelCaseHistoryRowFields(row: Record<string, unknown>): {
+  actorId: string | null
+  actorName: string | null
+  occurredAt: string | null
+  fromStatus: string | null
+  toStatus: string | null
+} {
+  return {
+    actorId: stringOrNull(row.actor_id),
+    actorName: stringOrNull(row.actor_name),
+    occurredAt: toIsoTimestampOrNull(row.occurred_at),
+    fromStatus: stringOrNull(row.from_status),
+    toStatus: stringOrNull(row.to_status),
+  }
+}
+
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
   const r = Router()
 
@@ -281,6 +327,8 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
           cancel_round_outcome_raw?: unknown
           cancel_round_close_reason_raw?: unknown
         }
+        // T4cd: camelCase copies beside the unchanged snake_case fields (see camelCaseHistoryRowFields).
+        const dto = { ...item, ...camelCaseHistoryRowFields(item) }
         const metadata: Record<string, unknown> = {}
         const cancellationOutcome = projectCancelRoundCancellationOutcomeForReadV1(cancellationOutcomeRaw)
         if (cancellationOutcome) metadata.cancellationOutcome = cancellationOutcome
@@ -290,7 +338,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
           const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
           if (attachmentIds.length > 0) metadata.attachmentIds = attachmentIds
         }
-        return Object.keys(metadata).length > 0 ? { ...item, metadata } : item
+        return Object.keys(metadata).length > 0 ? { ...dto, metadata } : dto
       })
 
       return res.json({

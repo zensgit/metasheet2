@@ -27,6 +27,12 @@ export interface OnboardingPacket {
   inviteMessage: string
 }
 
+// Every code in a preset's `permissions` is written to `user_permissions` when the preset is applied
+// (POST /api/admin/users, POST /api/admin/permission-templates/apply), and
+// `user_permissions.permission_code` is a foreign key to `permissions(code)`. A code that no migration
+// registers makes every use of the preset fail (#6185: `workflow:read`, which nothing checks, was
+// removed from the platform and PLM presets). tests/unit/access-presets-permission-catalogue.guard.test.ts
+// runs the migrations' up() and fails on any preset code they do not insert.
 const ACCESS_PRESETS: AccessPresetDefinition[] = [
   {
     id: 'platform-editor',
@@ -34,10 +40,10 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     description: '适用于多维表与基础流程协作成员。',
     productMode: 'platform',
     role: 'user',
-    permissions: ['multitable:read', 'multitable:write', 'spreadsheet:read', 'spreadsheet:write', 'spreadsheets:read', 'spreadsheets:write', 'workflow:read'],
+    permissions: ['multitable:read', 'multitable:write', 'spreadsheet:read', 'spreadsheet:write', 'spreadsheets:read', 'spreadsheets:write'],
     homePath: '/multitable',
     welcomeTitle: 'MetaSheet 平台协作',
-    checklist: ['登录后进入多维表主页', '确认可访问多维表与流程入口', '如需审批权限再由管理员追加授权'],
+    checklist: ['登录后进入多维表主页', '确认可访问多维表入口', '如需审批权限再由管理员追加授权'],
   },
   {
     id: 'platform-viewer',
@@ -45,7 +51,7 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     description: '适用于只读查看表格与流程状态。',
     productMode: 'platform',
     role: 'user',
-    permissions: ['multitable:read', 'spreadsheet:read', 'spreadsheets:read', 'workflow:read'],
+    permissions: ['multitable:read', 'spreadsheet:read', 'spreadsheets:read'],
     homePath: '/multitable',
     welcomeTitle: 'MetaSheet 平台只读访问',
     checklist: ['登录后确认只读访问范围', '如需编辑能力需管理员提升权限'],
@@ -113,7 +119,7 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     description: '适用于查看 PLM 工作台、审批与评论协作。',
     productMode: 'plm-workbench',
     role: 'user',
-    permissions: ['spreadsheets:read', 'workflow:read', 'approvals:read', 'comments:read'],
+    permissions: ['spreadsheets:read', 'approvals:read', 'comments:read'],
     homePath: '/plm',
     welcomeTitle: 'MetaSheet PLM 协作入口',
     checklist: ['进入 PLM 工作台确认可见产品范围', '如需审批写入能力再由管理员追加权限'],

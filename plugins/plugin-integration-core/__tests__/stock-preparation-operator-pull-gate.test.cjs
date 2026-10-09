@@ -1,18 +1,25 @@
 'use strict'
 
-// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT, across the four routes it touches.
+// 拉取人员拉数据 — THE PULL GATE SPLIT (was 一线自己拉数据), across the routes it touches.
 //
-// THE RULING. The owner ruled that a floor operator may self-serve the PLM pull: without it the
-// 项目备料页 opens on a project whose BOM nobody on the floor can bring in, and "ask a platform
-// administrator" is not an answer at 07:00 on a shop floor. Round-1 moved dry-run and apply only;
-// round-2 (decision C13, #5460) additionally moved reconcile, because leaving it admin-only put an
-// operator whose plan had human-confirm rows into a closed loop (see below). What NEITHER round
-// moved is mvp-persist, which R-11(b) names as owner-level:
+// THE RULING, AND ITS REVERSAL. The owner first ruled that a floor operator may self-serve the PLM
+// pull. Round-1 moved dry-run and apply onto the operator tier (operate ∧ read); round-2 (decision
+// C13, #5460) additionally moved reconcile, because leaving it admin-only put an operator whose
+// plan had human-confirm rows into a closed loop (see below); the large-BOM background channel
+// followed (P-07). On 2026-10-08 the owner REVERSED the tier (ADR
+// adr-stock-prep-project-sheets-20261008 addendum A; register R-33): the floor fills the sheet and
+// decides held rows but does NOT pull — pulling belongs to the 拉取人员, a holder of
+// `stock-prep:pull` on top of operate and read. The split's routes and its shape did not change;
+// the tier it admits did. What NO round moved is mvp-persist, which R-11(b) names as owner-level:
 //
-//   dry-run     was integration:read        -> ALSO stock-prep operate ∧ read, for ONE action id
-//   apply       was integration:write       -> ALSO stock-prep operate ∧ read, for ONE action id
-//   reconcile   requireAccess(req, 'admin') -> ALSO stock-prep operate ∧ read, for ONE action id (round-2 C13)
+//   dry-run     was integration:read        -> ALSO stock-prep pull ∧ operate ∧ read, for ONE action id
+//   apply       was integration:write       -> ALSO stock-prep pull ∧ operate ∧ read, for ONE action id
+//   reconcile   requireAccess(req, 'admin') -> ALSO stock-prep pull ∧ operate ∧ read, for ONE action id (round-2 C13)
 //   mvp-persist requireAccess(req, 'admin')  UNCHANGED
+//
+// NAMING. `PULLER` below is the 拉取人员 (read + operate + pull) and is the actor every admission
+// case runs as. `OPERATOR` is the floor operator (read + operate, NO pull) and is now a REFUSED
+// actor everywhere in this file — P-14 is the block that pins the reversal route by route.
 //
 // WHAT THIS SUITE EXISTS TO CATCH. A gate split is the easiest change in this repository to get
 // silently wrong, because the routes it touches are GENERIC — `/table-actions/:actionId/...`
@@ -60,8 +67,11 @@ const {
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
+  STOCK_PREP_PULL,
   STOCK_PREP_READ,
+  STOCK_PREP_WORKBENCH_CAPABILITIES,
   operatorMayRunStockPrepPull,
+  satisfiesStockPrepAccess,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
   normalizeStockPreparationActionConfig,
@@ -75,8 +85,14 @@ const LOGGED_IN = Object.freeze({ id: 'u_plain', tenantId: TENANT, permissions: 
 const INTEGRATION_READER = Object.freeze({ id: 'u_int_r', tenantId: TENANT, permissions: ['integration:read'] })
 const INTEGRATION_WRITER = Object.freeze({ id: 'u_int_w', tenantId: TENANT, permissions: ['integration:write'] })
 const OPERATOR_READ = Object.freeze({ id: 'u_op_r', tenantId: TENANT, permissions: [STOCK_PREP_READ] })
+// The FLOOR OPERATOR — read + operate, no pull. Admitted to the split until 2026-10-08; refused since.
 const OPERATOR = Object.freeze({ id: 'u_op', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const OPERATOR_ORPHAN = Object.freeze({ id: 'u_op_o', tenantId: TENANT, permissions: [STOCK_PREP_OPERATE] })
+// The 拉取人员 — read + operate + pull. The one non-admin stock-prep actor the split admits (R-33).
+const PULLER = Object.freeze({ id: 'u_pull', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
+// The two DEGENERATE pull grants: pull without operate, and pull alone. Each must confer nothing.
+const PULLER_NO_OPERATE = Object.freeze({ id: 'u_pull_no_op', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_PULL] })
+const PULLER_ORPHAN = Object.freeze({ id: 'u_pull_o', tenantId: TENANT, permissions: [STOCK_PREP_PULL] })
 const WORKBENCH_ADMIN = Object.freeze({ id: 'u_wb', tenantId: TENANT, permissions: [STOCK_PREP_ADMIN] })
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_adm', tenantId: TENANT, roles: ['admin'], permissions: ['integration:admin'] })
 
@@ -517,7 +533,7 @@ async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
   const started = await rawCall(routes, {
     method: 'POST',
     routePath: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
-    user: OPERATOR,
+    user: PULLER,
     actionId: pull,
     body: { parameters: { projectNo: '200000006' } },
   })
@@ -525,8 +541,9 @@ async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
   const jobId = started.body && started.body.data && started.body.data.jobId
   assert.ok(jobId, 'P-10: the job has an id')
 
-  // ANOTHER operator of the same tenant and tier names that job id.
-  const intruder = Object.freeze({ id: 'u_op_other', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+  // ANOTHER puller of the same tenant and tier names that job id. (Same tier is the point: a floor
+  // operator would be refused one door earlier, by the pull gate, and never reach the actor guard.)
+  const intruder = Object.freeze({ id: 'u_pull_other', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
   const stolen = await rawCall(routes, { ...RUN, user: intruder, actionId: pull, jobId })
   assert.equal(stolen.statusCode, 403, `P-10: a job's run belongs to its creator (got ${stolen.statusCode})`)
   assert.equal(
@@ -536,7 +553,7 @@ async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
   )
 
   // The creator themselves is not refused by this guard (it fails later, in the inert source read).
-  const own = await rawCall(routes, { ...RUN, user: OPERATOR, actionId: pull, jobId })
+  const own = await rawCall(routes, { ...RUN, user: PULLER, actionId: pull, jobId })
   assert.notEqual(
     own.body && own.body.error && own.body.error.code,
     'LARGE_BOM_JOB_ACTOR_MISMATCH',
@@ -572,7 +589,7 @@ async function theHumanConfirmLoopIsReachableByTheOperator() {
     ['3. 写入 — apply what was decided', APPLY],
   ]) {
     assert.equal(
-      await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+      await gateVerdict(routes, { ...route, user: PULLER, actionId: pull }),
       'admitted',
       `P-11: ${label} must be reachable — a loop with one refused step is a room with no door`,
     )
@@ -587,7 +604,7 @@ async function theHumanConfirmLoopIsReachableByTheOperator() {
     ['the decision they then make', 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm'],
   ]) {
     assert.equal(
-      await gateVerdict(routes, { method, routePath, user: OPERATOR, actionId: pull }),
+      await gateVerdict(routes, { method, routePath, user: PULLER, actionId: pull }),
       'admitted',
       `P-11: ${label} is reachable`,
     )
@@ -596,14 +613,14 @@ async function theHumanConfirmLoopIsReachableByTheOperator() {
   // AND THE STEP THAT STAYED still refuses them — the split moved what the loop needs and nothing
   // more. mvp-persist's absence costs an operator nothing on their own run.
   assert.equal(
-    await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
+    await gateVerdict(routes, { ...MVP_PERSIST, user: PULLER, actionId: pull }),
     'refused',
     'P-11: mvp-persist is not part of the loop and did not move',
   )
 
   // …and none of it leaks to another action id.
   assert.equal(
-    await gateVerdict(routes, { ...RECONCILE, user: OPERATOR, actionId: OTHER_ACTION_ID }),
+    await gateVerdict(routes, { ...RECONCILE, user: PULLER, actionId: OTHER_ACTION_ID }),
     'refused',
     'P-11: reconcile is admitted for the frozen action id ONLY',
   )
@@ -615,7 +632,7 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   // 1. THE OPERATOR'S dry-run reads as the BINDING OWNER, not as themselves.
   {
     const { routes, adapterPrincipals } = mountWithSource()
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
     assert.deepEqual(
       adapterPrincipals,
       [DATA_SOURCE_OWNER],
@@ -627,7 +644,7 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   // 2. …and so does APPLY, which re-expands the source in its own right.
   {
     const { routes, adapterPrincipals } = mountWithSource()
-    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
     assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-09: apply too')
   }
 
@@ -664,10 +681,10 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   //    principal, i.e. exactly today's behaviour. The delegation never invents an identity.
   {
     const { routes, adapterPrincipals } = mountWithSource({ dataSourceOwnerId: null })
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
     assert.deepEqual(
       adapterPrincipals,
-      [OPERATOR.id],
+      [PULLER.id],
       'P-09: with no server-held owner there is nothing to delegate to, so nothing changes',
     )
   }
@@ -696,7 +713,7 @@ async function theDelegationReachesTheConnectionResolution() {
   //    owner. The connection resolution must run as the owner, and so must the adapter.
   {
     const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
     assert.deepEqual(
       loadPrincipals,
       [DATA_SOURCE_OWNER],
@@ -704,7 +721,7 @@ async function theDelegationReachesTheConnectionResolution() {
       + 'the 400 every operator got',
     )
     assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: and so does the adapter, as one value')
-    assert.notEqual(DATA_SOURCE_OWNER, OPERATOR.id, 'P-12: the case is only meaningful while the two differ')
+    assert.notEqual(DATA_SOURCE_OWNER, PULLER.id, 'P-12: the case is only meaningful while the two differ')
   }
 
   // 2. THE LEGACY POINTER SHAPE BEHAVES IDENTICALLY — it was equally broken, for the same reason,
@@ -714,7 +731,7 @@ async function theDelegationReachesTheConnectionResolution() {
       connectionOwner: DATA_SOURCE_OWNER,
       bindingShape: 'legacy',
     })
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
     assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same resolution identity')
     assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same adapter identity')
   }
@@ -722,7 +739,7 @@ async function theDelegationReachesTheConnectionResolution() {
   // 3. APPLY re-expands the source in its own right, so it takes the same path.
   {
     const { routes, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
-    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull })
     assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: apply too')
   }
 
@@ -734,8 +751,8 @@ async function theDelegationReachesTheConnectionResolution() {
       connectionOwner: DATA_SOURCE_OWNER,
       dataSourceOwnerId: null,
     })
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
-    assert.deepEqual(loadPrincipals, [OPERATOR.id], 'P-12: with no stamp the load is the requester`s, as before')
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
+    assert.deepEqual(loadPrincipals, [PULLER.id], 'P-12: with no stamp the load is the requester`s, as before')
     assert.deepEqual(adapterPrincipals, [], 'P-12: and the refusal happens in the load, so no adapter is built')
   }
 
@@ -763,13 +780,13 @@ async function theDelegationReachesTheConnectionResolution() {
   //    operator's id and never the owner's, because the operator must not learn who the owner is.
   {
     const { routes, logLines } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull })
     const delegated = logLines.filter((entry) => entry.detail && entry.detail.delegated === true)
     assert.equal(delegated.length, 1, 'P-12: the delegation is logged exactly once per read')
     assert.deepEqual(delegated[0].detail, { actionId: pull, delegated: true })
     const serialized = JSON.stringify(logLines)
     assert.equal(serialized.includes(DATA_SOURCE_OWNER), false, 'P-12: the owner id is not in the record')
-    assert.equal(serialized.includes(OPERATOR.id), false, 'P-12: nor the operator id')
+    assert.equal(serialized.includes(PULLER.id), false, 'P-12: nor the operator id')
   }
 
   // 8. …AND NOTHING IS LOGGED WHEN NOTHING IS DELEGATED.
@@ -814,12 +831,12 @@ async function theOperatorPullsAndReconcilesButDoesNotArchive() {
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
 
   assert.equal(
-    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+    await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull }),
     'admitted',
     'P-01: the operator may DRY-RUN the stock-prep pull',
   )
   assert.equal(
-    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull }),
+    await gateVerdict(routes, { ...APPLY, user: PULLER, actionId: pull }),
     'admitted',
     'P-01: the operator may APPLY the stock-prep pull',
   )
@@ -828,12 +845,12 @@ async function theOperatorPullsAndReconcilesButDoesNotArchive() {
   // write step skipped for want of a token, and the page then pointed them at a queue that could
   // never contain their work, because the only thing that fills it was the step they were refused.
   assert.equal(
-    await gateVerdict(routes, { ...RECONCILE, user: OPERATOR, actionId: pull }),
+    await gateVerdict(routes, { ...RECONCILE, user: PULLER, actionId: pull }),
     'admitted',
     'P-02: the operator may RECONCILE the stock-prep pull — it is what puts their held rows in the queue',
   )
   assert.equal(
-    await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
+    await gateVerdict(routes, { ...MVP_PERSIST, user: PULLER, actionId: pull }),
     'refused',
     'P-02: mvp-persist stayed platform-admin — its absence costs the operator nothing on their own run',
   )
@@ -847,15 +864,17 @@ async function theWideningIsNotAWildcardOverTheTableActionNamespace() {
   const routes = mount()
   for (const route of [DRY_RUN, APPLY]) {
     assert.equal(
-      await gateVerdict(routes, { ...route, user: OPERATOR, actionId: OTHER_ACTION_ID }),
+      await gateVerdict(routes, { ...route, user: PULLER, actionId: OTHER_ACTION_ID }),
       'refused',
       `P-03: the operator is refused ${route.routePath} for a table action that is not the stock-prep pull`,
     )
   }
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], OTHER_ACTION_ID), false)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], ''), false)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], null), false)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], `${STOCK_PREP_OPERATOR_PULL_ACTION_ID}.evil`), false)
+  // The PULLER's permissions, so each false below is the ACTION ID's doing and not the tier's.
+  assert.equal(operatorMayRunStockPrepPull(PULLER.permissions, STOCK_PREP_OPERATOR_PULL_ACTION_ID), true, 'P-03 calibration')
+  assert.equal(operatorMayRunStockPrepPull(PULLER.permissions, OTHER_ACTION_ID), false)
+  assert.equal(operatorMayRunStockPrepPull(PULLER.permissions, ''), false)
+  assert.equal(operatorMayRunStockPrepPull(PULLER.permissions, null), false)
+  assert.equal(operatorMayRunStockPrepPull(PULLER.permissions, `${STOCK_PREP_OPERATOR_PULL_ACTION_ID}.evil`), false)
 }
 
 // ---------------------------------------------------------------------------
@@ -880,8 +899,9 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
     'P-04: integration:read did not gain the write half',
   )
 
-  // The tiers that hold nothing relevant are still refused everywhere.
-  for (const user of [ANONYMOUS, LOGGED_IN, OPERATOR_READ, OPERATOR_ORPHAN]) {
+  // The tiers that hold nothing relevant are still refused everywhere. Since R-33 that list
+  // includes the FLOOR OPERATOR (read + operate, no pull) and the two degenerate pull grants.
+  for (const user of [ANONYMOUS, LOGGED_IN, OPERATOR_READ, OPERATOR_ORPHAN, OPERATOR, PULLER_NO_OPERATE, PULLER_ORPHAN]) {
     for (const route of [DRY_RUN, APPLY, RECONCILE, MVP_PERSIST]) {
       assert.equal(
         await gateVerdict(routes, { ...route, user, actionId: pull }),
@@ -891,7 +911,7 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
     }
   }
 
-  // stock-prep:admin satisfies operate through the ladder, so it pulls AND reconciles — and still
+  // stock-prep:admin satisfies pull through the ladder, so it pulls AND reconciles — and still
   // does not archive.
   assert.equal(await gateVerdict(routes, { ...DRY_RUN, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
   assert.equal(await gateVerdict(routes, { ...APPLY, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
@@ -969,7 +989,7 @@ async function reconcileIsNotNarrowedByProject() {
 
   // (1) + (2): one directory listing exactly one number, and a reconcile of a DIFFERENT one.
   const operator = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
-  const operatorCode = await refusalCode(operator.routes, { ...foreign, user: OPERATOR })
+  const operatorCode = await refusalCode(operator.routes, { ...foreign, user: PULLER })
   assert.notEqual(
     operatorCode,
     RECONCILE_PROJECT_GATE_CODE,
@@ -1006,7 +1026,7 @@ async function reconcileIsNotNarrowedByProject() {
   await rawCall(directoryReader.routes, {
     method: 'GET',
     routePath: '/api/integration/stock-preparation/operator/projects',
-    user: OPERATOR,
+    user: PULLER,
   })
   assert.ok(
     projectSheetLookups(directoryReader) > 0,
@@ -1023,7 +1043,7 @@ async function reconcileIsNotNarrowedByProject() {
   const listed = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
   const listedCode = await refusalCode(listed.routes, {
     ...RECONCILE,
-    user: OPERATOR,
+    user: PULLER,
     actionId: pull,
     body: reconcileBody(VISIBLE_PROJECT_NO),
   })
@@ -1056,7 +1076,7 @@ async function reconcileIsNotNarrowedByProject() {
   const numeric = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
   const numericResponse = await rawCall(numeric.routes, {
     ...RECONCILE,
-    user: OPERATOR,
+    user: PULLER,
     actionId: pull,
     body: { parameters: { projectNo: 99999999 } },
   })
@@ -1079,7 +1099,7 @@ async function reconcileIsNotNarrowedByProject() {
   for (const route of [DRY_RUN, APPLY]) {
     const foreignCode = await refusalCode(untouchedForeign.routes, {
       ...route,
-      user: OPERATOR,
+      user: PULLER,
       actionId: pull,
       body: reconcileBody(FOREIGN_PROJECT_NO),
     })
@@ -1090,7 +1110,7 @@ async function reconcileIsNotNarrowedByProject() {
     )
     const listedStepCode = await refusalCode(untouchedListed.routes, {
       ...route,
-      user: OPERATOR,
+      user: PULLER,
       actionId: pull,
       body: reconcileBody(VISIBLE_PROJECT_NO),
     })
@@ -1140,14 +1160,118 @@ function theRuleIsDeclaredOnceAndTheSplitIsNamed() {
     assert.ok(['read', 'write', 'admin'].includes(step.legacyGate), 'P-05: each moved step names the legacy gate it keeps')
   }
 
-  // The CONJUNCTION, restated at this boundary: operate alone confers nothing here either.
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_OPERATE], STOCK_PREP_OPERATOR_PULL_ACTION_ID), false)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ], STOCK_PREP_OPERATOR_PULL_ACTION_ID), false)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], STOCK_PREP_OPERATOR_PULL_ACTION_ID), true)
-  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_ADMIN], STOCK_PREP_OPERATOR_PULL_ACTION_ID), true)
-  assert.equal(operatorMayRunStockPrepPull(permissionsOf(PLATFORM_ADMIN), STOCK_PREP_OPERATOR_PULL_ACTION_ID), true)
-  assert.equal(operatorMayRunStockPrepPull([], STOCK_PREP_OPERATOR_PULL_ACTION_ID), false)
-  assert.equal(operatorMayRunStockPrepPull(null, STOCK_PREP_OPERATOR_PULL_ACTION_ID), false)
+  // The CONJUNCTION, restated at this boundary — now three-way (R-33): pull AND operate AND read.
+  // Operate ∧ read alone (the floor operator) confers nothing here since 2026-10-08.
+  const id = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_OPERATE], id), false)
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ], id), false)
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE], id), false, 'P-05: the floor operator no longer pulls')
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_PULL], id), false, 'P-05: pull alone confers nothing')
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_PULL], id), false, 'P-05: pull without operate confers nothing')
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_OPERATE, STOCK_PREP_PULL], id), false, 'P-05: pull without read confers nothing')
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], id), true, 'P-05: the 拉取人员 pulls')
+  assert.equal(operatorMayRunStockPrepPull([STOCK_PREP_ADMIN], id), true)
+  assert.equal(operatorMayRunStockPrepPull(permissionsOf(PLATFORM_ADMIN), id), true)
+  assert.equal(operatorMayRunStockPrepPull([], id), false)
+  assert.equal(operatorMayRunStockPrepPull(null, id), false)
+  // …and it is `satisfiesStockPrepAccess` at the PULL code, not a second ladder.
+  for (const permissions of [[], [STOCK_PREP_READ, STOCK_PREP_OPERATE], PULLER.permissions, [STOCK_PREP_ADMIN], permissionsOf(PLATFORM_ADMIN)]) {
+    assert.equal(operatorMayRunStockPrepPull(permissions, id), satisfiesStockPrepAccess(permissions, STOCK_PREP_PULL))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P-14 — THE REVERSAL (R-33, 2026-10-08): the floor operator is refused EVERY split route,
+//        the 拉取人员 is admitted to every one, and nothing the floor kept moved
+// ---------------------------------------------------------------------------
+//
+// Every case before this block ran its admissions as PULLER, so none of them can show that the
+// OPERATOR is refused — a suite that renamed its actor would stay green with the gate still on
+// OPERATE. This block is the one that reddens on that: route by route, all eleven members of the
+// split, the operate-only actor is refused and the pull actor is admitted. Then the complement: the
+// manifest routes the owner kept for the floor (confirm, value read-back, export, handoff, board,
+// directory) still admit the operate-only actor, so the reversal narrowed the pull and nothing else.
+async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
+  const routes = mount()
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  assert.equal(ALL_MOVED_ROUTES.length, 11, 'P-14: the split has exactly eleven members')
+
+  for (const route of ALL_MOVED_ROUTES) {
+    routes.resetHostCalls()
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+      'refused',
+      `P-14: the floor operator (read+operate, no pull) is refused ${route.step}`,
+    )
+    assert.equal(routes.hostCallCount(), 0, `P-14: …and the refusal at ${route.step} cost no host call`)
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: PULLER, actionId: pull }),
+      'admitted',
+      `P-14: the 拉取人员 (read+operate+pull) passes the gate at ${route.step}`,
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: PULLER_NO_OPERATE, actionId: pull }),
+      'refused',
+      `P-14: pull WITHOUT operate is refused ${route.step} — the tier is a three-way conjunction`,
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: PULLER_ORPHAN, actionId: pull }),
+      'refused',
+      `P-14: pull alone is refused ${route.step}`,
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: WORKBENCH_ADMIN, actionId: pull }),
+      'admitted',
+      `P-14: stock-prep:admin still passes the gate at ${route.step} (the ladder short-circuit is unchanged)`,
+    )
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: PLATFORM_ADMIN, actionId: pull }),
+      'admitted',
+      `P-14: the platform admin still passes the gate at ${route.step}`,
+    )
+    // The pull tier is as action-scoped as the operator tier was.
+    assert.equal(
+      await gateVerdict(routes, { ...route, user: PULLER, actionId: OTHER_ACTION_ID }),
+      'refused',
+      `P-14: the 拉取人员 is refused ${route.step} for a table action that is not the stock-prep pull`,
+    )
+  }
+  // mvp-persist did not move — not to the puller either.
+  assert.equal(await gateVerdict(routes, { ...MVP_PERSIST, user: PULLER, actionId: pull }), 'refused', 'P-14: mvp-persist stays platform-admin')
+
+  // THE COMPLEMENT — what the floor KEPT. Every OPERATE-tier capability in the workbench manifest
+  // still admits the operate-only actor, so the reversal touched the pull and nothing else. The
+  // routes are read out of the manifest rather than retyped, so a capability that is re-tiered
+  // without this list changing cannot slip past. 'admitted' here means "past the permission gate"
+  // (the inert harness fails every one of them later, on data it does not have).
+  const keptByTheFloor = STOCK_PREP_WORKBENCH_CAPABILITIES.filter((entry) => entry.code === STOCK_PREP_OPERATE)
+  assert.deepEqual(
+    keptByTheFloor.map((entry) => entry.capability).sort(),
+    [
+      'confirmationQueue.confirm',
+      'confirmationQueue.export',
+      'confirmationQueue.projectBoard',
+      'confirmationQueue.projectDirectory',
+      'confirmationQueue.valueEntry',
+      'handoff.advance',
+    ],
+    'P-14: the six OPERATE capabilities the owner kept for the floor',
+  )
+  for (const entry of keptByTheFloor) {
+    assert.equal(
+      await gateVerdict(routes, { method: entry.method, routePath: entry.path, user: OPERATOR, actionId: pull, query: { projectNo: 'P-14', decisionId: 'd_1' } }),
+      'admitted',
+      `P-14: the floor operator still passes the gate at ${entry.capability}`,
+    )
+  }
+  // …and a bare `stock-prep:pull` opens none of them: the code is a pull code, not a value code.
+  for (const entry of keptByTheFloor) {
+    assert.equal(
+      await gateVerdict(routes, { method: entry.method, routePath: entry.path, user: PULLER_ORPHAN, actionId: pull, query: { projectNo: 'P-14', decisionId: 'd_1' } }),
+      'refused',
+      `P-14: pull alone is refused ${entry.capability}`,
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,7 +1287,7 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   {
     const routes = mount()
     for (const route of [DRY_RUN, APPLY]) {
-      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, query: { tenantId: TENANT_B } })
+      const code = await refusalCode(routes, { ...route, user: PULLER, actionId: pull, query: { tenantId: TENANT_B } })
       assert.equal(code, 'OPERATOR_SCOPE_TENANT_MISMATCH', `P-06: ${route.routePath} refuses a steered tenant`)
     }
   }
@@ -1173,7 +1297,7 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   {
     const routes = mount()
     for (const route of [DRY_RUN, APPLY]) {
-      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT_B })
+      const code = await refusalCode(routes, { ...route, user: PULLER, actionId: pull, authenticatedTenantId: TENANT_B })
       assert.equal(code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', `P-06: ${route.routePath} refuses a contradicted tenant`)
     }
   }
@@ -1183,7 +1307,7 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   {
     const routes = mount({ tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } })
     for (const route of [DRY_RUN, APPLY]) {
-      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull })
+      const code = await refusalCode(routes, { ...route, user: PULLER, actionId: pull })
       assert.equal(code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', `P-06: ${route.routePath} refuses a non-member`)
     }
   }
@@ -1192,7 +1316,7 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   {
     const routes = mount({ tenantPrincipalDirectory: null })
     for (const route of [DRY_RUN, APPLY]) {
-      const code = await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull })
+      const code = await refusalCode(routes, { ...route, user: PULLER, actionId: pull })
       assert.equal(code, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', `P-06: ${route.routePath} fails closed without the seam`)
     }
   }
@@ -1201,7 +1325,7 @@ async function theOperatorBranchCannotBeSteeredAcrossTenants() {
   // branch has no notion of a tenantless caller to serve.
   {
     const routes = mount()
-    const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+    const tenantless = { id: 'u_pull_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] }
     for (const route of [DRY_RUN, APPLY]) {
       const code = await refusalCode(routes, { ...route, user: tenantless, actionId: pull })
       assert.equal(code, 'OPERATOR_SCOPE_TENANT_REQUIRED', `P-06: ${route.routePath} refuses a tenantless operator`)
@@ -1250,7 +1374,7 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
     const routes = mount()
     for (const route of LARGE_BOM_ROUTES) {
       assert.equal(
-        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: pull }),
+        await gateVerdict(routes, { ...route, user: PULLER, actionId: pull }),
         'admitted',
         `P-07: the operator may run ${route.step}`,
       )
@@ -1265,7 +1389,7 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
     for (const route of LARGE_BOM_ROUTES) {
       routes.resetHostCalls()
       assert.equal(
-        await gateVerdict(routes, { ...route, user: OPERATOR, actionId: OTHER_ACTION_ID }),
+        await gateVerdict(routes, { ...route, user: PULLER, actionId: OTHER_ACTION_ID }),
         'refused',
         `P-07: ${route.step} is refused for a table action that is not the stock-prep pull`,
       )
@@ -1320,7 +1444,7 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
     for (const route of LARGE_BOM_ROUTES) {
       routes.resetHostCalls()
       assert.equal(
-        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, query: { tenantId: TENANT_B } }),
+        await refusalCode(routes, { ...route, user: PULLER, actionId: pull, query: { tenantId: TENANT_B } }),
         'OPERATOR_SCOPE_TENANT_MISMATCH',
         `P-07: ${route.step} refuses a steered tenant`,
       )
@@ -1328,14 +1452,14 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
 
       routes.resetHostCalls()
       assert.equal(
-        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT_B }),
+        await refusalCode(routes, { ...route, user: PULLER, actionId: pull, authenticatedTenantId: TENANT_B }),
         'OPERATOR_SCOPE_TENANT_CONTRADICTED',
         `P-07: ${route.step} refuses a header contradicting the verified claim`,
       )
       assert.equal(routes.hostCallCount(), 0, `P-07: ${route.step} refuses a contradicted tenant with zero IO`)
 
       routes.resetHostCalls()
-      const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+      const tenantless = { id: 'u_pull_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] }
       assert.equal(
         await refusalCode(routes, { ...route, user: tenantless, actionId: pull }),
         'OPERATOR_SCOPE_TENANT_REQUIRED',
@@ -1350,7 +1474,7 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
     const routes = mount({ tenantPrincipalDirectory: null })
     for (const route of LARGE_BOM_ROUTES) {
       assert.equal(
-        await refusalCode(routes, { ...route, user: OPERATOR, actionId: pull }),
+        await refusalCode(routes, { ...route, user: PULLER, actionId: pull }),
         'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE',
         `P-07: ${route.step} fails closed without the membership seam`,
       )
@@ -1371,7 +1495,7 @@ async function theOperatorReachesTheBoundedBackgroundChannel() {
   {
     const routes = mount()
     assert.equal(
-      await gateVerdict(routes, { ...MVP_PERSIST, user: OPERATOR, actionId: pull }),
+      await gateVerdict(routes, { ...MVP_PERSIST, user: PULLER, actionId: pull }),
       'refused',
       'P-07: mvp-persist is still platform-admin',
     )
@@ -1648,12 +1772,12 @@ async function theLegacyBranchDoorPrecedesTheRoutesOwnValidation() {
 // rather than backing it, and P-06's assurance would have quietly moved to a flagged code path.
 async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
-  const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+  const tenantless = { id: 'u_pull_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] }
   const combinations = [
-    { what: 'a steered tenant', mountOptions: undefined, call: { user: OPERATOR, query: { tenantId: TENANT_B } }, expected: 'OPERATOR_SCOPE_TENANT_MISMATCH' },
-    { what: 'a contradicted tenant', mountOptions: undefined, call: { user: OPERATOR, authenticatedTenantId: TENANT_B }, expected: 'OPERATOR_SCOPE_TENANT_CONTRADICTED' },
-    { what: 'a non-member', mountOptions: { tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED' },
-    { what: 'no membership seam', mountOptions: { tenantPrincipalDirectory: null }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE' },
+    { what: 'a steered tenant', mountOptions: undefined, call: { user: PULLER, query: { tenantId: TENANT_B } }, expected: 'OPERATOR_SCOPE_TENANT_MISMATCH' },
+    { what: 'a contradicted tenant', mountOptions: undefined, call: { user: PULLER, authenticatedTenantId: TENANT_B }, expected: 'OPERATOR_SCOPE_TENANT_CONTRADICTED' },
+    { what: 'a non-member', mountOptions: { tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } }, call: { user: PULLER }, expected: 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED' },
+    { what: 'no membership seam', mountOptions: { tenantPrincipalDirectory: null }, call: { user: PULLER }, expected: 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE' },
     { what: 'a tenantless operator', mountOptions: undefined, call: { user: tenantless }, expected: 'OPERATOR_SCOPE_TENANT_REQUIRED' },
   ]
   for (const flag of [null, 'true']) {
@@ -1681,7 +1805,7 @@ async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
   await withTenantClaimFlag(null, async () => {
     const routes = mount()
     assert.equal(
-      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull }),
       'admitted',
       'P-10g: a claimless operator is admitted today',
     )
@@ -1690,13 +1814,13 @@ async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
     const routes = mount()
     routes.resetHostCalls()
     assert.equal(
-      await refusalCode(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      await refusalCode(routes, { ...DRY_RUN, user: PULLER, actionId: pull }),
       'OPERATOR_SCOPE_TENANT_REQUIRED',
       'P-10g: …and refused once the door is armed, because their tenant was never proven',
     )
     assert.equal(routes.hostCallCount(), 0, 'P-10g: with no host work')
     assert.equal(
-      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT }),
+      await gateVerdict(routes, { ...DRY_RUN, user: PULLER, actionId: pull, authenticatedTenantId: TENANT }),
       'admitted',
       'P-10g: the SAME operator, once their token carries the claim, is admitted again — the fix is a token, not a grant',
     )
@@ -1719,6 +1843,7 @@ async function main() {
   await theWideningIsNotAWildcardOverTheTableActionNamespace()
   await theLegacyTiersAreExactlyWhatTheyWere()
   theRuleIsDeclaredOnceAndTheSplitIsNamed()
+  await theFloorOperatorNoLongerPullsAndThePullerDoes()
   console.log('✓ stock-preparation-operator-pull-gate')
 }
 

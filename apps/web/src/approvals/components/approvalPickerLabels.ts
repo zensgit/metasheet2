@@ -62,8 +62,17 @@ export const RECORD_LINK_PICKER_EN: Record<keyof typeof RECORD_LINK_PICKER_ZH, s
 
 export const USER_PICKER_ZH = {
   defaultPlaceholder: '搜索用户名 / 邮箱 / ID',
+  // Test report 2026-10-08 (T4b / T4cd): what a member id renders as when no display name can be
+  // resolved for it (inactive or nameless account, or a lookup still in flight) — never the id.
+  unknownUser: '未知用户',
 }
 
 export const USER_PICKER_EN: Record<keyof typeof USER_PICKER_ZH, string> = {
   defaultPlaceholder: 'Search by name / email / ID',
+  unknownUser: 'Unknown user',
+}
+
+/** The values-free label for a member id with no resolvable display name, in the shell locale. */
+export function unknownUserLabel(isZh: boolean): string {
+  return (isZh ? USER_PICKER_ZH : USER_PICKER_EN).unknownUser
 }

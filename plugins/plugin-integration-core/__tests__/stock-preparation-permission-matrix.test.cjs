@@ -63,6 +63,7 @@ const {
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_ROUTE,
@@ -115,6 +116,12 @@ const OPERATOR_CONFIRM = Object.freeze({ id: 'u_op_confirm', tenantId: TENANT_ID
 const OPERATOR_ORPHAN_OPERATE = Object.freeze({ id: 'u_op_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_OPERATE] })
 const WORKBENCH_ADMIN = Object.freeze({ id: 'u_wb_admin', tenantId: TENANT_ID, permissions: [STOCK_PREP_ADMIN] })
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
+// R-33 (2026-10-08): the 拉取人员 — read + operate + pull. On THIS manifest (the confirmation-queue
+// control set) the pull code adds nothing: the pull routes are not manifest members (see the
+// operator-pull-gate suite), so this actor must answer exactly as `operatorConfirm` does.
+const PULLER = Object.freeze({ id: 'u_puller', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
+// The DEGENERATE pull grant: pull alone. Must confer nothing — it is a pull code, not a value code.
+const PULL_ORPHAN = Object.freeze({ id: 'u_pull_orphan', tenantId: TENANT_ID, permissions: [STOCK_PREP_PULL] })
 
 function permissionsOf(user) {
   if (!user) return []
@@ -477,6 +484,34 @@ const MATRIX = Object.freeze({
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
+  // R-33: the 拉取人员 answers exactly as the confirming operator on THIS manifest — the pull code
+  // opens the pull routes (not members here) and nothing in the queue control set.
+  puller: Object.freeze({
+    'confirmationQueue.readiness': 'pass',
+    'confirmationQueue.list': 'pass',
+    'confirmationQueue.valueEntry': 'pass',
+    'confirmationQueue.confirm': 'pass',
+    'confirmationQueue.export': 'pass',
+    'confirmationQueue.projectDirectory': 'pass',
+    'handoff.read': 'pass',
+    'handoff.advance': 'pass',
+    'confirmationQueue.projectBoard': 'pass',
+    'confirmationQueue.ensure': 'gate',
+    'confirmationQueue.reconcile': 'gate',
+  }),
+  orphanPull: Object.freeze({
+    'confirmationQueue.readiness': 'gate',
+    'confirmationQueue.list': 'gate',
+    'confirmationQueue.valueEntry': 'gate',
+    'confirmationQueue.confirm': 'gate',
+    'confirmationQueue.export': 'gate',
+    'confirmationQueue.projectDirectory': 'gate',
+    'handoff.read': 'gate',
+    'handoff.advance': 'gate',
+    'confirmationQueue.projectBoard': 'gate',
+    'confirmationQueue.ensure': 'gate',
+    'confirmationQueue.reconcile': 'gate',
+  }),
 })
 
 const ACTORS = Object.freeze({
@@ -488,6 +523,8 @@ const ACTORS = Object.freeze({
   orphanOperate: OPERATOR_ORPHAN_OPERATE,
   workbenchAdmin: WORKBENCH_ADMIN,
   platformAdmin: PLATFORM_ADMIN,
+  puller: PULLER,
+  orphanPull: PULL_ORPHAN,
 })
 
 async function matrixGoldenHolds() {
@@ -714,7 +751,8 @@ async function platformAdminLosesNothing() {
 async function nobodyGainsAnything() {
   // R-11's zero-automatic mapping, asserted: no pre-existing integration scope becomes a stock-prep
   // scope. These three actors could reach NOTHING here before this change and must reach nothing now.
-  for (const user of [LOGGED_IN, INTEGRATION_READER, INTEGRATION_WRITER]) {
+  // A bare `stock-prep:pull` (R-33) joins them: it is a pull code, and opens nothing in this manifest.
+  for (const user of [LOGGED_IN, INTEGRATION_READER, INTEGRATION_WRITER, PULL_ORPHAN]) {
     for (const capability of STOCK_PREP_WORKBENCH_CAPABILITIES) {
       const { routes } = mount()
       const res = await callCapability(routes, capability, user)
@@ -891,6 +929,22 @@ async function orphanOperateGrantConfersNothing() {
     const res = await callCapability(routes, capability, OPERATOR_ORPHAN_OPERATE)
     assert.ok(refusedByGate(res), `M-05: operate-without-read must be refused ${capability.capability}`)
   }
+  // R-33: the PULL tier is the same shape one rung up — pull without the operate conjunction is
+  // nothing, and the pull code satisfies no other code.
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_PULL), false, 'M-05: pull alone does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_READ], STOCK_PREP_PULL), false, 'M-05: pull without operate does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_OPERATE], STOCK_PREP_PULL), false, 'M-05: pull without read does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ], STOCK_PREP_PULL), true, 'M-05: the 拉取人员 satisfies pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_READ, STOCK_PREP_OPERATE], STOCK_PREP_PULL), false, 'M-05: the floor operator does not satisfy pull')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_ADMIN], STOCK_PREP_PULL), true, 'M-05: stock-prep:admin satisfies pull through the ladder')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_READ), false, 'M-05: pull alone does not satisfy read')
+  assert.equal(satisfiesStockPrepAccess([STOCK_PREP_PULL], STOCK_PREP_OPERATE), false, 'M-05: pull alone does not satisfy operate')
+  assert.deepEqual(grantedStockPrepCapabilities([STOCK_PREP_PULL]), [], 'M-05: pull alone renders nothing')
+  assert.deepEqual(
+    grantedStockPrepCapabilities([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
+    grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
+    'M-05: on this manifest the pull code adds no capability to the operator tier',
+  )
   // And the conjunction is the ONLY thing standing between that grant and a misaligned actor: adding
   // read turns it into the full operator tier.
   assert.deepEqual(
@@ -1029,9 +1083,33 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260830100000_add_stock_prep_permissions.ts'),
     'utf8',
   )
-  for (const code of STOCK_PREP_PERMISSION_CODES) {
+  // The three R-11 codes come from the 0830 seed; `stock-prep:pull` (R-33, 2026-10-08) from its own
+  // migration, whose single row must be the descriptor BYTE FOR BYTE (name and description), and
+  // which — like the seed — binds NO role.
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
     assert.ok(migration.includes(`'${code}'`), `M-08: the migration seeds ${code}`)
   }
+  assert.ok(!migration.includes(`'${STOCK_PREP_PULL}'`), 'M-08: the 0830 seed is untouched — pull has its own migration')
+  const pullMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20261008120000_add_stock_prep_pull_permission.ts'),
+    'utf8',
+  )
+  const pullDescriptor = STOCK_PREP_PERMISSION_DESCRIPTORS.find((descriptor) => descriptor.code === STOCK_PREP_PULL)
+  assert.ok(pullDescriptor, 'M-08: the pull code has a descriptor')
+  assert.ok(
+    pullMigration.includes(`('${STOCK_PREP_PULL}', '${pullDescriptor.name}', '${pullDescriptor.description}')`),
+    'M-08: the pull migration inserts exactly the PULL descriptor row',
+  )
+  assert.match(pullMigration, /INSERT INTO permissions \(code, name, description\)\s+VALUES/, 'M-08: the pull migration uses the raw INSERT … VALUES form the catalogue guard reads')
+  assert.ok(!/INSERT INTO role_permissions/.test(pullMigration), 'M-08: the pull migration grants the code to NO role — roles are site data')
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
+    assert.ok(!pullMigration.includes(`'${code}'`), `M-08: the pull migration touches only its own code, not ${code}`)
+  }
+  assert.equal(
+    (pullMigration.split(/export\s+async\s+function\s+down\b/)[1].match(/DELETE FROM/g) || []).length,
+    3,
+    'M-08: down() removes the pull code from role_permissions, user_permissions and permissions, in FK order',
+  )
   // The ADMIN description gained the relabel write scope; the seed is ON CONFLICT DO NOTHING, so a
   // compare-and-set migration carries it to existing rows. Its AFTER text must be the descriptor's,
   // byte for byte, and its BEFORE text must be exactly what the seed wrote — otherwise the CAS would
@@ -1191,10 +1269,11 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   const { routes, hostCallCount } = mount()
   const before = hostCallCount()
 
-  // Everything BELOW the operator tier, refused on all four routes exactly as before. The orphan
-  // operate grant is in this list on purpose: the tier is a conjunction, so the split confers
-  // nothing on it either.
-  for (const user of [OPERATOR_READ, OPERATOR_ORPHAN_OPERATE, LOGGED_IN, ANONYMOUS]) {
+  // Everything BELOW the pull tier, refused on all four routes. The orphan operate grant is in this
+  // list on purpose: the tier is a conjunction, so the split confers nothing on it either. Since
+  // R-33 (2026-10-08) the CONFIRMING OPERATOR (read + operate, no pull) is below the pull tier too —
+  // that is the reversal — and so is a bare `stock-prep:pull`.
+  for (const user of [OPERATOR_READ, OPERATOR_ORPHAN_OPERATE, OPERATOR_CONFIRM, PULL_ORPHAN, LOGGED_IN, ANONYMOUS]) {
     for (const route of PROJECT_SYNC_ROUTES) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1212,7 +1291,7 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   // WHAT STAYED: mvp-persist alone. Reconcile moved with the rest of the pull (C13) because it is
   // the step that fills the queue an operator is sent to; mvp-persist writes the snapshot archive,
   // whose absence costs an operator nothing on their own run, and the page says so in words.
-  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+  for (const user of [PULLER, WORKBENCH_ADMIN]) {
     for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1228,7 +1307,7 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
   }
 
   // M-10c: on any OTHER table action the operator is refused on all four, split included.
-  for (const user of [OPERATOR_CONFIRM, WORKBENCH_ADMIN]) {
+  for (const user of [PULLER, WORKBENCH_ADMIN]) {
     for (const route of PROJECT_SYNC_ROUTES) {
       const res = await call(routes, 'POST', route.path, {
         user,
@@ -1528,6 +1607,9 @@ function theRailVocabularyAndTheLandingRuleHold() {
     { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
     { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
     { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
+    // R-33: the pull code re-tiers NO rail item — the 拉取人员 sees exactly the operator's rail.
+    { name: 'puller', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'orphan pull', permissions: [STOCK_PREP_PULL], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
     { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
     { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
   ]
@@ -1562,6 +1644,11 @@ function theRailVocabularyAndTheLandingRuleHold() {
       stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE], posture),
       'home',
       `D2: 一线落 home @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL], posture),
+      'home',
+      `D2: 拉取人员也落 home @ ${String(posture)} (R-33 re-tiers no landing)`,
     )
     assert.equal(
       stockPrepWorkbenchLandingKey([STOCK_PREP_READ], posture),

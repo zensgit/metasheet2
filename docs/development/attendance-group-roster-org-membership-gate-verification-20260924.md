@@ -227,3 +227,31 @@ SELECT 'attendance_schedule_group_members', m.org_id, m.user_id, m.schedule_grou
 | `orgId=""` query, body, or `x-org-id` stays on that tenant; with no token the same selector is 403 and does not query `'default'` | `an empty-string org selector stays on the token tenant` |
 
 The token-only user is `{ id: 'admin-1' }` plus `authenticatedTenantId: 'org-tenant'`, and the same routes are repeated with `user.orgId: ''`. SQL parameters include `org-tenant` and do not include `'default'`.
+
+## 10. Alignment to main 64bf18b5e (2026-10-09)
+
+Draft #6051 was merged onto `origin/main` `64bf18b5e833b5cf938d83afe420ae0df4370c86` (#6250 squash, parent `7723d950dc4f7fd2f903eb8588fb5f2b622dc2ef`). Nothing had landed past that SHA at fetch time. The previous alignment parent was `3884d49e90d1e4340b65a87d5bebbd3c5041307e`. Zero conflicts.
+
+Commits brought in, oldest first. Sensitive paths are listed; they were merged under the align-to-latest-main policy.
+
+| Commit | What | Sensitive paths |
+|---|---|---|
+| `00aac5b7b4de` #6246 | Drop the Node 18.x matrix leg. `apps/web` type-check now runs `vue-tsc` with a 4096 MB heap. | `.github/workflows/plugin-tests.yml` |
+| `afd32b704c6f` #6247 | Route the plugin-test job through `MS2_PLUGIN_RUNNER` (default `ubuntu-latest`). | `.github/workflows/plugin-tests.yml` |
+| `317cf60d9042` #6252 | Stock-prep customer-reply draft. | none |
+| `644310ba6095` #6254 | Date-only leftovers use the business-timezone day. | `packages/core-backend/src/routes/univer-meta.ts` |
+| `9eee3a3cd0e7` #6253 | Access presets stop granting unregistered `workflow:read`. | none |
+| `ceb5442ed2fa` #6260 | Approval date fields and history actors. | `.github/workflows/approval-web-guard.yml` |
+| `311c1fc2e820` #6264 | `stock-prep:pull` gates pull sub-routes. | migration `zzzz20261008120000_add_stock_prep_pull_permission`, `plugins/plugin-integration-core/lib/http-routes.cjs`, `s6a-package-provenance-pins.json` |
+| `a6321f3b4bb4` #6257 | Create-user validation reason codes. | none |
+| `2f91694c6fa0` #6255 | Approval-center CSV export headers follow the UI language. | none |
+| `c147a2d78029` #6256 | Record-link target pickers in the Designer field inspector. | none |
+| `9d65b8318f3d` #6261 | Delete condition branches; extra parallel lanes stay reachable. | none |
+| `7723d950dc4f` #6263 | Directory create-and-bind returns 400 `INVALID_USERNAME` for a login-name rule failure. | none |
+| `64bf18b5e833` #6250 | Stop the attendance-web-guard `onTaskUpdate` timeout. | `apps/web/tests/attendance-admin-regressions.spec.ts` only (no workflow file) |
+
+Earlier context still in this head, already on the previous baseline: #6187 narrowed provenance so `evidenceFiles.pluginTestsWorkflow` became `evidenceFiles.s6aPowershell51Workflow` (still 63 SHA-256 values across 66 leaf fields). #6245 replaced a customer project reference and moved `runtimeFiles.pluginHttpRoutes`.
+
+Pins recomputed on this merge tree against main's pin file: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally. `plugins/plugin-attendance/index.cjs` is byte-identical to `24bb31894`. Residuals #6234–#6237 are unchanged: a deactivation that commits after the insert keeps the row; W4 still has no manager write; already-stored ghost rows are not deleted; `loadDefaultRule` still falls back to the `'default'` org.
+
+`plugin-tests.yml` is now a one-entry matrix `[20.x]`. The required check name stays `test (20.x)`. There is no `test (18.x)` leg. The attendance step still does not set `EXPECT_DB` (#6238). The approval real-DB step still sets `EXPECT_DB: '1'` and `if: matrix.node-version == '20.x'`.

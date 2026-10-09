@@ -21,9 +21,9 @@ import type {
 import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
 import {
   businessTodayKey,
-  calendarDayFromText,
   dateTimeValueDayKey,
   dayKeyOrdinal,
+  formatDateOnlyValue,
   getBusinessTimezone,
   resolveDateTimeTimezone,
 } from './business-timezone'
@@ -174,10 +174,12 @@ function startOfDay(date: Date): number {
  * is_in_next_n_days / is_overdue) compare CALENDAR DAYS, never the browser's day:
  *   - a date-time field (dateTime / createdTime / modifiedTime) → the day its cell shows (the field's zone
  *     rule: explicit non-`UTC` zone, else the business timezone), against today in that zone;
- *   - a `date` field holding a day string → the day AS WRITTEN (floating day, #3417), against the business
- *     today (the calendar views' "today").
- * `null` for every other case (other field types, numbers / Dates in a `date` field, text neither grammar
- * reads) — the caller keeps the legacy local-day math. Zone rule mirrored from field-display `viewDayZone`
+ *   - a `date` field holding a string → the day its cell shows (`formatDateOnlyValue`, the grid's own day key,
+ *     #6204): a day as written keeps that day (floating day, #3417); a stored instant (`2026-09-17T16:00:00.000Z`)
+ *     is the day it falls on in the business timezone (`2026-09-18` in Asia/Shanghai), never its UTC day —
+ *     against the business today (the calendar views' "today").
+ * `null` for every other case (other field types, numbers / Dates in a `date` field, text that names no day)
+ * — the caller keeps the legacy local-day math. Zone rule mirrored from field-display `viewDayZone`
  * (not imported: field-display imports this module).
  */
 function dayOrdinals(value: unknown, field: MetaField | undefined, nowMs: number): { cell: number; today: number } | null {
@@ -189,7 +191,7 @@ function dayOrdinals(value: unknown, field: MetaField | undefined, nowMs: number
     cellKey = dateTimeValueDayKey(value, zone)
   } else if (field.type === 'date' && typeof value === 'string') {
     zone = getBusinessTimezone()
-    cellKey = calendarDayFromText(value)
+    cellKey = formatDateOnlyValue(value)
   }
   if (!cellKey || !zone) return null
   const cell = dayKeyOrdinal(cellKey)

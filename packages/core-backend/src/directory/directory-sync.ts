@@ -3,7 +3,9 @@ import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
 import { recordInvite } from '../auth/invite-ledger'
 import { issueInviteToken } from '../auth/invite-tokens'
+import { assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
+import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
@@ -719,14 +721,6 @@ function sanitizeDirectoryAdmissionUsername(value: unknown): string | null {
   const text = normalizeText(value).toLowerCase()
   if (!text) return null
   return text.slice(0, 64)
-}
-
-function validateDirectoryAdmissionUsername(username: string | null): string | null {
-  if (!username) return null
-  if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
-    return 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
-  }
-  return null
 }
 
 function resolveDirectoryAdmissionAccountLabel(options: {
@@ -6128,10 +6122,9 @@ async function createDirectoryAdmittedUserInTransaction(
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
-  const usernameValidationError = validateDirectoryAdmissionUsername(options.username)
-  if (usernameValidationError) {
-    throw new Error(usernameValidationError)
-  }
+  // #6259: shared login-name rule; throws LoginNameRuleError (message unchanged) so a route can
+  // answer 400 INVALID_USERNAME by type instead of matching the English sentence.
+  assertLoginName(options.username)
   if (!options.email && !options.username && !options.mobile) {
     throw new Error('At least one account identifier (email, username, or mobile) is required')
   }
@@ -6888,8 +6881,9 @@ export async function admitDirectoryAccountUser(
   }
   if (cleanName.length < 2 || cleanName.length > 100) throw new Error('Name must be between 2 and 100 characters')
   if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format')
-  const usernameValidationError = validateDirectoryAdmissionUsername(cleanUsername)
-  if (usernameValidationError) throw new Error(usernameValidationError)
+  // #6259: shared login-name rule (auth/login-name-rule.ts); LoginNameRuleError keeps the English
+  // message byte-identical, and the admit-user route maps the type to 400 INVALID_USERNAME.
+  assertLoginName(cleanUsername)
 
   // Pending: ignore any requested password — unusable hash only (no temp credentials).
   let generatedPassword: string | null = null
@@ -6902,7 +6896,8 @@ export async function admitDirectoryAccountUser(
     mustChangePassword = requestedPassword.length === 0
     const passwordValidation = validatePassword(generatedPassword)
     if (!passwordValidation.valid) {
-      throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+      // #6259: typed so the admit-user route answers 400 PASSWORD_POLICY_FAILED; message unchanged.
+      throw new PasswordPolicyError(passwordValidation.errors)
     }
     passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   }

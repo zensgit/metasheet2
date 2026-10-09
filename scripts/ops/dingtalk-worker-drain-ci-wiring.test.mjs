@@ -18,9 +18,10 @@ function jobBlock(jobId) {
     : workflow.slice(bodyStart, bodyStart + nextJob)
 }
 
-test('test matrix runs the worker-drain behavior suite on Node 18 and 20', () => {
+test('test matrix runs the worker-drain behavior suite on the required Node 20 leg', () => {
   const requiredTestJob = jobBlock('test')
-  assert.match(requiredTestJob, /node-version:\s*\[18\.x,\s*20\.x\]/)
+  // The 18.x leg was dropped on 2026-10-07 (Node 18 is EOL; it was never a required check).
+  assert.match(requiredTestJob, /node-version:\s*\[20\.x\]/)
   assert.match(
     requiredTestJob,
     /node --test scripts\/ops\/dingtalk-staging-deploy-identity\.test\.mjs/,

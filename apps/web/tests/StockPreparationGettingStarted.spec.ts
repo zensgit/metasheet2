@@ -843,6 +843,11 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     ;(ready.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).click()
     await nextTick()
     expect(h.copied[0]).toContain('可以用了')
+    // R-33 (2026-10-08): the message goes to the floor, who no longer pull — both pull steps name
+    // the 拉取人员 and the text never tells the reader to pull themselves.
+    expect(h.copied[0]).toContain('由拉取人员从 PLM 拉进来')
+    expect(h.copied[0]).toContain('请拉取人员再同步一次')
+    expect(h.copied[0]).not.toContain('→ 从 PLM 拉进来 →')
   })
 
   // ---------------------------------------------------------------------------

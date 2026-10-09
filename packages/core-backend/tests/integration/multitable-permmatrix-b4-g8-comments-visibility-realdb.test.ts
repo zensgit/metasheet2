@@ -33,7 +33,8 @@
  *
  * NOT theoretical: `auth/access-presets.ts`'s `plm-collaborator` preset (role: 'user', "PLM 协作成员" /
  * "PLM Collaboration Member" — "适用于查看 PLM 工作台、审批与评论协作") grants EXACTLY
- * `['spreadsheets:read', 'workflow:read', 'approvals:read', 'comments:read']` — comments:read WITHOUT
+ * `['spreadsheets:read', 'approvals:read', 'comments:read']` (`workflow:read` dropped by #6253, it was never
+ * registered) — comments:read WITHOUT
  * any multitable:* grant. Also, migration `zzzz20260320163000_add_comment_permissions.ts` seeds BOTH
  * comments:read AND comments:write onto the generic 'user' role_permissions row. Any actor holding either
  * of those — a real, shipped role shape, not a contrived fixture — can read (and via 'user' role, write)
