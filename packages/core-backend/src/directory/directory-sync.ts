@@ -646,6 +646,8 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
 export type DirectoryAccountBatchAdmissionOutcome = {
   succeeded: DirectoryAccountManualAdmissionResult[]
   failed: Array<{ accountId: string; error: string }>
+  /** What each `failed` entry was thrown as, index-aligned — see DirectoryAccountBatchOutcome.failedErrors. */
+  failedErrors: unknown[]
 }
 
 export type DirectoryAutoAdmissionOnboardingPacket = {
@@ -5558,6 +5560,15 @@ export async function getDirectoryReviewItem(
 export type DirectoryAccountBatchOutcome = {
   succeeded: DirectoryAccountMutationResult[]
   failed: Array<{ accountId: string; error: string }>
+  /**
+   * #6163 S6: what each `failed` entry was thrown as, index-aligned with `failed`. A batch that commits
+   * nothing is answered like the single-item route: the route rethrows `failedErrors[0]`, so the status
+   * comes from the error's TYPE (DirectoryValidationError 400 / DirectoryNotFoundError 404 /
+   * DirectoryConflictError 409; anything else a fixed-sentence 500), not from a regex over
+   * `failed[0].error`. Kept beside `failed` rather than inside it: the routes send `failed` as it is and
+   * never this array.
+   */
+  failedErrors: unknown[]
 }
 
 export async function batchUnbindDirectoryAccounts(
@@ -5567,7 +5578,7 @@ export async function batchUnbindDirectoryAccounts(
   const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
   if (normalizedIds.length === 0) throw new DirectoryValidationError('accountIds are required')
 
-  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const directoryAccountId of normalizedIds) {
     try {
       outcome.succeeded.push(await unbindDirectoryAccount(directoryAccountId, input))
@@ -5576,6 +5587,7 @@ export async function batchUnbindDirectoryAccounts(
         accountId: directoryAccountId,
         error: readErrorMessage(error, 'Failed to unbind directory account'),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome
@@ -5596,7 +5608,7 @@ export async function batchBindDirectoryAccounts(
   if (normalizedEntries.length === 0) throw new DirectoryValidationError('bindings are required')
 
   // DT-HARDEN-04: per-item isolation — see DirectoryAccountBatchOutcome.
-  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const entry of normalizedEntries) {
     try {
       outcome.succeeded.push(await bindDirectoryAccount(entry.accountId, {
@@ -5609,6 +5621,7 @@ export async function batchBindDirectoryAccounts(
         accountId: entry.accountId,
         error: readErrorMessage(error, 'Failed to bind directory account'),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome
@@ -5669,7 +5682,7 @@ export async function batchAdmitDirectoryAccountUsers(
   if (normalizedIds.length === 0) throw new DirectoryValidationError('accountIds are required')
   if (!normalizedAdminUserId) throw new DirectoryValidationError('adminUserId is required')
 
-  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const accountId of normalizedIds) {
     try {
       const account = await loadDirectoryBindingTargetAccount(accountId)
@@ -5697,6 +5710,7 @@ export async function batchAdmitDirectoryAccountUsers(
         accountId,
         error: readErrorMessage(error, 'Failed to create and bind local user for directory account'),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome

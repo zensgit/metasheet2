@@ -35,6 +35,9 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 }))
 
 import {
+  DirectoryConflictError,
+  DirectoryNotFoundError,
+  DirectoryValidationError,
   __directorySyncInternalsForTests,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
@@ -1362,6 +1365,11 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-2', error: expect.stringMatching(/not found/i) },
     ])
+    // #6163 S6: the thrown value rides beside `failed`, index-aligned and still TYPED, so the route can
+    // answer a batch that commits nothing by the error's type.
+    expect(outcome.failedErrors).toHaveLength(1)
+    expect(outcome.failedErrors[0]).toBeInstanceOf(DirectoryNotFoundError)
+    expect((outcome.failedErrors[0] as Error).message).toBe(outcome.failed[0].error)
     // account-1 committed; account-2 opened its authoritative lookup transaction and failed
     // before any mutation.
     expect(pgMocks.transaction).toHaveBeenCalledTimes(2)
@@ -1456,6 +1464,8 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-missing', error: expect.stringMatching(/not found/i) },
     ])
+    expect(outcome.failedErrors).toHaveLength(1)
+    expect(outcome.failedErrors[0]).toBeInstanceOf(DirectoryNotFoundError)
     const createUserCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('INSERT INTO users'))
     const createdUserId = Array.isArray(createUserCall?.[1]) ? String(createUserCall?.[1]?.[0] || '') : ''
     expect(createUserCall?.[1]).toEqual(expect.arrayContaining([
@@ -1519,6 +1529,8 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-case-mismatch', error: expect.stringMatching(/already exists/i) },
     ])
+    expect(outcome.failedErrors).toHaveLength(1)
+    expect(outcome.failedErrors[0]).toBeInstanceOf(DirectoryConflictError)
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
@@ -1555,6 +1567,8 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-already-linked', error: expect.stringMatching(/already linked/i) },
     ])
+    expect(outcome.failedErrors).toHaveLength(1)
+    expect(outcome.failedErrors[0]).toBeInstanceOf(DirectoryConflictError)
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
@@ -1647,7 +1661,31 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.failed).toEqual([
       { accountId: 'account-2', error: expect.stringMatching(/not found/i) },
     ])
+    expect(outcome.failedErrors).toHaveLength(1)
+    expect(outcome.failedErrors[0]).toBeInstanceOf(DirectoryNotFoundError)
+    expect((outcome.failedErrors[0] as Error).message).toBe(outcome.failed[0].error)
     // account-1 really did commit (its transaction ran); account-2 never opened one.
     expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  // #6163 S6: the caller's unusable input is thrown TYPED (message unchanged), before any database
+  // read, so the admin route answers 400 by the error's type instead of a regex over its text.
+  it('throws input errors as DirectoryValidationError, message unchanged, before touching the database', async () => {
+    const rejection = async (promise: Promise<unknown>): Promise<unknown> => promise.then(() => null, (error: unknown) => error)
+    const cases: Array<[Promise<unknown>, string]> = [
+      [batchBindDirectoryAccounts([], { adminUserId: 'admin-1' }), 'bindings are required'],
+      [batchUnbindDirectoryAccounts([], { adminUserId: 'admin-1' }), 'accountIds are required'],
+      [batchAdmitDirectoryAccountUsers([], { adminUserId: 'admin-1' }), 'accountIds are required'],
+      [bindDirectoryAccount('', { localUserRef: 'user-1', adminUserId: 'admin-1' }), 'directoryAccountId is required'],
+      [unbindDirectoryAccount('', { adminUserId: 'admin-1' }), 'directoryAccountId is required'],
+      [admitDirectoryAccountUser('account-1', { adminUserId: 'admin-1', name: 'X', email: 'x@example.com' }), 'Name must be between 2 and 100 characters'],
+    ]
+    for (const [promise, message] of cases) {
+      const error = await rejection(promise)
+      expect(error).toBeInstanceOf(DirectoryValidationError)
+      expect((error as Error).message).toBe(message)
+    }
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 })
