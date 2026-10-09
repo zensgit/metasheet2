@@ -5,6 +5,8 @@
 // Each feature runs only when BOTH halves are true:
 //   (a) the org-side policy saved in settings (this is what 「已配置」 reports), AND
 //   (b) the process-level env gates owned by ops (this is what 「当前是否可运行」 reports).
+//       `runtimeGates` is the switch snapshot of the ONE process that answered the request (当前响应进程的
+//       开关快照); another instance may be configured differently, so the UI never calls it a cluster-wide state.
 // Missing (b) is a byte-exact no-op at base 9d65b8318f - digest producer: plugins/plugin-attendance/index.cjs:16548-16550
 // read by runAttendanceReportDigestOnce (:17423); accrual: :19791-19793 read by
 // runAnnualLeaveAccrualScheduledTriggerOnce (:19893); the scheduler gate is packages/core-backend/src/services/
@@ -181,11 +183,11 @@ function openDetail(tr: TranslateFn, feature: AttendanceScheduledFeatureKey): st
   return feature === 'reportDigest'
     ? tr(
       'The server run switches are on. A saved change can take up to about 60 seconds to be picked up by each server instance. The selected channel still needs its own server configuration.',
-      '服务端运行开关已开启。已保存的改动最长约 60 秒后才会被各服务实例读取；所选渠道仍需各自的服务端配置。',
+      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例下次读取时刷新，可能有缓存延迟；所选渠道仍需各自的服务端配置。',
     )
     : tr(
       'The server run switches are on. A saved change can take up to about 60 seconds to be picked up by each server instance. The annual leave engine above must also stay enabled.',
-      '服务端运行开关已开启。已保存的改动最长约 60 秒后才会被各服务实例读取；上方年假引擎也需保持启用。',
+      '当前响应进程的服务端运行开关已开启。已保存的改动会在各实例下次读取时刷新，可能有缓存延迟；上方年假引擎也需保持启用。',
     )
 }
 
@@ -300,11 +302,11 @@ export function scheduledFeatureSaveNotice(
   return feature === 'reportDigest'
     ? tr(
       'The server run switches are on; a saved change can take up to about 60 seconds to be picked up. The selected channel still needs its own server configuration.',
-      '服务端运行开关已开启；已保存的改动最长约 60 秒后被各服务实例读取。所选渠道仍需各自的服务端配置。',
+      '当前响应进程的服务端运行开关已开启；已保存的改动会在各实例下次读取时刷新，可能有缓存延迟。所选渠道仍需各自的服务端配置。',
     )
     : tr(
       'The server run switches are on; a saved change can take up to about 60 seconds to be picked up. The annual leave engine must also stay enabled.',
-      '服务端运行开关已开启；已保存的改动最长约 60 秒后被各服务实例读取。年假引擎也需保持启用。',
+      '当前响应进程的服务端运行开关已开启；已保存的改动会在各实例下次读取时刷新，可能有缓存延迟。年假引擎也需保持启用。',
     )
 }
 

@@ -18887,7 +18887,7 @@ export interface components {
                 swap?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
             };
         };
-        /** @description Read-only report of the server-side run switches that the two scheduled attendance features need in addition to their saved org-side settings. Present only as a sibling of `data` on GET /api/attendance/settings (omitted by older servers); never part of the persisted settings document and never on the PUT response. It carries symbolic gate ids and booleans only, no environment variable names or values. An open gate means "not blocked by these switches", not that the feature is running. */
+        /** @description Read-only report of the server-side run switches that the two scheduled attendance features need in addition to their saved org-side settings. Present only as a sibling of `data` on GET /api/attendance/settings (omitted by older servers); never part of the persisted settings document and never on the PUT response. It carries symbolic gate ids and booleans only, no environment variable names or values. An open gate means "not blocked by these switches", not that the feature is running. The report is the switch snapshot of the one process that answered this request; another instance may be configured differently, so it is never a cluster-wide state. */
         AttendanceRuntimeGates: {
             reportDigest: components["schemas"]["AttendanceRuntimeGateEntry"];
             annualLeaveAccrualScheduled: components["schemas"]["AttendanceRuntimeGateEntry"];

@@ -212,7 +212,8 @@ describe('describeScheduledFeatureStatus', () => {
         expect(text).not.toMatch(/\bin effect\b/i)
         expect(text).not.toMatch(/\bnow running\b/i)
       }
-      expect(zh.detail).toContain('60 秒')
+      expect(zh.detail).toContain('下次读取时刷新')
+      expect(zh.detail).not.toMatch(/\d+ ?秒/)
       expect(en.detail).toContain('60 seconds')
     }
   })
