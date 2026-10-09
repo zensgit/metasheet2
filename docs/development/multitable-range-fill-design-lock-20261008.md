@@ -1,5 +1,7 @@
 # Multitable rectangular copy and fill — design lock
 
+> Owner follow-up 2026-10-09: the [editable-field extension](multitable-range-fill-editable-fields-design-lock-20261009.md) supersedes the six-type restriction in contract 5. All other guards and release boundaries remain in force.
+
 Date: 2026-10-08. Owner request: implement rectangular copy/drag-repeat and numeric/date series, with design and executable verification. Base: `9d65b8318f3d5cbc323b458cb5c96c2240a144f7`.
 
 ## Contract

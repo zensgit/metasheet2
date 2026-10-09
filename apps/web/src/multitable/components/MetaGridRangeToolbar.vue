@@ -29,6 +29,7 @@ const message = computed(() => {
     COPIED: ['选区已复制。', 'Range copied.'],
     STALE: ['数据或视图已变化，请重新选择。', 'Data or view changed. Select the range again.'],
     RANGE_STALE: ['数据版本已变化，请刷新后重新选择。', 'Data changed. Refresh and select again.'],
+    RANGE_REFRESH_REQUIRED: ['填充已保存，但显示刷新失败；请刷新核对，无需重复提交。', 'Range saved, but display refresh failed. Refresh to check; do not resubmit.'],
     READ_ONLY: ['选区含不可写单元格，未提交。', 'Range contains read-only cells; nothing submitted.'],
     RANGE_READ_ONLY: ['选区含不可写单元格，未提交。', 'Range contains read-only cells; nothing submitted.'],
     TOO_LARGE: ['单次最多填写 1,000 格。', 'Limit: 1,000 destination cells.'],

@@ -3,7 +3,7 @@ import { nextTick, ref } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { useMultitableGrid } from '../src/multitable/composables/useMultitableGrid'
-import type { MetaField, PatchResult } from '../src/multitable/types'
+import type { MetaField, MetaRecord, MetaRecordContext, PatchResult } from '../src/multitable/types'
 import type { RangeChange } from '../src/multitable/utils/grid-range-fill'
 
 const changes: RangeChange[] = [
@@ -275,7 +275,7 @@ describe('useMultitableGrid patchRange', () => {
 
   it.each<Partial<MetaField>>([
     { type: 'formula' }, { type: 'lookup' }, { type: 'rollup' }, { type: 'createdTime' },
-    { type: 'link' }, { type: 'attachment' }, { property: { mirrorOf: 'source' } },
+    { type: 'autoNumber' }, { type: 'button' }, { property: { mirrorOf: 'source' } },
     { property: { readOnly: true } }, { property: { readonly: true } },
     { property: { hidden: true } }, { property: { visible: false } },
   ])('rejects structurally forbidden fields %j without a request', async (definition) => {
@@ -502,5 +502,172 @@ describe('useMultitableGrid patchRange', () => {
     patchFetch.mockResolvedValueOnce(response({ ...success, updated: [{ recordId: 'r1', version: 7 }, { recordId: 'r2', version: 10 }] }))
     await grid.patchRange(changes.map((change) => ({ ...change, expectedVersion: change.recordId === 'r1' ? 6 : 9 })))
     expect(patchRecords).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+function recordContext(record: MetaRecord, extras: Partial<MetaRecordContext> = {}): MetaRecordContext {
+  return {
+    sheet: { id: 's1', name: 'Sheet' }, fields: [], record,
+    capabilities: { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: false,
+      canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false,
+      canManageAutomation: false, canExport: false },
+    commentsScope: { targetType: 'record', targetId: record.id, containerType: 'sheet', containerId: 's1' },
+    ...extras,
+  }
+}
+
+async function extendedWriter(type: MetaField['type'] = 'person') {
+  const state = await setup()
+  state.grid.fields.value[0] = { id: 'f1', name: 'Extended', type, property: { limitSingleRecord: false } }
+  state.patchFetch.mockImplementation(async () => response({ updated: [{ recordId: 'r1', version: 6 }], batchId: 'extended' }))
+  const getRecord = vi.spyOn(state.client, 'getRecord').mockImplementation(async recordId =>
+    recordContext(JSON.parse(JSON.stringify(state.grid.rows.value.find(row => row.id === recordId)!))))
+  return { ...state, getRecord }
+}
+
+describe('range writer editable field extension', () => {
+  it.each<[MetaField['type'], unknown]>([
+    ['multiSelect', ['one', 'two']], ['person', ['member1', 'member2']], ['link', ['linked1']],
+    ['attachment', ['file1']], ['currency', 12.5], ['percent', 0.25], ['rating', 3], ['duration', 3600],
+    ['url', 'https://example.invalid'], ['email', 'synthetic@example.invalid'], ['phone', '+123456789'],
+    ['barcode', '00123'], ['qrcode', 'example'], ['location', { address: 'Synthetic', latitude: 25, longitude: 121 }],
+    ['longText', 'a\nb'],
+  ])('writes %s atomically and reads its canonical record using the original scope', async (type, value) => {
+    const { grid, patchRecords, getRecord } = await extendedWriter(type)
+    const change = { recordId: 'r1', fieldId: 'f1', value, expectedVersion: 5 }
+    await grid.patchRange([change])
+    expect(patchRecords).toHaveBeenCalledWith({ sheetId: 's1', viewId: 'v1', partialSuccess: false, changes: [change] })
+    expect(getRecord).toHaveBeenCalledWith('r1', { sheetId: 's1', viewId: 'v1' })
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 6, data: { f1: value, f2: 10 } })
+  })
+
+  it.each([{ value: ['member1', 'member2'] }, { value: { address: 'Synthetic', latitude: 25, longitude: 121 } }])(
+    'captures nested values before awaiting the patch acknowledgement', async ({ value }) => {
+      const { grid, patchFetch, patchRecords } = await extendedWriter(Array.isArray(value) ? 'person' : 'location')
+      const pending = deferred<Response>()
+      patchFetch.mockReturnValueOnce(pending.promise)
+      const original = JSON.parse(JSON.stringify(value))
+      const input = [{ recordId: 'r1', fieldId: 'f1', value, expectedVersion: 5 }]
+      const commit = grid.patchRange(input)
+      if (Array.isArray(value)) value.push('later')
+      else value.address = 'later'
+      expect(patchRecords.mock.calls[0][0].changes[0].value).toEqual(original)
+      expect(grid.rows.value[0].data.f1).toBe('old')
+      pending.resolve(response({ updated: [{ recordId: 'r1', version: 6 }] }))
+      await commit
+      expect(grid.rows.value[0].data.f1).toEqual(original)
+    },
+  )
+
+  it('uses authoritative values and person/link/attachment displays after acknowledgement', async () => {
+    const { grid, getRecord } = await extendedWriter('longText')
+    const canonical = recordContext({ id: 'r1', version: 6, data: { f1: 'sanitized', people: ['u1'] } }, {
+      personSummaries: { people: [{ id: 'u1', display: 'Synthetic Member' }] },
+      linkSummaries: { relation: [{ id: 'l1', display: 'Synthetic Record' }] }, attachmentSummaries: {},
+    })
+    getRecord.mockResolvedValueOnce(canonical)
+    await grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: '<p>sanitized</p>', expectedVersion: 5 }])
+    expect(grid.rows.value[0]).toEqual(canonical.record)
+    expect(grid.personSummaries.value.r1).toEqual(canonical.personSummaries)
+    expect(grid.linkSummaries.value.r1).toEqual(canonical.linkSummaries)
+  })
+
+  it('keeps newer realtime values and names when a stale read-back arrives', async () => {
+    const { grid, getRecord } = await extendedWriter()
+    const pending = deferred<MetaRecordContext>()
+    getRecord.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u1'], expectedVersion: 5 }])
+    await vi.waitFor(() => expect(getRecord).toHaveBeenCalledTimes(1))
+    const live = { id: 'r1', version: 7, data: { f1: ['u2'] } }
+    grid.mergeRemoteRecord(live, { personSummaries: { f1: [{ id: 'u2', display: 'Newer' }] } })
+    pending.resolve(recordContext({ id: 'r1', version: 6, data: { f1: ['u1'] } }, {
+      personSummaries: { f1: [{ id: 'u1', display: 'Older' }] },
+    }))
+    await commit
+    expect(grid.rows.value[0]).toEqual(live)
+    expect(grid.personSummaries.value.r1).toEqual({ f1: [{ id: 'u2', display: 'Newer' }] })
+  })
+
+  it('drops read-back after an away-and-back view change', async () => {
+    const { grid, getRecord, viewId } = await extendedWriter()
+    const pending = deferred<MetaRecordContext>()
+    getRecord.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u1'], expectedVersion: 5 }])
+    await vi.waitFor(() => expect(getRecord).toHaveBeenCalledTimes(1))
+    viewId.value = 'v2'; viewId.value = 'v1'
+    await nextTick()
+    grid.rows.value = [{ id: 'r1', version: 50, data: { f1: 'another view' } }]
+    pending.resolve(recordContext({ id: 'r1', version: 6, data: { f1: ['u1'] } }))
+    await commit
+    expect(grid.rows.value).toEqual([{ id: 'r1', version: 50, data: { f1: 'another view' } }])
+  })
+
+  it.each(['network', 'older version', 'wrong record'])('reports a saved batch requiring refresh after %s without retry', async failure => {
+    const { grid, getRecord, patchRecords } = await extendedWriter()
+    if (failure === 'network') getRecord.mockRejectedValueOnce(new Error('sensitive read failure'))
+    else getRecord.mockResolvedValueOnce(recordContext({ id: failure === 'wrong record' ? 'other' : 'r1', version: 5, data: {} }))
+    await expect(grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u1'], expectedVersion: 5 }])).rejects.toThrow('RANGE_REFRESH_REQUIRED')
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 6, data: { f1: ['u1'], f2: 10 } })
+    expect(grid.editHistory.value).toEqual([])
+    expect(grid.lastBatchId.value).toBe('extended')
+  })
+
+  it('does not read canonical records when the server refuses the batch', async () => {
+    const { grid, patchFetch, getRecord } = await extendedWriter()
+    patchFetch.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR' } }), { status: 400 }))
+    const before = JSON.stringify(grid.rows.value)
+    await expect(grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['nonmember'], expectedVersion: 5 }])).rejects.toMatchObject({ status: 400 })
+    expect(JSON.stringify(grid.rows.value)).toBe(before)
+    expect(getRecord).not.toHaveBeenCalled()
+  })
+
+  it('bounds post-write reads to four concurrent requests and blocks a second write until they settle', async () => {
+    const { grid, getRecord, patchFetch } = await extendedWriter()
+    grid.rows.value = Array.from({ length: 7 }, (_, i) => ({ id: `r${i}`, version: 1, data: { f1: [] } }))
+    patchFetch.mockResolvedValueOnce(response({ updated: grid.rows.value.map(row => ({ recordId: row.id, version: 2 })) }))
+    const pending = Array.from({ length: 7 }, () => deferred<MetaRecordContext>())
+    getRecord.mockImplementation(recordId => pending[Number(recordId.slice(1))].promise)
+    const input = grid.rows.value.map(row => ({ recordId: row.id, fieldId: 'f1', value: ['u1'], expectedVersion: 1 }))
+    const commit = grid.patchRange(input)
+    await vi.waitFor(() => expect(getRecord).toHaveBeenCalledTimes(4))
+    await expect(grid.patchRange(input)).rejects.toThrow('RANGE_BUSY')
+    for (let i = 0; i < 4; i++) pending[i].resolve(recordContext({ id: `r${i}`, version: 2, data: { f1: ['u1'] } }))
+    await vi.waitFor(() => expect(getRecord).toHaveBeenCalledTimes(7))
+    for (let i = 4; i < 7; i++) pending[i].resolve(recordContext({ id: `r${i}`, version: 2, data: { f1: ['u1'] } }))
+    await commit
+    expect(grid.rows.value.map(row => row.data.f1)).toEqual(Array.from({ length: 7 }, () => ['u1']))
+  })
+})
+
+
+describe('range canonical read-back lock state', () => {
+  it('adopts a newer server lock and refuses a subsequent fill before sending it', async () => {
+    const { grid, getRecord, patchRecords } = await extendedWriter()
+    getRecord.mockResolvedValueOnce(recordContext({ id: 'r1', version: 7, data: { f1: ['u1'] },
+      locked: true, lockedBy: 'other-user', lockedAt: '2026-10-09T12:00:00Z', canUnlock: false }))
+    await grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u1'], expectedVersion: 5 }])
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 7, data: { f1: ['u1'] },
+      locked: true, lockedBy: 'other-user', lockedAt: '2026-10-09T12:00:00Z', canUnlock: false })
+    await expect(grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u2'], expectedVersion: 7 }])).rejects.toThrow('RANGE_READ_ONLY')
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears an intervening lock when canonical read-back is a later unlocked version', async () => {
+    const { grid, getRecord } = await extendedWriter()
+    const pending = deferred<MetaRecordContext>()
+    getRecord.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange([{ recordId: 'r1', fieldId: 'f1', value: ['u1'], expectedVersion: 5 }])
+    await vi.waitFor(() => expect(getRecord).toHaveBeenCalledTimes(1))
+    Object.assign(grid.rows.value[0], { version: 7, locked: true, lockedBy: 'other-user',
+      lockedAt: '2026-10-09T12:00:00Z', canUnlock: true })
+    pending.resolve(recordContext({ id: 'r1', version: 8, data: { f1: ['u1'] }, locked: false }))
+    await commit
+    expect(grid.rows.value[0].version).toBe(8)
+    expect(grid.rows.value[0].locked).toBe(false)
+    expect(grid.rows.value[0].lockedBy).toBeUndefined()
+    expect(grid.rows.value[0].lockedAt).toBeUndefined()
+    expect(grid.rows.value[0].canUnlock).toBeUndefined()
   })
 })

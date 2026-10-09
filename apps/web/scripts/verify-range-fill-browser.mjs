@@ -2,7 +2,7 @@ import { chromium, expect, selectors } from '@playwright/test'
 import { mkdir } from 'node:fs/promises'
 const browser = await chromium.launch({ headless: true })
 selectors.setTestIdAttribute('data-test')
-const context = await browser.newContext({ viewport: { width: 1440, height: 960 }, permissions: ['clipboard-read', 'clipboard-write'] })
+const context = await browser.newContext({ viewport: { width: 1920, height: 960 }, permissions: ['clipboard-read', 'clipboard-write'] })
 const page = await context.newPage()
 const errors = []
 page.on('pageerror', error => errors.push(error.message))
@@ -86,9 +86,31 @@ try {
     { recordId: 'r11', fieldId: 'a', value: 202, expectedVersion: 1 },
     { recordId: 'r11', fieldId: 'b', value: 203, expectedVersion: 1 },
   ])
-  await drag(cell(4, 0), cell(9, 1))
+  await drag(cell(0, 4), cell(0, 5))
+  await drag(page.getByTestId('range-fill-handle'), cell(3, 5))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(9)
+  expect(await page.evaluate(() => window.rangeDemo.calls[8].map(({ fieldId, value }) => ({ fieldId, value })))).toEqual(
+    Array.from({ length: 3 }, () => [
+      { fieldId: 'tags', value: ['采购', '质检'] }, { fieldId: 'people', value: ['synthetic-a', 'synthetic-b'] },
+    ]).flat(),
+  )
+  await expect(cell(3, 5)).toContainText('样例成员甲')
+  await expect(cell(3, 5)).toContainText('样例成员乙')
+  await drag(cell(0, 4), cell(0, 5))
+  await page.getByTestId('range-copy').click()
+  await cell(4, 4).click()
+  await page.getByTestId('range-paste').click()
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(10)
+  expect(await page.evaluate(() => window.rangeDemo.rows.value[4].data.tags)).toEqual(['采购', '质检'])
+  expect(await page.evaluate(() => window.rangeDemo.rows.value[4].data.people)).toEqual(['synthetic-a', 'synthetic-b'])
+  await expect(cell(4, 5)).toContainText('样例成员甲')
+  await cell(0, 6).click()
+  await drag(page.getByTestId('range-fill-handle'), cell(2, 6))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(11)
+  expect(await page.evaluate(() => window.rangeDemo.rows.value[2].data.place)).toEqual({ address: '合成仓库', latitude: 25, longitude: 121 })
+  await drag(cell(0, 4), cell(4, 6))
   await mkdir('../../artifacts/range-fill', { recursive: true })
   await page.screenshot({ path: '../../artifacts/range-fill/grid-range-fill.png', fullPage: true })
   expect(errors).toEqual([])
-  console.log('PASS browser: selection, all four fill directions, independent row/column series, 2x2 repeat and clipboard paste, civil-date series; 8 commits; no browser errors')
+  console.log('PASS browser: selection, all four fill directions, independent row/column series, 2x2 repeat and clipboard paste, civil-date series, multiSelect/person JSON clipboard and repeated arrays, structured location; 11 commits; no browser errors')
 } catch (error) { console.log({ browserErrors: errors }); throw error } finally { await browser.close() }

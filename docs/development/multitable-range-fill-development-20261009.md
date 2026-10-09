@@ -1,5 +1,7 @@
 # 多维表矩形复制与填充：开发说明
 
+> 2026-10-09 后续扩展：多选、人员及其余可编辑字段已另行实现，最新范围与证据见[可编辑字段开发与验证](multitable-range-fill-editable-fields-development-and-verification-20261009.md)。本文保留原六类字段版本的历史验收快照。
+
 日期：2026-10-09。关联 PR：#6271。本文把已锁定的 v1 范围映射到实现入口和验收门；不是新路线图。详细行为契约见[设计锁](multitable-range-fill-design-lock-20261008.md)，已有验证记录见[验证报告](multitable-range-fill-verification-20261009.md)。
 
 ## 用户目标与 v1 范围

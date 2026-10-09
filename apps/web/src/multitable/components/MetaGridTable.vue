@@ -1439,7 +1439,9 @@ const range = useGridRangeSelection({
   fields: () => props.visibleFields,
   contextKey: () => props.rangeContextKey ?? '',
   policyKey: () => JSON.stringify([props.canEdit, props.fieldReadOnlyIds, props.rowActionOverrides]),
-  canWrite: isEditable,
+  // Range copies do not require an inline editor; the planner checks field types and structural locks.
+  canWrite: (recordId, field) => !isRowLocked(recordId) && resolveRowActions(recordId).canEdit
+    && !props.fieldReadOnlyIds?.includes(field.id),
   commit: changes => props.commitRange!(changes),
   focus: point => {
     const row = displayRows.value[point.row]

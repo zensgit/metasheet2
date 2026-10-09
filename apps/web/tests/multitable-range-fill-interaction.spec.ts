@@ -3,7 +3,7 @@ import { createApp, h, nextTick, reactive, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import { useLocale } from '../src/composables/useLocale'
 import type { MetaField, MetaRecord, MetaRowActions } from '../src/multitable/types'
-import type { RangeChange } from '../src/multitable/utils/grid-range-fill'
+import { serializeClipboardMatrix, type RangeChange } from '../src/multitable/utils/grid-range-fill'
 
 const GROUP: MetaField = { id: 'group', name: 'Group', type: 'string' }
 function fields(): MetaField[] {
@@ -500,5 +500,86 @@ describe('MetaGridTable range interaction with real planner', () => {
     await nextTick()
     expect(grid.selectionChange).toHaveBeenCalledWith(['r1'])
     expect(grid.commitRange).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('editable field range copy', () => {
+  it.each<[MetaField['type'], unknown]>([
+    ['multiSelect', ['alpha, beta', 'gamma\ndelta']], ['person', ['member1', 'member2']],
+    ['location', { address: 'Synthetic', latitude: 25, longitude: 121 }], ['currency', 12.5],
+    ['attachment', ['file1']], ['link', ['record1']], ['longText', 'multiple\nlines'],
+  ])('drags a %s value as a whole into two rows', async (type, value) => {
+    const grid = await mountGrid({
+      visibleFields: [{ id: 'f', name: 'Value', type, options: [{ value: 'alpha, beta' }, { value: 'gamma\ndelta' }],
+        property: { limitSingleRecord: false, foreignSheetId: 'foreign' } }],
+      rows: [{ id: 'r1', version: 1, data: { f: value } }, { id: 'r2', version: 2, data: { f: null } },
+        { id: 'r3', version: 3, data: { f: null } }],
+    })
+    await clickCell(grid, 0, 0)
+    await fill(grid, 2, 0)
+    await settled(grid)
+    expect(grid.commitRange).toHaveBeenCalledWith([
+      { recordId: 'r2', fieldId: 'f', value, expectedVersion: 2 },
+      { recordId: 'r3', fieldId: 'f', value, expectedVersion: 3 },
+    ])
+    expect(grid.patchCell).not.toHaveBeenCalled()
+  })
+
+  it.each(['multiSelect', 'person'] as const)('roundtrips %s through the actual grid clipboard handlers', async type => {
+    const value = type === 'person' ? ['member1', 'member2'] : ['alpha, beta', 'gamma\ndelta']
+    const grid = await mountGrid({
+      visibleFields: [{ id: 'f', name: 'Array', type, options: value.map(value => ({ value })), property: { limitSingleRecord: false } }],
+      rows: [{ id: 'r1', version: 1, data: { f: value } }, { id: 'r2', version: 2, data: { f: ['old'] } }],
+    })
+    await clickCell(grid, 0, 0)
+    await key(grid.get('.meta-grid'), 'c', { ctrlKey: true })
+    await settled(grid)
+    const text = serializeClipboardMatrix([[value]])
+    expect(writeText).toHaveBeenCalledWith(text)
+    await clickCell(grid, 1, 0)
+    await paste(grid, text)
+    expect(grid.commitRange).toHaveBeenCalledWith([{ recordId: 'r2', fieldId: 'f', value, expectedVersion: 2 }])
+  })
+
+  it('freezes array content at drag start even if the source mutates in place before mouseup', async () => {
+    const grid = await mountGrid({
+      visibleFields: [{ id: 'f', name: 'People', type: 'person', property: { limitSingleRecord: false } }],
+      rows: [{ id: 'r1', version: 1, data: { f: ['member1'] } }, { id: 'r2', version: 2, data: { f: [] } }],
+    })
+    await clickCell(grid, 0, 0)
+    await mouse(grid.get('[data-test="range-fill-handle"]'), 'mousedown')
+    ;(grid.state.rows[0].data.f as string[]).push('member2')
+    await mouse(grid.cell(1, 0), 'mouseenter')
+    await mouse(grid.cell(1, 0), 'mouseup')
+    await settled(grid)
+    expect(grid.commitRange).toHaveBeenCalledWith([{ recordId: 'r2', fieldId: 'f', value: ['member1'], expectedVersion: 2 }])
+  })
+
+  it('shows a saved-but-refresh-needed message even after successful projection clears the selection', async () => {
+    const grid = await mountGrid()
+    grid.commitRange.mockImplementationOnce(async () => {
+      grid.state.rows[1].version++
+      throw new Error('RANGE_REFRESH_REQUIRED')
+    })
+    await clickCell(grid, 0, 0)
+    await fill(grid, 1, 0)
+    await settled(grid)
+    expect(grid.get('[data-test="range-status"]').textContent).toBe('Range saved, but display refresh failed. Refresh to check; do not resubmit.')
+    expect(grid.commitRange).toHaveBeenCalledTimes(1)
+  })
+
+  it('copies a computed result as a value into an editable number cell without writing the formula', async () => {
+    const grid = await mountGrid({
+      visibleFields: [{ id: 'computed', name: 'Formula', type: 'formula' }, { id: 'manual', name: 'Number', type: 'number' }],
+      rows: [{ id: 'r1', version: 1, data: { computed: 42, manual: null } }],
+    })
+    await clickCell(grid, 0, 0)
+    await key(grid.get('.meta-grid'), 'c', { ctrlKey: true })
+    await settled(grid)
+    expect(writeText).toHaveBeenCalledWith('42')
+    await clickCell(grid, 0, 1)
+    await paste(grid, '42')
+    expect(grid.commitRange).toHaveBeenCalledWith([{ recordId: 'r1', fieldId: 'manual', value: 42, expectedVersion: 1 }])
   })
 })

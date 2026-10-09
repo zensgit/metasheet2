@@ -11,10 +11,15 @@ useLocale().setLocale('zh-CN')
 const fields = [
   {id:'a',name:'计划数量',type:'number'}, {id:'b',name:'复核数量',type:'number'},
   {id:'c',name:'交付日期',type:'date'}, {id:'d',name:'备注',type:'string'},
+  {id:'tags',name:'多选标签',type:'multiSelect',options:[{value:'采购'},{value:'质检'}]},
+  {id:'people',name:'负责人',type:'person',property:{limitSingleRecord:false}},
+  {id:'place',name:'地点',type:'location'},
 ]
 const rows = ref(Array.from({length:12}, (_,i)=>({id:`r${i}`,version:1,data:{a:i<2?(i+1)*10:null,b:null,c:i===0?'2026-10-08':null,d:i===0?'样例记录':null}})))
 rows.value[6].data.a=101; rows.value[6].data.b=102
 rows.value[7].data.a=201; rows.value[7].data.b=202
+rows.value[0].data.tags=['采购','质检']; rows.value[0].data.people=['synthetic-a','synthetic-b']
+rows.value[0].data.place={address:'合成仓库',latitude:25,longitude:121}
 const calls=[]
 async function commitRange(changes){
   calls.push(changes)
@@ -24,5 +29,6 @@ async function commitRange(changes){
   document.querySelector('#receipt').textContent=`已验证一次批量提交：${changes.length} 个单元格；只修改目标记录。`
 }
 window.rangeDemo={rows,calls}
-createApp({setup:()=>()=>h(MetaGridTable,{rows:rows.value,visibleFields:fields,sortRules:[],loading:false,currentPage:1,totalPages:1,startIndex:0,canEdit:true,canComment:false,commitRange,rangeContextKey:'synthetic/local'})}).mount('#app')
+const personSummaries=()=>Object.fromEntries(rows.value.map(row=>[row.id,{people:(row.data.people??[]).map(id=>({id,display:id==='synthetic-a'?'样例成员甲':'样例成员乙'}))}]))
+createApp({setup:()=>()=>h(MetaGridTable,{rows:rows.value,personSummaries:personSummaries(),visibleFields:fields,sortRules:[],loading:false,currentPage:1,totalPages:1,startIndex:0,canEdit:true,canComment:false,commitRange,rangeContextKey:'synthetic/local'})}).mount('#app')
 </script></html>

@@ -2,7 +2,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import type { MetaField, MetaRecord } from '../types'
 import {
   parseClipboardMatrix, planRangeFill, planRangePaste, rangeContains, rangeFromPoints,
-  serializeClipboardMatrix, type CellPoint, type CellRange, type FillMode, type RangeChange,
+  serializeClipboardMatrix, cloneRangeValue, type CellPoint, type CellRange, type FillMode, type RangeChange,
 } from '../utils/grid-range-fill'
 
 interface Options {
@@ -53,7 +53,9 @@ export function useGridRangeSelection(options: Options) {
     return point.row >= 0 && point.col >= 0 && point.row < options.rows().length && point.col < options.fields().length
   }
   function snapshotRows() {
-    return options.rows().map(row => ({ ...row, data: { ...row.data } }))
+    return options.rows().map(row => ({ ...row, data: Object.fromEntries(
+      Object.entries(row.data).map(([fieldId, value]) => [fieldId, cloneRangeValue(value)]),
+    ) }))
   }
   function select(point: CellPoint, extend = false) {
     if (!enabled.value || busy.value || options.editing() || !valid(point)) return
@@ -102,7 +104,16 @@ export function useGridRangeSelection(options: Options) {
   }
   async function commit(changes: RangeChange[], context: string) {
     if (!changes.length) return
-    await options.commit(changes)
+    try {
+      await options.commit(changes)
+    } catch (error) {
+      // The write succeeded but its read-back failed. Do not invite replaying an already saved batch.
+      if (error instanceof Error && error.message === 'RANGE_REFRESH_REQUIRED') {
+        if (options.contextKey() === context) status.value = 'RANGE_REFRESH_REQUIRED'
+        return
+      }
+      throw error
+    }
     // A successful projection can change row versions and clear selection; do not label it stale.
     if (options.contextKey() === context) status.value = 'DONE'
   }

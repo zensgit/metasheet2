@@ -1,5 +1,7 @@
 # 多维表矩形复制与填充：验证报告
 
+> 2026-10-09 后续扩展：多选、人员及其余可编辑字段已另行实现，最新范围与证据见[可编辑字段开发与验证](multitable-range-fill-editable-fields-development-and-verification-20261009.md)。本文保留原六类字段版本的历史验收快照。
+
 日期：2026-10-09（Asia/Taipei）。[PR #6271](https://github.com/zensgit/metasheet2/pull/6271)，分支 `codex/multitable-range-fill-20261008`。契约见[设计锁](multitable-range-fill-design-lock-20261008.md)，实现和使用方式见[开发说明](multitable-range-fill-development-20261009.md)。
 
 **结论：本地实现、独立复核及真实 JWT / PostgreSQL API 验收通过；新增规格的远端 CI 尚待完成，浏览器直连后端、staging、合并和部署未验收。** 功能默认关闭，只在构建时精确设置 `VITE_MULTITABLE_RANGE_FILL_ENABLED=true` 才启用。下述 CI 为文档提交时快照，最终状态以对应提交的运行记录为准。

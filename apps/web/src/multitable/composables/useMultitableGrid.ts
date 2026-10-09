@@ -16,7 +16,7 @@ import type {
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-permissions'
-import type { RangeChange } from '../utils/grid-range-fill'
+import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
@@ -1492,7 +1492,6 @@ export function useMultitableGrid(opts: {
       const rowsById = new Map(rows.value.map((row) => [row.id, row]))
       const fieldsById = new Map(fields.value.map((field) => [field.id, field]))
       const visibleIds = new Set(visibleFields.value.map((field) => field.id))
-      const writableTypes = new Set(['string', 'number', 'boolean', 'date', 'dateTime', 'select'])
       const seen = new Set<string>()
       const capturedChanges = changes.map(({ recordId, fieldId, value, expectedVersion }) => {
         const row = rowsById.get(recordId)
@@ -1506,10 +1505,10 @@ export function useMultitableGrid(opts: {
         if (row.locked === true || resolveRowActions(recordId)?.canEdit === false
           || viewPermission.value?.canAccess === false || !visibleIds.has(fieldId)
           || fieldPermissions.value[fieldId]?.readOnly === true || isFieldAlwaysReadOnly(field)
-          || !writableTypes.has(field.type)) {
+          || !isRangeWritableFieldType(field.type)) {
           throw new Error('RANGE_READ_ONLY')
         }
-        return { recordId, fieldId, value, expectedVersion }
+        return { recordId, fieldId, value: cloneRangeValue(value), expectedVersion }
       })
       const result = await client.patchRecords({
         sheetId,
@@ -1580,6 +1579,42 @@ export function useMultitableGrid(opts: {
         })
         lastBatchId.value = result.batchId ?? null
         clearEditHistory()
+        // Extended types can be normalized server-side and people need directory-backed display names.
+        // Read only affected records, with bounded concurrency; never reload or replace another view.
+        const scalarTypes = new Set(['string', 'number', 'boolean', 'date', 'dateTime', 'select'])
+        const refreshIds = [...new Set(capturedChanges.filter(change =>
+          !superseded.has(change.recordId) && !scalarTypes.has(fieldsById.get(change.fieldId)!.type),
+        ).map(change => change.recordId))]
+        const sameContext = () => opts.sheetId.value === sheetId && opts.viewId.value === viewId
+          && latestLoadRequestId === loadRequestId && rangeContextId === contextId
+        let next = 0
+        let refreshFailed = false
+        await Promise.all(Array.from({ length: Math.min(4, refreshIds.length) }, async () => {
+          while (next < refreshIds.length && sameContext()) {
+            const recordId = refreshIds[next++]
+            try {
+              const context = await client.getRecord(recordId, { sheetId, viewId })
+              if (!sameContext()) return
+              const record = context.record
+              const acknowledged = result.updated.find(update => update.recordId === recordId)!
+              if (!record || record.id !== recordId || !Number.isSafeInteger(record.version)
+                || record.version < acknowledged.version || !isMap(record.data)) {
+                throw new Error('RANGE_REFRESH_REQUIRED')
+              }
+              const live = rows.value.find(row => row.id === recordId)
+              if (live && live.version <= record.version) {
+                // This is a complete server record, including lock/unlock metadata, not a data-only patch.
+                rows.value = rows.value.map(row => row.id === recordId ? { ...record, data: { ...record.data } } : row)
+                replaceRecordLinkSummaries(recordId, context.linkSummaries)
+                replaceRecordPersonSummaries(recordId, context.personSummaries)
+                replaceRecordAttachmentSummaries(recordId, context.attachmentSummaries)
+              }
+            } catch {
+              refreshFailed = true
+            }
+          }
+        }))
+        if (refreshFailed && sameContext()) throw new Error('RANGE_REFRESH_REQUIRED')
       }
       return result
     } finally {

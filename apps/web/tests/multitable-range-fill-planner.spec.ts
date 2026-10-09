@@ -3,7 +3,7 @@ import type { MetaField, MetaRecord } from '../src/multitable/types'
 import {
   RangeOperationError, parseClipboardMatrix, serializeClipboardMatrix,
   planRangeFill, planRangePaste, rangeContains, rangeFromPoints, rangeSize,
-  type CellRange,
+  cloneRangeValue, isRangeWritableFieldType, normalizeRangeValue, type CellRange,
 } from '../src/multitable/utils/grid-range-fill'
 
 const writable = () => true
@@ -266,7 +266,9 @@ describe('typed clipboard conversion and whole-operation refusal', () => {
 
   it.each<Partial<MetaField>>([
     { type: 'formula' }, { type: 'lookup' }, { type: 'rollup' }, { type: 'autoNumber' },
-    { type: 'attachment' }, { type: 'link' }, { property: { readOnly: true } }, { property: { readonly: true } },
+    { type: 'button' }, { type: 'createdTime' }, { type: 'modifiedTime' },
+    { type: 'createdBy' }, { type: 'modifiedBy' }, { type: 'unknown' as never },
+    { property: { readOnly: true } }, { property: { readonly: true } },
     { property: { mirrorOf: 'source' } }, { property: { hidden: true } }, { property: { visible: false } },
   ])('rejects forbidden field definitions %j', definition => {
     expectCode(() => paste([['x']], field('string', definition)), 'READ_ONLY')
@@ -279,5 +281,153 @@ describe('typed clipboard conversion and whole-operation refusal', () => {
     expectCode(() => planRangePaste({ rows, fields: [field()], target: cell(), matrix: [['new'], ['new too']],
       canWrite: recordId => refusal !== 'permission' || recordId !== 'r1' }), 'READ_ONLY')
     expect(JSON.stringify(rows)).toBe(before)
+  })
+})
+
+const editableExamples: Array<{ type: MetaField['type']; value: unknown; extra?: Partial<MetaField> }> = [
+  { type: 'string', value: 'text' }, { type: 'number', value: 12.5 },
+  { type: 'boolean', value: false }, { type: 'date', value: '2024-02-29' },
+  { type: 'dateTime', value: '2024-02-29T12:30:00Z' },
+  { type: 'select', value: 'Open', extra: { options: [{ value: 'Open' }] } },
+  { type: 'multiSelect', value: ['A,B', 'line\nnext', 'quote"'],
+    extra: { options: [{ value: 'A,B' }, { value: 'line\nnext' }, { value: 'quote"' }] } },
+  { type: 'person', value: ['u1', 'u2'], extra: { property: { limitSingleRecord: false } } },
+  { type: 'link', value: ['rec1', 'rec2'], extra: { property: { foreignSheetId: 'sheet2' } } },
+  { type: 'attachment', value: ['attachment1', 'attachment2'] },
+  { type: 'currency', value: 100.25 }, { type: 'percent', value: 0.25 },
+  { type: 'rating', value: 4 }, { type: 'duration', value: 5400 },
+  { type: 'url', value: 'https://example.test/path?q=a,b' },
+  { type: 'email', value: 'person@example.test' }, { type: 'phone', value: '+86 123456789' },
+  { type: 'barcode', value: '001234' }, { type: 'qrcode', value: 'hello,世界' },
+  { type: 'location', value: { address: 'Room A,B', latitude: 30, longitude: 120 } },
+  { type: 'longText', value: '<p>hello <b>world</b></p>', extra: { property: { rich: true } } },
+]
+function copyValue(value: unknown, targetField: MetaField) {
+  return planRangeFill({ rows: records([[value], [null], [null]]), fields: [targetField],
+    source: cell(), target: { top: 0, bottom: 2, left: 0, right: 0 }, mode: 'copy', canWrite: writable })
+}
+
+describe('all editable field copy values', () => {
+  it.each(editableExamples)('copies canonical $type and independently roundtrips TSV', ({ type, value, extra }) => {
+    const targetField = field(type, extra)
+    const before = JSON.stringify(value)
+    expect(copyValue(value, targetField).map(change => change.value)).toEqual([value, value])
+    expect(isRangeWritableFieldType(type)).toBe(true)
+    const across = planRangeFill({ rows: records([[value, null]]),
+      fields: [targetField, { ...targetField, id: 'f1' }], source: cell(),
+      target: { top: 0, bottom: 0, left: 0, right: 1 }, mode: 'copy', canWrite: writable })
+    expect(across).toEqual([{ recordId: 'r0', fieldId: 'f1', value, expectedVersion: 1 }])
+    const matrix = parseClipboardMatrix(serializeClipboardMatrix([[value]]))
+    const expected = type === 'dateTime' ? Date.parse(value as string) : value
+    expect(paste(matrix, targetField)[0].value).toEqual(expected)
+    expect(JSON.stringify(value)).toBe(before)
+  })
+
+  it.each(['multiSelect', 'person', 'link', 'attachment'] as const)('clears optional %s arrays and refuses required arrays', type => {
+    const targetField = field(type)
+    expect(paste([['']], targetField)[0].value).toEqual([])
+    expect(paste([['[]']], targetField)[0].value).toEqual([])
+    expectCode(() => paste([['[]']], { ...targetField, required: true }), 'INVALID_VALUE')
+    expectCode(() => copyValue([], { ...targetField, property: { required: true } }), 'INVALID_VALUE')
+    expectCode(() => paste([['']], { ...targetField, required: true }), 'INVALID_VALUE')
+  })
+
+  it('checks destination multi-select options, including property-backed options, without splitting punctuation', () => {
+    const targetField = field('multiSelect', { property: { options: [{ value: 'a,b' }, { value: 'c\nd' }] } })
+    expect(paste([['["a,b","c\\nd"]']], targetField)[0].value).toEqual(['a,b', 'c\nd'])
+    expectCode(() => paste([['["a,b","unknown"]']], targetField), 'INVALID_VALUE')
+    expectCode(() => paste([['a,b']], targetField), 'INVALID_VALUE')
+    const fields = [field('multiSelect', { options: [{ value: 'Open' }] }),
+      field('multiSelect', { id: 'f1', options: [{ value: 'Closed' }] })]
+    expectCode(() => planRangeFill({ rows: records([[['Open'], ['Closed']]]), fields,
+      source: cell(), target: { top: 0, bottom: 0, left: 0, right: 1 }, mode: 'copy', canWrite: writable }), 'INVALID_VALUE')
+  })
+
+  it('enforces native person defaults, legacy person and target link cardinality', () => {
+    expectCode(() => copyValue(['u1', 'u2'], field('person')), 'INVALID_VALUE')
+    expect(copyValue(['u1'], field('person'))[0].value).toEqual(['u1'])
+    expectCode(() => copyValue(['r1', 'r2'], field('link', { property: { refKind: 'user', limitSingleRecord: true } })), 'INVALID_VALUE')
+    expectCode(() => copyValue(['r1', 'r2'], field('link', { property: { limitSingleRecord: true } })), 'INVALID_VALUE')
+    expect(copyValue(['r1', 'r2'], field('link', { property: { refKind: 'user', limitSingleRecord: false } }))[0].value).toEqual(['r1', 'r2'])
+    expectCode(() => copyValue(['a1', 'a2'], field('attachment', { property: { maxFiles: 1 } })), 'INVALID_VALUE')
+    expectCode(() => paste([['Alice']], field('person')), 'INVALID_VALUE')
+    expectCode(() => paste([['[{"id":"u1","name":"Alice"}]']], field('person')), 'INVALID_VALUE')
+    expect(paste([['["u1","u1"]']], field('person'))[0].value).toEqual(['u1'])
+  })
+
+  it('copies links across columns only when reference sheet and kind agree (including aliases)', () => {
+    const first = field('link', { property: { foreignDatasheetId: 'target', refKind: 'user' } })
+    const second = field('link', { id: 'f1', property: { foreignSheetId: 'target', refKind: 'user' } })
+    const args = { rows: records([[['r1'], []]]), fields: [first, second], source: cell(),
+      target: { top: 0, bottom: 0, left: 0, right: 1 }, mode: 'copy' as const, canWrite: writable }
+    expect(planRangeFill(args)[0].value).toEqual(['r1'])
+    for (const property of [{ foreignSheetId: 'other', refKind: 'user' }, { foreignSheetId: 'target' }, {}]) {
+      expectCode(() => planRangeFill({ ...args, fields: [first, { ...second, property }] }), 'INCOMPATIBLE_TYPE')
+    }
+    expectCode(() => planRangeFill({ ...args, fields: [field('person'), second] }), 'INCOMPATIBLE_TYPE')
+  })
+
+  it.each([
+    ['multiSelect', '[1]'], ['person', '[null]'], ['person', '[[]]'],
+    ['link', '[{"id":"r1"}]'], ['attachment', '{}'], ['attachment', '[true]'],
+    ['rating', '1.5'], ['rating', '6'], ['duration', '-1'], ['duration', '0.5'], ['duration', '1:30'],
+    ['currency', 'Infinity'], ['percent', '1e309'], ['url', 'javascript:alert(1)'],
+    ['email', 'not-an-email'], ['phone', 'letters'], ['barcode', 'x'.repeat(257)], ['qrcode', 'x'.repeat(257)],
+    ['location', '[]'], ['location', '{"address":"x","latitude":10}'],
+    ['location', '{"address":"x","latitude":91,"longitude":0}'],
+    ['location', '{"address":{},"latitude":0,"longitude":0}'],
+  ] as const)('rejects malformed extended %s clipboard values', (type, value) => {
+    expectCode(() => paste([[value]], field(type)), 'INVALID_VALUE')
+  })
+
+  it.each(['multiSelect', 'person', 'link', 'attachment', 'location', 'longText'] as const)('does not infer a series for %s', type => {
+    expectCode(() => series([null, null], type, cell(), { top: 0, bottom: 1, left: 0, right: 0 }), 'INVALID_SERIES')
+  })
+
+  it('clones arrays and structured values independently per destination and from the source', () => {
+    const source = ['u1']
+    const changes = copyValue(source, field('person'))
+    source.push('u2')
+    expect(changes.map(change => change.value)).toEqual([['u1'], ['u1']])
+    const firstPeople = changes[0].value as string[]
+    firstPeople.push('u3')
+    expect(changes[1].value).toEqual(['u1'])
+    const location = { address: 'old', latitude: 10, longitude: 20 }
+    const locations = copyValue(location, field('location'))
+    location.address = 'source changed'
+    const firstLocation = locations[0].value as { address: string }
+    firstLocation.address = 'destination changed'
+    expect(locations[1].value).toEqual({ address: 'old', latitude: 10, longitude: 20 })
+  })
+})
+
+
+describe('range capture helpers', () => {
+  it('deep-captures nested JSON objects and arrays for parent drag/request snapshots', () => {
+    const source = { cells: [[{ people: ['u1'], location: { address: 'old' } }]], nullable: null }
+    const expected = { cells: [[{ people: ['u1'], location: { address: 'old' } }]], nullable: null }
+    const captured = cloneRangeValue(source)
+    source.cells[0][0].people.push('u2')
+    source.cells[0][0].location.address = 'new'
+    expect(captured).toEqual(expected)
+    const second = cloneRangeValue(captured) as typeof source
+    second.cells[0][0].people.push('u3')
+    expect(captured).toEqual(expected)
+    expect(cloneRangeValue(undefined)).toBeUndefined()
+  })
+
+  it.each(['formula', 'lookup', 'rollup', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy', 'button', 'unknown'])('prohibits %s even for an empty value', type => {
+    expect(isRangeWritableFieldType(type)).toBe(false)
+    expectCode(() => normalizeRangeValue(null, field(type as MetaField['type'])), 'READ_ONLY')
+  })
+
+  it('normalizes location address text and checks target rating max', () => {
+    expect(paste([['Room A,B\nFloor 2']], field('location'))[0].value).toEqual({ address: 'Room A,B\nFloor 2' })
+    expectCode(() => paste([['4']], field('rating', { property: { max: 3 } })), 'INVALID_VALUE')
+    expect(paste([['3']], field('rating', { property: { max: 3 } }))[0].value).toBe(3)
+    expectCode(() => paste([['["' + 'u'.repeat(51) + '"]']], field('person')), 'INVALID_VALUE')
+    expectCode(() => copyValue(['r'.repeat(51)], field('link')), 'INVALID_VALUE')
+    expectCode(() => copyValue(['a'.repeat(101)], field('attachment')), 'INVALID_VALUE')
+    expect(paste([['x'.repeat(256)]], field('qrcode'))[0].value).toBe('x'.repeat(256))
   })
 })
