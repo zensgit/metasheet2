@@ -4107,6 +4107,34 @@ function requireStockPreparationAudit() {
   }
 
   /**
+   * THE STALE-JOB CHECK (fix round 1, R1). A large-BOM job carries the target it was PLANNED against
+   * in its stored snapshot (`actionSnapshot.target`, copied into the checkpoint apply job's `target`),
+   * and the plan / apply-start / apply-run routes work on that snapshot, never on the live binding
+   * (ADR §3). A job started BEFORE the project-sheets switch was flipped therefore carries the
+   * deployment env sheet; once the switch is on the registry answers a DIFFERENT sheet for the same
+   * project, and the write gate's project branch admits only the registry's objectId — the env
+   * snapshot would fall through to the legacy allowlist and keep writing the old mixed sheet. So,
+   * whenever the route's lookup resolved a project sheet (the marker is present: switch on and a
+   * registry row answered), the stored target must name THAT sheet — objectId AND sheetId — or the
+   * job is refused 409 (typed, values-free: booleans only; the operator starts a new expansion). No
+   * marker (switch off, or no overlay) → no-op, so the switch-off path stays byte-identical.
+   */
+  function assertLargeBomJobTargetMatchesProjectTarget(storedTarget, projectAction, which) {
+    if (!projectAction || !isPlainObject(projectAction.projectTarget)) return
+    const registry = isPlainObject(projectAction.target) ? projectAction.target : {}
+    const stored = isPlainObject(storedTarget) ? storedTarget : {}
+    const objectIdMatches = typeof stored.objectId === 'string' && stored.objectId === registry.objectId
+    const sheetIdMatches = typeof stored.sheetId === 'string' && stored.sheetId === registry.sheetId
+    if (objectIdMatches && sheetIdMatches) return
+    throw new HttpRouteError(
+      409,
+      'STOCK_PREPARATION_JOB_TARGET_STALE',
+      'this large-BOM job was planned against a target that is not the project\'s registered stock-preparation sheet; start a new expansion',
+      { field: 'jobId', snapshot: which, objectIdMatches, sheetIdMatches },
+    )
+  }
+
+  /**
    * THE WALL ON AN OVERLAID TARGET (ADR §3 「租户墙」). A no-op for an action the overlay did not touch
    * — the env target is deploy-global and these routes never walled it; with the switch on the sheet
    * is decided by the tenant, so the same `assertStockPreparationTargetBelongsToTenant` the carry,
@@ -6899,6 +6927,19 @@ function requireStockPreparationAudit() {
       })
       assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
+      // R1: the plan reads existing rows FROM THE SNAPSHOT's sheet, so a snapshot that no longer names
+      // the project's registered sheet is refused here, before that read. A READ lookup: an archived
+      // project still resolves its sheet for a plan; the apply-start below is where archived refuses.
+      assertLargeBomJobTargetMatchesProjectTarget(
+        action.target,
+        await tableActions.getTableAction({
+          ...routeScope,
+          actionId,
+          projectNo: job.parameters && job.parameters.projectNo,
+          targetPurpose: 'read',
+        }),
+        'expansion',
+      )
       // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
       // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
       await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -6991,6 +7032,19 @@ function requireStockPreparationAudit() {
         jobId,
       })
       const snapshotAction = assertStockPreparationTargetReady(expansionJob.actionSnapshot)
+      // R1: approval is where a checkpoint apply job is MINTED from the snapshot, so the snapshot must
+      // name the project's registered sheet here — a WRITE lookup (archived → 409 ARCHIVED, absent →
+      // 409 ABSENT) — before the probes below touch the snapshot's sheet and before any job exists.
+      assertLargeBomJobTargetMatchesProjectTarget(
+        snapshotAction.target,
+        await tableActions.getTableAction({
+          ...routeScope,
+          actionId,
+          projectNo: expansionJob.parameters && expansionJob.parameters.projectNo,
+          targetPurpose: 'write',
+        }),
+        'expansion',
+      )
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -7058,6 +7112,20 @@ function requireStockPreparationAudit() {
         jobId,
       })
       const runSnapshotAction = assertStockPreparationTargetReady(runExpansionJob.actionSnapshot)
+      // S1 (ADR §3 大 BOM apply-run row): the registry row is RE-CHECKED per chunk — an archived
+      // project refuses 409 here, before the gate and before the chunk write — and the gate's
+      // project-sheet input is built from THAT re-read, never from the stored snapshot alone. With
+      // the switch off the overlay answers nothing and `runProjectAction.projectTarget` is absent.
+      const runProjectAction = await tableActions.getTableAction({
+        ...routeScope,
+        actionId,
+        projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo,
+        targetPurpose: 'write',
+      })
+      // R1: BOTH stored targets — the expansion snapshot the probes below read, and the apply job's
+      // own `target` the chunk writer uses — must name the registered sheet, before any IO on them.
+      assertLargeBomJobTargetMatchesProjectTarget(runSnapshotAction.target, runProjectAction, 'expansion')
+      assertLargeBomJobTargetMatchesProjectTarget(pendingJob.target, runProjectAction, 'apply')
       await tableActionInternals.assertTargetFieldsExist(
         runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
@@ -7074,16 +7142,6 @@ function requireStockPreparationAudit() {
       // FOS-4b-3-prod P2: the large-BOM checkpoint apply funnels through here. Shared apply gate before any
       // write — no production policy → sandbox gate (canonical rejected, fail-closed); a configured
       // production policy may authorize the canonical (large route) per the controlled exception.
-      // S1 (ADR §3 大 BOM apply-run row): the registry row is RE-CHECKED per chunk — an archived
-      // project refuses 409 here, before the gate and before the chunk write — and the gate's
-      // project-sheet input is built from THAT re-read, never from the stored snapshot alone. With
-      // the switch off the overlay answers nothing and `runProjectAction.projectTarget` is absent.
-      const runProjectAction = await tableActions.getTableAction({
-        ...routeScope,
-        actionId,
-        projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo,
-        targetPurpose: 'write',
-      })
       const applyGate = assertStockPrepApplyAllowed(pendingJob.target, {
         sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
         productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
@@ -8673,9 +8731,13 @@ function requireStockPreparationAudit() {
 
     // ── 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008 §2 / §4) ─────────────────
     //
-    // THE SWITCH IS CHECKED FIRST, BEFORE THE GATE'S OWN REFUSAL COSTS ANYTHING AND BEFORE ANY IO:
-    // with the switch off these three routes do not exist as far as a caller can tell (404, closed
-    // code), which is what makes S1 shippable in a release that leaves the switch off (§8 R63).
+    // ORDER: THE PERMISSION GATE FIRST, THEN THE SWITCH, THEN ANY IO. `requireAccess` is a pure read
+    // of the authenticated principal, so a caller below the tier is answered 401 / 403 exactly as on
+    // every other stock-prep route — the switch never turns a permission refusal into a 404, and the
+    // 404 is therefore only ever seen by someone who could use the route if it were on. With the
+    // switch off the routes then stop before any IO (404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED,
+    // closed code), which is what makes S1 shippable in a release that leaves the switch off (§8
+    // R63). The call-site guard pins this order (gate → switch → first await).
     //
     // TENANT DERIVATION is the board's: the host-vouched operator scope, never `resolveTenantId`.
     // The registry is keyed by that tenant, so ABSENT / ACTIVE / ARCHIVED is only ever a fact about
@@ -8754,8 +8816,10 @@ function requireStockPreparationAudit() {
     // CREATE + REGISTER + GRANT. R-35's named exception to R-11: a PULLER provisions ONE sheet, from
     // the frozen template, with every identifier derived server-side and an EMPTY request body.
     // Ordering: switch → gate → body/number shape → scope → audit vocabulary probe (migration 088)
-    // → cap → registry read → provision → register → audit → grant → audit. A race partner's
-    // insert is arbitrated by the registry's unique index (the store maps 23505 to 409).
+    // → cap (pre-count, so nothing is provisioned past it) → registry read → provision → register
+    // (E1: the store re-checks the cap under a per-tenant advisory lock, in the same transaction as
+    // its insert) → audit → grant → audit. A race partner's insert is arbitrated by the registry's
+    // unique index (the store maps 23505 to 409).
     async stockPreparationProjectTargetCreate(req, res) {
       const user = requireAccess(req, STOCK_PREP_PULL)
       requireProjectSheetsEnabled()
@@ -8803,6 +8867,9 @@ function requireStockPreparationAudit() {
           sheetId: provisioned.sheetId,
           objectId: provisioned.objectId,
           createdBy: actor,
+          // E1: the cap is enforced by the store under its lock; this pre-count above only keeps a
+          // sheet from being provisioned for a tenant that is visibly at the cap.
+          maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
         })
         created = true
         await audit.append({

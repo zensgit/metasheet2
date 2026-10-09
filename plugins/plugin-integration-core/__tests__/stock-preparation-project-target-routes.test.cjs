@@ -31,6 +31,22 @@
 //   R-12 SHAPE: a non-empty create body is 400; a malformed project number is 400.
 //   R-13 BOARD: with the switch on an unregistered project renders as "no bound target" (200),
 //        never a 409 — the ABSENT refusal is caught like TABLE_ACTION_NOT_CONFIGURED.
+//   R-14 (R1) A LARGE-BOM JOB PLANNED BEFORE THE FLIP: its snapshot names the env sheet; once the
+//        switch is on and the project has its registered sheet, plan / apply-start / apply-run all
+//        refuse 409 STOCK_PREPARATION_JOB_TARGET_STALE before any records IO, and the already
+//        approved apply job is left untouched.
+//   R-15 (R1 / E2c) A JOB WHOSE SNAPSHOT IS THE REGISTERED SHEET proceeds through plan, apply-start
+//        and apply-run — the write gate admits the project sheet through its project branch (the env
+//        allowlist never names it), so sourcing the gate's registry objectId from the deployment
+//        objectId would refuse here.
+//   R-16 (R1) SWITCH OFF: the same env-sheet job answers byte-identically (timestamps and the minted
+//        apply job id canonicalized) with the registry wired and without it, and the registry is
+//        never consulted.
+//   R-17 (E2a) THE SWITCH IS READ PER REQUEST: one mount, the env flipped between calls, the three
+//        routes follow the flip (and only the exact literal counts).
+//   R-18 (E2d) ARCHIVED, switch on: the small apply, conflict-policies save / delete and the handoff
+//        advance each refuse 409 ARCHIVED — each is a WRITE-purpose lookup, so a purpose downgraded
+//        to 'read' on any of them resolves the archived sheet instead and reds here.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -49,6 +65,7 @@ const {
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
+const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 
 const TENANT = 'tenant-s1-routes'
 const OTHER_TENANT = 'tenant-s1-foreign'
@@ -65,6 +82,14 @@ const LIST_PATH = '/api/integration/stock-preparation/project-targets'
 const DRY_RUN_PATH = '/api/integration/table-actions/:actionId/dry-run'
 const POLICIES_PATH = '/api/integration/table-actions/:actionId/conflict-policies'
 const BOARD_PATH = '/api/integration/stock-preparation/projects/:projectNo/board'
+const APPLY_PATH = '/api/integration/table-actions/:actionId/apply'
+const HANDOFF_ADVANCE_PATH = '/api/integration/stock-preparation/handoff/advance'
+const JOBS_PATH = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
+const PLAN_PATH = `${JOBS_PATH}/:jobId/plan`
+const APPLY_START_PATH = `${JOBS_PATH}/:jobId/apply-jobs`
+const APPLY_RUN_PATH = `${JOBS_PATH}/:jobId/apply-jobs/:applyJobId/run`
+// What `largeBomJobScope` derives for a request that names only the tenant.
+const JOB_SCOPE = Object.freeze({ tenantId: TENANT, workspaceId: 'workspace-default' })
 
 const FLOOR = Object.freeze({ id: 'u_floor', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const PULLER = Object.freeze({ id: 'u_pull', tenantId: TENANT, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
@@ -77,9 +102,12 @@ function makeMemoryDb() {
   const rows = []
   const calls = []
   const matches = (row, where) => Object.entries(where).every(([c, v]) => (row[c] === undefined ? null : row[c]) === (v === undefined ? null : v))
-  return {
+  const api = {
     rows,
     calls,
+    // E1: the store's create runs lock → count → insert on a transaction handle; this fake runs the
+    // callback inline (no isolation) and records the lock so a suite can see it was taken.
+    async transaction(fn) { calls.push('transaction'); return fn({ ...api, async advisoryXactLock(key) { calls.push(`advisoryXactLock:${key}`) } }) },
     async selectOne(_t, where) { calls.push('selectOne'); return rows.find((r) => matches(r, where)) || null },
     async select(_t, { where } = {}) { calls.push('select'); return rows.filter((r) => matches(r, where || {})) },
     async insertOne(_t, row) {
@@ -93,6 +121,7 @@ function makeMemoryDb() {
     },
     async countRows(_t, where) { calls.push('countRows'); return rows.filter((r) => matches(r, where || {})).length },
   }
+  return api
 }
 
 /**
@@ -145,13 +174,19 @@ function makeProvisioning({ grant = async () => ({ granted: [], alreadyGranted: 
 
 function makeRecordsApi(rowsBySheet = {}) {
   const queries = []
+  const writes = []
   return {
     queries,
+    writes,
     async queryRecords(input) {
       queries.push(input)
       const rows = rowsBySheet[input.sheetId] || []
       return rows.slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000))
     },
+    // The apply chunk (R-15 / R-16) requires the write pair to exist; nothing in this suite writes a
+    // row (every seeded plan is empty), and `writes` proves it.
+    async createRecord(input) { writes.push(['createRecord', input]); return { id: `rec_${writes.length}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } } },
+    async patchRecord(input) { writes.push(['patchRecord', input]); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
   }
 }
 
@@ -176,7 +211,7 @@ function baseServices() {
   }
 }
 
-function mount({ env = {}, provisioning = makeProvisioning(), records = makeRecordsApi(), db = makeMemoryDb(), withStore = true } = {}) {
+function mount({ env = {}, provisioning = makeProvisioning(), records = makeRecordsApi(), db = makeMemoryDb(), withStore = true, configExtras = {}, serviceExtras = {} } = {}) {
   const routes = new Map()
   const auditAppends = []
   const context = {
@@ -184,7 +219,8 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
       multitable: { provisioning, records },
     },
-    storage: new Map(),
+    // `durable: true` is what the large-BOM job store demands before it accepts a job (R-14..R-16).
+    storage: Object.assign(new Map(), { durable: true }),
     config: {
       stockPreparationTableActions: [{
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
@@ -192,9 +228,10 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
         target: { sheetId: ENV_SHEET, objectId: ENV_OBJECT, fieldIdMap: {} },
       }],
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [ENV_OBJECT] },
+      ...configExtras,
     },
   }
-  const services = baseServices()
+  const services = Object.assign(baseServices(), serviceExtras)
   services.stockPreparationAuditStore = {
     async append(entry) {
       auditInternals.assertValuesFreeDetail(entry.detail)
@@ -217,7 +254,7 @@ function mount({ env = {}, provisioning = makeProvisioning(), records = makeReco
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return {
-    routes, auditAppends, provisioning, records, db, store,
+    routes, auditAppends, provisioning, records, db, store, context,
     restore() { for (const [key, value] of Object.entries(previousEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } },
   }
 }
@@ -255,8 +292,204 @@ function registerActive(harness, projectNo = PROJECT, { archived = false, tenant
   return { sheetId, objectId }
 }
 
+/**
+ * A completed, authoritative, already-planned large-BOM expansion job written straight into the
+ * route's own durable storage — the state a job is in once a puller has expanded and planned it —
+ * with its snapshot bound to `target`. Rows and decisions are empty: these cases are about WHICH
+ * sheet the job addresses, not what it writes.
+ */
+async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
+  const actionId = PLM_STOCK_PREPARATION_ACTION_ID
+  const at = '2026-10-09T00:00:00.000Z'
+  const job = {
+    jobId, ...JOB_SCOPE, actionId,
+    status: 'completed', authoritative: true, projectNoPresent: true,
+    parameters: { projectNo },
+    principal: 'u_pull',
+    actionSnapshot: {
+      actionId,
+      source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
+      target,
+    },
+    sourceKind: 'data-source:sql-readonly',
+    artifactRevision: 'artifact-1',
+    artifact: { revision: 'artifact-1', status: 'expanded', rows: [], summary: {}, sealedAt: at },
+    planRevision: 'plan-1',
+    planArtifact: { revision: 'plan-1', artifactRevision: 'artifact-1', plan: { revision: 'plan-1', decisions: [], plannedAt: at }, existingRowCount: 0, plannedAt: at },
+    progress: { rowsExpanded: 0, readCount: 0, frontierRemaining: 0, completedChunks: 1 },
+    budgets: {},
+    evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
+    createdAt: at, updatedAt: at,
+  }
+  await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId }), job)
+  return job
+}
+
+const jobParams = (jobId, applyJobId) => ({ actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
+const plan = (routes, jobId) => call(routes, 'POST', PLAN_PATH, { user: PLATFORM_ADMIN, params: jobParams(jobId), body: {}, query: { tenantId: TENANT } })
+const applyStart = (routes, jobId) => call(routes, 'POST', APPLY_START_PATH, { user: PLATFORM_ADMIN, params: jobParams(jobId), body: { confirm: { acceptManualConfirmHold: true } }, query: { tenantId: TENANT } })
+const applyRun = (routes, jobId, applyJobId) => call(routes, 'POST', APPLY_RUN_PATH, { user: PLATFORM_ADMIN, params: jobParams(jobId, applyJobId), body: {}, query: { tenantId: TENANT } })
+const ENV_TARGET = Object.freeze({ sheetId: ENV_SHEET, objectId: ENV_OBJECT, fieldIdMap: {} })
+
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+test('R-14 (R1) a large-BOM job planned against the env sheet BEFORE the flip is refused 409 JOB_TARGET_STALE by plan, apply-start and apply-run once the switch is on', async () => {
+  const h = mount({ env: {} })
+  try {
+    const jobId = 'job-pre-flip'
+    await seedPlannedExpansionJob(h, { jobId, target: ENV_TARGET })
+    // Before the flip: planned and approved exactly as today (switch off → no overlay, no registry).
+    const planned = await plan(h.routes, jobId)
+    assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
+    const approved = await applyStart(h.routes, jobId)
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const applyJobId = approved.body.data.jobId
+    assert.deepEqual(h.db.calls, [], 'the registry was never consulted before the flip')
+    // THE FLIP: the switch goes on and the project gets its own registered sheet.
+    process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    registerActive(h)
+    const queriesBefore = h.records.queries.length
+    // (The registry's own binding build resolves the PROJECT sheet's field ids; what must not happen
+    // is a probe of the stale ENV sheet.)
+    const envProbes = () => h.provisioning.calls.filter((c) => c[0] === 'resolveFieldIds' && c[1] === ENV_OBJECT).length
+    const fieldProbesBefore = envProbes()
+    for (const [label, run] of [
+      ['plan', () => plan(h.routes, jobId)],
+      ['apply-start', () => applyStart(h.routes, jobId)],
+      ['apply-run', () => applyRun(h.routes, jobId, applyJobId)],
+    ]) {
+      const res = await run()
+      assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_JOB_TARGET_STALE', label)
+      assert.deepEqual({ ...res.body.error.details }, { field: 'jobId', snapshot: 'expansion', objectIdMatches: false, sheetIdMatches: false }, `${label}: values-free details`)
+    }
+    assert.equal(h.records.queries.length, queriesBefore, 'no records IO on the stale sheet after the flip')
+    assert.equal(envProbes(), fieldProbesBefore, 'no field probe on the stale sheet after the flip')
+    assert.deepEqual(h.records.writes, [], 'no write')
+    const stored = await h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId }))
+    assert.equal(stored.status, 'queued', 'the approved apply job is left exactly as it was')
+    assert.equal(stored.checkpoint.nextDecisionIndex, 0)
+    assert.equal(stored.target.sheetId, ENV_SHEET, 'the stored target is not rewritten either')
+  } finally { h.restore() }
+})
+
+test('R-15 (R1 / E2c) a job whose snapshot IS the registered sheet proceeds through plan, apply-start and apply-run — the gate admits the project sheet', async () => {
+  const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' } })
+  try {
+    const { sheetId, objectId } = registerActive(h)
+    assert.ok(!h.context.config.stockPrepApplySandbox.allowedTargetObjectIds.includes(objectId), 'the env allowlist never names the project sheet')
+    const jobId = 'job-post-flip'
+    await seedPlannedExpansionJob(h, { jobId, target: { sheetId, objectId, fieldIdMap: {} } })
+    const planned = await plan(h.routes, jobId)
+    assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
+    const approved = await applyStart(h.routes, jobId)
+    assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
+    const applyJobId = approved.body.data.jobId
+    const ran = await applyRun(h.routes, jobId, applyJobId)
+    assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+    const stored = await h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: PLM_STOCK_PREPARATION_ACTION_ID, applyJobId }))
+    assert.notEqual(stored.status, 'queued', 'the chunk ran (the write path was reached)')
+    assert.equal(stored.target.sheetId, sheetId, 'on the project sheet')
+    assert.deepEqual(h.records.writes, [], 'an empty plan writes no row')
+  } finally { h.restore() }
+})
+
+test('R-16 (R1) switch OFF: the three routes answer byte-identically for the same env-sheet job with and without the registry wired', async () => {
+  const run = async (withStore) => {
+    const h = mount({ env: {}, withStore })
+    try {
+      const jobId = 'job-switch-off'
+      await seedPlannedExpansionJob(h, { jobId, target: ENV_TARGET })
+      const planned = await plan(h.routes, jobId)
+      const approved = await applyStart(h.routes, jobId)
+      const applyJobId = approved.body && approved.body.data ? approved.body.data.jobId : null
+      const ran = await applyRun(h.routes, jobId, applyJobId)
+      assert.deepEqual(h.db.calls, [], 'the registry is never consulted while the switch is off')
+      // Clocks and the minted apply-job id are the only things that may differ between two runs.
+      const canon = (res) => JSON.parse(JSON.stringify([res.statusCode, res.body])
+        .split(applyJobId).join('<applyJobId>')
+        .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, '<ts>'))
+      return [canon(planned), canon(approved), canon(ran)]
+    } finally { h.restore() }
+  }
+  const wired = await run(true)
+  const bare = await run(false)
+  assert.equal(wired[0][0], 200, JSON.stringify(wired[0][1]))
+  assert.equal(wired[1][0], 202, JSON.stringify(wired[1][1]))
+  assert.equal(wired[2][0], 200, JSON.stringify(wired[2][1]))
+  assert.deepEqual(wired, bare)
+})
+
+test('R-17 (E2a) the switch is read PER REQUEST: one mount, the env flipped between calls, the routes follow the flip', async () => {
+  const h = mount({ env: {} })
+  try {
+    const flip = (value) => { if (value === undefined) delete process.env[PROJECT_SHEETS_ENABLED_ENV]; else process.env[PROJECT_SHEETS_ENABLED_ENV] = value }
+    assert.equal((await getTarget(h.routes, PULLER)).statusCode, 404)
+    flip('true')
+    const on = await getTarget(h.routes, PULLER)
+    assert.equal(on.statusCode, 200, JSON.stringify(on.body))
+    assert.equal(on.body.data.status, 'absent')
+    assert.equal((await listTargets(h.routes, PULLER)).statusCode, 200)
+    flip(undefined)
+    assert.equal((await getTarget(h.routes, PULLER)).statusCode, 404)
+    assert.equal((await listTargets(h.routes, PULLER)).statusCode, 404)
+    assert.equal((await createTarget(h.routes, PULLER)).statusCode, 404)
+    // Only the exact literal counts — per request, too.
+    for (const near of ['TRUE', ' true', 'true ', '1', 'yes']) {
+      flip(near)
+      assert.equal((await getTarget(h.routes, PULLER)).statusCode, 404, `not the literal: ${JSON.stringify(near)}`)
+    }
+    flip('true')
+    const created = await createTarget(h.routes, PULLER)
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+    flip(undefined)
+    assert.equal((await getTarget(h.routes, PULLER)).statusCode, 404, 'off again, even with a registered row')
+  } finally { h.restore() }
+})
+
+test('R-18 (E2d) archived project, switch ON: small apply, conflict-policies save / delete and handoff advance all refuse 409 ARCHIVED', async () => {
+  const handoffStore = {
+    async get() { return null },
+    async advance() { throw new Error('unexpected handoff advance') },
+    async claimNotification() { throw new Error('unexpected handoff claim') },
+  }
+  const h = mount({
+    env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' },
+    configExtras: {
+      stockPreparationHandoff: {
+        tenantId: TENANT,
+        steps: [{ key: 'prep_entry', handlerUserIds: [PLATFORM_ADMIN.id] }],
+        notify: { groupDestinationId: 'dest-prep' },
+        terminal: { groupDestinationIds: ['dest-warehouse'], exportPath: '/stock-prep' },
+      },
+    },
+    serviceExtras: { stockPreparationHandoffStore: handoffStore },
+  })
+  try {
+    const ARCHIVED = 'PRJ-S1-ARCH'
+    registerActive(h, ARCHIVED, { archived: true })
+    const actionId = PLM_STOCK_PREPARATION_ACTION_ID
+    const cases = [
+      ['POST', APPLY_PATH, { params: { actionId }, body: { parameters: { projectNo: ARCHIVED } }, query: { tenantId: TENANT } }],
+      ['PUT', POLICIES_PATH, { params: { actionId }, body: {}, query: { tenantId: TENANT, projectNo: ARCHIVED } }],
+      ['DELETE', POLICIES_PATH, { params: { actionId }, body: {}, query: { tenantId: TENANT, projectNo: ARCHIVED } }],
+      ['POST', HANDOFF_ADVANCE_PATH, { body: { projectNo: ARCHIVED, fromStepKey: 'prep_entry' }, query: {} }],
+    ]
+    for (const [method, routePath, req] of cases) {
+      const res = await call(h.routes, method, routePath, { user: PLATFORM_ADMIN, ...req })
+      assert.equal(res.statusCode, 409, `${method} ${routePath}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_ARCHIVED', `${method} ${routePath}`)
+    }
+    assert.deepEqual(h.records.queries, [], 'no records IO')
+    assert.deepEqual(h.auditAppends, [], 'no audit row')
+    // Positive control for the handoff case: the same request against an ACTIVE project gets past the
+    // lookup (it then fails on the existence probe against the empty sheet — a different refusal).
+    registerActive(h)
+    const active = await call(h.routes, 'POST', HANDOFF_ADVANCE_PATH, { user: PLATFORM_ADMIN, body: { projectNo: PROJECT, fromStepKey: 'prep_entry' }, query: {} })
+    assert.notEqual(active.body.error && active.body.error.code, 'STOCK_PREPARATION_PROJECT_ARCHIVED')
+  } finally { h.restore() }
+})
 
 test('R-01 switch OFF: 404 DISABLED on all three routes, zero IO, for every tier; the legacy conflict-policies read is unchanged', async () => {
   const h = mount({ env: {} })
