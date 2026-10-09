@@ -416,16 +416,28 @@ async function stopLauncher(child: ChildProcess, requireGraceful: boolean): Prom
     if (requireGraceful) assert.deepEqual({ code: child.exitCode, signal: child.signalCode }, { code: 0, signal: null })
     return
   }
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
-    child.once('exit', (code, signal) => resolve({ code, signal }))
+  const waitForExit = (timeoutMs: number) => new Promise<{ code: number | null; signal: NodeJS.Signals | null } | null>(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve({ code: child.exitCode, signal: child.signalCode }); return
+    }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer)
+      resolve({ code, signal })
+    }
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit)
+      resolve(null)
+    }, timeoutMs)
+    child.once('exit', onExit)
   })
+  const exited = waitForExit(60_000)
   child.kill('SIGTERM')
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 60_000) })
-  const result = await Promise.race([exited, timeout])
-  clearTimeout(timer)
+  const result = await exited
   if (!result) {
-    throw new Error('RECOVERY_LOCAL_BACKUP_MANUAL_STOP_TIMEOUT')
+    const stopped = waitForExit(10_000)
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    if (!(await stopped) || requireGraceful) throw new Error('RECOVERY_LOCAL_BACKUP_MANUAL_STOP_TIMEOUT')
+    return
   }
   if (requireGraceful) assert.deepEqual(result, { code: 0, signal: null })
 }
