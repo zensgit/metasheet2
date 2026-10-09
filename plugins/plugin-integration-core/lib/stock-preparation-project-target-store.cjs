@@ -34,6 +34,13 @@ const SHEET_CONSTRAINT = 'uniq_integration_stock_prep_project_target_sheet'
 
 const PROJECT_TARGET_STATUSES = Object.freeze(['active', 'archived'])
 
+// E1 (S1 fix round 1): the per-tenant advisory-lock key `create` takes before it counts. The cap
+// (200 rows per tenant, archived included) used to be count-then-insert in two autocommit
+// statements, so N concurrent creates that all counted 199 all inserted; a 199-row probe with three
+// concurrent creates ended at 202. Under `pg_advisory_xact_lock` the count and the insert of one
+// tenant run one at a time, and the lock is released with the transaction.
+const PROJECT_TARGET_CREATE_LOCK_PREFIX = 'stock-prep-project-target:'
+
 class StockPreparationProjectTargetStoreError extends Error {
   constructor(status, code, message, details = {}) {
     super(message)
@@ -113,9 +120,12 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     typeof db.selectOne !== 'function' ||
     typeof db.select !== 'function' ||
     typeof db.insertOne !== 'function' ||
-    typeof db.countRows !== 'function'
+    typeof db.countRows !== 'function' ||
+    // E1: `transaction` is REQUIRED, not nice-to-have — `create` serializes its count and insert
+    // under a per-tenant advisory lock, and a lock in autocommit guards nothing.
+    typeof db.transaction !== 'function'
   ) {
-    throw new Error('createStockPreparationProjectTargetStore: scoped db helper (selectOne + select + insertOne + countRows) is required')
+    throw new Error('createStockPreparationProjectTargetStore: scoped db helper (selectOne + select + insertOne + countRows + transaction) is required')
   }
 
   function scope(input = {}) {
@@ -150,6 +160,15 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     return db.countRows(PROJECT_TARGET_TABLE, { tenant_id: tenantId })
   }
 
+  /** The per-tenant cap `create` enforces under its lock: a positive integer, or null for no cap. */
+  function normalizeCap(value) {
+    if (value === undefined || value === null) return null
+    if (!Number.isInteger(value) || value < 1) {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'maxPerTenant must be a positive integer', { field: 'maxPerTenant' })
+    }
+    return value
+  }
+
   /**
    * Register a freshly provisioned sheet as this project's 备料表.
    *
@@ -157,24 +176,50 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * together; the sheet id is deterministic (derived from (staging project, objectId)), so both
    * provisioned the SAME sheet and only the registry insert can disagree. The loser's 23505 becomes a
    * typed 409 `STOCK_PREPARATION_PROJECT_TARGET_EXISTS` rather than a second row — pinned by the
-   * store suite with a db whose insert raises the violation.
+   * store suite with a db whose insert raises the violation, and by the real-DB suite with two
+   * concurrent creates against PostgreSQL.
+   *
+   * THE CAP IS ENFORCED HERE, UNDER A LOCK (E1). `maxPerTenant` (the route passes the 200-row cap)
+   * is checked inside ONE transaction that first takes the tenant's advisory lock, then counts, then
+   * inserts — so two creates for DIFFERENT projects of a tenant sitting at the cap cannot both read
+   * "one below" and both land. The route's own pre-count stays (it refuses before provisioning a
+   * sheet); this one is the authority. Order pinned by the store suite: transaction → lock → count →
+   * insert, all on the transaction handle.
    */
   async function create(input = {}) {
     const { tenantId, projectNo } = scope(input)
     const sheetId = requiredString(input.sheetId, 'sheetId')
     const objectId = requiredString(input.objectId, 'objectId')
     const createdBy = optionalString(input.createdBy)
+    const maxPerTenant = normalizeCap(input.maxPerTenant)
     try {
-      const row = firstRow(await db.insertOne(PROJECT_TARGET_TABLE, {
-        id: idGenerator(),
-        tenant_id: tenantId,
-        project_no: projectNo,
-        sheet_id: sheetId,
-        object_id: objectId,
-        status: 'active',
-        created_by: createdBy,
-      }))
-      return rowToPublicTarget(row)
+      return await db.transaction(async (trx) => {
+        if (!trx || typeof trx.advisoryXactLock !== 'function') {
+          throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock')
+        }
+        await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+        if (maxPerTenant !== null) {
+          const registered = await trx.countRows(PROJECT_TARGET_TABLE, { tenant_id: tenantId })
+          if (registered >= maxPerTenant) {
+            throw new StockPreparationProjectTargetStoreError(
+              409,
+              'STOCK_PREPARATION_PROJECT_TARGET_LIMIT',
+              `this tenant already has ${maxPerTenant} registered stock-preparation project sheets (archived included)`,
+              { limit: maxPerTenant },
+            )
+          }
+        }
+        const row = firstRow(await trx.insertOne(PROJECT_TARGET_TABLE, {
+          id: idGenerator(),
+          tenant_id: tenantId,
+          project_no: projectNo,
+          sheet_id: sheetId,
+          object_id: objectId,
+          status: 'active',
+          created_by: createdBy,
+        }))
+        return rowToPublicTarget(row)
+      })
     } catch (error) {
       if (isUniqueViolation(error, SCOPE_CONSTRAINT) || isUniqueViolation(error, SHEET_CONSTRAINT)) {
         throw new StockPreparationProjectTargetStoreError(
@@ -194,6 +239,7 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
 module.exports = {
   PROJECT_TARGET_TABLE,
   PROJECT_TARGET_STATUSES,
+  PROJECT_TARGET_CREATE_LOCK_PREFIX,
   SCOPE_CONSTRAINT,
   SHEET_CONSTRAINT,
   StockPreparationProjectTargetStoreError,

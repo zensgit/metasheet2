@@ -339,6 +339,15 @@ import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/s
 const projectTargets = require(
   path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-project-targets.cjs'),
 )
+// E4: the REAL registry store over the plugin's own db helper, against real PostgreSQL.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const projectTargetStore = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-project-target-store.cjs'),
+)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pluginDb = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'db.cjs'),
+)
 
 describeDb('S1 G1 project-sheet role grant (real registry + real grant service + real wrapper, real DB)', () => {
   const PLUGIN = 'plugin-integration-core'
@@ -457,6 +466,7 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
     }
     await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN]]).catch(() => {})
+    await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
     await pool.end()
   })
 
@@ -519,5 +529,63 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     expect(await permissionRows(unclaimedSheet)).toEqual([])
     // ...and the canonical main table is refused on SHAPE, before the registry is even asked.
     await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: getObjectSheetId(projectId, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID, roleIds: [ROLE_A] })).rejects.toMatchObject({ code: 'STOCK_PREP_PROJECT_SHEET_GRANT_OBJECT_NOT_PROJECT_SHEET' })
+  })
+
+  // E4 (S1 fix round 1): THE REGISTRY CREATE RACE against real PostgreSQL. Two concurrent creates
+  // for one (tenant_id, project_no) through the REAL store over the plugin's REAL db helper: exactly
+  // one row lands and the loser is the typed 409 — which pins that node-postgres surfaces the unique
+  // index NAME in `error.constraint` (the store routes on it) and that migration 087's scope index is
+  // the one that fires (the two creates name DIFFERENT sheet ids, so the sheet index stays quiet).
+  // The E1 lock rides the same path: both creates take the tenant's advisory lock, so they also
+  // serialize the cap check, and a cap of 1 refuses the next project's create with zero rows added.
+  it('E4 registry create race (real DB): two concurrent creates for one (tenant, project) → one row, the loser 409 EXISTS off the unique index name', async () => {
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    const projectNo = `S1RACE-${suffix}`
+    const sheet = (n: number) => `sheet_s1race_${suffix}_${n}`
+    const results = await Promise.allSettled([1, 2].map((n) =>
+      store.create({ tenantId, projectNo, sheetId: sheet(n), objectId: objectA, createdBy: 'race', maxPerTenant: 200 }) as Promise<{ sheetId: string }>,
+    ))
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<{ sheetId: string }> => r.status === 'fulfilled')
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(fulfilled, JSON.stringify(results.map((r) => r.status))).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0].reason).toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_TARGET_EXISTS' })
+    const rows = await pool.query('SELECT sheet_id FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])
+    expect(rows.rowCount).toBe(1)
+    expect((rows.rows[0] as { sheet_id: string }).sheet_id).toBe(fulfilled[0].value.sheetId)
+    // The cap, under the same lock: this tenant now holds one row, so a cap of 1 refuses the next
+    // project's create and adds nothing.
+    await expect(store.create({ tenantId, projectNo: `${projectNo}-B`, sheetId: sheet(3), objectId: objectB, maxPerTenant: 1 }))
+      .rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT' })
+    const after = await pool.query('SELECT COUNT(*)::int AS n FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId])
+    expect(Number((after.rows[0] as { n: number }).n)).toBe(1)
   })
 })

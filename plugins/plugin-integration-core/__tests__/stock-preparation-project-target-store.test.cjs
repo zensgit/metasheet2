@@ -15,6 +15,10 @@
 //   S-05 get / list / count read what create wrote; count includes an archived row.
 //   S-06 migration 087 text: both unique indexes, the status / archived / outcome CHECKs, the
 //        integration_ prefix, no value-bearing column, no DROP.
+//   S-07 (E1) `create` is ONE transaction: the per-tenant advisory lock is taken FIRST, then the
+//        count, then the insert — every statement on the transaction handle — and the cap is enforced
+//        under the lock. Mutation: drop the `advisoryXactLock` call, or move the count / insert onto
+//        the autocommit db, and the recorded call sequence reds.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -23,6 +27,7 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 const {
   PROJECT_TARGET_TABLE,
+  PROJECT_TARGET_CREATE_LOCK_PREFIX,
   SCOPE_CONSTRAINT,
   SHEET_CONSTRAINT,
   StockPreparationProjectTargetStoreError,
@@ -41,21 +46,23 @@ function makeMemoryDb({ failInsertWith } = {}) {
       return actual === (value === undefined ? null : value)
     })
   }
-  return {
-    rows,
-    calls,
+  // The statements, untagged; `api` (autocommit) and the transaction handle each log their own tag
+  // before delegating here, so a suite can tell a statement that ran INSIDE the transaction from one
+  // that ran in autocommit (E1: a lock in autocommit would guard nothing).
+  const impl = {
     async selectOne(table, where) {
-      calls.push(['selectOne', table])
       assert.equal(table, PROJECT_TARGET_TABLE)
       return rows.find((row) => matches(row, where)) || null
     },
     async select(table, { where } = {}) {
-      calls.push(['select', table])
       assert.equal(table, PROJECT_TARGET_TABLE)
       return rows.filter((row) => matches(row, where || {}))
     },
+    async countRows(table, where) {
+      assert.equal(table, PROJECT_TARGET_TABLE)
+      return rows.filter((row) => matches(row, where || {})).length
+    },
     async insertOne(table, row) {
-      calls.push(['insertOne', table])
       assert.equal(table, PROJECT_TARGET_TABLE)
       if (failInsertWith) throw failInsertWith
       // The REAL unique indexes, modelled: a real database raises 23505 with the constraint name.
@@ -76,12 +83,26 @@ function makeMemoryDb({ failInsertWith } = {}) {
       rows.push(stored)
       return [stored]
     },
-    async countRows(table, where) {
-      calls.push(['countRows', table])
-      assert.equal(table, PROJECT_TARGET_TABLE)
-      return rows.filter((row) => matches(row, where || {})).length
+  }
+  const tagged = (prefix) => ({
+    async selectOne(table, where) { calls.push([`${prefix}selectOne`, table]); return impl.selectOne(table, where) },
+    async select(table, options) { calls.push([`${prefix}select`, table]); return impl.select(table, options) },
+    async countRows(table, where) { calls.push([`${prefix}countRows`, table]); return impl.countRows(table, where) },
+    async insertOne(table, row) { calls.push([`${prefix}insertOne`, table]); return impl.insertOne(table, row) },
+  })
+  const api = {
+    rows,
+    calls,
+    ...tagged(''),
+    async transaction(fn) {
+      calls.push(['transaction'])
+      return fn({
+        ...tagged('trx.'),
+        async advisoryXactLock(key) { calls.push(['trx.advisoryXactLock', key]) },
+      })
     },
   }
+  return api
 }
 
 function makeStore(db) {
@@ -200,6 +221,41 @@ test('S-05 get / list / count read what create wrote; count includes an archived
   assert.deepEqual(listed.map((row) => [row.projectNo, row.status]), [['PRJ-S1-A', 'active'], ['PRJ-S1-B', 'archived']])
   assert.equal(listed[1].archivedAt, '2026-10-10T00:00:00.000Z')
   assert.ok(listed.every((row) => row.tenantId === TENANT), 'list is tenant-scoped')
+})
+
+test('S-07 (E1) create serializes count + insert per tenant: ONE transaction, the advisory lock first, then the count, then the insert — and the cap is enforced under the lock', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  const base = { tenantId: 'tenant-s1-lock', objectId: 'plm_stock_preparation_sandbox_p_0123456789abcdef01234567' }
+  await store.create({ ...base, projectNo: 'P-1', sheetId: 'sheet_lock_1', maxPerTenant: 2 })
+  assert.deepEqual(db.calls, [
+    ['transaction'],
+    ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}tenant-s1-lock`],
+    ['trx.countRows', PROJECT_TARGET_TABLE],
+    ['trx.insertOne', PROJECT_TARGET_TABLE],
+  ], 'lock → count → insert, every statement on the transaction handle')
+  db.calls.length = 0
+  await store.create({ ...base, projectNo: 'P-2', sheetId: 'sheet_lock_2', maxPerTenant: 2 })
+  // At the cap: refused UNDER THE LOCK, after the count, with nothing inserted.
+  const limited = await expectStoreError(store.create({ ...base, projectNo: 'P-3', sheetId: 'sheet_lock_3', maxPerTenant: 2 }), 409, 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT')
+  assert.deepEqual(limited.details, { limit: 2 })
+  assert.deepEqual(db.calls.slice(-3), [['transaction'], ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}tenant-s1-lock`], ['trx.countRows', PROJECT_TARGET_TABLE]])
+  assert.equal(db.rows.filter((row) => row.tenant_id === 'tenant-s1-lock').length, 2)
+  // Another tenant is not counted against this one.
+  await store.create({ ...base, tenantId: 'tenant-s1-other', projectNo: 'P-1', sheetId: 'sheet_lock_4', maxPerTenant: 2 })
+  // No cap given: no count, still locked, still transactional.
+  db.calls.length = 0
+  await store.create({ ...base, tenantId: 'tenant-s1-uncapped', projectNo: 'P-1', sheetId: 'sheet_lock_5' })
+  assert.deepEqual(db.calls, [['transaction'], ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}tenant-s1-uncapped`], ['trx.insertOne', PROJECT_TARGET_TABLE]])
+  // A malformed cap is refused before any db call.
+  db.calls.length = 0
+  for (const bad of [0, -1, 1.5, '200', NaN]) {
+    await expectStoreError(store.create({ ...base, projectNo: 'P-9', sheetId: 'sheet_lock_9', maxPerTenant: bad }), 422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID')
+  }
+  assert.deepEqual(db.calls, [])
+  // A db without `transaction` cannot build the store at all (a lock in autocommit would guard nothing).
+  const { transaction: _omitted, ...autocommitOnly } = makeMemoryDb()
+  assert.throws(() => createStockPreparationProjectTargetStore({ db: autocommitOnly }), /transaction/)
 })
 
 test('S-06 migration 087: two unique indexes, the CHECKs, the integration_ prefix, no value column, no DROP', () => {

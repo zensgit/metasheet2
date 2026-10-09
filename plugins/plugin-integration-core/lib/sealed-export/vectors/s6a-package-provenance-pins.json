@@ -56,7 +56,7 @@
   "externalModules": {
     "gipProfileCertificationContracts": "253000b5f5676340f2d1876cf2810e5ba90561207840ba3ba12a89717771293d",
     "gipCanonicalJson": "99c2f954e35ab1c943c59872def8722b00dccb11401783d77839ae0ed98298b1",
-    "pluginDb": "81a122d60891bbe458d47fe0ae87939c535cc1e017fb61c21f98b997d5d8fc3e",
+    "pluginDb": "263b1634f303c43cefa0f2ac319ae4c319bd5120b938088628a25a71dbbec56d",
     "stockPreparationDecoder": "8868b8c51c7f96d81eb224c81d8d270b1dc79b1f7bca702b4e8b7849259b0c6a",
     "stockPreparationReadonlyIntake": "d518a5310e5b8da97f0e85db717ab2816210793d9e2e658690c0635fa19e3704",
     "stockPreparationPlmSourcePersistBridge": "d5051a1e2baee502fa2ee809d62490e108c26ed8d1da3812444798cbda36a8c2",
@@ -70,7 +70,7 @@
     "pluginPackageJson": "4cd227957910381d06701bdbd95a33b2276c4c735f364ab415efdf8d4d113dc9",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
     "pluginIndex": "344ad64168f5d062ac8defaeec22112c52e0fefda6cda0d50159c1838c5e65dc",
-    "pluginHttpRoutes": "4de4149e9985a4a3d617ad15fcbfc1fe5f09beec9068ff7985560a5bcba33a22",
+    "pluginHttpRoutes": "6344ba266be6b0154ea712385677bee964a554725334f61d7da673326e2787dc",
     "testChainRunner": "c6ce4f00b412038b7f4473802f9d0b0df408d693c0b117f5b9dd23e0a7b1b82d",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
