@@ -35,6 +35,7 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 }))
 
 import {
+  __directorySyncInternalsForTests,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts,
@@ -42,6 +43,8 @@ import {
   bindDirectoryAccount,
   unbindDirectoryAccount,
 } from '../../src/directory/directory-sync'
+import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/login-name-rule'
+import { PasswordPolicyError } from '../../src/auth/password-policy-error'
 
 describe('bindDirectoryAccount', () => {
   function installTransactionMock(
@@ -965,6 +968,101 @@ describe('bindDirectoryAccount', () => {
     })).rejects.toThrow('missing DingTalk openId')
 
     expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  // #6259: the manual admission writer uses the SHARED login-name rule and throws its typed error,
+  // so the admit-user route can answer 400 INVALID_USERNAME by type. The English message is the
+  // same sentence POST /api/admin/users returns.
+  it('rejects a non-ASCII manual-admission login name with the shared LoginNameRuleError before any read', async () => {
+    const rejection = admitDirectoryAccountUser('account-admit-zh', {
+      adminUserId: 'admin-1',
+      name: '测试员',
+      username: '测试员',
+      mobile: '13900000000',
+      enableDingTalkGrant: true,
+    })
+
+    await expect(rejection).rejects.toBeInstanceOf(LoginNameRuleError)
+    await expect(rejection).rejects.toMatchObject({
+      message: LOGIN_NAME_RULE_MESSAGE,
+      code: 'INVALID_USERNAME',
+      rule: 'login_name_ascii',
+    })
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  it('does not reject a mixed-case login name by the rule (rule unchanged: the writer lowercases first)', async () => {
+    // 'LiQing' is lowercased to 'liqing' before the rule runs — it must NOT be rejected by the
+    // login-name rule; the call proceeds to the account read (which this fixture leaves empty).
+    pgMocks.query.mockResolvedValue({ rows: [] })
+
+    await expect(admitDirectoryAccountUser('account-admit-case', {
+      adminUserId: 'admin-1',
+      name: '李青',
+      username: 'LiQing',
+      enableDingTalkGrant: false,
+    })).rejects.toThrow('Directory account not found')
+  })
+
+  it('rejects a requested password that fails policy with a typed PasswordPolicyError (message unchanged)', async () => {
+    const rejection = admitDirectoryAccountUser('account-admit-weak', {
+      adminUserId: 'admin-1',
+      name: '李青',
+      username: 'liqing',
+      password: 'weak',
+      enableDingTalkGrant: true,
+    })
+
+    await expect(rejection).rejects.toBeInstanceOf(PasswordPolicyError)
+    await expect(rejection).rejects.toMatchObject({
+      // First failed rule, exactly what the untyped Error carried before #6259.
+      message: 'Password must be at least 8 characters long',
+      code: 'PASSWORD_POLICY_FAILED',
+      errors: [
+        'Password must be at least 8 characters long',
+        'Password must contain at least one uppercase letter',
+        'Password must contain at least one number',
+      ],
+    })
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  it('rechecks the login name with the shared rule inside the admission write (sync / batch path)', async () => {
+    const clientQuery = vi.fn(async () => ({ rows: [] as Array<Record<string, unknown>> }))
+
+    const rejection = __directorySyncInternalsForTests.createDirectoryAdmittedUserInTransaction(
+      { query: clientQuery },
+      {
+        account: {
+          id: 'account-seam',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: 'external-seam',
+          union_id: 'union-seam',
+          open_id: 'open-seam',
+          external_key: 'union-seam',
+          name: '林岚',
+          email: null,
+          mobile: null,
+          is_active: true,
+        } as never,
+        adminUserId: 'admin-1',
+        name: '林岚',
+        email: null,
+        username: '林岚',
+        mobile: null,
+        passwordHash: 'hashed',
+        mustChangePassword: true,
+        enableDingTalkGrant: false,
+      },
+    )
+
+    await expect(rejection).rejects.toBeInstanceOf(LoginNameRuleError)
+    await expect(rejection).rejects.toThrow(LOGIN_NAME_RULE_MESSAGE)
+    expect(clientQuery).not.toHaveBeenCalled()
   })
 
   it('rechecks account active state at the bind write point', async () => {

@@ -166,6 +166,21 @@ export interface UnifiedApprovalDTO {
    * Mirrors the pending-count badge's unread predicate exactly (absence of an approval_reads row).
    */
   isRead?: boolean
+  /**
+   * 抄送我的 unread (test report 2026-10-08, behind APPROVAL_CC_UNREAD_BADGE_ENABLED): `true` when
+   * the viewer has not opened this instance since the newest CC row targeting them
+   * (`approvalCcUnreadConditionSql`). Populated ONLY on the 抄送我的 (cc) tab and only while the
+   * flag is on; `undefined` everywhere else, which callers must read as "no dot". A separate field,
+   * not `isRead`, because the two tabs' rules differ (row presence vs. time comparison).
+   */
+  ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08, behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED):
+   * `true` when the viewer's own request reached a terminal status decided by someone else and the
+   * viewer has not opened it since (`approvalMineOutcomeUnseenConditionSql`). Populated ONLY on the
+   * 我发起的 (mine) tab and only while the flag is on; `undefined` elsewhere ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -277,6 +292,29 @@ export interface ApprovalQueryOptions {
   actorPermissions?: string[]
   limit?: number
   offset?: number
+  /**
+   * 抄送我的 tab only: resolve `ccUnread` per returned row (one extra id-scoped query). The route
+   * sets it only while APPROVAL_CC_UNREAD_BADGE_ENABLED is on, so the flag-off feed issues exactly
+   * the queries it always did and its DTOs carry no new key.
+   */
+  annotateCcUnread?: boolean
+  /**
+   * 我发起的 tab only: resolve `outcomeUnseen` per returned row (one extra id-scoped query). Set by
+   * the route only while APPROVAL_MINE_OUTCOME_BADGE_ENABLED is on.
+   */
+  annotateMineOutcomeUnseen?: boolean
+}
+
+/**
+ * The viewer + source scope of a tab badge count: the same inputs the list route hands
+ * `listApprovals` for that tab, minus paging and the client filters a badge does not apply.
+ */
+export interface ApprovalTabBadgeCountOptions {
+  sourceSystem?: 'platform' | 'plm'
+  includeExternalTabSources?: boolean
+  actorId: string
+  actorRoles?: string[]
+  actorPermissions?: string[]
 }
 
 // ── Sync Options ──

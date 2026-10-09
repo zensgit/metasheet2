@@ -52,6 +52,8 @@ import {
   restoreDeprovisionEvent,
 } from '../directory/deprovision-evidence-api'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { LoginNameRuleError } from '../auth/login-name-rule'
+import { PasswordPolicyError } from '../auth/password-policy-error'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -992,6 +994,17 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from the admission write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
+      // #6259: input-rule failures are recognised by TYPE (not by matching their English prose) and
+      // answered 400 with the same stable codes POST /api/admin/users uses. The login-name sentence
+      // matched none of the patterns below and used to fall through to 500.
+      if (error instanceof LoginNameRuleError) {
+        jsonError(res, 400, error.code, error.message, { rule: error.rule })
+        return
+      }
+      if (error instanceof PasswordPolicyError) {
+        jsonError(res, 400, error.code, error.message, { details: [...error.errors] })
+        return
+      }
       const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
       const statusCode = /not found/i.test(message)
         ? 404

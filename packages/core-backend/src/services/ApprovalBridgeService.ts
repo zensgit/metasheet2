@@ -27,12 +27,15 @@ import type {
   ApprovalBridgePlmAdapter,
   ApprovalInstanceRow,
   ApprovalQueryOptions,
+  ApprovalTabBadgeCountOptions,
   PlmSyncOptions,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
+import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
+import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -67,6 +70,20 @@ export function __setW4c3bBridgeDispatchTestBarrierForTests(
   hook: W4c3bBridgeDispatchBarrierFn | null,
 ): void {
   bridgeDispatchTestBarrierForTests = hook
+}
+
+/**
+ * `listApprovals`'s WHERE (see `ApprovalBridgeService.buildListWhere`): the conjuncts, their bound
+ * values, the next free placeholder, and the placeholders the `tab` filter bound for the actor id
+ * and the role array (`null` when the tab never referenced them — no tab, no actor, or a tab that
+ * reads neither).
+ */
+interface ApprovalListWhere {
+  conditions: string[]
+  params: unknown[]
+  nextParamIndex: number
+  tabActorParam: number | null
+  tabRolesParam: number | null
 }
 
 const logger = new Logger('ApprovalBridgeService')
@@ -445,10 +462,14 @@ export class ApprovalBridgeService {
     return { synced, errors }
   }
 
-  async listApprovals(options?: ApprovalQueryOptions): Promise<{
-    data: UnifiedApprovalDTO[]
-    total: number
-  }> {
+  /**
+   * The list feed's WHERE, exactly as `listApprovals` has always assembled it — client filters,
+   * the `tab` filter, the server-determined scope, and the dormant org pin — extracted so a count
+   * over the same feed (the 抄送我的 / 我发起的 badges) is the SAME statement with one conjunct
+   * appended, never a second hand-built copy that can drift from the list it counts. Text and
+   * placeholder push order are unchanged by the extraction.
+   */
+  private async buildListWhere(options?: ApprovalQueryOptions): Promise<ApprovalListWhere> {
     if (!pool) throw new Error('Database not available')
 
     const conditions: string[] = []
@@ -504,6 +525,11 @@ export class ApprovalBridgeService {
     }
     const sourceSystem = options?.sourceSystem
     const includeExternalTabSources = options?.includeExternalTabSources === true
+    // Declared OUTSIDE the tab block so the placeholders the tab filter bound for the actor id and
+    // the role array are returned to the caller (`ApprovalListWhere.tabActorParam` /
+    // `tabRolesParam`): a conjunct appended later binds the SAME values the tab arm bound.
+    let tabActorIdParam: number | null = null
+    let tabActorRolesParam: number | null = null
     if (options?.tab && options.actorId) {
       const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
       const actorPermissions = options.actorPermissions && options.actorPermissions.length > 0 ? options.actorPermissions : ['__none__']
@@ -520,8 +546,6 @@ export class ApprovalBridgeService {
       // middle ("could not determine data type of parameter $N"). Either way 我发起的 / 抄送我的 /
       // 我已处理 answered 500 on real PostgreSQL. Allocating on first reference keeps every bound
       // value referenced and the numbering dense, for all five tabs in both source modes.
-      let tabActorIdParam: number | null = null
-      let tabActorRolesParam: number | null = null
       let tabActorPermissionsParam: number | null = null
       const actorIdParam = (): number => {
         if (tabActorIdParam === null) {
@@ -554,15 +578,8 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND metadata->>'targetType' = 'user'
-                AND metadata->>'targetId' = $${actorIdParam()}
-            )`,
-          )
+          // User arm only on the PLM source — the historical shape, kept (see approval-cc-predicate.ts).
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: null }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
         } else if (options.tab === 'processed') {
@@ -602,17 +619,7 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(
             `(
@@ -624,15 +631,7 @@ export class ApprovalBridgeService {
                   OR id IN (
                     SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
                   )
-                  OR id IN (
-                    SELECT instance_id
-                    FROM approval_records
-                    WHERE action = 'cc'
-                      AND (
-                        (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                        OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                      )
-                  )
+                  OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
                   OR id IN (
                     SELECT instance_id
                     FROM approval_assignments
@@ -691,17 +690,7 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
           conditions.push(
@@ -710,15 +699,7 @@ export class ApprovalBridgeService {
               OR id IN (
                 SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
               )
-              OR id IN (
-                SELECT instance_id
-                FROM approval_records
-                WHERE action = 'cc'
-                  AND (
-                    (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                    OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                  )
-              )
+              OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
               OR id IN (
                 SELECT instance_id
                 FROM approval_assignments
@@ -821,6 +802,91 @@ export class ApprovalBridgeService {
       )
     }
 
+    return {
+      conditions,
+      params,
+      nextParamIndex: paramIndex,
+      tabActorParam: tabActorIdParam,
+      tabRolesParam: tabActorRolesParam,
+    }
+  }
+
+  /**
+   * 抄送我的 unread badge (test report 2026-10-08): the 抄送我的 feed — `buildListWhere` with
+   * `tab: 'cc'` and the caller's source scope, i.e. the very statement the tab lists — with ONE
+   * conjunct appended (`approvalCcUnreadConditionSql`, bound to the placeholders the tab filter
+   * bound). It can therefore never exceed the tab's own total for the same `sourceSystem`, and it
+   * equals the number of rows that tab marks `ccUnread` across all its pages. Client filters the
+   * tab may also carry (search, status, template, date window) are deliberately not applied: a
+   * badge counts the tab, not the current search — the same convention as the 待我处理 badge.
+   */
+  async countCcUnreadForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'cc',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalCcUnreadConditionSql({
+        instanceRef: 'approval_instances',
+        actorParam: listWhere.tabActorParam,
+        rolesParam: listWhere.tabRolesParam,
+      }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08): the 我发起的 feed (`buildListWhere` with
+   * `tab: 'mine'` and the caller's source scope) with ONE conjunct appended —
+   * `approvalMineOutcomeUnseenConditionSql`, bound to the actor placeholder the tab filter bound.
+   * Same contract as `countCcUnreadForViewer`: never above the tab's total for the same
+   * `sourceSystem`, equal to the rows that tab marks `outcomeUnseen`, client filters not applied.
+   */
+  async countMineOutcomesUnseenForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'mine',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: listWhere.tabActorParam }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  async listApprovals(options?: ApprovalQueryOptions): Promise<{
+    data: UnifiedApprovalDTO[]
+    total: number
+  }> {
+    if (!pool) throw new Error('Database not available')
+
+    const listWhere = await this.buildListWhere(options)
+    const { conditions, params } = listWhere
+    let paramIndex = listWhere.nextParamIndex
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const limit = options?.limit ?? 50
     const offset = options?.offset ?? 0
@@ -862,6 +928,55 @@ export class ApprovalBridgeService {
       readInstanceIds = new Set(readResult.rows.map((row) => row.instance_id))
     }
 
+    // 抄送我的 unread (test report 2026-10-08): resolved ONLY when the caller asks for it (the route
+    // does while APPROVAL_CC_UNREAD_BADGE_ENABLED is on) and only on the cc tab. Same conjunct the
+    // badge count appends to this same feed (`approvalCcUnreadConditionSql`), bound to the SAME
+    // values the tab filter bound — so the rows marked here are exactly the rows the badge counts.
+    let ccUnreadInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateCcUnread === true
+      && options.tab === 'cc'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const ccParams: unknown[] = [
+        instancesResult.rows.map((row) => row.id),
+        params[listWhere.tabActorParam - 1],
+      ]
+      let ccRolesParam: number | null = null
+      if (listWhere.tabRolesParam !== null) {
+        ccParams.push(params[listWhere.tabRolesParam - 1])
+        ccRolesParam = ccParams.length
+      }
+      const ccUnreadResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalCcUnreadConditionSql({ instanceRef: 'approval_instances', actorParam: 2, rolesParam: ccRolesParam })}`,
+        ccParams,
+      )
+      ccUnreadInstanceIds = new Set(ccUnreadResult.rows.map((row) => row.id))
+    }
+
+    // 我发起的 new outcome (test report 2026-10-08): same shape as the cc annotation above — only on
+    // request, only on the mine tab, and with the SAME conjunct the badge count appends to this feed.
+    let outcomeUnseenInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateMineOutcomeUnseen === true
+      && options.tab === 'mine'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const outcomeResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: 2 })}`,
+        [instancesResult.rows.map((row) => row.id), params[listWhere.tabActorParam - 1]],
+      )
+      outcomeUnseenInstanceIds = new Set(outcomeResult.rows.map((row) => row.id))
+    }
+
     const data = instancesResult.rows.map((row) => {
       const dto = toUnifiedDTO(
         row,
@@ -870,6 +985,12 @@ export class ApprovalBridgeService {
       )
       if (readInstanceIds) {
         dto.isRead = readInstanceIds.has(row.id)
+      }
+      if (ccUnreadInstanceIds) {
+        dto.ccUnread = ccUnreadInstanceIds.has(row.id)
+      }
+      if (outcomeUnseenInstanceIds) {
+        dto.outcomeUnseen = outcomeUnseenInstanceIds.has(row.id)
       }
       return dto
     })
