@@ -348,6 +348,15 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
+  // 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008). All three derive their tenant
+  // through the host-vouched operator scope, exactly like the board: the registry they read is keyed
+  // by that tenant, so ABSENT / ACTIVE / ARCHIVED is only ever a fact about the caller's own tenant.
+  // The CREATE is a WRITE (it provisions a sheet and registers it) and, like the confirm, is pinned
+  // here because the scope it resolves is what decides which tenant's staging project the sheet
+  // lands in. All three are behind the default-OFF switch and refuse 404 before any IO without it.
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetGet',
+  'stockPreparationProjectTargetList',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
@@ -422,6 +431,12 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   // project that wall compares against must come from the resolved scope with no request projectId,
   // or a caller could name the project the registry is asked about.
   'stockPreparationHandoffAdvance',
+  // 一个项目一张备料表 (S1). The GET derives the staging project for the deep-link handles and the
+  // row scan; the CREATE derives the staging project the new sheet is PROVISIONED INTO and the
+  // registry row is keyed by — a request projectId here would let a caller plant a sheet in another
+  // tenant's staging project. (The list route derives none: it reads registry rows by tenant only.)
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetGet',
 ])
 
 /**

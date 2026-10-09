@@ -316,3 +316,208 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
     expect(afterCommit[PLM_FIELD]).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// 一个项目一张备料表 — S1 G1 against the REAL registry, the REAL grant service and the REAL wrapper
+// (ADR adr-stock-prep-project-sheets-20261008 §10 S1 「真库」; register R-35).
+//
+//   * two projects → two sheets, both provisioned through the real `ensureObject` with the plugin's
+//     own per-project template and both CLAIMED in plugin_multitable_object_registry;
+//   * G1 writes ONLY role subjects, with the literal spreadsheet:write, and the operator-facing read
+//     (`listSheetPermissionEntries`, what the 权限 panel lists) shows them at level `write` — the
+//     read a floor role's landing resolves against;
+//   * a repeat adds no row and no history row (ON CONFLICT DO NOTHING end to end);
+//   * a role outside the `stock-prep` namespace, a role that does not exist, a sheet another plugin
+//     claimed and a sheet nobody claimed are all refused with ZERO rows written.
+// Role ids and project ids are synthetic and random per run; everything is cleaned up afterwards.
+// ---------------------------------------------------------------------------------------------
+import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
+import { listSheetPermissionEntries } from '../../src/multitable/permission-service'
+import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const projectTargets = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-project-targets.cjs'),
+)
+
+describeDb('S1 G1 project-sheet role grant (real registry + real grant service + real wrapper, real DB)', () => {
+  const PLUGIN = 'plugin-integration-core'
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10)
+  const tenantId = `s1g1_${suffix}`
+  const projectId = `${tenantId}:integration-core`
+  const PROJECT_A = `S1G1-A-${suffix}`
+  const PROJECT_B = `S1G1-B-${suffix}`
+  const ROLE_A = `stock-prep_s1test_${suffix}_a`
+  const ROLE_B = `stock-prep_s1test_${suffix}_b`
+  const ROLE_FOREIGN = `s1test_foreign_${suffix}`
+  let pool: Pool
+  let sheetA = ''
+  let sheetB = ''
+  let objectA = ''
+  let objectB = ''
+  let unclaimedSheet = ''
+  let unclaimedObject = ''
+  let otherPluginSheet = ''
+  let otherPluginObject = ''
+
+  const q = async (sql: string, params?: unknown[]) => {
+    const r = await pool.query(sql, params as unknown[])
+    return { rows: r.rows as unknown[], rowCount: r.rowCount }
+  }
+
+  const provisionProject = async (projectNo: string, { claimAs }: { claimAs: string | null }) => {
+    const template = projectTargets.projectSheetTemplate({ tenantId, projectNo })
+    const descriptor = targetProvisioning.buildStockPreparationTargetDescriptor({ template })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const cq = (sql: string, params?: unknown[]) => client.query(sql, params as unknown[])
+      const ensured = await ensureObject({ query: cq as never, projectId, baseId: null, descriptor })
+      if (claimAs) {
+        await claimPluginObjectScope(cq as never, { pluginName: claimAs, projectId, objectId: descriptor.id, sheetId: ensured.sheet.id })
+      }
+      await client.query('COMMIT')
+      return { sheetId: ensured.sheet.id, objectId: descriptor.id as string }
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw e
+    } finally {
+      client.release()
+    }
+  }
+
+  const scopedApi = () => createPluginScopedMultitableApi(
+    {
+      provisioning: {
+        getObjectSheetId,
+        isSheetOwnedByProject: (sheetId: string, pid: string) => isSheetOwnedByProject(q as never, sheetId, pid),
+        grantSheetRoleWrite: async ({ sheetId, roleIds, actorId }: { sheetId: string; roleIds: string[]; actorId?: string | null }) => {
+          const client = await pool.connect()
+          try {
+            await client.query('BEGIN')
+            const cq = async (sql: string, params?: unknown[]) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            }
+            const result = await grantStockPreparationProjectSheetRoleWrite(cq, { sheetId, roleIds, actorId })
+            await client.query('COMMIT')
+            return result
+          } catch (e) {
+            await client.query('ROLLBACK').catch(() => {})
+            throw e
+          } finally {
+            client.release()
+          }
+        },
+      },
+      records: {},
+    } as never,
+    PLUGIN,
+    {
+      // The host's STRICT hook (index.ts): assertPluginOwnsSheet, and an unregistered sheet refuses.
+      assertSheetOwnedByPlugin: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+      },
+      isSheetOwnedByProject: ({ sheetId, projectId: pid }) => isSheetOwnedByProject(q as never, sheetId, pid),
+    },
+  )
+
+  const permissionRows = async (sheetId: string) => {
+    const r = await pool.query(
+      'SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions WHERE sheet_id = $1 ORDER BY subject_id, perm_code',
+      [sheetId],
+    )
+    return r.rows as Array<{ subject_type: string; subject_id: string; perm_code: string; user_id: string | null }>
+  }
+  const revisionCount = async (sheetId: string) => {
+    const r = await pool.query("SELECT COUNT(*)::int AS n FROM meta_config_revisions WHERE sheet_id = $1 AND entity_type = 'permission'", [sheetId])
+    return Number((r.rows[0] as { n: number }).n)
+  }
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: dbUrl })
+    for (const [id, name] of [[ROLE_A, 'S1 test role A'], [ROLE_B, 'S1 test role B'], [ROLE_FOREIGN, 'S1 test foreign role']]) {
+      await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [id, name])
+    }
+    ;({ sheetId: sheetA, objectId: objectA } = await provisionProject(PROJECT_A, { claimAs: PLUGIN }))
+    ;({ sheetId: sheetB, objectId: objectB } = await provisionProject(PROJECT_B, { claimAs: PLUGIN }))
+    ;({ sheetId: unclaimedSheet, objectId: unclaimedObject } = await provisionProject(`S1G1-U-${suffix}`, { claimAs: null }))
+    ;({ sheetId: otherPluginSheet, objectId: otherPluginObject } = await provisionProject(`S1G1-O-${suffix}`, { claimAs: 'plugin-other-s1test' }))
+  })
+
+  afterAll(async () => {
+    const sheets = [sheetA, sheetB, unclaimedSheet, otherPluginSheet].filter(Boolean)
+    if (sheets.length) {
+      await pool.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
+    }
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN]]).catch(() => {})
+    await pool.end()
+  })
+
+  it('two projects produce two distinct project sheets, both claimed by the plugin for this project', async () => {
+    expect(objectA).toMatch(projectTargets.STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN)
+    expect(objectB).toMatch(projectTargets.STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN)
+    expect(objectA).not.toBe(objectB)
+    expect(sheetA).not.toBe(sheetB)
+    expect(sheetA).toBe(getObjectSheetId(projectId, objectA))
+    expect(sheetB).toBe(getObjectSheetId(projectId, objectB))
+    await expect(isSheetOwnedByProject(q as never, sheetA, projectId)).resolves.toBe(true)
+    await expect(isSheetOwnedByProject(q as never, sheetB, projectId)).resolves.toBe(true)
+    await expect(assertPluginOwnsSheet(q as never, { pluginName: PLUGIN, sheetId: sheetA })).resolves.toBe(true)
+    // Neither sheet carries any grant yet — a floor role could not open either.
+    expect(await permissionRows(sheetA)).toEqual([])
+    expect(await permissionRows(sheetB)).toEqual([])
+  })
+
+  it('G1 writes role-only spreadsheet:write rows, visible to the permissions read at level write, with a history row each', async () => {
+    const api = scopedApi()
+    const result = await api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetA, objectId: objectA, roleIds: [ROLE_A, ROLE_B], actorId: 'u_s1_pull' })
+    expect(result).toEqual({ sheetId: sheetA, granted: [ROLE_A, ROLE_B], alreadyGranted: [] })
+    expect(await permissionRows(sheetA)).toEqual([
+      { subject_type: 'role', subject_id: ROLE_A, perm_code: 'spreadsheet:write', user_id: null },
+      { subject_type: 'role', subject_id: ROLE_B, perm_code: 'spreadsheet:write', user_id: null },
+    ])
+    const entries = await listSheetPermissionEntries(q as never, sheetA)
+    expect(entries.filter((e) => e.subjectType === 'role').map((e) => [e.subjectId, e.accessLevel]).sort()).toEqual([[ROLE_A, 'write'], [ROLE_B, 'write']])
+    expect(await revisionCount(sheetA)).toBe(2)
+    // Sheet B is untouched by sheet A's grant.
+    expect(await permissionRows(sheetB)).toEqual([])
+  })
+
+  it('a repeat call adds no row and no history row (ON CONFLICT DO NOTHING end to end)', async () => {
+    const api = scopedApi()
+    const result = await api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetA, objectId: objectA, roleIds: [ROLE_A, ROLE_B], actorId: 'u_s1_pull' })
+    expect(result).toEqual({ sheetId: sheetA, granted: [], alreadyGranted: [ROLE_A, ROLE_B] })
+    expect((await permissionRows(sheetA)).length).toBe(2)
+    expect(await revisionCount(sheetA)).toBe(2)
+  })
+
+  it('a role outside the stock-prep namespace is refused with zero rows written', async () => {
+    const api = scopedApi()
+    await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetB, objectId: objectB, roleIds: [ROLE_A, ROLE_FOREIGN] })).rejects.toMatchObject({ code: 'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_OUTSIDE_NAMESPACE' })
+    expect(await permissionRows(sheetB)).toEqual([])
+    expect(await revisionCount(sheetB)).toBe(0)
+  })
+
+  it('a role that does not exist refuses the whole call with zero rows written', async () => {
+    const api = scopedApi()
+    await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetB, objectId: objectB, roleIds: [ROLE_A, `stock-prep_missing_${suffix}`] })).rejects.toMatchObject({ code: 'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_NOT_FOUND', status: 404 })
+    expect(await permissionRows(sheetB)).toEqual([])
+  })
+
+  it('a sheet another plugin claimed, and a sheet nobody claimed, are refused before any write', async () => {
+    const api = scopedApi()
+    await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: otherPluginSheet, objectId: otherPluginObject, roleIds: [ROLE_A] })).rejects.toBeInstanceOf(MultitableSheetScopeError)
+    await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: unclaimedSheet, objectId: unclaimedObject, roleIds: [ROLE_A] })).rejects.toBeInstanceOf(MultitableSheetScopeError)
+    expect(await permissionRows(otherPluginSheet)).toEqual([])
+    expect(await permissionRows(unclaimedSheet)).toEqual([])
+    // ...and the canonical main table is refused on SHAPE, before the registry is even asked.
+    await expect(api.provisioning.grantSheetRoleWrite!({ projectId, sheetId: getObjectSheetId(projectId, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID, roleIds: [ROLE_A] })).rejects.toMatchObject({ code: 'STOCK_PREP_PROJECT_SHEET_GRANT_OBJECT_NOT_PROJECT_SHEET' })
+  })
+})

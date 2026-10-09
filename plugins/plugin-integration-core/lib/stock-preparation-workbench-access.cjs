@@ -98,9 +98,13 @@ const STOCK_PREP_PERMISSION_DESCRIPTORS = Object.freeze([
   Object.freeze({ code: STOCK_PREP_OPERATE, name: 'Stock Prep Operate', description: 'Confirm stock-preparation queue decisions and read back own value entry' }),
   // The ADMIN description gained the relabel write (客户反馈 2026-09-24 #4a). The seed migration used
   // ON CONFLICT DO NOTHING, so the new text reaches existing rows through its own compare-and-set
-  // migration (zzzz20260927120000_update_stock_prep_admin_permission_description), which the
-  // permission-matrix suite pins byte-equal to this string.
-  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no provisioning, no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on)' }),
+  // migration (zzzz20260927120000_update_stock_prep_admin_permission_description). S1 (R-35) then
+  // dropped the words "no provisioning": the ladder short-circuits ADMIN into the PULL tier, and a
+  // puller may now create ONE per-project sheet from the frozen template (the named R-11 exception),
+  // so a role editor reading "no provisioning" would be reading a lie. The second compare-and-set
+  // (zzzz20261009120000_update_stock_prep_admin_permission_description_project_sheets) carries THIS
+  // text to existing rows; the permission-matrix suite pins the whole chain byte-equal.
+  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on; includes the puller tier, which may create one per-project stock-preparation sheet from the frozen template when the project-sheets switch is on)' }),
   // Seeded by its own migration (zzzz20261008120000_add_stock_prep_pull_permission), which the
   // permission-matrix suite pins byte-equal to this row.
   Object.freeze({ code: STOCK_PREP_PULL, name: 'Stock Prep Pull', description: 'Pull from PLM into the stock-preparation sheet (dry-run, apply, large-BOM background channel, reconcile); in later slices also create project sheets and archive/restore them. The holder must also hold stock-prep:operate and stock-prep:read' }),

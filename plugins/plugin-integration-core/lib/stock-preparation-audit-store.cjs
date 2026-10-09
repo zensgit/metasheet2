@@ -85,6 +85,20 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // project_id is NULL, mode is the operator_project_board|operator_project_board_miss enum, and
   // detail is counts and booleans only — never the projectNo that was asked for, found or not.
   'project_board_read',
+  // 一个项目一张备料表 (migration 088; ADR adr-stock-prep-project-sheets-20261008 §1.2). Listed in
+  // FULL here and in 088 at once — S1 writes the first two (`project_target_create`,
+  // `project_target_grant`), S3 / S4 write the other four — so the vocabulary migration is replaced
+  // exactly once for the whole ADR instead of once per slice. Every row is values-free in the
+  // sense the rest of this trail is: `project_id` carries the business project NUMBER (the same
+  // navigation handle `prep_line_export` carries), `subject_id` a sheet id, `mode` a closed enum,
+  // `detail` counts and booleans. `project_fields_update` records WHICH project-level column
+  // changed, never its value.
+  'project_target_create',
+  'project_target_archive',
+  'project_target_restore',
+  'project_target_grant',
+  'project_fields_update',
+  'project_overview_refresh',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

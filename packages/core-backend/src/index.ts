@@ -62,6 +62,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 // — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
 // column). See the service file header for the load-bearing property and the removal path.
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
+import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -1105,6 +1106,26 @@ export class MetaSheetServer {
               args,
               invalidateSheetDisplayNameCaches,
             )
+          },
+          // 一个项目一张备料表 G1 (R-35): grant the configured stock-prep roles `spreadsheet:write` on
+          // one project sheet. ONE transaction (row lock + liveness, role existence, add-only insert,
+          // history row); every refusal propagates unwrapped so the plugin route sees `.status` /
+          // `.code`. The plugin-scope wrapper in front of this has already refused everything about
+          // WHICH sheet (shape, derivation, registry ownership by plugin and by project); this binds
+          // only the DATA (services/stock-preparation-project-sheet-grants.ts).
+          grantSheetRoleWrite: async ({ sheetId, roleIds, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return grantStockPreparationProjectSheetRoleWrite(txQuery, { sheetId, roleIds, actorId })
+            })
           },
         },
         records: {
@@ -2338,6 +2359,28 @@ export class MetaSheetServer {
                   sheetId,
                 })
               })
+            },
+            // G1 (R-35): the STRICT ownership assertion the project-sheet grant port runs. Unlike
+            // `assertSheetScope` below it has NO `observe` tolerance: a grant is an authorization
+            // write, and a sheet nobody has claimed must never admit one in any deployment mode.
+            // `assertPluginOwnsSheet` already throws on a DIFFERENT owner; the unregistered case is
+            // turned into the same refusal here.
+            assertSheetOwnedByPlugin: async ({ sheetId, pluginName }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await poolManager.get().query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, { pluginName, sheetId })
+              if (!ownsSheet) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+              }
             },
             assertSheetScope: async ({ sheetId, pluginName }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {

@@ -6,6 +6,11 @@ import type {
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
 import {
+  StockPreparationProjectSheetGrantError,
+  isStockPreparationProjectSheetObjectId,
+  normalizeStockPreparationGrantRoleIds,
+} from './stock-preparation-project-sheet-grant-contract'
+import {
   getMultitableRequestMetadataCache,
   runWithMultitableRequestMetadataCache,
 } from './request-metadata-cache'
@@ -51,6 +56,13 @@ export type MultitableScopeHooks = {
   ) => ReturnType<MultitableAPI['provisioning']['ensureObject']>
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
+  /**
+   * G1 (R-35): the STRICT sheet-ownership assertion the grant port runs — throws unless the plugin
+   * object registry records this sheet as THIS plugin's. Unlike `assertSheetScope` it has no
+   * `observe` tolerance: an unregistered sheet is a refusal in every deployment mode, because a
+   * grant is an authorization write and "nobody has claimed this sheet" must never admit one.
+   */
+  assertSheetOwnedByPlugin?: (input: AssertPluginSheetScopeInput) => Promise<void>
   assertSheetScope?: (
     input: AssertPluginSheetScopeInput,
   ) => Promise<void | AssertPluginSheetScopeOutcome>
@@ -497,6 +509,71 @@ export function createPluginScopedMultitableApi(
                 apply: input.apply,
                 expectedPlanDigest: input.expectedPlanDigest,
                 actorId: input.actorId,
+              })
+            },
+          }
+        : {}),
+      // G1 (R-35): the project-sheet role grant — an AUTHORIZATION write, so it takes MORE than the
+      // two assertions every other write here takes. Exposed iff the host exposes it (the optional-
+      // capability idiom above). Every value is read ONCE and the checked values are what the host
+      // receives. Order, each refusing before the next does any IO:
+      //   1. project namespace (pure);
+      //   2. the role list is well-formed and entirely inside the `stock-prep` namespace (pure);
+      //   3. the objectId has the project-sheet shape (pure) — the canonical main table and a
+      //      hand-named sandbox twin are refused here;
+      //   4. the sheet id IS the one derived for (projectId, objectId) (pure) — so a caller cannot
+      //      pair a project-shaped objectId with some other sheet's id;
+      //   5. the registry records the sheet as THIS plugin's (strict hook — no `observe` tolerance;
+      //      a host that does not provide the hook cannot verify ownership and the port refuses);
+      //   6. the registry records the sheet as THIS project's (the same boolean port the tenant
+      //      wall uses, never an owner id).
+      ...(typeof multitable.provisioning?.grantSheetRoleWrite === 'function'
+        ? {
+            grantSheetRoleWrite: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+              roleIds: string[]
+              actorId?: string | null
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              const roleIds = normalizeStockPreparationGrantRoleIds(input.roleIds)
+              if (!isStockPreparationProjectSheetObjectId(objectId)) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_OBJECT_NOT_PROJECT_SHEET',
+                  'a project-sheet grant may target only a per-project stock-preparation sheet',
+                  { objectId: String(objectId) },
+                )
+              }
+              if (typeof sheetId !== 'string' || sheetId.trim().length === 0
+                || multitable.provisioning.getObjectSheetId(projectId, objectId) !== sheetId) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_SHEET_MISMATCH',
+                  'the sheet is not the one derived for this project and objectId',
+                  { objectId },
+                )
+              }
+              if (!hooks.assertSheetOwnedByPlugin) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unverifiable')
+              }
+              await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+              const ownedByProject = hooks.isSheetOwnedByProject
+                ? await hooks.isSheetOwnedByProject({ sheetId, projectId })
+                : await multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
+              if (ownedByProject !== true) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
+              }
+              return multitable.provisioning.grantSheetRoleWrite!({
+                projectId,
+                sheetId,
+                objectId,
+                roleIds,
+                actorId: typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null,
               })
             },
           }

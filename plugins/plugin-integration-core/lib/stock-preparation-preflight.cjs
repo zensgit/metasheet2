@@ -76,6 +76,15 @@ const {
 const {
   OUTBOUND_HTTP_WRITE_TARGETS_ENV,
 } = require('./outbound-http-write-gate.cjs')
+// S1 一个项目一张备料表: the switch, the G1 role-list env and the registry cap — read for the
+// informational `checks.projectSheets` section only. Nothing here provisions or resolves a sheet.
+const {
+  PROJECT_SHEETS_ENABLED_ENV,
+  PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+  MAX_PROJECT_TARGETS_PER_TENANT,
+  stockPreparationProjectSheetsEnabled,
+  resolveProjectSheetGrantRoleIds,
+} = require('./stock-preparation-project-targets.cjs')
 
 // ---------------------------------------------------------------------------
 // The deployment vocabulary the fix lines quote.
@@ -466,9 +475,34 @@ async function computeStockPreparationPreflight({
   tenantId,
   actionId,
   env = process.env,
+  // S1: the project-sheet registry store (optional). Only its COUNT is read, for the informational
+  // section below; a caller without it gets `registeredCount: null`.
+  projectTargetStore,
 } = {}) {
   const blockers = []
   const checks = {}
+
+  // ---- 0. 一个项目一张备料表 (S1) — INFORMATIONAL, NEVER A BLOCKER --------------------------------
+  // The switch state, how many project sheets this tenant has registered (archived INCLUDED, the
+  // same count the 200-row cap reads), and how many G1 roles are configured. Values-free: a
+  // boolean, two integers and env KEY names. Off is the correct posture of a release that ships S1
+  // with the switch closed (ADR §8), so there is nothing to fix and no `fix` line.
+  let registeredCount = null
+  if (projectTargetStore && typeof projectTargetStore.count === 'function' && tenantId) {
+    try {
+      registeredCount = await projectTargetStore.count({ tenantId })
+    } catch (error) {
+      registeredCount = null
+    }
+  }
+  checks.projectSheets = Object.freeze({
+    enabled: stockPreparationProjectSheetsEnabled(env),
+    switchEnv: PROJECT_SHEETS_ENABLED_ENV,
+    grantRolesEnv: PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+    grantRoleCount: resolveProjectSheetGrantRoleIds(env).length,
+    registeredCount,
+    registeredLimit: MAX_PROJECT_TARGETS_PER_TENANT,
+  })
 
   // ---- 1. the confirmation-decision LEDGER -------------------------------------------------
   // A managed multitable object that the SQL migration chain does not create. Without it the

@@ -883,6 +883,17 @@ function stockPrepGatedHandlersInSource(src) {
 const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze([
   'stockPreparationPreflight',
   'stockPreparationManagedTableRelabel',
+  // 一个项目一张备料表 S1 (ADR adr-stock-prep-project-sheets-20261008 §10): the three project-sheet
+  // routes are exempt FOR NOW, for a reason that expires with S2. They sit behind the default-OFF
+  // switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED and answer 404 DISABLED without it, so no
+  // control on the confirmation-queue view can be alive for them in this slice — S2 (R-36) adds the
+  // 「新建备料表并拉取」 / 「直接打开」 controls and MUST then move all three into the manifest (with
+  // control ids) and delete these three lines. Their gates are pinned on their own below:
+  // Create is PULL (the R-35 exception), Get and List are OPERATE (the board's tier), and the
+  // project-target routes suite drives every tier through them.
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetGet',
+  'stockPreparationProjectTargetList',
 ])
 
 function everyStockPrepGatedRouteIsInTheManifest() {
@@ -1041,8 +1052,8 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   // stays pinned here rather than relaxed to "any frozen constant".
   assert.deepEqual(
     gates.identifiers,
-    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_READ'],
-    'M-08: exactly the admin, read and operate constants are used as gate expressions',
+    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_PULL', 'STOCK_PREP_READ'],
+    'M-08: exactly the admin, operate, pull and read constants are used as gate expressions',
   )
   assert.deepEqual(
     stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
@@ -1050,6 +1061,17 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     )),
     ['stockPreparationManagedTableRelabel'],
     'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler',
+  )
+  // STOCK_PREP_PULL joined the set with exactly ONE handler — the S1 project-sheet CREATE, the named
+  // R-11 exception (R-35). The pull-bom split itself is NOT a `requireAccess` gate (it is the
+  // `requireTableActionAccess` disjunction, pinned by the operator-pull-gate suite), so a second
+  // PULL-gated handler must be argued here the way the ADMIN one is.
+  assert.deepEqual(
+    stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
+      /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
+    )),
+    ['stockPreparationProjectTargetCreate'],
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create handler',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1119,17 +1141,34 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260927120000_update_stock_prep_admin_permission_description.ts'),
     'utf8',
   )
-  assert.ok(
-    descriptionMigration.includes(`'${adminDescriptor.description}'`),
-    'M-08: the description migration writes exactly the ADMIN descriptor text',
-  )
+  // THE CHAIN, pinned link by link: seed → 0927 (relabel) → 1009 (S1 project sheets) → descriptor.
+  // Each compare-and-set's BEFORE must be exactly the previous link's text or it matches nothing
+  // on a real deployment and the role editor keeps describing a tier that no longer exists.
   const seededAdminDescription = (migration.match(/\('stock-prep:admin', 'Stock Prep Admin', '([^']+)'\)/) || [])[1]
   assert.ok(seededAdminDescription, 'M-08: the seed row for stock-prep:admin is readable')
   assert.ok(
     descriptionMigration.includes(`'${seededAdminDescription}'`),
-    'M-08: the description migration compare-and-sets FROM exactly the seeded text',
+    'M-08: the 0927 description migration compare-and-sets FROM exactly the seeded text',
+  )
+  const relabelAdminDescription = (descriptionMigration.match(/STOCK_PREP_ADMIN_DESCRIPTION_AFTER =\s*'([^']+)'/) || [])[1]
+  assert.ok(relabelAdminDescription, 'M-08: the 0927 migration exports its AFTER text')
+  const projectSheetsDescriptionMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20261009120000_update_stock_prep_admin_permission_description_project_sheets.ts'),
+    'utf8',
+  )
+  assert.ok(
+    projectSheetsDescriptionMigration.includes(`STOCK_PREP_ADMIN_DESCRIPTION_BEFORE =\n  '${relabelAdminDescription}'`),
+    'M-08: the S1 description migration compare-and-sets FROM exactly the 0927 text',
+  )
+  assert.ok(
+    projectSheetsDescriptionMigration.includes(`STOCK_PREP_ADMIN_DESCRIPTION_AFTER =\n  '${adminDescriptor.description}'`),
+    'M-08: the S1 description migration writes exactly the ADMIN descriptor text',
   )
   assert.match(adminDescriptor.description, /relabel/, 'M-08: the ADMIN description names the relabel write scope')
+  // R-35: "no provisioning" is GONE from the description — the ladder short-circuits ADMIN into
+  // PULL, and PULL may create one per-project sheet — and the exception is named in its place.
+  assert.ok(!/no provisioning/.test(adminDescriptor.description), 'M-08: the ADMIN description no longer claims "no provisioning"')
+  assert.match(adminDescriptor.description, /per-project stock-preparation sheet/, 'M-08: the ADMIN description names the R-35 provisioning exception')
   // R-11: zero holders. The migration must NOT bind any role to these codes.
   assert.ok(
     !/INSERT INTO role_permissions/.test(migration),
