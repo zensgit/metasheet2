@@ -293,7 +293,7 @@ describe('scheduledFeatureSaveNotice / withScheduledFeatureSaveNotice', () => {
     for (const feature of features) {
       const gate = closedByFeature[feature]
       for (const [tr, bound, cannot, forbidden] of [
-        [zhTr, '应答进程的', '不能确认其他实例', /不会发送|不会自动运行|之前不会/],
+        [zhTr, '应答进程的', '不能确认其他实例', /不会发送|不会自动运行|之前不会|才会(发送|自动运行)/],
         [enTr, 'answering process', 'cannot confirm other instances', /will not (send|run)/i],
       ] as const) {
         const notConfigured = describeScheduledFeatureStatus(tr, { feature, configured: 'not_configured', gate })
