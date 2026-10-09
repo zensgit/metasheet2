@@ -10,15 +10,20 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #                    runner override set_window_env uses; redeploying with tasks_enabled=false
 #                    removes it. Deploy-only — see the input description below.
 #   smoke          — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5 / tasks)
-#                    in-container. `tasks` (owner-authorized 2026-09-28) is a non-admin P0-A
-#                    tasks-route smoke: requires TASKS_ENABLED=true on the running backend
-#                    (fails closed otherwise), runs against org `default` (the same
-#                    deterministic default every other window smoke already uses), and always
-#                    tears down its throwaway user/role/admission (guaranteed cleanup via the
-#                    smoke script's own try/catch/finally — same discipline as ae4/rd45/mp6/
-#                    hmr5). It is NOT part of the bundle §7 fixed-format `stamps` residue-sweep
-#                    (that input is a closed 5-field ae4/rd45/otbank/mp6/hmr5 contract) — the
-#                    tasks smoke proves and reports its own zero-residue instead.
+#                    in-container. Rule: ae4, mp6 and otbank-v18 stay packaged in the bundle
+#                    but are not enabled in this runner until their cleanup and fixtures match
+#                    the current code; the remote script refuses them first, before any
+#                    container access, token mint or staging write, so only rd45, hmr5 and
+#                    tasks run. `tasks` (owner-authorized 2026-09-28) is a non-admin
+#                    tasks-route smoke covering the P0-A and M3 routes: requires
+#                    TASKS_ENABLED=true on the running backend (fails closed otherwise), runs
+#                    against org `default` (the same deterministic default every other window
+#                    smoke already uses), and always tears down its stamp-derived throwaway
+#                    users/roles/admissions and every task row it wrote (guaranteed cleanup via
+#                    the smoke script's own try/catch/finally — same discipline as ae4/rd45/
+#                    mp6/hmr5). It is NOT part of the bundle §7 fixed-format `stamps` residue-
+#                    sweep (that input is a closed 5-field ae4/rd45/otbank/mp6/hmr5 contract) —
+#                    the tasks smoke proves and reports its own zero-residue instead.
 #   status         — read-only staging snapshot
 #   migrate        — pull the exact deploy_sha backend image WITHOUT switching the running app,
 #                    then backup + clone-rehearsal + apply its migration universe, per
@@ -59,8 +64,18 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
-# committed scripts/ops/attendance-staging-window-runner-remote.sh, synced per-run;
-# every remote command is wrapped in an explicit `bash -o pipefail -c '<script>'`
+# committed scripts/ops/attendance-staging-window-runner-remote.sh. Each run ships ONE
+# bundle from this checkout to a per-run directory on the deploy host (the "Sync runner
+# scripts" tar list): the remote script, its pipeline lib, the in-container helpers, and
+# every window smoke script together with its relative-import closure. action=smoke
+# docker-cp's the smoke from that bundle and never reads, fetches or checks out a
+# repository on the deploy host. scripts/ops/attendance-window-runner-pipeline.test.mjs
+# derives each smoke's bundle from the remote script's smoke cases and the module sources (the
+# smoke plus every sibling file it names with a literal relative specifier), refuses a load it
+# cannot resolve unless that use is allowlisted with a reason, and fails when the tar list, the
+# node --check list or the container copy misses a file, or when a smoke started alone from a
+# flat copy of its bundle files cannot load.
+# Every remote command is wrapped in an explicit `bash -o pipefail -c '<script>'`
 # (login-shell defaults are never relied on). Pipeline semantics are proven by
 # scripts/ops/attendance-window-runner-pipeline.test.mjs (gate-contract strict case).
 #
@@ -90,11 +105,11 @@ on:
         required: false
         default: ''
       smoke:
-        description: 'Which window smoke to run (action=smoke only)'
+        description: 'Which window smoke to run (action=smoke only). ae4, mp6 and otbank-v18 are packaged but refused by the runner until their cleanup and fixtures match the current code; rd45, hmr5 and tasks run.'
         required: false
         type: choice
         options: [ae4, rd45, otbank-v18, mp6, hmr5, tasks]
-        default: ae4
+        default: tasks
       stamps:
         description: 'action=residue-sweep only: comma-separated ae4,rd45,otbank,mp6,hmr5 STAMP values in that order (bundle §7). ae4/rd45/otbank are required; leave mp6/hmr5 blank if that optional smoke did not run this window, e.g. "ae4-smoke-x,rd45-smoke-x,otbank-v18-smoke-x,,".'
         required: false
@@ -115,10 +130,6 @@ on:
         required: false
         type: choice
         options: ['false', 'true']
-        default: 'false'
-      skip_host_sync:
-        description: 'skip the deploy-host repo git sync before smoke (true/false)'
-        required: false
         default: 'false'
 
 concurrency:
@@ -265,6 +276,12 @@ jobs:
           bash -n scripts/ops/attendance-window-runner-pipeline.lib.sh
           node --check scripts/ops/attendance-window-runner-mint-token.mjs
           node --check scripts/ops/attendance-w4w7-soak-load-generator.mjs
+          node --check scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs
+          node --check scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs
+          node --check scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs
+          node --check scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs
+          node --check scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs
+          node --check scripts/ops/staging-attendance-tooling-teardown.mjs
           node --check scripts/ops/staging-tasks-smoke.mjs
           node -e "JSON.parse(require('fs').readFileSync('scripts/ops/attendance-w4w7-soak-config.template.json','utf8'))"
           echo "inputs and embedded scripts OK"
@@ -295,11 +312,20 @@ jobs:
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
           runner_dir="/tmp/attendance-window-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          # The runner bundle. Every smoke_script and smoke_deps entry of action_smoke in the
+          # remote script must be listed here (enforced by the pipeline contract test).
           tar -czf - \
             scripts/ops/attendance-staging-window-runner-remote.sh \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
             scripts/ops/attendance-window-runner-mint-token.mjs \
             scripts/ops/attendance-w4w7-soak-load-generator.mjs \
+            scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs \
+            scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs \
+            scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs \
+            scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs \
+            scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs \
+            scripts/ops/staging-attendance-tooling-teardown.mjs \
+            scripts/ops/staging-tasks-smoke.mjs \
           | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
@@ -321,7 +347,6 @@ jobs:
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           FORCE_RECREATE: ${{ inputs.force_recreate }}
           TASKS_ENABLED_INPUT: ${{ inputs.tasks_enabled }}
-          SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
@@ -330,7 +355,7 @@ jobs:
           set -euo pipefail
           ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -i $HOME/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH" "SKIP_HOST_SYNC=$SKIP_HOST_SYNC"; do
+          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH"; do
             value="${pair#*=}"
             if [[ ! "$value" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
               echo "refusing unsafe characters in ${pair%%=*}: '$value'" >&2
@@ -353,7 +378,6 @@ jobs:
           export TASKS_WINDOW_ENABLED='${TASKS_ENABLED_INPUT}'
           export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
           export DEPLOY_PATH='${DEPLOY_PATH}'
-          export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
           export STAMPS='${STAMPS}'
           export SOAK_ORGS='${SOAK_ORGS}'
           export SOAK_OPTS='${SOAK_OPTS}'
