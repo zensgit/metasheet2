@@ -533,15 +533,32 @@ export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<stri
   TABLE_ACTION_TARGET_TENANT_MISMATCH: 'PLAN_TARGET_NOT_OURS',
   TABLE_ACTION_TARGET_OWNER_UNKNOWN: 'PLAN_TARGET_NOT_OURS',
   TABLE_ACTION_TARGET_UNBOUND: 'PLAN_TARGET_NOT_OURS',
+})
+
+/**
+ * S2 fix round 1 (refuter #4): `TARGET_SCHEMA_INCOMPLETE` is NOT a project-sheet code — the env
+ * sheet answers it too (a deployment whose template columns were deleted). Its project-sheet
+ * sentence (repair the project sheet by re-installing the customer pack) is therefore chosen ONLY
+ * when the run was on a project sheet (`context.projectSheet`, set by the project-sheet flow, i.e. the
+ * server's switch is on and this project resolved to its own sheet). Everywhere else it keeps the
+ * reading it had before S2 — the status rules below (a 422 reads as PLAN_READ_FAILED_UNKNOWN) — so
+ * the switch-off text is unchanged.
+ */
+export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
   TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
 })
 
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
+  context: { projectSheet?: boolean } = {},
 ): StockPreparationProjectSyncReason {
   if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
     return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
+  }
+  if (context.projectSheet === true && errorCode
+    && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS, errorCode)) {
+    return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
   }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
@@ -562,7 +579,7 @@ export function classifyPlanReadFailureReason(
 export function classifyPlanStep(
   index: number,
   plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
-  options: { status?: number; malformed?: boolean; errorCode?: string | null } = {},
+  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
@@ -571,7 +588,7 @@ export function classifyPlanStep(
     const status = options.status ?? 0
     const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null)
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true })
     return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
@@ -756,6 +773,12 @@ function missingComponentsFallbackReason(error: unknown): StockPreparationMissin
  */
 export interface StockPreparationProjectSyncHooks {
   confirmWrite?: (planned: NonNullable<StockPreparationProjectSyncReport['planned']>) => Promise<boolean> | boolean
+  /**
+   * S2 fix round 1: the run is on a PROJECT SHEET (the project-sheet flow sets it). Only then does a
+   * refusal code that both sheet kinds can answer (`TARGET_SCHEMA_INCOMPLETE`) read in its
+   * project-sheet wording; see `STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS`.
+   */
+  projectSheet?: boolean
 }
 
 /**
@@ -815,6 +838,7 @@ export async function runStockPreparationProjectSync(
       status: statusOf(error),
       malformed: isMalformed(error),
       errorCode: codeOf(error),
+      projectSheet: hooks.projectSheet === true,
     }))
   }
   if (planStep.status !== 'ok') return done()

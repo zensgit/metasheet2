@@ -12,7 +12,8 @@
 //
 // THE FLOW (`runStockPreparationProjectPull`), and the one ordering rule it exists to keep:
 //
-//   probe the sheet ─┬─ disabled / unreadable ───────────────────────────────▶ the old four-step run
+//   probe the sheet ─┬─ disabled (switch off, 404) ─────────────────────────▶ the old four-step run
+//                    ├─ unreadable (anything else) ────────────────────────▶ STOP, say so, offer 重试
 //                    ├─ absent  ─ (pull tier?) ─ confirm 「新建」 ─ CREATE ─▶ preview ─ confirm ─ write
 //                    ├─ active  ─ (pull tier?) ─ confirm 「重新拉取」 ──────▶ the old four-step run
 //                    └─ archived ──────────────────────────────────────────▶ stop (restore is S4)
@@ -24,8 +25,13 @@
 //
 // THE SERVER STAYS AUTHORITATIVE. `canPull` (workbenchAccess.canRunStockPrepProjectSync) and `may.*`
 // only decide what this page OFFERS; every route re-checks its own gate. A probe that could not be
-// read falls through to the old run, whose dry run the server answers (409 ABSENT included) —
-// never to a guess about the sheet.
+// read for any reason other than the switch-off 404 STOPS the run (S2 fix round 1): falling back to
+// the old flow would pull on a guess about which sheet the project has.
+//
+// REPAIR (S2 fix round 1). A project sheet that lost — or never got — the customer's extension
+// columns answers its dry run 422 TARGET_SCHEMA_INCOMPLETE. `stockPrepProjectSheetRepairAffordance`
+// offers a puller 「修复项目表（重装客户包）」: the create route's 200 replay re-installs the pack
+// (server-side heal), then the four steps run again.
 //
 // VALUES-FREE: states, handles, counts and clamped codes. The one business string is the project
 // number the OPERATOR typed, which is sent in the path and never read back from a response.
@@ -66,6 +72,8 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_NO_REQUIRED',
   'STOCK_PREPARATION_PROJECT_TARGET_PACK_INCOMPLETE',
   'STOCK_PREPARATION_PROJECT_TARGET_PACK_INSTALL_FAILED',
+  'STOCK_PREPARATION_PROJECT_TARGET_TENANT_CLAIM_REQUIRED',
+  'STOCK_PREPARATION_PROJECT_TARGET_PACK_TARGET_INVALID',
   'STOCK_PREPARATION_JOB_TARGET_STALE',
   'TABLE_ACTION_TARGET_TENANT_MISMATCH',
   'TABLE_ACTION_TARGET_OWNER_UNKNOWN',
@@ -326,7 +334,7 @@ export type StockPrepProjectPullOutcome =
   /** The four-step run happened. `mode` says on which path; `after` is the re-read sheet (counts). */
   | {
     kind: 'synced'
-    mode: 'legacy' | 'created' | 'existing'
+    mode: 'legacy' | 'created' | 'existing' | 'repaired'
     createdSheet: boolean
     report: StockPreparationProjectSyncReport
     after: StockPrepProjectTargetState | null
@@ -337,8 +345,10 @@ export type StockPrepProjectPullOutcome =
   | { kind: 'contact_puller' }
   /** Archived: read-only until a puller restores it (S4). */
   | { kind: 'archived'; mayRestore: boolean; state: StockPrepProjectTargetState }
-  /** The create was refused; nothing was pulled. */
+  /** The create (or the repair's replay) was refused; nothing was pulled. */
   | { kind: 'create_refused'; status: number; code: string | null }
+  /** The sheet state could not be read (not the switch-off 404): nothing was pulled. */
+  | { kind: 'probe_failed'; status: number; code: string | null }
 
 export interface StockPrepProjectPullDeps {
   /** Null → this page has no target client: the old run, unchanged. */
@@ -374,9 +384,9 @@ export async function runStockPreparationProjectPull(
   if (!api) return legacy()
 
   const probe = await probeStockPreparationProjectTarget(api, projectNo)
-  // Switch off → the old flow, byte for byte. Unreadable → the old flow too: its dry run is answered
-  // by the server, which refuses an unregistered project 409 ABSENT with its own sentence.
-  if (probe.kind !== 'state') return legacy()
+  // Switch off → the old flow, byte for byte. Unreadable → STOP: nothing is pulled on a guess.
+  if (probe.kind === 'disabled') return legacy()
+  if (probe.kind === 'unreadable') return { kind: 'probe_failed', status: probe.status, code: probe.code }
   const state = probe.state
 
   if (state.status === 'archived') return { kind: 'archived', mayRestore: state.may.restore, state }
@@ -398,7 +408,7 @@ export async function runStockPreparationProjectPull(
       }
       // EXISTS: a colleague's create won the race — it is this project's one sheet; carry on.
     }
-    const report = await deps.runSync({ confirmWrite: (planned) => deps.confirm({ kind: 'write', planned }) })
+    const report = await deps.runSync({ projectSheet: true, confirmWrite: (planned) => deps.confirm({ kind: 'write', planned }) })
     return { kind: 'synced', mode: 'created', createdSheet, report, after: await rereadCounts(api, projectNo) }
   }
 
@@ -410,6 +420,43 @@ export async function runStockPreparationProjectPull(
     rowCountBounded: state.rowCountBounded,
   })
   if (go !== true) return { kind: 'cancelled', stage: 'repull' }
-  const report = await deps.runSync({})
+  const report = await deps.runSync({ projectSheet: true })
   return { kind: 'synced', mode: 'existing', createdSheet: false, report, after: await rereadCounts(api, projectNo) }
+}
+
+/**
+ * 「修复项目表（重装客户包）」 — offered after a run ON A PROJECT SHEET whose dry run (or write) the
+ * server refused 422 TARGET_SCHEMA_INCOMPLETE. A puller gets the repair; anyone else is told whom to
+ * ask. Off a project sheet (switch off) nothing is offered: that refusal is about the env sheet and
+ * keeps its pre-S2 reading.
+ */
+export function stockPrepProjectSheetRepairAffordance(
+  report: StockPreparationProjectSyncReport | null,
+  context: { projectSheet: boolean; canPull: boolean },
+): 'repair' | 'contact_puller' | null {
+  if (!report || context.projectSheet !== true) return null
+  const missingColumns = report.steps.some((step) => (step.id === 'dry-run' && step.reason === 'PLAN_TARGET_SCHEMA_INCOMPLETE')
+    || (step.id === 'apply' && step.detail.code === 'TARGET_SCHEMA_INCOMPLETE'))
+  if (!missingColumns) return null
+  return context.canPull ? 'repair' : 'contact_puller'
+}
+
+/**
+ * THE REPAIR: the create route's 200 replay (which heals a registered sheet's customer pack server-
+ * side — R-36), then the four steps again. A refusal of the replay stops with its code; nothing is
+ * pulled. Pull tier only, like the create it replays; the server re-checks.
+ */
+export async function repairStockPreparationProjectSheet(
+  deps: Pick<StockPrepProjectPullDeps, 'targetApi' | 'runSync' | 'canPull'>,
+  projectNo: string,
+): Promise<StockPrepProjectPullOutcome> {
+  const api = deps.targetApi
+  if (!api || !deps.canPull) return { kind: 'contact_puller' }
+  try {
+    await api.create(projectNo)
+  } catch (error) {
+    return { kind: 'create_refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
+  }
+  const report = await deps.runSync({ projectSheet: true })
+  return { kind: 'synced', mode: 'repaired', createdSheet: false, report, after: await rereadCounts(api, projectNo) }
 }

@@ -98,6 +98,9 @@
 # here (the nearest neighbours `StockPreparationProjectQuery` / `StockPreparationProjectWorkspaceView`
 # diverge right after `StockPreparationProject`). Roster entries for the .spec.ts files themselves are
 # the same deferred follow-up as the notes above.
+# Fix round 1 added a FIFTH, `StockPreparationProjectSyncPanel.spec.ts` (the pull panel's own DOM spec,
+# whose panel S2 changes most), in the same `.spec.ts`-suffixed form the required lane uses: it matches
+# exactly one file, and neither it nor `StockPreparationProjectSync.spec.ts` is a substring of the other.
 set -euo pipefail
 
 #
@@ -175,6 +178,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationProjectBoard \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
+  StockPreparationProjectSyncPanel.spec.ts \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationScenarioBAcceptance \

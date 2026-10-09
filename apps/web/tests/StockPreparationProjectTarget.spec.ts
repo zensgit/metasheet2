@@ -20,8 +20,14 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   PT-HOME    今天要处理: the 「每个项目一张备料表」 line and per-card row counts from the registry;
 //              Q8 「平台登记」 wording with the switch off.
 //   PT-QUERY   项目查询: the `mvp` source reads 「平台登记」, never 「归档过」 (Q8).
-//   PT-ALIGN   the three new manifest controls render for EXACTLY the actors the manifest grants, on
-//              the surfaces they live on (the web matrix suite defers to this block).
+//   PT-ALIGN   the three new manifest controls render for EXACTLY the actors the SERVER grants (the
+//              plugin module, imported live), on the surfaces they live on; the client rows for them
+//              are byte-equal to the plugin's (the web matrix suite defers to this block).
+//   PT-WORKSPACE 项目接入 follows `project-target-changed`: after a project-sheet run 「打开备料多维表」
+//              opens the project's own sheet; with the switch off the shell handle stands.
+//   Fix round 1 also pins: an unreadable state STOPS the run (no silent old flow) with 重试; the
+//   repair affordance 「修复项目表（重装客户包）」 → replay POST → run again; TARGET_SCHEMA_INCOMPLETE
+//   reads in project-sheet words only on a project sheet.
 //
 // Synthetic, obviously-fake project numbers only.
 
@@ -63,13 +69,16 @@ vi.mock('vue-router', () => ({
 import StockPreparationProjectSyncPanel from '../src/components/integration/stockPreparation/StockPreparationProjectSyncPanel.vue'
 import StockPreparationProjectBoardView from '../src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue'
 import StockPreparationOperatorHome from '../src/components/integration/stockPreparation/StockPreparationOperatorHome.vue'
+import StockPreparationProjectWorkspaceView from '../src/components/integration/stockPreparation/StockPreparationProjectWorkspaceView.vue'
 import {
   STOCK_PREP_PROJECT_TARGET_ERROR_CODES,
   StockPreparationProjectTargetCallError,
   clampStockPrepProjectTargetState,
   createStockPreparationProjectTargetApi,
   isStockPrepProjectSheetsDisabled,
+  repairStockPreparationProjectSheet,
   runStockPreparationProjectPull,
+  stockPrepProjectSheetRepairAffordance,
   type StockPrepProjectTargetConfirmRequest,
   type StockPrepProjectTargetList,
   type StockPrepProjectTargetState,
@@ -80,6 +89,7 @@ import {
   runStockPreparationProjectSync,
   StockPreparationProjectSyncCallError,
   STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS,
+  STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS,
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
 } from '../src/services/integration/stockPreparation/projectSync'
@@ -97,6 +107,12 @@ import {
   grantedStockPrepCapabilities,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
+
+// The SERVER's own manifest and decision, imported live (the F-01 posture): PT-ALIGN measures the
+// rendered controls against THIS, never against the client mirror it is checking. Same form as
+// stockPrepPermissionMatrix.spec.ts F-01.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
 const SCOPE = { tenantId: 'tenant-syn', workspaceId: 'workspace-syn' }
 const PROJECT = 'PRJ-SYN-S2-01'
@@ -387,19 +403,47 @@ describe('PT-FLOW — runStockPreparationProjectPull', () => {
     expect(log).toEqual(['target.get'])
   })
 
-  it('switch OFF (or unreadable): the old run, exactly — no question, no create, no re-read', async () => {
-    for (const answer of [disabledError(), new StockPreparationProjectTargetCallError(500, 'GET', { code: 'INTERNAL' })]) {
+  it('switch OFF: the old run, exactly — no question, no create, no re-read; no target client → the old run', async () => {
+    const log: string[] = []
+    const { deps: d } = deps(log, [disabledError()])
+    const outcome = await runStockPreparationProjectPull(d, PROJECT)
+    expect(outcome.kind === 'synced' && outcome.mode).toBe('legacy')
+    expect(log).toEqual(['target.get', 'dryRun', 'apply', 'archive'])
+    const noClient: string[] = []
+    const { deps: bare } = deps(noClient, [ABSENT()])
+    const viaNoClient = await runStockPreparationProjectPull({ ...bare, targetApi: null }, PROJECT)
+    expect(viaNoClient.kind === 'synced' && viaNoClient.mode).toBe('legacy')
+    expect(noClient).toEqual(['dryRun', 'apply', 'archive'])
+  })
+
+  it('UNREADABLE state (fix round 1): the run STOPS — no plan, no create, the status and code reported', async () => {
+    for (const answer of [
+      new StockPreparationProjectTargetCallError(500, 'GET', { code: 'INTERNAL' }),
+      new StockPreparationProjectTargetCallError(200, 'GET', { malformed: true }),
+      new StockPreparationProjectTargetCallError(404, 'GET', { code: 'NOT_ROUTED' }),
+    ]) {
       const log: string[] = []
       const { deps: d } = deps(log, [answer])
-      const outcome = await runStockPreparationProjectPull(d, PROJECT)
-      expect(outcome.kind === 'synced' && outcome.mode).toBe('legacy')
-      expect(log).toEqual(['target.get', 'dryRun', 'apply', 'archive'])
+      expect(await runStockPreparationProjectPull(d, PROJECT)).toEqual({ kind: 'probe_failed', status: answer.status, code: answer.code })
+      expect(log).toEqual(['target.get'])
     }
-    const noClient: string[] = []
-    const { deps: d } = deps(noClient, [ABSENT()])
-    const outcome = await runStockPreparationProjectPull({ ...d, targetApi: null }, PROJECT)
-    expect(outcome.kind === 'synced' && outcome.mode).toBe('legacy')
-    expect(noClient).toEqual(['dryRun', 'apply', 'archive'])
+  })
+
+  it('a project-sheet run tells the four-step run it is on a project sheet; the switch-off run does not', async () => {
+    const seen: unknown[] = []
+    const make = (states: Array<StockPrepProjectTargetState | Error>) => ({
+      targetApi: targetDouble([], states),
+      canPull: true,
+      confirm: async () => true,
+      runSync: async (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => {
+        seen.push(hooks && hooks.projectSheet === true)
+        return runStockPreparationProjectSync(syncDouble([]), PROJECT, undefined, hooks)
+      },
+    })
+    await runStockPreparationProjectPull(make([targetState(), targetState()]), PROJECT)
+    await runStockPreparationProjectPull(make([ABSENT(), targetState()]), PROJECT)
+    await runStockPreparationProjectPull(make([disabledError()]), PROJECT)
+    expect(seen).toEqual([true, true, false])
   })
 })
 
@@ -457,11 +501,17 @@ describe('PT-CODES — every project-sheet refusal says who acts next', () => {
     expect(classifyPlanReadFailureReason(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED')).toBe('PLAN_PROJECT_SHEET_ARCHIVED')
     expect(classifyPlanReadFailureReason(409, 'TABLE_ACTION_TARGET_TENANT_MISMATCH')).toBe('PLAN_TARGET_NOT_OURS')
     expect(classifyPlanReadFailureReason(409, 'TABLE_ACTION_TARGET_OWNER_UNKNOWN')).toBe('PLAN_TARGET_NOT_OURS')
-    expect(classifyPlanReadFailureReason(422, 'TARGET_SCHEMA_INCOMPLETE')).toBe('PLAN_TARGET_SCHEMA_INCOMPLETE')
+    // TARGET_SCHEMA_INCOMPLETE is answered by BOTH sheet kinds: the project-sheet sentence only on a
+    // project-sheet run, the pre-S2 reading (status rules: 422 → UNKNOWN) everywhere else.
+    expect(classifyPlanReadFailureReason(422, 'TARGET_SCHEMA_INCOMPLETE', { projectSheet: true })).toBe('PLAN_TARGET_SCHEMA_INCOMPLETE')
+    expect(classifyPlanReadFailureReason(422, 'TARGET_SCHEMA_INCOMPLETE')).toBe('PLAN_READ_FAILED_UNKNOWN')
+    expect(classifyPlanReadFailureReason(422, 'TARGET_SCHEMA_INCOMPLETE', { projectSheet: false })).toBe('PLAN_READ_FAILED_UNKNOWN')
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_TARGET_SCHEMA_INCOMPLETE.zhNext).not.toContain('数据来源与体检')
+    expect(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_TARGET_SCHEMA_INCOMPLETE.enNext).not.toContain('Sources & Health Check')
     // Unchanged neighbours.
     expect(classifyPlanReadFailureReason(409, 'TARGET_SHEET_FOREIGN_PROJECT')).toBe('PLAN_READ_FAILED_FOREIGN_PROJECT')
     expect(classifyPlanReadFailureReason(403, null)).toBe('PLAN_READ_NOT_PERMITTED')
-    for (const reason of new Set(Object.values(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS))) {
+    for (const reason of new Set([...Object.values(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS), ...Object.values(STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS)])) {
       const entry = STOCK_PREP_SYNC_REASON_PLAIN[reason]
       expect(entry, reason).toBeTruthy()
       expect(String(entry.zhNext ?? '').length, reason).toBeGreaterThan(0)
@@ -591,14 +641,86 @@ describe('PT-PANEL — the pull panel', () => {
     expect(testid(root, 'stock-prep-project-sync-verdict')?.dataset.verdict).toBe('imported')
   })
 
-  it('a dry run refused 409 ABSENT (the probe could not read) gets the project-sheet sentence, not 「稍后再试」', async () => {
+  it('UNREADABLE state (fix round 1): the panel stops with a plain line and 重试; the retry reads again', async () => {
     const log: string[] = []
-    const { root } = mountPanel(log, [new StockPreparationProjectTargetCallError(503, 'GET', { code: 'X' })], {
-      sync: { dryRun: vi.fn(async () => { log.push('dryRun'); throw new StockPreparationProjectSyncCallError(409, 'dry-run', { code: 'STOCK_PREPARATION_PROJECT_ABSENT' }) }) },
+    const { root } = mountPanel(log, [new StockPreparationProjectTargetCallError(503, 'GET', { code: 'UPSTREAM_DOWN' }), disabledError()])
+    await typeAndRun(root)
+    expect(log).toEqual(['target.get'])
+    const notice = testid(root, 'stock-prep-project-sync-target-notice')
+    expect(notice?.dataset.notice).toBe('probe_failed')
+    expect(notice?.textContent).toContain(STOCK_PREP_PROJECT_TARGET_PLAIN.probe_failed.zh)
+    expect(notice?.textContent).toContain('UPSTREAM_DOWN')
+    expect(testid(root, 'stock-prep-project-sync-verdict')).toBeNull()
+    h.locale = 'en'
+    unmountAll()
+    const enLog: string[] = []
+    const en = mountPanel(enLog, [new StockPreparationProjectTargetCallError(503, 'GET', { code: 'UPSTREAM_DOWN' }), disabledError()])
+    await typeAndRun(en.root)
+    expect(testid(en.root, 'stock-prep-project-sync-target-notice')?.textContent).toContain(STOCK_PREP_PROJECT_TARGET_PLAIN.probe_failed.en)
+    await press(en.root, 'stock-prep-project-sync-target-retry')
+    expect(enLog).toEqual(['target.get', 'target.get', 'dryRun', 'apply', 'archive'])
+    expect(testid(en.root, 'stock-prep-project-sync-verdict')?.dataset.verdict).toBe('imported')
+  })
+
+  it('missing ext columns on a PROJECT sheet: project-sheet wording + 「修复项目表（重装客户包）」 → replay POST → the pull runs again', async () => {
+    const log: string[] = []
+    let dryRuns = 0
+    const { root } = mountPanel(log, [targetState(), targetState(), targetState({ rowCount: 9, activeRowCount: 9 })], {
+      sync: {
+        dryRun: vi.fn(async () => {
+          log.push('dryRun')
+          dryRuns += 1
+          if (dryRuns === 1) throw new StockPreparationProjectSyncCallError(422, 'dry-run', { code: 'TARGET_SCHEMA_INCOMPLETE' })
+          return { status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 9, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }
+        }),
+      },
+    })
+    await typeAndRun(root)
+    await press(root, 'stock-prep-project-sync-target-prompt-confirm')
+    const reason = root.querySelector('[data-step="dry-run"] [data-testid="stock-prep-project-sync-step-reason"]')?.textContent ?? ''
+    expect(reason).toContain(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_TARGET_SCHEMA_INCOMPLETE.zh)
+    expect(root.textContent).not.toContain('数据来源与体检')
+    expect(testid(root, 'stock-prep-project-sync-repair-contact')).toBeNull()
+    await press(root, 'stock-prep-project-sync-repair-action')
+    expect(log).toEqual(['target.get', 'dryRun', 'target.get', 'target.create', 'dryRun', 'apply', 'archive', 'target.get'])
+    expect(testid(root, 'stock-prep-project-sync-verdict')?.dataset.verdict).toBe('imported')
+    expect(testid(root, 'stock-prep-project-sync-repair')).toBeNull()
+  })
+
+  it('switch OFF: the same 422 keeps its pre-S2 reading, and no repair is offered', async () => {
+    const log: string[] = []
+    const { root } = mountPanel(log, [disabledError()], {
+      sync: { dryRun: vi.fn(async () => { log.push('dryRun'); throw new StockPreparationProjectSyncCallError(422, 'dry-run', { code: 'TARGET_SCHEMA_INCOMPLETE' }) }) },
     })
     await typeAndRun(root)
     const reason = root.querySelector('[data-step="dry-run"] [data-testid="stock-prep-project-sync-step-reason"]')?.textContent ?? ''
-    expect(reason).toContain(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_PROJECT_SHEET_ABSENT.zh)
+    expect(reason).toContain(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_READ_FAILED_UNKNOWN.zh)
+    expect(reason).not.toContain(STOCK_PREP_SYNC_REASON_PLAIN.PLAN_TARGET_SCHEMA_INCOMPLETE.zh)
+    expect(testid(root, 'stock-prep-project-sync-repair')).toBeNull()
+    expect(testid(root, 'stock-prep-project-sync-repair-contact')).toBeNull()
+  })
+
+  it('the repair affordance: a puller repairs, anyone else is told whom to ask, nothing off a project sheet', () => {
+    const report = { steps: [{ index: 1, id: 'dry-run', status: 'fail', reason: 'PLAN_TARGET_SCHEMA_INCOMPLETE', detail: { status: 422, code: 'TARGET_SCHEMA_INCOMPLETE' } }] } as unknown as StockPreparationProjectSyncReport
+    const applyReport = { steps: [{ index: 3, id: 'apply', status: 'fail', reason: 'WRITE_FAILED', detail: { status: 422, code: 'TARGET_SCHEMA_INCOMPLETE' } }] } as unknown as StockPreparationProjectSyncReport
+    expect(stockPrepProjectSheetRepairAffordance(report, { projectSheet: true, canPull: true })).toBe('repair')
+    expect(stockPrepProjectSheetRepairAffordance(report, { projectSheet: true, canPull: false })).toBe('contact_puller')
+    expect(stockPrepProjectSheetRepairAffordance(applyReport, { projectSheet: true, canPull: true })).toBe('repair')
+    expect(stockPrepProjectSheetRepairAffordance(report, { projectSheet: false, canPull: true })).toBeNull()
+    expect(stockPrepProjectSheetRepairAffordance(null, { projectSheet: true, canPull: true })).toBeNull()
+  })
+
+  it('the repair needs the pull right and stops on a refused replay', async () => {
+    const log: string[] = []
+    const noPull = await repairStockPreparationProjectSheet({ targetApi: targetDouble(log, [targetState()]), canPull: false, runSync: async () => { throw new Error('must not run') } }, PROJECT)
+    expect(noPull).toEqual({ kind: 'contact_puller' })
+    expect(log).toEqual([])
+    const refusedReplay = await repairStockPreparationProjectSheet({
+      targetApi: targetDouble(log, [targetState()], { create: async () => { throw new StockPreparationProjectTargetCallError(403, 'POST', { code: 'STOCK_PREPARATION_PROJECT_TARGET_TENANT_CLAIM_REQUIRED' }) } }),
+      canPull: true,
+      runSync: async () => { throw new Error('must not run') },
+    }, PROJECT)
+    expect(refusedReplay).toEqual({ kind: 'create_refused', status: 403, code: 'STOCK_PREPARATION_PROJECT_TARGET_TENANT_CLAIM_REQUIRED' })
   })
 })
 
@@ -700,6 +822,38 @@ describe('PT-HOME / PT-QUERY — 今天要处理 and 项目查询', () => {
 })
 
 // ---------------------------------------------------------------------------
+// PT-WORKSPACE — 项目接入 tab follows the project sheet (fix round 1, refuter #6)
+// ---------------------------------------------------------------------------
+
+describe('PT-WORKSPACE — 项目接入 opens the project\'s own sheet after a project-sheet run', () => {
+  it('project-target-changed replaces the shell handle; switch OFF keeps it', async () => {
+    const envHandle = { sheetId: 'sheet_syn_env', viewId: 'view_syn_env' }
+    for (const [label, targetAnswer, expected] of [
+      ['switch on', () => ok({ projectNo: PROJECT, ...targetState() }), { sheetId: SHEET, viewId: FILL_VIEW }],
+      ['switch off', () => refused(404, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'), envHandle],
+    ] as const) {
+      h.apiFetch.mockReset()
+      h.apiFetch.mockImplementation(async (path: string) => {
+        if (path.includes('/target')) return targetAnswer()
+        if (path.includes('/dry-run')) return ok({ status: 'ready', canApply: true, dryRunToken: 'tok_syn', counts: { add: 2, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+        if (path.includes('/apply')) return ok({ status: 'succeeded', apply: { counts: { created: 2, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 } } })
+        if (path.includes('/mvp-persist')) return ok({ status: 'created', persisted: true, created: { batch: 1, lines: 2, run: 1 } })
+        return refused(404, 'NOT_ROUTED_IN_THIS_SUITE')
+      })
+      const onOpen = vi.fn()
+      const root = mount(StockPreparationProjectWorkspaceView as Component, { scope: SCOPE, fillTarget: envHandle, onOpenMultitable: onOpen })
+      await flush()
+      await typeAndRun(root)
+      if (testid(root, 'stock-prep-project-sync-target-prompt')) await press(root, 'stock-prep-project-sync-target-prompt-confirm')
+      expect(testid(root, 'stock-prep-project-sync-verdict')?.dataset.verdict, label).toBe('imported')
+      await press(root, 'stock-prep-project-sync-open-multitable')
+      expect(onOpen, label).toHaveBeenLastCalledWith(expected)
+      unmountAll()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // PT-ALIGN — the three manifest controls, both directions, per actor
 // ---------------------------------------------------------------------------
 
@@ -712,11 +866,16 @@ describe('PT-ALIGN — rendered project-sheet controls equal granted capabilitie
     { name: 'platform-admin', roles: ['admin'], permissions: ['integration:admin'] },
     { name: 'pull-orphan', roles: [], permissions: ['stock-prep:pull'] },
   ]
-  const byCapability = new Map(STOCK_PREP_WORKBENCH_CAPABILITIES.map((capability) => [capability.capability, capability]))
+  const PROJECT_TARGET_CAPABILITIES = ['projectTarget.read', 'projectTarget.create', 'projectTarget.list']
 
-  /** The server's own gate, answered as the S1 routes answer it: 403 below the tier. */
+  /** The SERVER's grant (the plugin module itself), flattened the way the plugin flattens a principal. */
+  function serverGranted(roles: readonly string[], permissions: readonly string[]): string[] {
+    return backendAccess.grantedStockPrepCapabilities([...permissions, ...roles.map((role) => `role:${role}`)])
+  }
+
+  /** The routes' own gate, answered by the PLUGIN's decision — never by the client manifest under test. */
   function gatedTargetApi(state: StockPrepProjectTargetState): StockPreparationProjectTargetApi {
-    const granted = () => grantedStockPrepCapabilities({ roles: h.roles, permissions: h.permissions })
+    const granted = () => serverGranted(h.roles, h.permissions)
     const refuse = () => new StockPreparationProjectTargetCallError(403, 'gate', { code: 'FORBIDDEN' })
     return {
       get: vi.fn(async () => {
@@ -734,17 +893,26 @@ describe('PT-ALIGN — rendered project-sheet controls equal granted capabilitie
     }
   }
 
-  it('the three controls are manifest members with these ids (anti-vacuity)', () => {
-    expect(byCapability.get('projectTarget.read')?.control).toBe('stock-prep-project-target-status')
-    expect(byCapability.get('projectTarget.create')?.control).toBe('stock-prep-project-target-create')
-    expect(byCapability.get('projectTarget.list')?.control).toBe('stock-prep-project-target-list')
+  it('the client rows for the three capabilities are BYTE-EQUAL to the plugin module\'s (F-01 for these rows)', () => {
+    const pick = (rows: readonly { capability: string }[]) => rows.filter((row) => PROJECT_TARGET_CAPABILITIES.includes(row.capability))
+    const server = pick(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES)
+    expect(server.map((row: { capability: string }) => row.capability)).toEqual(PROJECT_TARGET_CAPABILITIES)
+    expect(JSON.stringify(pick(STOCK_PREP_WORKBENCH_CAPABILITIES))).toBe(JSON.stringify(server))
+    expect(server.map((row: { control: string }) => row.control)).toEqual([
+      'stock-prep-project-target-status',
+      'stock-prep-project-target-create',
+      'stock-prep-project-target-list',
+    ])
   })
 
-  it('status (board), create (pull panel) and list (home) render iff the manifest grants them', async () => {
+  it('status (board), create (pull panel) and list (home) render iff the SERVER grants them', async () => {
     for (const actor of ACTORS) {
       h.roles = actor.roles
       h.permissions = actor.permissions
-      const granted = grantedStockPrepCapabilities({ roles: actor.roles, permissions: actor.permissions })
+      const granted = serverGranted(actor.roles, actor.permissions)
+      // The client agrees with the server for this actor (the mirror under test).
+      expect(grantedStockPrepCapabilities({ roles: actor.roles, permissions: actor.permissions }).filter((id) => PROJECT_TARGET_CAPABILITIES.includes(id)))
+        .toEqual(granted.filter((id: string) => PROJECT_TARGET_CAPABILITIES.includes(id)))
 
       routeBoardApi()
       let root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectNo: PROJECT, projectTargetApi: gatedTargetApi(targetState()) })

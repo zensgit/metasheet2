@@ -140,7 +140,20 @@
     >
       {{ bi(targetNoticeText.zh, targetNoticeText.en) }}
       <span v-if="targetNoticeText.zhNext" class="sp-sync__verdict-next">{{ bi(targetNoticeText.zhNext, targetNoticeText.enNext ?? '') }}</span>
-      <code v-if="targetNotice.kind === 'create_refused' && targetNotice.code" class="sp-sync__token">{{ targetNotice.code }}</code>
+      <code
+        v-if="(targetNotice.kind === 'create_refused' || targetNotice.kind === 'probe_failed') && targetNotice.code"
+        class="sp-sync__token"
+      >{{ targetNotice.code }}</code>
+      <!-- S2 fix round 1: a state read that failed for any reason but switch-off stops the run; the
+           operator reads again from here instead of being pulled on a guess. -->
+      <button
+        v-if="targetNotice.kind === 'probe_failed'"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-target-retry"
+        :disabled="busy"
+        @click="onRun"
+      >{{ bi(targetPlain('retry_action').zh, targetPlain('retry_action').en) }}</button>
     </p>
 
     <!-- The row-refresh explanation. It appears only when a row's 刷新 armed this panel, because
@@ -185,6 +198,22 @@
          server, bounded, values-free. Absent on the old (switch-off) path and when it could not count. -->
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
+    </p>
+    <!-- S2 fix round 1 (refuter #1): the project sheet is missing the customer's extension columns
+         (dry run / write refused 422 TARGET_SCHEMA_INCOMPLETE on a project sheet). A puller repairs
+         it in place — the create route's replay re-installs the pack — and the pull runs again;
+         anyone else is told whom to ask. Never shown off a project sheet. -->
+    <p v-if="repairAffordance === 'repair'" class="sp-sync__target-notice" data-testid="stock-prep-project-sync-repair">
+      <button
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-repair-action"
+        :disabled="busy"
+        @click="onRepair"
+      >{{ bi(targetPlain('repair_action').zh, targetPlain('repair_action').en) }}</button>
+    </p>
+    <p v-else-if="repairAffordance === 'contact_puller'" class="sp-sync__target-notice" data-testid="stock-prep-project-sync-repair-contact">
+      {{ bi(targetPlain('repair_contact_puller').zh, targetPlain('repair_contact_puller').en) }}
     </p>
 
     <!-- B1 — the add-on's own OPT-IN was refused for THIS caller specifically (403 OPERATOR_SCOPE_*):
@@ -464,7 +493,9 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
   createStockPreparationProjectTargetApi,
+  repairStockPreparationProjectSheet,
   runStockPreparationProjectPull,
+  stockPrepProjectSheetRepairAffordance,
   type StockPrepProjectPullOutcome,
   type StockPrepProjectTargetConfirmRequest,
   type StockPrepProjectTargetState,
@@ -708,8 +739,48 @@ const targetNoticeText = computed<StockPrepPlainEntry>(() => {
     const next = targetPlain(notice.mayRestore ? 'restore_pending' : 'contact_puller_restore')
     return { zh: status.zh, en: status.en, zhNext: next.zh, enNext: next.en }
   }
+  if (notice.kind === 'probe_failed') return targetPlain('probe_failed')
   return stockPrepErrorPlain(notice.code ?? '')
 })
+
+/** Whether the last run went through the project-sheet flow (switch on, the project's own sheet). */
+const lastRunOnProjectSheet = ref(false)
+
+/** S2 fix round 1: repair the project sheet (puller) / say whom to ask (anyone else) / nothing. */
+const repairAffordance = computed(() => stockPrepProjectSheetRepairAffordance(report.value, {
+  projectSheet: lastRunOnProjectSheet.value,
+  canPull: canRun.value,
+}))
+
+function syncRunner(api: StockPreparationProjectSyncApi, target: string) {
+  return (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => runStockPreparationProjectSync(api, target, (step) => {
+    // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
+    results.value = [...results.value, step]
+  }, hooks)
+}
+
+/** One way a run ends, whichever entry (run / repair) started it. */
+function applyPullOutcome(outcome: StockPrepProjectPullOutcome): void {
+  if (outcome.kind !== 'synced') {
+    targetNotice.value = outcome
+    return
+  }
+  report.value = outcome.report
+  afterState.value = outcome.after
+  lastRunOnProjectSheet.value = outcome.mode !== 'legacy'
+  armedNote.value = false
+  if (outcome.mode !== 'legacy') emit('project-target-changed', outcome.after)
+  emit('synced', report.value)
+}
+
+function resetRunState(): void {
+  results.value = []
+  report.value = null
+  targetNotice.value = null
+  afterState.value = null
+  lastRunOnProjectSheet.value = false
+  missingComponentsCopyState.value = 'idle'
+}
 
 const afterRowsText = computed<string>(() => {
   const state = afterState.value
@@ -722,34 +793,36 @@ async function onRun(): Promise<void> {
   if (!canSubmit.value) return
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
-  results.value = []
-  report.value = null
-  targetNotice.value = null
-  afterState.value = null
-  missingComponentsCopyState.value = 'idle'
+  resetRunState()
   busy.value = true
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    const outcome = await runStockPreparationProjectPull({
+    applyPullOutcome(await runStockPreparationProjectPull({
       targetApi: resolveTargetApi(),
       canPull: canRun.value,
       confirm: askOperator,
-      runSync: (hooks) => runStockPreparationProjectSync(api, target, (step) => {
-        // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
-        results.value = [...results.value, step]
-      }, hooks),
-    }, target)
-    if (outcome.kind !== 'synced') {
-      targetNotice.value = outcome
-      return
-    }
-    report.value = outcome.report
-    afterState.value = outcome.after
-    armedNote.value = false
-    if (outcome.mode !== 'legacy') emit('project-target-changed', outcome.after)
-    emit('synced', report.value)
+      runSync: syncRunner(api, target),
+    }, target))
   } finally {
     targetPrompt.value = null
+    busy.value = false
+  }
+}
+
+/** 「修复项目表（重装客户包）」: the create route's replay heals the pack, then the four steps again. */
+async function onRepair(): Promise<void> {
+  const target = submittedProjectNo.value
+  if (!target || busy.value || !canRun.value) return
+  resetRunState()
+  busy.value = true
+  try {
+    const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+    applyPullOutcome(await repairStockPreparationProjectSheet({
+      targetApi: resolveTargetApi(),
+      canPull: canRun.value,
+      runSync: syncRunner(api, target),
+    }, target))
+  } finally {
     busy.value = false
   }
 }

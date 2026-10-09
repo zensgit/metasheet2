@@ -1214,6 +1214,16 @@ describe('StockPreparationWorkspace shell', () => {
           data: { status: 'succeeded', apply: { counts: { created: 1 } } },
         }), { status: 200 })
       }
+      // 一个项目一张备料表 (S2): this fixture is a deployment with the project-sheets switch OFF, and
+      // that is what the real server answers on the project-target route. Since S2 fix round 1 the
+      // pull panel STOPS on any other answer to it (an unreadable sheet state is never guessed past),
+      // so the catch-all below must not stand in for it.
+      if (target.includes('/stock-preparation/projects/') && target.includes('/target')) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', message: 'disabled' },
+        }), { status: 404 })
+      }
       return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
     })
   }

@@ -830,6 +830,21 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '可以再点一次(重试不会建出第二张表);还是不行就把报错代码给平台管理员,请他们看客户包。',
     enNext: 'You can press again (a retry never creates a second sheet); if it still fails, give a platform administrator the error code and ask them to check the customer pack.',
   }),
+  // S2 fix round 1: the claim door for packs that govern column write permissions (the same door the
+  // admin pack-install route has). Not a fault, and not fixed by pressing again — by a login whose
+  // token carries the factory.
+  STOCK_PREPARATION_PROJECT_TARGET_TENANT_CLAIM_REQUIRED: Object.freeze({
+    zh: '这家工厂的客户包带有列写权限,建表或修复项目表需要用带工厂身份的登录;这次什么都没有建,也没有改动。',
+    en: 'This factory’s customer pack carries column write permissions, so creating or repairing a project sheet needs a login that carries your factory; nothing was created or changed.',
+    zhNext: '请用拉取人员自己工厂的账号重新登录(登录令牌里要带工厂)后再试;再点一次不会有变化。',
+    enNext: 'Sign in again with the pull operator’s own factory account (the sign-in token must carry the factory), then try again — pressing again will not change it.',
+  }),
+  STOCK_PREPARATION_PROJECT_TARGET_PACK_TARGET_INVALID: Object.freeze({
+    zh: '系统发现客户包要装到的不是这个项目自己的备料表,为保护数据没有装;什么都没有改动。',
+    en: 'The system found the customer pack aimed at a sheet that is not this project’s own, so nothing was installed, to protect the data; nothing changed.',
+    zhNext: '这不是您操作的问题,再点也一样 —— 请把这条报错代码给平台管理员。',
+    enNext: 'This is not something you did, and pressing again will not change it — give a platform administrator this error code.',
+  }),
   STOCK_PREPARATION_JOB_TARGET_STALE: Object.freeze({
     zh: '这个后台任务是按旧的备料表规划的,现在这个项目有了自己的表,所以没有继续,也没有写入。',
     en: 'This background job was planned against the old stock-preparation sheet; the project now has its own sheet, so the job stopped without writing.',
@@ -1807,11 +1822,14 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '再点也一样 —— 请把技术详情里的代码给平台管理员核对。什么都没有改动。',
     enNext: 'Pressing again will not change it — give a platform administrator the code in the technical details. Nothing was changed.',
   }),
+  // Chosen ONLY for a run on a project sheet (projectSync.ts STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS).
+  // The remedy is the project sheet's own repair — re-installing the customer pack through the
+  // project-sheet route — never 「数据来源与体检」, which addresses the deployment's env sheet.
   PLAN_TARGET_SCHEMA_INCOMPLETE: Object.freeze({
-    zh: '这张备料表缺了列,试算没有跑',
-    en: 'This stock-preparation sheet is missing columns, so nothing was planned',
-    zhNext: '通常是客户的扩展列还没装到这张表上:请平台管理员在「数据来源与体检」里处理(新建项目表时系统会自动装上)。什么都没有改动。',
-    enNext: 'Usually the customer’s extension columns are not on this sheet yet — ask a platform administrator to fix it under Sources & Health Check (a newly created project sheet gets them automatically). Nothing was changed.',
+    zh: '这个项目的备料表缺了客户的扩展列,试算没有跑',
+    en: 'This project’s stock-preparation sheet is missing the customer’s extension columns, so nothing was planned',
+    zhNext: '有拉取权限的人在下面按「修复项目表（重装客户包）」即可补上,再拉取一次;没有拉取权限请联系拉取人员修复。什么都没有改动。',
+    enNext: 'Someone with pull permission can press 修复项目表（重装客户包） below to put them back, then pull again; without that permission, contact a pull operator to repair it. Nothing was changed.',
   }),
 
   // 2. 确认
@@ -2258,6 +2276,22 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
   remove_vs_archive: Object.freeze({
     zh: '「从列表移除」只在这台电脑上、不删数据;「归档项目」由拉取人员操作,可以恢复。',
     en: '"Remove from list" only affects this computer and deletes nothing; "Archive project" is a pull operator’s action and can be undone.',
+  }),
+  // S2 fix round 1 (refuter #5): the state read failed for a reason other than "switch off". The flow
+  // STOPS — it never falls back to the old run on a guess — and offers to read again.
+  probe_failed: Object.freeze({
+    zh: '没能读到这个项目的备料表状态,这次没有拉取,什么都没有改动。',
+    en: 'This project’s stock-preparation sheet state could not be read, so nothing was pulled and nothing changed.',
+    zhNext: '按「重试」再读一次;一直这样就把报错代码给管理员。',
+    enNext: 'Press Try again to read it again; if it keeps happening, give an administrator the error code.',
+  }),
+  retry_action: Object.freeze({ zh: '重试', en: 'Try again' }),
+  // S2 fix round 1 (refuter #1): the project sheet lacks the customer's extension columns. A puller
+  // repairs it in place — the create route's replay re-installs the pack — and the pull runs again.
+  repair_action: Object.freeze({ zh: '修复项目表（重装客户包）', en: 'Repair the project sheet (re-install the customer pack)' }),
+  repair_contact_puller: Object.freeze({
+    zh: '这个项目的备料表缺了客户的扩展列,请联系拉取人员修复。',
+    en: 'This project’s stock-preparation sheet is missing the customer’s extension columns — please contact a pull operator (拉取人员) to repair it.',
   }),
   open_action: Object.freeze({ zh: '直接打开', en: 'Open it' }),
   open_archived_action: Object.freeze({ zh: '打开(已归档)', en: 'Open (archived)' }),
