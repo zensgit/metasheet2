@@ -1,6 +1,7 @@
 # Required web runner routing — 2026-10-08
 
-Status: local candidate; repository configuration and publication are not authorized.
+Status: Draft PR #6272; routing and runner-portability verification. No merge,
+repository-variable change, runner registration, or deployment is included.
 Base: `c147a2d78029dd3097d973e7512e354242ae4883`.
 
 The required `web-tests` job currently selects `ubuntu-latest`. The backend
@@ -18,11 +19,13 @@ after restoring only the runner expression, and the existing required-web token
 manifest and neighboring Time Machine CI wiring checks. This proves the local
 route and preserves test registration; it does not prove runner execution.
 
-The repository inventory currently has two Linux runners and no Windows runner.
-The existing `MS2_WEB_RUNNER` selects the idle Linux runner; `MS2_PLUGIN_RUNNER`
-is absent. Main requires 13 check contexts, including Windows PowerShell 5.1 and
-other Linux jobs that still select GitHub-hosted runners. Routing these two test
-jobs alone does not establish full required CI or resolve every billing gate.
+Runner inventory and variable values must be refreshed before execution. The
+2026-10-09 inventory has two Linux runners and one Windows runner; both
+`MS2_WEB_RUNNER` and `MS2_PLUGIN_RUNNER` are configured. Main requires 13 check
+contexts, including Windows PowerShell 5.1 and other Linux jobs that still select
+GitHub-hosted runners. Routing these two test jobs alone does not establish full
+required CI or resolve every billing gate. PR #6270 leaves `web-tests.yml` to this
+PR so the frontend route has one owner and remains independently selectable.
 
 After separately authorized publication, select a Linux runner label from a fresh
 repository inventory and verify the actual runner ID, exact candidate SHA,
@@ -35,5 +38,37 @@ This change does not replace the separate web quality fix or Phase 5 diagnostic
 candidate. It does not establish native APFS recovery, independently durable
 storage, key custody, or staging acceptance. Do not move a previously restricted
 native exercise to this runner as a workaround. Owner approval is still required
-for remote configuration, publishing a branch/Draft PR, or starting an execution
-that changes staging resources. Root may commit the reviewed local candidate.
+for remote configuration, merging, or starting an execution that changes staging
+resources.
+
+## 2026-10-09 runner-portability correction
+
+Run `37807700490`, job `113416195058`, reached the required web spec gate on a
+self-hosted runner and failed the year-below-100 comparison in
+`attendance-date-only-format.spec.ts`. The old ISO parse was formatted in the host
+timezone while its expected string assumed UTC. Reproduce in a fresh process
+with `TZ=America/Los_Angeles`; do not set a global job timezone to hide the failure.
+
+Only the two ISO-parse comparisons in that existing test use explicit UTC
+formatting now. Product date formatting, local-parts assertions, test commands,
+registration and the independent west-of-UTC negative-control probe remain
+unchanged. Verify the existing spec and its companion under UTC, a west-of-UTC
+timezone and an east-of-UTC timezone; temporarily remove the correction to prove
+the west-of-UTC run fails again. This is test portability, not a date-range product
+capability change.
+
+Local verification (Node 20.20.2, existing dependency links; not a fresh install):
+
+- Before correction, the two date specs under `America/Los_Angeles`: 19 passed,
+  1 failed with the same year-1 mismatch as CI; the four child-process probes pass.
+- After correction, both date specs plus the neighboring records-route redirect
+  spec: 25/25 under each of `UTC`, `America/Los_Angeles`, and `Asia/Taipei`.
+- Removing just the year-100 UTC correction produces the independent year-99
+  mismatch under `America/Los_Angeles`; restore the correction before committing.
+- Required-web token/registration guards: 63/63; neighboring archive source-pin
+  and key-registry CI wiring guards: 4/4; manifest equality: 552 tokens.
+- Parsed workflow equality after restoring only `runs-on`: pass; full actionlint
+  for `web-tests.yml`: pass. Test registration and production code are unchanged.
+
+These local results do not establish a completed self-hosted run or full required
+CI. The exact published follow-up SHA must be checked separately.
