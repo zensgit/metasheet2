@@ -4,12 +4,14 @@ import {
   buildDetailColumns,
   buildDetailRowsForDisplay,
   buildDisplayFields,
+  collectFormUserIds,
   createEmptyDetailColumnDraft,
   createEmptyDetailRow,
   detailColumnDraftsFromField,
   DETAIL_LEAF_FIELD_TYPES,
   findDetailFieldInSchema,
   formatSummaryLine,
+  formatUserFieldValue,
   isDetailCellVisible,
   isDetailField,
   isDetailLeafFieldType,
@@ -17,6 +19,7 @@ import {
   pruneHiddenDetailRow,
   pruneHiddenFormDataWithDetail,
   summaryFields,
+  userFieldValueIds,
   validateDetailColumnsDraft,
   validateDetailRows,
   visibleDetailColumnsForRow,
@@ -481,6 +484,103 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
       }
       expect(buildDisplayFields(minuteRange, { fld_trip: { start: '2026-10-08T09:30:00', end: '2026-10-09T18:00:00' } })[0].value)
         .toBe(`${new Date('2026-10-08T09:30:00').toLocaleString('zh-CN')} ~ ${new Date('2026-10-09T18:00:00').toLocaleString('zh-CN')}`)
+    })
+  })
+
+  // Test report 2026-10-08, T4b. A `user` (人员) value is stored as member ids; the detail page used
+  // to print them verbatim (`default: String(value)`). The fixtures are UUID-shaped on purpose: the
+  // discriminating negative is "the id never appears", and its positive control is the same id
+  // rendering the resolved name.
+  describe('T4b: a user value renders display names resolved by id — never the stored id', () => {
+    const ALICE = '3f2b8c1e-5a7d-4e9b-8c21-0d4f6a7b9e10'
+    const BOB = '9a1c4e7f-2b6d-4f8a-9e3c-5d7b1a2c4e60'
+    const userSchema: FormSchema = {
+      fields: [
+        { id: 'fld_owner', type: 'user', label: '人员' },
+        { id: 'fld_members', type: 'user', label: '参与人', props: { selection: 'multi' } },
+      ],
+    }
+    const names: Record<string, string> = { [ALICE]: '张三' }
+    const resolve = (id: string) => names[id] ?? null
+
+    it('a resolvable id renders the name; the id itself never reaches the display', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: ALICE }, { resolveUserName: resolve })
+      expect(field).toEqual({ key: 'fld_owner', label: '人员', value: '张三' })
+    })
+
+    it('an unresolvable id (inactive / nameless account, or a lookup still in flight) renders the unknown-user label', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: BOB }, { resolveUserName: resolve })
+      expect(field.value).toBe('未知用户')
+      expect(field.value).not.toContain(BOB)
+      const [en] = buildDisplayFields(userSchema, { fld_owner: BOB }, { resolveUserName: resolve, isZh: false })
+      expect(en.value).toBe('Unknown user')
+    })
+
+    it('without a resolver the value is still never the raw id', () => {
+      const [field] = buildDisplayFields(userSchema, { fld_owner: ALICE })
+      expect(field.value).toBe('未知用户')
+    })
+
+    it('several ids render one label each, in order, with the locale separator', () => {
+      const [, multi] = buildDisplayFields(userSchema, { fld_owner: ALICE, fld_members: [ALICE, BOB] }, { resolveUserName: resolve })
+      expect(multi.value).toBe('张三、未知用户')
+      const [, multiEn] = buildDisplayFields(userSchema, { fld_owner: ALICE, fld_members: [ALICE, BOB] }, { resolveUserName: resolve, isZh: false })
+      expect(multiEn.value).toBe('张三, Unknown user')
+    })
+
+    it('a historical {id, name} value is resolved by id — the stored name is not authoritative and never renders', () => {
+      const stored = { id: ALICE, name: '旧名字' }
+      expect(buildDisplayFields(userSchema, { fld_owner: stored }, { resolveUserName: resolve })[0].value).toBe('张三')
+      const unresolved = buildDisplayFields(userSchema, { fld_owner: { id: BOB, name: '旧名字' } }, { resolveUserName: resolve })[0].value
+      expect(unresolved).toBe('未知用户')
+      expect(unresolved).not.toContain('旧名字')
+      expect(unresolved).not.toContain('[object Object]')
+    })
+
+    it('an empty selection is "-"; a value with no usable id is the unknown-user label, never "[object Object]"', () => {
+      expect(formatUserFieldValue([], resolve)).toBe('-')
+      expect(formatUserFieldValue(null, resolve)).toBe('-')
+      expect(formatUserFieldValue({ name: '没有 id' }, resolve)).toBe('未知用户')
+      expect(formatUserFieldValue(42, resolve)).toBe('未知用户')
+    })
+
+    it('the list summary line resolves user values the same way', () => {
+      const summary = summaryFields(userSchema, { fld_owner: ALICE }, 3, true, resolve)
+      expect(formatSummaryLine(summary)).toBe('人员：张三')
+      expect(formatSummaryLine(summaryFields(userSchema, { fld_owner: BOB }, 3, true, resolve))).toBe('人员：未知用户')
+    })
+
+    it('userFieldValueIds reads ids from a string, an {id} object, or an array of either — deduplicated, blanks dropped', () => {
+      expect(userFieldValueIds(` ${ALICE} `)).toEqual([ALICE])
+      expect(userFieldValueIds({ id: ALICE, name: 'x' })).toEqual([ALICE])
+      expect(userFieldValueIds([ALICE, { id: BOB }, ALICE, '', { name: 'no id' }, 7])).toEqual([ALICE, BOB])
+    })
+
+    it('collectFormUserIds gathers top-level user values and 明细 user columns, deduplicated', () => {
+      const schema: FormSchema = {
+        fields: [
+          { id: 'fld_owner', type: 'user', label: '人员' },
+          { id: 'fld_reason', type: 'text', label: '事由' },
+          {
+            id: 'items',
+            type: 'detail',
+            label: '明细',
+            columns: [
+              { id: 'who', type: 'user', label: '负责人' },
+              { id: 'note', type: 'text', label: '备注' },
+            ],
+          },
+        ],
+      }
+      const snapshot = {
+        fld_owner: ALICE,
+        fld_reason: BOB,
+        items: [{ who: BOB, note: 'n' }, { who: { id: ALICE } }],
+      }
+      expect(collectFormUserIds(schema, snapshot).sort()).toEqual([ALICE, BOB].sort())
+      // A text field holding an id-shaped string is not a member reference.
+      expect(collectFormUserIds(schema, { fld_reason: BOB })).toEqual([])
+      expect(collectFormUserIds(schema, snapshot, { includeDetailColumns: false })).toEqual([ALICE])
     })
   })
 

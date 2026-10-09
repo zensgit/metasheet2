@@ -58,6 +58,10 @@ const getPendingCountSpy = vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 
 const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
 const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
+// Test report 2026-10-08 T4b: the summary line resolves `user` (人员) values through the shared
+// directory cache, whose batch fetch is `resolveApprovalDirectoryUsers`. Resolves immediately so the
+// cache's retry backoff is never entered (see directoryResolve.ts on the cross-test timer hazard).
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 
 // B3-03: the filter bar's template dropdown fetches options via listTemplates() on mount.
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
@@ -85,6 +89,7 @@ vi.mock('../src/approvals/api', () => ({
   markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
+  resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
   exportApprovalsCsv: (...args: unknown[]) => exportApprovalsCsvSpy(...args),
   ApprovalApiError: MockApprovalApiError,
@@ -1149,6 +1154,39 @@ describe('ApprovalCenterView', () => {
       expect(summary!.textContent?.trim()).toBe('请假类型：年假 · 时长：2 · 事由：家里有事')
       // The attachment field is a schema field but never part of the summary.
       expect(summary!.textContent).not.toContain('附件')
+    })
+
+    // Test report 2026-10-08 T4b: a 人员 (user) field among the summary fields shows the resolved
+    // name, never the stored member id.
+    it('T4b: a user field in the summary renders the directory-resolved name, never the member id', async () => {
+      const MEMBER_ID = '7d3e9a61-0c2f-4b85-9e14-a6f2c8d05b37'
+      // Imported here, not at the top: a static import would evaluate the mocked api module before
+      // this file's hoisted mock factory can see its own top-level class.
+      const { __resetResolvedDirectoryNamesForTests } = await import('../src/approvals/directoryResolve')
+      __resetResolvedDirectoryNamesForTests()
+      resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([{ id: MEMBER_ID, name: '王五' }])
+      getTemplateSpy.mockResolvedValue({
+        formSchema: {
+          fields: [
+            { id: 'fld_owner', type: 'user', label: '人员' },
+            { id: 'fld_reason', type: 'textarea', label: '事由' },
+          ],
+        },
+      })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_1',
+          templateId: 'tpl_owner',
+          formSnapshot: { fld_owner: MEMBER_ID, fld_reason: '出差' },
+        }),
+      ]
+      await mountView()
+      await flushUi(12)
+
+      expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(MEMBER_ID)
+      const summary = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="标题"] .approval-center__row-summary')
+      expect(summary?.textContent?.trim()).toBe('人员：王五 · 事由：出差')
+      expect(container!.textContent).not.toContain(MEMBER_ID)
     })
 
     it('a row without templateId renders no summary and never calls getTemplate', async () => {
