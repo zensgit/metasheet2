@@ -1414,6 +1414,7 @@ jobs:
             tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
             tests/integration/multitable-patch-batchid-echo-realdb.test.ts \
+            tests/integration/multitable-range-fill-realdb.test.ts \
             tests/integration/stock-prep-substrate-p1a-realdb.test.ts \
             tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
             tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
