@@ -39,9 +39,56 @@ try {
   await drag(page.getByTestId('range-fill-handle'), cell(3, 2))
   await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(3)
   expect(await page.evaluate(() => window.rangeDemo.calls[2].map(change => change.value))).toEqual(['2026-10-09', '2026-10-10', '2026-10-11'])
-  await drag(cell(0, 0), cell(4, 1))
+  await page.getByTestId('range-mode').selectOption('copy')
+  await drag(cell(6, 1), cell(7, 1))
+  await drag(page.getByTestId('range-fill-handle'), cell(7, 0))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(4)
+  expect(await page.evaluate(() => window.rangeDemo.calls[3])).toEqual([
+    { recordId: 'r6', fieldId: 'a', value: 102, expectedVersion: 1 },
+    { recordId: 'r7', fieldId: 'a', value: 202, expectedVersion: 1 },
+  ])
+  await page.getByTestId('range-mode').selectOption('series')
+  await drag(cell(6, 0), cell(7, 0))
+  await drag(page.getByTestId('range-fill-handle'), cell(7, 1))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(5)
+  expect(await page.evaluate(() => window.rangeDemo.calls[4])).toEqual([
+    { recordId: 'r6', fieldId: 'b', value: 103, expectedVersion: 2 },
+    { recordId: 'r7', fieldId: 'b', value: 203, expectedVersion: 2 },
+  ])
+  await page.getByTestId('range-mode').selectOption('copy')
+  await drag(cell(6, 0), cell(7, 1))
+  await drag(page.getByTestId('range-fill-handle'), cell(9, 1))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(6)
+  expect(await page.evaluate(() => window.rangeDemo.calls[5])).toEqual([
+    { recordId: 'r8', fieldId: 'a', value: 102, expectedVersion: 1 },
+    { recordId: 'r8', fieldId: 'b', value: 103, expectedVersion: 1 },
+    { recordId: 'r9', fieldId: 'a', value: 202, expectedVersion: 1 },
+    { recordId: 'r9', fieldId: 'b', value: 203, expectedVersion: 1 },
+  ])
+  await drag(cell(6, 0), cell(7, 1))
+  await drag(page.getByTestId('range-fill-handle'), cell(4, 1))
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(7)
+  expect(await page.evaluate(() => window.rangeDemo.calls[6])).toEqual([
+    { recordId: 'r4', fieldId: 'a', value: 102, expectedVersion: 3 },
+    { recordId: 'r4', fieldId: 'b', value: 103, expectedVersion: 3 },
+    { recordId: 'r5', fieldId: 'a', value: 202, expectedVersion: 1 },
+    { recordId: 'r5', fieldId: 'b', value: 203, expectedVersion: 1 },
+  ])
+  await drag(cell(6, 0), cell(7, 1))
+  await page.getByTestId('range-copy').click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('102\t103\n202\t203')
+  await cell(10, 0).click()
+  await page.getByTestId('range-paste').click()
+  await expect.poll(() => page.evaluate(() => window.rangeDemo.calls.length)).toBe(8)
+  expect(await page.evaluate(() => window.rangeDemo.calls[7])).toEqual([
+    { recordId: 'r10', fieldId: 'a', value: 102, expectedVersion: 1 },
+    { recordId: 'r10', fieldId: 'b', value: 103, expectedVersion: 1 },
+    { recordId: 'r11', fieldId: 'a', value: 202, expectedVersion: 1 },
+    { recordId: 'r11', fieldId: 'b', value: 203, expectedVersion: 1 },
+  ])
+  await drag(cell(4, 0), cell(9, 1))
   await mkdir('../../artifacts/range-fill', { recursive: true })
   await page.screenshot({ path: '../../artifacts/range-fill/grid-range-fill.png', fullPage: true })
   expect(errors).toEqual([])
-  console.log('PASS browser: selection, numeric series, real clipboard, multirow paste, civil-date series; 3 commits; no browser errors')
+  console.log('PASS browser: selection, all four fill directions, independent row/column series, 2x2 repeat and clipboard paste, civil-date series; 8 commits; no browser errors')
 } catch (error) { console.log({ browserErrors: errors }); throw error } finally { await browser.close() }

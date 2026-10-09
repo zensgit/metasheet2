@@ -286,12 +286,178 @@ describe('useMultitableGrid patchRange', () => {
   })
 
   it('accepts exactly 1000 cells in one request', async () => {
-    const { grid, patchRecords } = await setup()
+    const { grid, patchRecords, patchFetch } = await setup()
     grid.rows.value = Array.from({ length: 1000 }, (_, i) => ({ id: `r${i}`, version: 5, data: { f1: 'old' } }))
     const input = grid.rows.value.map((row) => ({ recordId: row.id, fieldId: 'f1', value: 'new', expectedVersion: 5 }))
+    patchFetch.mockResolvedValueOnce(response({ updated: input.map(change => ({ recordId: change.recordId, version: 6 })) }))
     await grid.patchRange(input)
     expect(patchRecords).toHaveBeenCalledTimes(1)
     expect(patchRecords).toHaveBeenCalledWith({ sheetId: 's1', viewId: 'v1', partialSuccess: false, changes: input })
+  })
+
+  it('projects acknowledged values when the server only returns versions and computed fields', async () => {
+    const { grid, patchFetch } = await setup()
+    patchFetch.mockResolvedValueOnce(response({
+      updated: success.updated,
+      records: [{ recordId: 'r1', data: { computed: 84 } }],
+    }))
+
+    await grid.patchRange(changes)
+
+    expect(grid.rows.value).toEqual([
+      { id: 'r1', version: 6, data: { f1: 'requested', f2: 42, computed: 84 } },
+      { id: 'r2', version: 9, data: { f1: 'requested too', f2: 20 } },
+    ])
+    expect(grid.editHistory.value).toEqual([])
+  })
+
+  it.each([
+    [1791505800000, '2026-10-09T00:30:00.000Z'],
+    ['2026-10-09T08:30:00+08:00', '2026-10-09T00:30:00.000Z'],
+    [null, null],
+  ])('projects acknowledged dateTime %j in the backend stored form', async (value, canonical) => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    grid.fields.value[1].type = 'dateTime'
+    patchFetch.mockResolvedValueOnce(response({ updated: [{ recordId: 'r1', version: 6 }] }))
+    const input = [{ recordId: 'r1', fieldId: 'f2', value, expectedVersion: 5 }]
+
+    await grid.patchRange(input)
+
+    expect(patchRecords).toHaveBeenCalledWith({ sheetId: 's1', viewId: 'v1', partialSuccess: false, changes: input })
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 6, data: { f1: 'old', f2: canonical } })
+  })
+
+  it('does not restore summaries for a row removed by realtime while the commit is pending', async () => {
+    const { grid, patchFetch } = await setup()
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange(changes)
+    grid.removeRemoteRecord('r1')
+    pending.resolve(response({ ...success, linkSummaries: { r1: { f1: [{ id: 'old-link', display: 'Old' }] } } }))
+    await commit
+    expect(grid.rows.value).toEqual([{ id: 'r2', version: 9, data: { f1: 'canonical too', f2: 20 } }])
+    expect(grid.linkSummaries.value).toEqual({})
+    expect(grid.editHistory.value).toEqual([])
+  })
+
+  it('ignores unversioned unrelated echoes rather than overwriting a newer realtime row', async () => {
+    const { grid, patchFetch } = await setup()
+    grid.rows.value.push({ id: 'r3', version: 30, data: { f1: 'newer unrelated' } })
+    patchFetch.mockResolvedValueOnce(response({
+      ...success,
+      records: [...success.records!, { recordId: 'r3', data: { f1: 'late unrelated' } }],
+      linkSummaries: { r3: { f1: [{ id: 'old-link', display: 'Old' }] } },
+    }))
+    await grid.patchRange(changes)
+    expect(grid.rows.value[2]).toEqual({ id: 'r3', version: 30, data: { f1: 'newer unrelated' } })
+    expect(grid.linkSummaries.value).toEqual({})
+  })
+
+  it.each([
+    ['null result', null],
+    ['missing updates', {}],
+    ['empty updates', { updated: [] }],
+    ['partial updates', { ...success, updated: [success.updated[0]] }],
+    ['duplicate updates', { ...success, updated: [success.updated[0], success.updated[0]] }],
+    ['unrequested update', { ...success, updated: [...success.updated, { recordId: 'other', version: 1 }] }],
+    ['non-array updates', { ...success, updated: {} }],
+    ['null update', { ...success, updated: [success.updated[0], null] }],
+    ['stale returned version', { ...success, updated: [{ recordId: 'r1', version: 5 }, success.updated[1]] }],
+    ['fractional returned version', { ...success, updated: [{ recordId: 'r1', version: 6.5 }, success.updated[1]] }],
+    ['malformed failures', { ...success, failed: {} }],
+    ['non-array records', { ...success, records: {} }],
+    ['null record', { ...success, records: [null] }],
+    ['null record data', { ...success, records: [{ recordId: 'r1', data: null }] }],
+    ['array record data', { ...success, records: [{ recordId: 'r1', data: [] }] }],
+    ['duplicate records', { ...success, records: [success.records![0], success.records![0]] }],
+    ['malformed summary map', { ...success, linkSummaries: { r1: null } }],
+    ['malformed summaries', { ...success, attachmentSummaries: { r1: { f1: {} } } }],
+  ])('rejects %s before changing any local state', async (_name, result) => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    patchFetch.mockResolvedValueOnce(response(result))
+    const before = JSON.stringify(grid.rows.value)
+    const history = JSON.stringify(grid.editHistory.value)
+
+    await expect(grid.patchRange(changes)).rejects.toThrow('RANGE_INVALID')
+
+    expect(JSON.stringify(grid.rows.value)).toBe(before)
+    expect(JSON.stringify(grid.editHistory.value)).toBe(history)
+    expect(grid.historyIndex.value).toBe(0)
+    expect(grid.lastBatchId.value).toBe('previous-batch')
+    expect(grid.linkSummaries.value).toEqual({})
+    expect(grid.attachmentSummaries.value).toEqual({})
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    await expect(grid.patchRange(changes)).resolves.toEqual(success)
+  })
+
+  it.each(['sheet', 'view', 'away and back'])('rejects %s changes before the context watcher reloads', async (navigation) => {
+    const { grid, sheetId, viewId, patchRecords } = await setup()
+    if (navigation === 'sheet') sheetId.value = 's2'
+    else {
+      viewId.value = 'v2'
+      if (navigation === 'away and back') viewId.value = 'v1'
+    }
+    await expect(grid.patchRange(changes)).rejects.toThrow('RANGE_STALE')
+    expect(patchRecords).not.toHaveBeenCalled()
+  })
+
+  it('does not project a success after a same-tick view roundtrip', async () => {
+    const { grid, viewId, patchFetch } = await setup()
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange(changes)
+    viewId.value = 'v2'
+    viewId.value = 'v1'
+    pending.resolve(response(success))
+    await commit
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 5, data: { f1: 'old', f2: 10 } })
+    expect(grid.lastBatchId.value).toBe('previous-batch')
+    expect(grid.historyIndex.value).toBe(0)
+  })
+
+  it.each(['cell', 'undo', 'redo', 'bulk'])('blocks %s writes while a range commit is pending', async (writer) => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = grid.patchRange(changes)
+    const before = JSON.stringify(grid.rows.value)
+    if (writer === 'cell') {
+      await expect(grid.patchCell('r1', 'f1', 'overlap', 5)).resolves.toMatchObject({ code: 'RANGE_BUSY' })
+    } else if (writer === 'bulk') {
+      await expect(grid.bulkPatch({ recordIds: ['r1'], fieldId: 'f1', value: 'overlap' })).rejects.toThrow('RANGE_BUSY')
+    } else await grid[writer as 'undo' | 'redo']()
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(grid.rows.value)).toBe(before)
+    expect(grid.historyIndex.value).toBe(0)
+    pending.resolve(response(success))
+    await commit
+  })
+
+  it.each(['cell', 'undo', 'redo', 'bulk'])('blocks range submission during an existing %s write', async (writer) => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    const pending = deferred<Response>()
+    patchFetch.mockReturnValueOnce(pending.promise)
+    const commit = writer === 'cell' ? grid.patchCell('r1', 'f1', 'other', 5)
+      : writer === 'bulk' ? grid.bulkPatch({ recordIds: ['r1'], fieldId: 'f1', value: 'other' })
+        : grid[writer as 'undo' | 'redo']()
+    await expect(grid.patchRange(changes)).rejects.toThrow('RANGE_BUSY')
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    pending.resolve(response(success))
+    await commit
+    patchFetch.mockResolvedValueOnce(response({ ...success, updated: [{ recordId: 'r1', version: 7 }, { recordId: 'r2', version: 10 }] }))
+    await grid.patchRange(changes.map(change => ({ ...change, expectedVersion: change.recordId === 'r1' ? 6 : 9 })))
+    expect(patchRecords).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['cell', 'undo', 'redo', 'bulk'])('releases the range exclusion after a failed %s write', async (writer) => {
+    const { grid, patchFetch, patchRecords } = await setup()
+    patchFetch.mockRejectedValueOnce(new Error('network failure'))
+    if (writer === 'cell') await grid.patchCell('r1', 'f1', 'other', 5)
+    else if (writer === 'bulk') {
+      await expect(grid.bulkPatch({ recordIds: ['r1'], fieldId: 'f1', value: 'other' })).rejects.toThrow('network failure')
+    } else await grid[writer as 'undo' | 'redo']()
+    await expect(grid.patchRange(changes)).resolves.toEqual(success)
+    expect(patchRecords).toHaveBeenCalledTimes(2)
   })
 
   it.each(['sheet', 'view', 'away and back', 'reload'])('does not project an old success after %s navigation', async (navigation) => {
@@ -333,6 +499,7 @@ describe('useMultitableGrid patchRange', () => {
     expect(patchRecords).toHaveBeenCalledTimes(1)
     pending.resolve(response(success))
     await commit
+    patchFetch.mockResolvedValueOnce(response({ ...success, updated: [{ recordId: 'r1', version: 7 }, { recordId: 'r2', version: 10 }] }))
     await grid.patchRange(changes.map((change) => ({ ...change, expectedVersion: change.recordId === 'r1' ? 6 : 9 })))
     expect(patchRecords).toHaveBeenCalledTimes(2)
   })

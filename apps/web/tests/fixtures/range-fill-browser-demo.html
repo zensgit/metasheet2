@@ -13,6 +13,8 @@ const fields = [
   {id:'c',name:'交付日期',type:'date'}, {id:'d',name:'备注',type:'string'},
 ]
 const rows = ref(Array.from({length:12}, (_,i)=>({id:`r${i}`,version:1,data:{a:i<2?(i+1)*10:null,b:null,c:i===0?'2026-10-08':null,d:i===0?'样例记录':null}})))
+rows.value[6].data.a=101; rows.value[6].data.b=102
+rows.value[7].data.a=201; rows.value[7].data.b=202
 const calls=[]
 async function commitRange(changes){
   calls.push(changes)
