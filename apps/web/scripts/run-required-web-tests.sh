@@ -1509,6 +1509,7 @@ exec npx vitest run \
   approvalTemplateVersionHistory \
   approvalUserPicker \
   asyncStateBlock \
+  attendance-record-timeline \
   attendance-selfservice-dashboard \
   attendanceAdminEndpointCompatibility \
   attendanceCapabilityUnavailable \
@@ -1519,7 +1520,9 @@ exec npx vitest run \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
   attendanceOverviewRequestReveal \
+  attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
+  attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
   automation-action-summary \
   automation-condition-legacy-person-picker \

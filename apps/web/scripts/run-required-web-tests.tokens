@@ -141,6 +141,7 @@ attendance-date-only-format
 attendance-experience-entrypoints
 attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
+attendance-record-timeline
 attendance-records-route-redirect
 attendance-selfservice-dashboard
 attendanceAdminEndpointCompatibility
@@ -152,7 +153,9 @@ attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
 attendanceOverviewRequestReveal
+attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
+attendanceTodayWorkbench
 attendanceUserPickerEndpoint
 automation-action-summary
 automation-condition-legacy-person-picker
