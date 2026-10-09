@@ -2,9 +2,7 @@
 import assert from 'node:assert/strict'
 import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
 import {
-  access,
   cp,
   lstat,
   mkdir,
@@ -1253,7 +1251,7 @@ async function existingPathCount(paths: readonly string[]): Promise<number> {
 }
 
 async function assertPathMissing(path: string): Promise<void> {
-  await assert.rejects(access(path, constants.F_OK), (error: unknown) => readCode(error) === 'ENOENT')
+  await assert.rejects(lstat(path), (error: unknown) => readCode(error) === 'ENOENT')
 }
 
 function quoteIdentifier(value: string): string {
