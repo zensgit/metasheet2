@@ -692,6 +692,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds).',
     source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
+  {
+    key: 'APPROVAL_CC_UNREAD_BADGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Test report 2026-10-08 T3 (being CC'd shows no prompt). Default OFF; exact literal 'true' only (no trim, no case folding). On: the approval center's 抄送我的 tab shows an unread-CC badge and a per-row dot, from GET /api/approvals/cc-unread-count and the list's per-row ccUnread, both built on one predicate: unread when the viewer has no approval_reads row at or after the newest CC row targeting them. Off: that endpoint answers 404 APPROVAL_CC_UNREAD_BADGE_DISABLED before any query, the list issues no extra query and its rows carry no new key, and the web (session feature approvalCcUnreadBadge) issues no count request. No DDL, no new realtime event, nothing added to the pending/todo counts or their socket events (todo-center lock B). Rollout effect, an owner choice at enablement: historical CC rows count by the same rule, so on the first load every CC a person was never shown since it arrived counts as unread. danger=low: read-only; one count query per approval-center load or tab switch and one id-scoped query per 抄送我的 page.",
+    source: 'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalCcUnreadBadgeEnabled',
+  },
+  {
+    key: 'APPROVAL_MINE_OUTCOME_BADGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Test report 2026-10-08 T6 (a requester gets no prompt when their request is rejected). Default OFF; exact literal 'true' only (no trim, no case folding). On: the approval center's 我发起的 tab shows a new-outcome badge and a per-row dot, from GET /api/approvals/mine-outcomes/unseen-count and the list's per-row outcomeUnseen, both built on one predicate: the viewer's own request is in a terminal status, the newest audit row that moved it into that status was written by someone else, and the viewer has no approval_reads row at or after that row. Self-decided outcomes (own withdrawal, own rejection or approval) are never badged. Off: that endpoint answers 404 APPROVAL_MINE_OUTCOME_BADGE_DISABLED before any query, the list issues no extra query and its rows carry no new key, and the web (session feature approvalMineOutcomeBadge) issues no count request. No DDL, no new realtime event (a requester receives no frame when someone else decides; the badge refreshes on the next load or tab switch), nothing added to the pending/todo counts or their socket events (todo-center lock B). Rollout effect, an owner choice at enablement: historical outcomes count by the same rule, so on the first load every finished request whose outcome its requester never opened afterwards counts as new. danger=low: read-only; one count query per approval-center load or tab switch and one id-scoped query per 我发起的 page.",
+    source: 'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */
