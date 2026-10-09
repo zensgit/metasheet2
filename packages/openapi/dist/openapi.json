@@ -6971,6 +6971,13 @@
             },
             "description": "Parallel gateway (并行分支) runtime frontier. Present only when\nthe instance is inside a parallel region with ≥ 2 still-pending\nbranches. Each entry is the current approval node key for one\nbranch. When absent or length < 2, use `currentNodeKey`\nunchanged for the linear / non-parallel flow.\n"
           },
+          "returnableNodeKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "退回 (return) targets the server's return gate would accept RIGHT NOW, in trail\norder (start → cursor). Computed server-side from the instance's FROZEN runtime\ngraph with the same three checks the action endpoint applies to a `return`: the\ncurrent node is not a handler (APPROVAL_HANDLER_ACTION_NOT_ALLOWED), the instance\nis not inside a parallel region (APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED), and the\ntarget is an approval node the walker visits before the cursor\n(APPROVAL_RETURN_TARGET_INVALID). An EMPTY array means nothing is legal — clients\nhide the return action. ABSENT means the server did not compute it: an older\nserver, a non-pending instance, a bridged / legacy instance with no frozen graph,\nor a graph the walker could not evaluate — clients fall back to their prior\nbehaviour, never read absence as empty. Present on the detail read\n(GET /api/approvals/{id}) and on action responses\n(POST /api/approvals/{id}/actions); never on list responses. Presentation only:\nthe return gate's own 409s remain the authority.\n"
+          },
           "assignments": {
             "type": "array",
             "items": {

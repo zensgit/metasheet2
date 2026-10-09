@@ -5385,6 +5385,48 @@ components:
             branches. Each entry is the current approval node key for one
             branch. When absent or length < 2, use `currentNodeKey`
             unchanged for the linear / non-parallel flow.
+        returnableNodeKeys:
+          type: array
+          items:
+            type: string
+          description: >
+            退回 (return) targets the server's return gate would accept RIGHT NOW,
+            in trail
+
+            order (start → cursor). Computed server-side from the instance's
+            FROZEN runtime
+
+            graph with the same three checks the action endpoint applies to a
+            `return`: the
+
+            current node is not a handler (APPROVAL_HANDLER_ACTION_NOT_ALLOWED),
+            the instance
+
+            is not inside a parallel region
+            (APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED), and the
+
+            target is an approval node the walker visits before the cursor
+
+            (APPROVAL_RETURN_TARGET_INVALID). An EMPTY array means nothing is
+            legal — clients
+
+            hide the return action. ABSENT means the server did not compute it:
+            an older
+
+            server, a non-pending instance, a bridged / legacy instance with no
+            frozen graph,
+
+            or a graph the walker could not evaluate — clients fall back to
+            their prior
+
+            behaviour, never read absence as empty. Present on the detail read
+
+            (GET /api/approvals/{id}) and on action responses
+
+            (POST /api/approvals/{id}/actions); never on list responses.
+            Presentation only:
+
+            the return gate's own 409s remain the authority.
         assignments:
           type: array
           items:
