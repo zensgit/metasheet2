@@ -1161,7 +1161,7 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, UnifiedApprovalDTO } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, ApprovalNodeType, UnifiedApprovalDTO } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -1219,6 +1219,7 @@ import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import { collectParallelRegionNodeKeys } from '../../approvals/graphTopologyEdit'
 import {
   addSignModeHint,
   addSignPlacementCopy,
@@ -2149,13 +2150,125 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
   return result
 })
 
+// ---------------------------------------------------------------------------
+// 退回 candidates — the server's return gate, mirrored from the same sources
+// ---------------------------------------------------------------------------
+// `dispatchAction` (packages/core-backend/src/services/ApprovalProductService.ts) refuses a
+// `return` in three places, each with its own typed 409:
+//   (a) the current node is a 办理 (handler) node — Lock-3 §2.2's handler verb gate →
+//       APPROVAL_HANDLER_ACTION_NOT_ALLOWED;
+//   (b) the instance is inside a parallel region (`isInParallelRegion` there: parallel branch state
+//       is present and the stored cursor is the fork's `parallelNodeKey`) →
+//       APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED;
+//   (c) the target is not in `ApprovalGraphExecutor.listVisitedApprovalNodeKeysUntil(current)`
+//       minus its last entry (packages/core-backend/src/services/ApprovalGraphExecutor.ts) →
+//       APPROVAL_RETURN_TARGET_INVALID. That walker passes THROUGH start / condition / cc / handler
+//       nodes, lets ONLY `approval` nodes join the trail, and jumps a `parallel` fork straight to its
+//       `joinNodeKey` — so a node inside a parallel branch is never a legal target, not even after
+//       the region has joined.
+// An option any of the three refuses can only ever 409, and a 退回 button whose every option 409s
+// is a dead button — so each is mirrored below and the list comes back empty (the button's `v-if`
+// already hides on an empty list). The server stays the authority; this only stops offering what
+// this instance's own graph and DTO say it will refuse.
+//
+// WHICH DTO FIELD CARRIES WHAT. The two builders do not ship the same fields, and the store
+// publishes an action response into the very slot the detail read fills:
+//   * the detail read (`GET /api/approvals/:id` → ApprovalBridgeService.getApproval →
+//     `toUnifiedDTO`) ships `currentNodeType` — the frozen runtime graph's type for the stored
+//     cursor, which inside a parallel region is the fork itself, `'parallel'` — and never
+//     `currentNodeKeys`;
+//   * an action response (ApprovalProductService.getApproval → `toUnifiedApprovalDTO`) ships
+//     `currentNodeKeys` whenever parallel branch state exists — the pending branch frontier, ONE
+//     entry once a joinMode-'all' sibling has finished — and never `currentNodeType`.
+// Hence (a) and (b) read whichever carrier is present, and the cursor's type falls back to this
+// instance's own graph when the DTO does not carry it.
+
+// The graph the candidates are judged by: this instance's OWN graph, or none. The template store is
+// app-wide and a failed load leaves the previous template in place (see the T4cd note on
+// `nodeLabel`), so `pinnedGraph` can hold ANOTHER template's graph whose nodes share default keys
+// (`approval_1`, …) — judging this instance's history by it would drop or keep the wrong nodes. The
+// frozen version is preferred (it is the shape the server walks); the live template is the
+// fallback, and for an ordinary member the ONLY source, because the version endpoint is
+// admin-guarded. DRIFT RISK on that fallback: `GET /api/approval-templates/:id` serves the
+// template's LATEST version (possibly an unpublished draft), so a node removed, retyped or moved
+// into a parallel region since this instance started is judged by its new shape. `pinnedGraph` is
+// deliberately left as it is — `upcomingTimelineNodes` reads it and is outside this slice. A graph
+// without node/edge arrays counts as no graph rather than throwing inside the action bar.
+const ownApprovalGraph = computed<ApprovalGraph | null>(() => {
+  const detail = approval.value
+  if (!detail?.templateId) return null
+  const usable = (graph: ApprovalGraph | null | undefined): graph is ApprovalGraph =>
+    !!graph && Array.isArray(graph.nodes) && Array.isArray(graph.edges)
+  const version = templateStore.activeVersion
+  if (
+    version
+    && version.templateId === detail.templateId
+    && version.id === detail.templateVersionId
+    && usable(version.approvalGraph)
+  ) {
+    return version.approvalGraph
+  }
+  const template = templateStore.activeTemplate
+  if (template && template.id === detail.templateId && usable(template.approvalGraph)) {
+    return template.approvalGraph
+  }
+  return null
+})
+
+// The cursor's node type: the DTO's own answer when it carries one (the frozen runtime graph — the
+// detail read), else this instance's graph (an action response does not carry the field).
+const returnCursorNodeType = computed<ApprovalNodeType | null>(() => {
+  const detail = approval.value
+  if (!detail) return null
+  if (detail.currentNodeType) return detail.currentNodeType
+  const cursor = detail.currentNodeKey
+  if (!cursor) return null
+  return ownApprovalGraph.value?.nodes.find((node) => node.key === cursor)?.type ?? null
+})
+
+// (b). Deliberately NOT `isInParallelRegion` (the 并行中 badge's `>= 2`): the server refuses 退回 in
+// ANY parallel state, and an action response carries a ONE-entry frontier once a joinMode-'all'
+// sibling has finished while the cursor is still the fork. `> 0` is the reading this view already
+// uses to resolve parallel-vs-linear in `currentActiveNodeKeys`; the cursor type covers the detail
+// read, which ships no `currentNodeKeys` at all.
+const returnBlockedByParallelRegion = computed(
+  () => parallelBranchNodeKeys.value.length > 0 || returnCursorNodeType.value === 'parallel',
+)
+
+// (c), the part a client can mirror from the graph alone: an `approval` node outside every parallel
+// region (`collectParallelRegionNodeKeys`, the FE mirror of the backend's region definition: branch
+// nodes up to, excluding, the join). A key the graph does not carry is dropped too. NOT mirrored —
+// recorded here rather than implied: the walker also resolves condition branches against the form
+// and stops at the cursor, so a node lying DOWNSTREAM of the cursor (visited before an earlier 退回)
+// is still offered and still answered with APPROVAL_RETURN_TARGET_INVALID.
+const returnEligibleGraphKeys = computed<Set<string> | null>(() => {
+  const graph = ownApprovalGraph.value
+  if (!graph) return null
+  const parallelRegion = collectParallelRegionNodeKeys(graph)
+  return new Set(
+    graph.nodes
+      .filter((node) => node.type === 'approval' && !parallelRegion.has(node.key))
+      .map((node) => node.key),
+  )
+})
+
+// NO graph — the template is not reachable for this viewer (outside its visibility scope, a failed
+// load) or the store holds another template: the list is exactly what it was before this filter
+// existed, every visited key but the cursor / start / end, in first-visit order. A deliberate,
+// owner-visible choice: hiding 退回 whenever the template cannot be loaded would silently take the
+// verb away from a member who may hold a perfectly legal target, and the server's (c) check still
+// answers an illegal one with its own typed 409. (a) and (b) need no graph when the DTO carries
+// their field.
 const returnableNodes = computed(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
+  if (returnCursorNodeType.value === 'handler') return []
+  if (returnBlockedByParallelRegion.value) return []
   const currentNodeKey = approval.value.currentNodeKey
+  const eligible = returnEligibleGraphKeys.value
   const visited = new Set<string>()
   for (const h of store.history) {
     const nk = h.metadata?.nodeKey as string | undefined
-    if (nk && nk !== currentNodeKey && nk !== 'start' && nk !== 'end') {
+    if (nk && nk !== currentNodeKey && nk !== 'start' && nk !== 'end' && (!eligible || eligible.has(nk))) {
       visited.add(nk)
     }
   }
