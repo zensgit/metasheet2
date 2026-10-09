@@ -1432,6 +1432,12 @@ export default defineConfig({
       // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
       // precedent the sibling approval-realdb-* lanes above cite.
       'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // Test report 2026-10-08: the approval center's tab read-state badges (抄送我的 unread-CC count
+      // + per-row ccUnread, 我发起的 new-outcome count + per-row outcomeUnseen) against real
+      // PostgreSQL — the time-comparison rules, count == list, the lock B negative control. Excluded
+      // from the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE
+      // FILE into .github/workflows/approval-realdb-list-scope.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-notify-badges.db.test.ts',
       // P3-1 CSV export read-parity. Needs real PostgreSQL for the same reason its sibling above
       // does: the assertions that matter are the ones only a real row can establish — that a row the
       // list scope admits but `canReadApprovalInstance` refuses is absent from the CSV (with its

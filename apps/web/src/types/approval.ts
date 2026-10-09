@@ -573,6 +573,19 @@ export interface UnifiedApprovalDTO {
    * tab; callers must treat that as "no dot", never guess a value.
    */
   isRead?: boolean
+  /**
+   * 抄送我的 unread (test report 2026-10-08): populated ONLY on the 抄送我的 (cc) tab and only while
+   * the server's CC-badge switch is on — `true` when the viewer has not opened this row since the
+   * newest CC targeting them. `undefined` everywhere else; callers treat that as "no dot".
+   */
+  ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08): populated ONLY on the 我发起的 (mine) tab and only
+   * while the server's outcome-badge switch is on — `true` when the viewer's own request was decided
+   * (approved / rejected / revoked / cancelled) by someone else and not opened since.
+   * `undefined` everywhere else ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }
