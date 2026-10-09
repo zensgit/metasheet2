@@ -1417,6 +1417,14 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # targeted run line. It matches exactly one spec file, and a bidirectional substring scan against
 # every token in this file finds no token that contains it or is contained by it (the
 # `approval-center*` and `approval-comments-*` tokens are the closest neighbours).
+# #5597 refresh (2026-10-09): FOUR tokens added at the end of this exec line —
+# `IntegrationK3WiseSetupView`, `IntegrationPipelineRunSection`, `IntegrationWorkbenchView`,
+# `integrationErrorCodeLabels`. They are the four specs that PR introduced on 2026-09-10 for the
+# 数据工厂 K3 write-back copy change (the K3 setup view, the pipeline run section, the workbench view,
+# and the human-readable error-code labels); none of them had been registered, so the lane never ran
+# them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
+# and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
+# The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1869,4 +1877,8 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
+  IntegrationK3WiseSetupView \
+  IntegrationPipelineRunSection \
+  IntegrationWorkbenchView \
+  integrationErrorCodeLabels \
   --reporter=dot
