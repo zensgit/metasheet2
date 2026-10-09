@@ -1300,3 +1300,125 @@ describe('ApprovalDetailView — T4cd platform /history rows (snake_case + camel
     expect(container!.textContent).not.toContain('user_secret_77')
   })
 })
+
+// -----------------------------------------------------------------------------------------------
+// Test report 2026-10-08 T4b — the 表单信息 「人员」 (user) field. Its value is stored as member ids,
+// and the detail page printed them verbatim. UUID-shaped fixtures, so the discriminating negative
+// ("the id never appears anywhere in the page") has a matching positive control (the same id renders
+// the resolved name once the directory resolver returns one).
+// -----------------------------------------------------------------------------------------------
+describe('ApprovalDetailView — T4b form user (人员) values render names, never ids', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const OWNER = '5b9e2d47-8c13-4f6a-9b20-7e1d3c5a8f42'
+  const MEMBER = 'c41f7a92-3d58-4b6e-a017-2f9d8e6b3c15'
+
+  beforeEach(() => {
+    mockRouteParams.id = 'apv_1'
+    createApprovalCommentsClientSpy.mockClear()
+    mockHistory.value = []
+    mockLoading.value = false
+    mockCanAct.value = false
+    mockApprovalMobileFlag.value = false
+    mockDetailActiveTemplate.value = null
+    mockDetailActiveVersion.value = null
+    setViewport(false)
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    pushSpy.mockClear()
+    mockCurrentUserId.value = null
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of ['ElDivider', 'ElEmpty', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElInput', 'ElTag']) {
+      app.component(name, stub(name))
+    }
+    app.component('ElDialog', ElDialog)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi(12)
+  }
+
+  function userFieldInstance(formSnapshot: Record<string, unknown>): any {
+    return baseInstance({
+      formSchema: {
+        fields: [
+          { id: 'fld_owner', type: 'user', label: '人员' },
+          { id: 'fld_members', type: 'user', label: '参与人', props: { selection: 'multi' } },
+          { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'who', type: 'user', label: '负责人' }] },
+        ],
+      },
+      formSnapshot,
+    })
+  }
+
+  function formValue(label: string): string | undefined {
+    const row = Array.from(container!.querySelectorAll('.approval-detail__field'))
+      .find((el) => el.querySelector('.approval-detail__label')?.textContent?.trim() === label)
+    return row?.querySelectorAll('span')[1]?.textContent?.trim()
+  }
+
+  it('the 表单信息 人员 field shows the directory-resolved name, and the stored id appears nowhere on the page', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: OWNER, name: '王五' }])
+    mockActiveApproval.value = userFieldInstance({ fld_owner: OWNER })
+    await mountView()
+
+    expect(formValue('人员')).toBe('王五')
+    expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(OWNER)
+    expect(container!.textContent).not.toContain(OWNER)
+  })
+
+  it('an id the directory cannot name (inactive or nameless account) shows 未知用户 — still never the id', async () => {
+    mockActiveApproval.value = userFieldInstance({ fld_owner: OWNER })
+    await mountView()
+
+    expect(formValue('人员')).toBe('未知用户')
+    expect(container!.textContent).not.toContain(OWNER)
+  })
+
+  it('a multi-person value and a 明细 person column resolve the same way; a historical {id, name} value is named by id, not by its stored name', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: OWNER, name: '王五' }])
+    mockActiveApproval.value = userFieldInstance({
+      fld_owner: { id: OWNER, name: '旧名字' },
+      fld_members: [OWNER, MEMBER],
+      // Lock-2B report §3: display metadata stored with a value is not authoritative — in a 明细
+      // cell too, whatever display keys the stored object carries.
+      items: [{ who: OWNER }, { who: MEMBER }, { who: { id: OWNER, name: '旧名字', displayValue: '旧显示名' } }],
+    })
+    await mountView()
+
+    expect(formValue('人员')).toBe('王五')
+    expect(formValue('参与人')).toBe('王五、未知用户')
+    const cells = Array.from(container!.querySelectorAll('table.approval-detail__detail-table td[data-el-cell="负责人"]'))
+      .map((cell) => cell.textContent?.trim())
+    expect(cells).toEqual(['王五', '未知用户', '王五'])
+    const text = container!.textContent ?? ''
+    expect(text).not.toContain(OWNER)
+    expect(text).not.toContain(MEMBER)
+    expect(text).not.toContain('旧名字')
+    expect(text).not.toContain('旧显示名')
+    expect(text).not.toContain('[object Object]')
+  })
+})

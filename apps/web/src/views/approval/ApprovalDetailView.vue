@@ -1193,7 +1193,9 @@ import {
 import {
   buildDetailRowsForDisplay,
   buildDisplayFields,
+  collectFormUserIds,
   findDetailFieldInSchema,
+  formatUserFieldValue,
   type DetailDisplayColumn,
   type DetailDisplayTable,
   type DisplayField,
@@ -1575,6 +1577,9 @@ const displayFields = computed<DisplayField[]>(() =>
   buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null, {
     attachmentPipelineEnabled: attachmentPipelineEnabled.value,
     isZh: isZh.value,
+    // Test report 2026-10-08 T4b: `user` (人员) values render the directory-resolved name (ensured
+    // by the form-user watch below), never the stored id.
+    resolveUserName: getResolvedUserName,
   }),
 )
 
@@ -1947,6 +1952,15 @@ watch(
     }
     return ids
   },
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
+
+// Test report 2026-10-08 T4b — the member ids held by the form's `user` (人员) values, top-level and
+// 明细 columns, feed the same resolver cache `displayFields` and `formatFieldValue` read from.
+// Kept a watch of its own (side effect, never inside a computed) beside the consolidated one above.
+watch(
+  () => collectFormUserIds(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null),
   (ids) => ensureUserNamesResolved(ids),
   { immediate: true },
 )
@@ -2502,6 +2516,9 @@ function objectDisplayValue(value: Record<string, unknown>): string {
 // single object value above.
 function formatFieldValue(value: unknown, column?: DetailDisplayColumn): string {
   if (value === null || value === undefined) return '-'
+  // Test report 2026-10-08 T4b: a 明细 `user` column renders resolved names exactly like a top-level
+  // `user` field (`formatUserFieldValue`), never the stored id or an embedded name.
+  if (column?.type === 'user') return formatUserFieldValue(value, getResolvedUserName, isZh.value)
   if (Array.isArray(value)) {
     const byValue = column?.options?.length
       ? new Map(column.options.map((opt) => [opt.value, opt.label]))
