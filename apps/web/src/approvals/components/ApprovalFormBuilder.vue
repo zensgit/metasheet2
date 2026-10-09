@@ -213,6 +213,8 @@
       :visibility-options="visibilityOptions"
       :read-only="readOnly"
       :execute="runInspectorCommand"
+      :record-link-catalog="recordLinkCatalog"
+      @retry-record-link-catalog="emit('retry-record-link-catalog')"
     />
   </div>
 </template>
@@ -295,6 +297,7 @@ import type {
   FieldAuthoringDraft,
   TemplateAuthoringDraft,
 } from '../templateAuthoring'
+import type { RecordLinkAuthoringCatalog } from '../recordLinkField'
 import {
   APPROVAL_FORM_FIELD_TYPE_LABELS,
   APPROVAL_FORM_PALETTE_GROUPS,
@@ -318,8 +321,19 @@ const props = withDefaults(
     dragSession?: ApprovalFormDragSession
     /** FB-D4/FB-D5 seam: the ONE production adapter; injectable in tests. */
     adapter?: FormAuthoringAdapter
+    /**
+     * Delta §3.4 / parity ledger deferral (3): the PARENT-OWNED record-link catalog snapshot (F0
+     * gate #2), passed through read-only to the inspector's typed base/sheet pickers. The builder
+     * never fetches it; a load/retry request is re-emitted to the owner.
+     */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   }>(),
-  { readOnly: false, dragSession: undefined, adapter: undefined },
+  {
+    readOnly: false,
+    dragSession: undefined,
+    adapter: undefined,
+    recordLinkCatalog: null,
+  },
 )
 
 const emit = defineEmits<{
@@ -328,6 +342,8 @@ const emit = defineEmits<{
     draft: TemplateAuthoringDraft,
     focusLocalId: string | null,
   ): void
+  /** The inspector asked the catalog owner to (re)load the record-link catalog. */
+  (e: 'retry-record-link-catalog'): void
 }>()
 
 const adapter: FormAuthoringAdapter =

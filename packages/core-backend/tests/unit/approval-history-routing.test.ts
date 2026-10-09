@@ -109,6 +109,13 @@ describe('approval history routing', () => {
             version: 2,
             from_version: 1,
             to_version: 2,
+            // Test report 2026-10-08 T4cd: camelCase copies of the five DTO fields, beside the
+            // unchanged snake_case columns above.
+            actorId: 'user-2',
+            actorName: 'Reviewer Two',
+            occurredAt: '2026-03-26T10:00:00.000Z',
+            fromStatus: 'pending',
+            toStatus: 'approved',
           },
         ],
         page: 2,
@@ -153,6 +160,88 @@ describe('approval history routing', () => {
       expect.stringContaining("metadata->>'commentId' IS NULL"),
       ['inst-1', 1, 1, 'policy_denied'],
     )
+  })
+
+  // Test report 2026-10-08 T4cd. The approval-centre detail page reads `occurredAt` / `actorName` /
+  // `actorId` / `fromStatus` / `toStatus`; the platform branch used to send only the snake_case
+  // columns, so every row rendered no time and 「系统」 as its actor. The real driver hands
+  // `occurred_at` over as a Date — this pins the ISO conversion, the null handling, and that no
+  // snake_case field moves.
+  it('T4cd: platform rows carry camelCase copies (ISO occurredAt from a driver Date) beside the unchanged snake_case fields', async () => {
+    pgState.pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [{ c: 3 }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'rec-created',
+            occurred_at: new Date('2026-10-08T01:02:03.456Z'),
+            actor_id: 'user-requester',
+            actor_name: 'Requester Name',
+            action: 'created',
+            comment: null,
+            from_status: null,
+            to_status: 'pending',
+            version: 1,
+            from_version: null,
+            to_version: 1,
+          },
+          {
+            id: 'rec-cc',
+            occurred_at: new Date('2026-10-08T01:02:03.456Z'),
+            actor_id: 'system',
+            actor_name: 'System',
+            action: 'cc',
+            comment: null,
+            from_status: 'pending',
+            to_status: 'pending',
+            version: 1,
+            from_version: 1,
+            to_version: 1,
+          },
+          {
+            id: 'rec-odd',
+            occurred_at: 'not-a-timestamp',
+            actor_id: null,
+            actor_name: null,
+            action: 'comment',
+            comment: 'x',
+            from_status: null,
+            to_status: null,
+            version: 1,
+            from_version: null,
+            to_version: null,
+          },
+        ],
+      })
+
+    const response = await request(pinned.url()).get('/api/approvals/inst-1/history')
+
+    expect(response.status).toBe(200)
+    const [created, cc, odd] = response.body.data.items as Array<Record<string, unknown>>
+    expect(created).toMatchObject({
+      occurred_at: '2026-10-08T01:02:03.456Z',
+      actor_id: 'user-requester',
+      actor_name: 'Requester Name',
+      from_status: null,
+      to_status: 'pending',
+      occurredAt: '2026-10-08T01:02:03.456Z',
+      actorId: 'user-requester',
+      actorName: 'Requester Name',
+      fromStatus: null,
+      toStatus: 'pending',
+    })
+    // The engine's own actor arrives as stored; turning it into 「系统」 is the client's job.
+    expect(cc).toMatchObject({ actorId: 'system', actorName: 'System', fromStatus: 'pending', toStatus: 'pending' })
+    // A value that is not a valid timestamp is null, never "Invalid Date"; null columns stay null.
+    expect(odd).toMatchObject({ occurredAt: null, actorId: null, actorName: null, fromStatus: null, toStatus: null })
+    expect(odd.occurred_at).toBe('not-a-timestamp')
+    // No metadata key appears for rows that carry none of the whitelisted values.
+    for (const item of [created, cc, odd]) {
+      expect(Object.prototype.hasOwnProperty.call(item, 'metadata')).toBe(false)
+    }
   })
 
   it('requires authentication for approval history', async () => {

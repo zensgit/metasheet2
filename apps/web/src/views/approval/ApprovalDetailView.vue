@@ -1177,6 +1177,7 @@ import {
 } from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import { unknownUserLabel } from '../../approvals/components/approvalPickerLabels'
 import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
@@ -1926,7 +1927,9 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
 // member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view
 // might need to display a name for — every `assignments` row's `assigneeId` (feeds
 // `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
-// `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below). A single
+// `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below) PLUS (test report
+// 2026-10-08 T4cd) the actor id of every history row that stores only that id as its name (feeds
+// `historyActorName`). A single
 // consolidated `watch` (side effect) rather than one per consumer — they draw from overlapping id
 // universes and Vue de-dupes redundant `ensureUserNamesResolved` calls internally anyway. Never
 // inside a `computed` — mutating the resolver's cache from within a computed that itself reads
@@ -1938,6 +1941,9 @@ watch(
     for (const item of store.history) {
       const cancelled = item.metadata?.aggregateCancelled
       if (Array.isArray(cancelled)) for (const id of cancelled) ids.push(String(id))
+      // T4cd: a history row whose stored actor name is only the id (see historyActorIdToResolve).
+      const unnamedActorId = historyActorIdToResolve(item)
+      if (unnamedActorId) ids.push(unnamedActorId)
     }
     return ids
   },
@@ -2237,12 +2243,51 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
   return map[action] ?? action
 }
 
+type HistoryActorFields = { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }
+
+// Test report 2026-10-08 T4cd — the engine's own actor sentinels. Since the platform branch of
+// `/history` started sending its camelCase fields, the stored actor reaches this view as written:
+// `'system'` with the English name 'System' (cc rows and the any-mode aggregate-cancel `sign`
+// rows), and every `system:`-prefixed sentinel — timeout, departure, cancel round, auto-approval —
+// with the sentinel itself as the name. None of them is a person and none may render verbatim;
+// the prefix rule is the server's own (`isSystemSentinelActor`, ApprovalAssigneeResolver.ts).
+function historySystemActorKind(actorId: string | null | undefined): 'autoApproval' | 'system' | null {
+  if (typeof actorId !== 'string') return null
+  if (actorId === 'system:auto-approval') return 'autoApproval'
+  if (actorId === 'system' || actorId.startsWith('system:')) return 'system'
+  return null
+}
+
+// T4cd — a person row whose stored name is the id itself: the writer only had the id (`name ?? email
+// ?? id` at write time for an account with neither, or the `original_approver` auto-approval mode,
+// which stores the approver's id as the name). Such a row is named through the directory resolver
+// (ensured by the consolidated watch below), never by printing the id.
+// A row with NO stored name is deliberately not resolved (gate r1 P2-2). No platform writer stores
+// one (every route falls back to the id); the rows that carry none are a `plm:` instance's upstream
+// rows (`actorName: null`, the UPSTREAM system's user id as `actorId`), and looking such an id up in
+// the local directory could name an unrelated local account. They keep the system fallback.
+function historyActorIdToResolve(item: HistoryActorFields): string | null {
+  const actorId = typeof item.actorId === 'string' ? item.actorId.trim() : ''
+  if (!actorId || historySystemActorKind(actorId)) return null
+  const storedName = (item.actorName ?? '').trim()
+  return storedName === actorId ? actorId : null
+}
+
 // Timeline / record-table actor label. The cancel-round system closure writes a sentinel as BOTH its
-// actor id and actor name (lock:131 「系统终结身份」); it is shown as 「系统」, never as the raw id.
-function historyActorName(item: { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+// actor id and actor name (lock:131 「系统终结身份」); it is shown as 「系统」, never as the raw id —
+// and so, since T4cd, is every other engine sentinel (see historySystemActorKind). A row with no
+// actor fields at all (a server that sends only the snake_case columns) keeps the 「系统」 fallback,
+// and so does a row whose stored name is missing or blank (see historyActorIdToResolve), which
+// would otherwise render an empty label.
+function historyActorName(item: HistoryActorFields): string {
   if (item.metadata?.autoApproved) return t.value.systemAutoApproval
   if (isCancelRoundSystemActor(item.actorId, item.actorName)) return t.value.system
-  return item.actorName ?? t.value.system
+  const systemKind = historySystemActorKind(item.actorId)
+  if (systemKind === 'autoApproval') return t.value.systemAutoApproval
+  if (systemKind === 'system') return t.value.system
+  const unresolvedId = historyActorIdToResolve(item)
+  if (unresolvedId) return getResolvedUserName(unresolvedId) ?? unknownUserLabel(isZh.value)
+  return (item.actorName ?? '').trim() || t.value.system
 }
 
 // The record table's synthetic 结束 row and the 复制摘要 text state the instance's status through the
@@ -2253,10 +2298,13 @@ function instanceStatusLabel(detail: UnifiedApprovalDTO): string {
 }
 
 // G-B2-09: initial-letter avatar for timeline actors — display only, token-styled.
-function actorInitial(item: { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+function actorInitial(item: HistoryActorFields): string {
   if (item.metadata?.autoApproved) return t.value.systemInitial
   if (isCancelRoundSystemActor(item.actorId, item.actorName)) return t.value.systemInitial
-  const name = (item.actorName ?? '').trim()
+  // T4cd: every engine sentinel gets the system avatar; an id-only person row takes its initial
+  // from the label historyActorName shows (resolved name or the values-free fallback), not the id.
+  if (historySystemActorKind(item.actorId)) return t.value.systemInitial
+  const name = (historyActorIdToResolve(item) ? historyActorName(item) : (item.actorName ?? '')).trim()
   return name ? Array.from(name)[0]! : t.value.systemInitial
 }
 

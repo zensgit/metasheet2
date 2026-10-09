@@ -1520,7 +1520,10 @@ async function handleExportCsv(): Promise<void> {
   // file itself is still saved: it is exactly what was asked for at click time.
   const stillSameFeed = () => appliedListFilters.value === filters
   try {
-    const result = await exportApprovalsCsv(filters)
+    // T1: ask the server for user-facing column labels and status words in the language the page
+    // shows RIGHT NOW (read at click time, not captured with the filter snapshot, so a runtime
+    // locale switch is honoured). The file is still the server's bytes, saved as they arrive.
+    const result = await exportApprovalsCsv(filters, { header: 'label', lang: isZh.value ? 'zh' : 'en' })
     saveExportFile(result.blob, result.fileName)
     if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
   } catch (error) {

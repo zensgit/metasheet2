@@ -173,6 +173,19 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustNotContain: ['prop="delegateeUserId"'],
     }],
   },
+  // Test report 2026-10-08 T4cd: once the platform /history rows carry their camelCase actor fields,
+  // the stored actor reaches the timeline as written — engine sentinels, and a person stored with
+  // the id as the name. The actor label resolves the latter through the directory and maps every
+  // sentinel to the system label; it must never fall back to the stored id.
+  {
+    site: 'ApprovalDetailView.vue — 审批记录 actor label (historyActorName: id-only and system-sentinel rows)',
+    coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-detail-record-table.spec.ts', 'a row whose stored name is only the id shows the directory-resolved name, or 未知用户 — never the id'],
+    sourceChecks: [{
+      file: 'src/views/approval/ApprovalDetailView.vue',
+      mustContain: ['function historyActorIdToResolve', 'getResolvedUserName(unresolvedId)', 'function historySystemActorKind'],
+      mustNotContain: ['item.actorName ?? item.actorId', 'item.actorName || item.actorId'],
+    }],
+  },
   // raw-id-render fix (2026-08-19; census 3rd missed site) — the requester-choice submit-time
   // approver picker (Lock-1 §K2). The site the hand-list had NO entry for at all. Fixed to the
   // same contract as ApprovalUserPicker (values-free ordinal + disabled-when-unidentifiable), plus
@@ -437,6 +450,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'conditionFormulaDryRunResult(node.key, branch.edgeKey)'],
+    // T5a (test report 2026-10-08): the branch-delete refusal reason — the node/edge keys are only
+    // the lookup arguments; the rendered text is a fixed business-language sentence
+    // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],
