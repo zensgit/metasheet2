@@ -32,6 +32,22 @@ const GRAPH: RuntimeGraph = {
   policy: { allowRevoke: true },
 }
 
+/** `GRAPH` without its start node — the executor refuses to walk it, so the field must be ABSENT. */
+const START_LESS_GRAPH: RuntimeGraph = {
+  ...GRAPH,
+  nodes: GRAPH.nodes.filter((node) => node.type !== 'start'),
+}
+
+/** `GRAPH` with the cursor node (approval_3) carrying an explicit `allowReturn: false`. */
+const RETURN_DISABLED_AT_CURSOR_GRAPH: RuntimeGraph = {
+  ...GRAPH,
+  nodes: GRAPH.nodes.map((node) => (
+    node.key === 'approval_3'
+      ? { ...node, config: { ...node.config, nodeOperationPolicy: { allowReturn: false } } }
+      : node
+  )),
+}
+
 function row(overrides: Partial<ApprovalInstanceRow> = {}): ApprovalInstanceRow {
   const now = new Date('2026-08-01T10:00:00.000Z')
   return {
@@ -131,6 +147,25 @@ describe('returnableNodeKeys — the detail-read carrier (ApprovalBridgeService 
     expect(dto.formSnapshot).toEqual({ note: 'x' })
     expect(dto.returnableNodeKeys).toEqual(['approval_high'])
   })
+
+  it('a malformed frozen graph (no start node) leaves the field ABSENT — the detail read never fails for it', async () => {
+    // Gate r1 NIT-1: criterion B at carrier level, not only at the helper.
+    const { toUnifiedDTO } = await import('../../src/services/ApprovalBridgeService')
+    let dto: ReturnType<typeof toUnifiedDTO> | null = null
+    expect(() => { dto = toUnifiedDTO(row(), [], START_LESS_GRAPH, { withReturnableNodeKeys: true }) }).not.toThrow()
+    expect(dto).not.toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(dto, 'returnableNodeKeys')).toBe(false)
+  })
+
+  it('a cancel-round row ([] by kind) and an allowReturn:false cursor ([] by policy) both ride the detail read as []', async () => {
+    // Gate r1 P3-1: the builder threads `row.workflow_key`; dropping it would turn the cancel-round
+    // answer back into the trail. The policy answer needs only the graph the builder already holds.
+    const { toUnifiedDTO } = await import('../../src/services/ApprovalBridgeService')
+    expect(toUnifiedDTO(row({ workflow_key: 'approval.cancel-round' }), [], GRAPH, { withReturnableNodeKeys: true }).returnableNodeKeys)
+      .toEqual([])
+    expect(toUnifiedDTO(row(), [], RETURN_DISABLED_AT_CURSOR_GRAPH, { withReturnableNodeKeys: true }).returnableNodeKeys)
+      .toEqual([])
+  })
 })
 
 describe('returnableNodeKeys — the action-response carrier (ApprovalProductService toUnifiedApprovalDTO)', () => {
@@ -194,5 +229,21 @@ describe('returnableNodeKeys — the action-response carrier (ApprovalProductSer
     )
     expect(dto.currentNodeKeys).toEqual(['approval_p1'])
     expect(dto.returnableNodeKeys).toEqual([])
+  })
+
+  it('a malformed frozen graph (no start node) leaves the field ABSENT — the action response never fails for it', async () => {
+    // Gate r1 NIT-1: criterion B at carrier level, not only at the helper.
+    const { toUnifiedApprovalDTO } = await import('../../src/services/ApprovalProductService')
+    let dto: ReturnType<typeof toUnifiedApprovalDTO> | null = null
+    expect(() => { dto = toUnifiedApprovalDTO(row(), [], null, START_LESS_GRAPH) }).not.toThrow()
+    expect(dto).not.toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(dto, 'returnableNodeKeys')).toBe(false)
+  })
+
+  it('a cancel-round row ([] by kind) and an allowReturn:false cursor ([] by policy) both ride the action response as []', async () => {
+    // Gate r1 P3-1: same two answers as the detail read, from the same row column and the same graph.
+    const { toUnifiedApprovalDTO } = await import('../../src/services/ApprovalProductService')
+    expect(toUnifiedApprovalDTO(row({ workflow_key: 'approval.cancel-round' }), [], null, GRAPH).returnableNodeKeys).toEqual([])
+    expect(toUnifiedApprovalDTO(row(), [], null, RETURN_DISABLED_AT_CURSOR_GRAPH).returnableNodeKeys).toEqual([])
   })
 })
