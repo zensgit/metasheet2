@@ -18,6 +18,7 @@
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
       :can-pull="canRunPull"
+      :project-targets="projectTargetList"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
@@ -114,7 +115,7 @@
           @keyup.enter="openProject"
         >
         <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
-             list holds 「这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目」 — so it
+             list holds 「这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目」 — so it
              has to. A directory row is labelled by its own name; a row only this computer's memory
              knows is labelled with the home page's words for that half of the list, verbatim. The
              memory is written only when this page opens a project, so "opened" is literally true. -->
@@ -153,6 +154,38 @@
          the board still answers a foreign tenant's project number with a 404 byte-identical to the
          one an unknown number gets (the server decides that, and its suite asserts it) — what
          changed is only what this tab renders around that refusal. -->
+    <!-- 一个项目一张备料表 (S2, R-36) — THIS PROJECT'S SHEET, said in one line. The projectTarget.read
+         control of the workbench manifest (OPERATE, the board's own tier): rendered only once GET
+         …/projects/:projectNo/target answered, i.e. the server's switch is on. 「直接打开」 deep-links
+         the fill view of the project's OWN sheet; archived reads 「打开(已归档)」 and says who restores
+         it. A caller without the pull right is told to contact a pull operator — never pointed at a
+         button they do not have. -->
+    <section
+      v-if="openedProjectNo && projectTarget"
+      class="sp-board__target"
+      data-testid="stock-prep-project-target-status"
+      :data-target-status="projectTarget.status"
+    >
+      <p class="sp-board__target-line">
+        {{ bi(targetStatusText.zh, targetStatusText.en) }}
+        <span v-if="targetRowsText" class="sp-board__target-rows" data-testid="stock-prep-project-target-rows">{{ targetRowsText }}</span>
+      </p>
+      <p v-if="targetNextText" class="sp-board__hint" data-testid="stock-prep-project-target-next">
+        {{ bi(targetNextText.zh, targetNextText.en) }}
+      </p>
+      <button
+        v-if="projectTargetFillTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-open"
+        @click="openProjectTargetSheet"
+      >
+        {{ projectTarget.status === 'archived'
+          ? bi(targetPlain('open_archived_action').zh, targetPlain('open_archived_action').en)
+          : bi(targetPlain('open_action').zh, targetPlain('open_action').en) }}
+      </button>
+    </section>
+
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
       <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
            button by that name. `run-variant` makes the button actually carry it. See the panel. -->
@@ -166,10 +199,12 @@
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
         :fill-target="composedFillTarget"
+        :target-api="projectTargetApi"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
         @busy-changed="onSyncBusyChanged"
+        @project-target-changed="onProjectTargetChanged"
       />
     </section>
 
@@ -489,11 +524,21 @@ import {
   type StockPreparationProjectBoard,
 } from '../../../services/integration/stockPreparation/projectBoard'
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
+import {
+  createStockPreparationProjectTargetApi,
+  stockPrepProjectTargetFillTarget,
+  type StockPrepProjectTargetList,
+  type StockPrepProjectTargetState,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   STOCK_PREP_CONFIRM_PANEL_NOTE,
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
+  STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS,
   stockPrepBoardErrorPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepHandoffOutcomePlain,
@@ -528,8 +573,13 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * Test seam ONLY (S2) — the project-target client, shared with the composed pull panel. Null in
+     * production: built from `scope`.
+     */
+    projectTargetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null, projectTargetApi: null },
 )
 
 const emit = defineEmits<{
@@ -1020,7 +1070,10 @@ const lastChangedFromPlmText = computed<string>(() => {
 })
 
 /** I-20: 表里有多少行's tooltip, the design's own worked example. */
-const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
+const rowsTooltip: StockPrepPlainText = {
+  zh: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.zh}${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.zh}`,
+  en: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.en} ${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.en}`,
+}
 
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
@@ -1227,6 +1280,7 @@ async function loadDirectory(): Promise<void> {
   try {
     // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
     // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
+    if (home) void loadProjectTargetList()
     directory.value = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
@@ -1292,8 +1346,12 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     handoff.value = null
     handoffNotice.value = ''
     exportEmptyNotice.value = false
+    projectTarget.value = null
   }
   if (!target) return
+  // S2: this project's sheet state — independent of the board read, silent on failure (switch off is
+  // a 404 DISABLED and means "no line", not an error the operator should see).
+  void loadProjectTarget(target)
   if (refresh) {
     refreshing.value = true
     errorCode.value = null
@@ -1532,6 +1590,9 @@ function triggerExportDownload(blob: Blob, filename: string): void {
  * so that read never happens) and a project the board 404s on — where nothing has claimed anything.
  */
 const composedFillTarget = computed(() => {
+  // S2: once the project has its OWN sheet (switch on, registry row), that sheet's fill view is the
+  // destination — the registry is the one authority for "which sheet is this project's" (ADR §3).
+  if (projectTargetFillTarget.value) return projectTargetFillTarget.value
   if (board.value) return board.value.fillTarget ?? null
   return directory.value?.fillTarget ?? null
 })
@@ -1567,6 +1628,77 @@ watch(() => props.projectNo, (next) => {
   projectNoInput.value = target
   void loadBoard(target)
 })
+
+// ── 一个项目一张备料表 (S2, R-36) — the project's own sheet, as the server's registry states it ──────
+
+/** This project's sheet; null = no line (switch off, unreadable, or not loaded yet). */
+const projectTarget = ref<StockPrepProjectTargetState | null>(null)
+/** The tenant's registry rows, for 今天要处理; null = the switch is off or the list was unreadable. */
+const projectTargetList = ref<StockPrepProjectTargetList | null>(null)
+let projectTargetGeneration = 0
+
+function projectTargetClient(): StockPreparationProjectTargetApi {
+  return props.projectTargetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+async function loadProjectTarget(projectNo: string): Promise<void> {
+  const mine = ++projectTargetGeneration
+  try {
+    const state = await projectTargetClient().get(projectNo)
+    if (mine === projectTargetGeneration && openedProjectNo.value === projectNo) projectTarget.value = state
+  } catch {
+    if (mine === projectTargetGeneration) projectTarget.value = null
+  }
+}
+
+async function loadProjectTargetList(): Promise<void> {
+  try {
+    projectTargetList.value = await projectTargetClient().list()
+  } catch {
+    projectTargetList.value = null
+  }
+}
+
+/** The pull panel re-read the sheet after a create or a re-pull — no second request needed. */
+function onProjectTargetChanged(state: StockPrepProjectTargetState | null): void {
+  if (state) {
+    projectTargetGeneration += 1
+    projectTarget.value = state
+  } else if (openedProjectNo.value) {
+    void loadProjectTarget(openedProjectNo.value)
+  }
+}
+
+const projectTargetFillTarget = computed(() => stockPrepProjectTargetFillTarget(projectTarget.value))
+
+function targetPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectTargetPlain(id) ?? { zh: id, en: id }
+}
+
+const targetStatusText = computed<StockPrepPlainText>(() => {
+  const status = projectTarget.value?.status ?? 'absent'
+  return targetPlain(`status_${status}`)
+})
+
+/** Who acts next — never a button this caller does not have. */
+const targetNextText = computed<StockPrepPlainText | null>(() => {
+  const state = projectTarget.value
+  if (!state) return null
+  if (state.status === 'absent') return targetPlain(canRunPull.value && state.may.create ? 'absent_can_create' : 'contact_puller_create')
+  if (state.status === 'archived') return targetPlain(canRunPull.value && state.may.restore ? 'restore_pending' : 'contact_puller_restore')
+  return null
+})
+
+const targetRowsText = computed<string>(() => {
+  const state = projectTarget.value
+  if (!state || state.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText(state)
+  return text ? bi(text.zh, text.en) : ''
+})
+
+function openProjectTargetSheet(): void {
+  emit('open-multitable', projectTargetFillTarget.value)
+}
 
 onMounted(async () => {
   const seeded = (props.projectNo ?? '').trim()
@@ -1892,5 +2024,29 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-3);
+}
+
+/* S2: this project's own sheet, one line. Outlined, never a filled primary (G1). */
+.sp-board__target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sp-board__target-line {
+  margin: 0;
+  color: var(--ms-text-1);
+}
+
+.sp-board__target-rows {
+  margin-left: var(--ms-space-2);
+  color: var(--ms-text-2);
 }
 </style>

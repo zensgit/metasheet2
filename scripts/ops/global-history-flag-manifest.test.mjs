@@ -238,7 +238,28 @@ function globalHistoryFlagsInSource() {
   // Approval center read-state badges (test report 2026-10-08): default-OFF exact-'true' switches,
   // one family by name shape so a new badge switch joins the population as soon as source reads it.
   const approvalBadges = grepFlagTokens('APPROVAL_[A-Z_0-9]+_BADGE_ENABLED')
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges])].sort()
+  // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 S1, R-35): the FIRST flags in this
+  // registry that are read by plugin-integration-core rather than by core-backend (AGENTS.md: every
+  // new env flag is registered here; the ADR §8 names this manifest explicitly). One family by name
+  // shape, scanned in the plugin's lib — the two keys are the switch and the G1 role list. Every
+  // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
+  const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
+    .filter((t) => !t.endsWith('_'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets])].sort()
+}
+
+function grepPluginFlagTokens(pattern) {
+  const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
+  let out = ''
+  try {
+    out = execSync(`grep -rhoE '${pattern}' ${libDir} --include='*.cjs'`, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+  } catch (err) {
+    throw new Error(`could not grep ${pattern} under ${libDir}: ${err.message}`)
+  }
+  return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
@@ -578,5 +599,37 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
     [...allRuleIds].sort(),
     ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
+  )
+})
+
+test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-20261008 S1, R-35): boolean, exact true, danger high, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#stockPreparationProjectSheetsEnabled',
+  )
+  // The predicate the manifest names is the one the plugin reads, and it is the EXACT literal.
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+  assert.equal(isActivated(spec, '1'), false)
+  assert.equal(isActivated(spec, undefined), false)
+})
+
+test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, sourced from its exported parser, not a dependsOn of the switch', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS
+  assert.ok(spec)
+  assert.equal(spec.type, 'list')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   )
 })

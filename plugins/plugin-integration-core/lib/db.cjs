@@ -451,8 +451,28 @@ function createDb({ database, logger } = {}) {
         const statement = transactionIsolationStatement(level)
         await trx.query(statement, [])
       }
+      /**
+       * `SELECT pg_advisory_xact_lock(hashtext($1))` on THIS transaction — a per-key mutex PostgreSQL
+       * releases at COMMIT / ROLLBACK, for "count, then insert under a cap" sequences that have no
+       * row to lock (the handoff cursor locks its row with selectOneForUpdate; a per-tenant cap has
+       * no parent row — stock-preparation-project-target-store.cjs `create` is the first caller).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal, the key
+       * is its ONE parameter and never reaches the SQL text, and `hashtext` keys the lock space by a
+       * string a caller can name (`<table>:<tenant>`) instead of an integer a caller must allocate
+       * (a hash collision only serializes two unrelated callers, it never admits one). The key must
+       * be a non-empty string. Offered ONLY on the transaction handle: `pg_advisory_xact_lock` is
+       * transaction-scoped by definition, so outside a block it would guard nothing.
+       */
+      async function advisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])
+      }
       return callback({
         setTransactionIsolationLevel,
+        advisoryXactLock,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,

@@ -3743,6 +3743,38 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     return (row.rows[0].metadata ?? {}) as Record<string, unknown>
   }
 
+  /**
+   * Test report 2026-10-08 T4cd (owner approval pending under this same 2026-09-20 ruling): `nodeKey`
+   * is a whitelisted single-key projection too, so a row's wire `metadata` carries its STORED node
+   * key beside the keys each case below is about. This builds that expectation from the row read
+   * back from the DB, so every case still pins the WHOLE metadata object.
+   */
+  function withStoredNodeKey(stored: Record<string, unknown>, rest: Record<string, unknown>): Record<string, unknown> {
+    const nodeKey = typeof stored.nodeKey === 'string' ? stored.nodeKey.trim() : ''
+    return nodeKey ? { nodeKey, ...rest } : rest
+  }
+
+  /**
+   * Gate r1 NIT-2: one history row's EXACT wire `metadata`. The route rebuilds it key by key and
+   * omits it entirely when no whitelisted key applies — never `{}` — so an empty expectation asserts
+   * the key is ABSENT; comparing `metadata ?? {}` would also accept a fabricated `{}`. Returns the
+   * shape it asserted, so a caller can pin the branch it means to exercise.
+   */
+  function expectWireMetadata(
+    item: { metadata?: Record<string, unknown> },
+    expected: Record<string, unknown>,
+  ): 'omitted' | 'exact' {
+    if (Object.keys(expected).length === 0) {
+      expect(
+        Object.prototype.hasOwnProperty.call(item, 'metadata'),
+        'no whitelisted key applies: metadata is omitted, never {}',
+      ).toBe(false)
+      return 'omitted'
+    }
+    expect(item.metadata).toEqual(expected)
+    return 'exact'
+  }
+
   async function historyItems(instanceId: string, token: string): Promise<{
     text: string
     items: { action?: string; metadata?: Record<string, unknown> }[]
@@ -3832,12 +3864,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const approveItem = history.items.find((item) => item.action === 'approve')
       expect(approveItem, 'the approve audit row must still be in the timeline').toBeTruthy()
       // The WHOLE metadata object, not just its cancellationOutcome key — this is the assertion a
-      // bare-`metadata` projection fails, because the row also holds nodeKey/approvalMode/…
-      expect(approveItem!.metadata).toEqual({ cancellationOutcome: expectedOutcome })
+      // bare-`metadata` projection fails, because the row also holds approvalMode/aggregateComplete/…
+      // (T4cd: the row's own nodeKey is whitelisted now and crosses as its stored value.)
+      expect(approveItem!.metadata).toEqual(withStoredNodeKey(stored, { cancellationOutcome: expectedOutcome }))
       expect(history.text).toContain(expectedBytes)
       expectNoForbiddenKeys(history.text, 'history')
-      // `nodeKey` exists on BOTH audit rows of this instance and appears nowhere in this response.
-      expect(history.text.includes('"nodeKey"')).toBe(false)
       expect(history.text.includes('cancelRoundDocumentId')).toBe(false)
 
       // ── SURFACE 2: the REFRESH path. F-5's key-set measurement listed 23 keys, none of them this.
@@ -3903,15 +3934,15 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
         const on = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
         const onItem = on.items.find((item) => item.action === 'approve')
-        expect(onItem!.metadata).toEqual({
+        expect(onItem!.metadata).toEqual(withStoredNodeKey(stored, {
           cancellationOutcome: expectedOutcome,
           attachmentIds: ['proj-att-1'],
-        })
+        }))
 
         process.env.APPROVAL_ATTACHMENTS_ENABLED = 'false'
         const off = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
         const offItem = off.items.find((item) => item.action === 'approve')
-        expect(offItem!.metadata).toEqual({ cancellationOutcome: expectedOutcome })
+        expect(offItem!.metadata).toEqual(withStoredNodeKey(stored, { cancellationOutcome: expectedOutcome }))
         expect(off.text.includes('proj-att-1')).toBe(false)
       } finally {
         if (previousFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
@@ -3979,10 +4010,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const blockedHistory = await historyItems(blockedFixture.roundInstanceId, blockedFixture.requesterToken)
       const expiredItem = expiredHistory.items.find((item) => item.action === 'reject')
       const blockedItem = blockedHistory.items.find((item) => item.action === 'reject')
-      expect(expiredItem!.metadata).toEqual({ cancelRoundCloseReason: 'round_expired' })
-      expect(blockedItem!.metadata).toEqual({
+      const expiredStored = await readStoredMetadata(expiredFixture.roundInstanceId, 'reject')
+      expect(expiredItem!.metadata).toEqual(withStoredNodeKey(expiredStored, { cancelRoundCloseReason: 'round_expired' }))
+      expect(blockedItem!.metadata).toEqual(withStoredNodeKey(blockedStored, {
         cancelRoundCloseReason: 'business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
-      })
+      }))
 
       // THE F-4 ASSERTION ITSELF: each token appears on exactly one of the two, so the two
       // responses are no longer byte-identical modulo id/timestamp.
@@ -4094,7 +4126,11 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const humanHistory = await historyItems(human.roundInstanceId, human.requesterToken)
       const humanRejectItem = humanHistory.items.find((item) => item.action === 'reject')
       expect(humanRejectItem, 'the human reject row must be in the timeline').toBeTruthy()
-      expect(Object.prototype.hasOwnProperty.call(humanRejectItem!, 'metadata')).toBe(false)
+      // T4cd: at most the row's own node key crosses — no close-reason key, nothing fabricated. The
+      // human reject row stores its node key, so its wire metadata is exactly `{ nodeKey }`, compared
+      // exactly (gate r1 NIT-2), not through `metadata ?? {}`.
+      expect(typeof humanStored.nodeKey).toBe('string')
+      expect(expectWireMetadata(humanRejectItem!, withStoredNodeKey(humanStored, {}))).toBe('exact')
       expect(humanHistory.text.includes('cancelRoundCloseReason')).toBe(false)
       expect(humanHistory.text.includes('round_expired')).toBe(false)
 
@@ -4162,7 +4198,7 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
       const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
       const approveItem = history.items.find((item) => item.action === 'approve')
-      expect(approveItem!.metadata).toEqual({ cancellationOutcome: expected })
+      expect(approveItem!.metadata).toEqual(withStoredNodeKey(stored, { cancellationOutcome: expected }))
       expect(history.text).toContain(expectedBytes)
 
       const detail = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
@@ -4216,7 +4252,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
       const history = await historyItems(fixture.roundInstanceId, fixture.requesterToken)
       const rejectItem = history.items.find((item) => item.action === 'reject')
-      expect(Object.prototype.hasOwnProperty.call(rejectItem!, 'metadata')).toBe(false)
+      // T4cd: at most the row's own node key crosses; the planted close reason never does. The system
+      // close row stores its node key, so its wire metadata is exactly `{ nodeKey }` (gate r1 NIT-2).
+      expect(typeof stored.nodeKey).toBe('string')
+      expect(expectWireMetadata(rejectItem!, withStoredNodeKey(stored, {}))).toBe('exact')
       expect(history.text.includes('totally-bogus')).toBe(false)
       expect(history.text.includes('cancelRoundCloseReason')).toBe(false)
 
@@ -4331,8 +4370,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
    * grants, so such a requester gets 403 at the guard today; that is an owner-open mount-side / grant
    * decision, not exercised here.
    *
-   * Per-surface `nodeKey` note: the history route rebuilds `metadata` key by key and its SELECT reads
-   * no `node_key`, so `"nodeKey"` is asserted absent on the HISTORY text only; the detail DTO
+   * Per-surface `nodeKey` note (amended, test report 2026-10-08 T4cd): the history route rebuilds
+   * `metadata` key by key and now projects each row's own `nodeKey` as one of those keys (owner
+   * approval pending under the 2026-09-20 whitelist ruling), so every approve row carries its STORED
+   * node key and nothing else besides the outcome on the one redeeming row. The detail DTO
    * legitimately carries `currentNodeKey` and `assignments[].nodeKey`, so the detail assertions are
    * limited to `delegatedFrom` and the forbidden-token list.
    */
@@ -4344,18 +4385,27 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   ): Promise<void> {
     const history = await historyItems(roundInstanceId, requesterToken)
     const approveItems = history.items.filter((item) => item.action === 'approve') as Array<{
+      id?: string | number
       action?: string
       actor_id?: string
       metadata?: Record<string, unknown>
     }>
     expect(approveItems.map((item) => item.actor_id).sort()).toEqual([...expectedApproveActors].sort())
     // Exactly one approve row carries the outcome (the one that redeemed the round); the whitelist
-    // rebuilds `metadata` per key, so a row without it has no `metadata` key at all.
-    const carriers = approveItems.filter((item) => item.metadata !== undefined)
+    // rebuilds `metadata` per key, so every other approve row carries at most its own node key (T4cd).
+    const storedApproves = await pool().query<{ id: string; metadata: Record<string, unknown> | null }>(
+      `SELECT id::text AS id, metadata FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+      [roundInstanceId],
+    )
+    const storedById = new Map(storedApproves.rows.map((row) => [row.id, row.metadata ?? {}]))
+    const carriers = approveItems.filter((item) => item.metadata?.cancellationOutcome !== undefined)
     expect(carriers.length).toBe(1)
-    expect(carriers[0].metadata).toEqual({ cancellationOutcome: expectedOutcome })
+    expect(carriers[0].metadata).toEqual(withStoredNodeKey(storedById.get(String(carriers[0].id)) ?? {}, { cancellationOutcome: expectedOutcome }))
+    for (const other of approveItems.filter((item) => item !== carriers[0])) {
+      // Gate r1 NIT-2: exact — its own stored node key, or no `metadata` key at all, never `{}`.
+      expectWireMetadata(other, withStoredNodeKey(storedById.get(String(other.id)) ?? {}, {}))
+    }
     expectNoForbiddenKeys(history.text, 'history')
-    expect(history.text.includes('"nodeKey"')).toBe(false)
     expect(history.text.includes('delegatedFrom')).toBe(false)
 
     const detail = await detailDto(roundInstanceId, requesterToken)

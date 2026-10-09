@@ -471,6 +471,7 @@ StockPreparationProjectBoard
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts
+StockPreparationProjectTarget
 StockPreparationProjectWorkspaceView
 StockPreparationRail
 StockPreparationScenarioBAcceptance
