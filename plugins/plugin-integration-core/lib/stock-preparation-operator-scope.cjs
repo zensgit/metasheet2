@@ -136,6 +136,11 @@
 //           tenant here would plant a sheet in another tenant's staging project.
 //       13. GET  …/stock-preparation/project-targets   `stockPreparationProjectTargetList`
 //           The tenant's registry rows (handles and enums only; OPERATE).
+//       14. POST …/projects/:projectNo/target/archive  `stockPreparationProjectTargetArchive`
+//       15. POST …/projects/:projectNo/target/restore  `stockPreparationProjectTargetRestore`
+//           S4 (R-38): WRITES to the registry row of the proven tenant — 归档 / 恢复, PULL tier. The
+//           tenant keys the row they flip; a header-fillable tenant here would archive another
+//           tenant's project. Neither touches a sheet, so neither derives a staging project.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

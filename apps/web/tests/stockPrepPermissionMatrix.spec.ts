@@ -292,6 +292,11 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-project-target-status',
   'stock-prep-project-target-create',
   'stock-prep-project-target-list',
+  // S4 (R-38): archive / restore live on 项目备料页's sheet-state line, PULL tier, rendered only on the
+  // state the server says the action fits. Their alignment, both directions, per actor, is asserted
+  // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
+  'stock-prep-project-target-archive',
+  'stock-prep-project-target-restore',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

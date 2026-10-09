@@ -184,6 +184,86 @@
           ? bi(targetPlain('open_archived_action').zh, targetPlain('open_archived_action').en)
           : bi(targetPlain('open_action').zh, targetPlain('open_action').en) }}
       </button>
+      <!-- S4 (ADR §6, register R-38) — 归档代替删除 (Q2). The projectTarget.archive / .restore controls
+           of the workbench manifest (PULL tier): rendered only when the caller holds that capability
+           AND the server says the action fits this sheet's state (`may.archive` / `may.restore`). A
+           caller without the pull right gets no button — the line above already says to contact a
+           pull operator. Pressing asks for the project number to be TYPED before anything is sent. -->
+      <button
+        v-if="canArchiveTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-archive"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('archive')"
+      >{{ bi(targetPlain('archive_action').zh, targetPlain('archive_action').en) }}</button>
+      <button
+        v-if="canRestoreTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-restore"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('restore')"
+      >{{ bi(targetPlain('restore_action').zh, targetPlain('restore_action').en) }}</button>
+      <div
+        v-if="lifecyclePrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-target-lifecycle-prompt"
+        :data-action="lifecyclePrompt"
+      >
+        <p class="sp-board__hint">
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive').zh, targetPlain('confirm_archive').en)
+            : bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}
+        </p>
+        <p v-if="lifecyclePrompt === 'archive'" class="sp-board__hint" data-testid="stock-prep-project-target-lifecycle-remove-vs-archive">
+          {{ bi(targetPlain('remove_vs_archive').zh, targetPlain('remove_vs_archive').en) }}
+        </p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-target-lifecycle-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="lifecycleTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-target-lifecycle-input"
+            :disabled="lifecycleBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-confirm"
+          :disabled="lifecycleBusy || !lifecycleTypedMatches"
+          @click="confirmLifecycle"
+        >
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive_action').zh, targetPlain('confirm_archive_action').en)
+            : bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}
+        </button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-cancel"
+          :disabled="lifecycleBusy"
+          @click="closeLifecyclePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="lifecycleNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-target-lifecycle-result"
+        :data-result="lifecycleNotice.kind"
+      >
+        {{ bi(lifecycleNoticeText.zh, lifecycleNoticeText.en) }}
+        <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
+        <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
+      </p>
     </section>
 
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
@@ -525,8 +605,12 @@ import {
 } from '../../../services/integration/stockPreparation/projectBoard'
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
 import {
+  changeStockPreparationProjectTargetLifecycle,
   createStockPreparationProjectTargetApi,
+  stockPrepProjectNumbersMatch,
   stockPrepProjectTargetFillTarget,
+  type StockPrepProjectLifecycleAction,
+  type StockPrepProjectLifecycleOutcome,
   type StockPrepProjectTargetList,
   type StockPrepProjectTargetState,
   type StockPreparationProjectTargetApi,
@@ -547,7 +631,7 @@ import {
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { canRunStockPrepProjectSync, grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -1347,6 +1431,9 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     handoffNotice.value = ''
     exportEmptyNotice.value = false
     projectTarget.value = null
+    // S4: a question about one project's lifecycle never survives a switch to another project.
+    closeLifecyclePrompt()
+    lifecycleNotice.value = null
   }
   if (!target) return
   // S2: this project's sheet state — independent of the board read, silent on failure (switch off is
@@ -1700,6 +1787,79 @@ function openProjectTargetSheet(): void {
   emit('open-multitable', projectTargetFillTarget.value)
 }
 
+// ── S4 (ADR §6, register R-38) — archive / restore this project's sheet ─────────────────────────────
+//
+// The two controls render iff the caller holds the manifest capability (the PULL tier — the same
+// mirror the server's gate is checked against in StockPreparationProjectArchive.spec.ts) AND the
+// server's `may.*` says the action fits the sheet's current state. The project number must be typed
+// before anything is sent; `changeStockPreparationProjectTargetLifecycle` stops a mismatch locally and
+// the server compares it again.
+
+function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'projectTarget.restore'): boolean {
+  return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
+}
+
+const canArchiveTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'active' && state.may.archive && holdsLifecycleCapability('projectTarget.archive'))
+})
+
+const canRestoreTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'archived' && state.may.restore && holdsLifecycleCapability('projectTarget.restore'))
+})
+
+const lifecyclePrompt = ref<StockPrepProjectLifecycleAction | null>(null)
+const lifecycleTyped = ref('')
+const lifecycleBusy = ref(false)
+const lifecycleNotice = ref<StockPrepProjectLifecycleOutcome | null>(null)
+const lifecycleTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, lifecycleTyped.value))
+
+function openLifecyclePrompt(action: StockPrepProjectLifecycleAction): void {
+  lifecyclePrompt.value = action
+  lifecycleTyped.value = ''
+  lifecycleNotice.value = null
+}
+
+function closeLifecyclePrompt(): void {
+  lifecyclePrompt.value = null
+  lifecycleTyped.value = ''
+}
+
+async function confirmLifecycle(): Promise<void> {
+  const action = lifecyclePrompt.value
+  const projectNo = openedProjectNo.value
+  if (!action || !projectNo || lifecycleBusy.value) return
+  lifecycleBusy.value = true
+  try {
+    const outcome = await changeStockPreparationProjectTargetLifecycle({
+      targetApi: projectTargetClient(),
+      canPull: holdsLifecycleCapability(action === 'archive' ? 'projectTarget.archive' : 'projectTarget.restore'),
+    }, action, projectNo, lifecycleTyped.value)
+    lifecycleNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closeLifecyclePrompt()
+      if (outcome.state && openedProjectNo.value === projectNo) {
+        projectTargetGeneration += 1
+        projectTarget.value = outcome.state
+      } else if (openedProjectNo.value === projectNo) {
+        void loadProjectTarget(projectNo)
+      }
+    }
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
+
+const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = lifecycleNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
 onMounted(async () => {
   const seeded = (props.projectNo ?? '').trim()
   await loadDirectory()
@@ -1914,6 +2074,25 @@ onMounted(async () => {
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* S4: the typed confirmation for archive / restore, inside the sheet-state line. */
+.sp-board__lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__lifecycle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__lifecycle-input {
+  min-width: 10em;
 }
 
 /* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */

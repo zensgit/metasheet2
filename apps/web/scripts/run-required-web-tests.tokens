@@ -467,6 +467,7 @@ StockPreparationOperatorProjectDirectory
 StockPreparationOpsPanel
 StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
+StockPreparationProjectArchive
 StockPreparationProjectBoard
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts

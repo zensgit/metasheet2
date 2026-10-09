@@ -101,6 +101,14 @@
 # Fix round 1 added a FIFTH, `StockPreparationProjectSyncPanel.spec.ts` (the pull panel's own DOM spec,
 # whose panel S2 changes most), in the same `.spec.ts`-suffixed form the required lane uses: it matches
 # exactly one file, and neither it nor `StockPreparationProjectSync.spec.ts` is a substring of the other.
+#
+# 一个项目一张备料表 S4 note (ADR §6, register R-38, 2026-10-09): ONE token added,
+# `StockPreparationProjectArchive` — S4's new spec (archive / restore client, typed confirmation, the
+# board's 「归档项目」 / 「恢复这张表」, the panel's 「恢复并重新拉取」, PA-ALIGN), on the same footing as the
+# notes above and in the same position the required lane gives it. It lives under the `/**` roster
+# entries that already fire this lane. 过滤词唯一: it is a substring of exactly one spec path, the S2
+# token `StockPreparationProjectTarget` is not a substring of it (the reason for the name), and it
+# neither contains nor is contained by any other token here.
 set -euo pipefail
 
 #
@@ -175,6 +183,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationMappingConfirmView \
   StockPreparationOperatorHome \
   StockPreparationPrepLineView \
+  StockPreparationProjectArchive \
   StockPreparationProjectBoard \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \

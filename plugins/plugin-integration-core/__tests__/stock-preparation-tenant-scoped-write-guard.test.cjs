@@ -357,6 +357,12 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetGet',
   'stockPreparationProjectTargetList',
+  // S4 (ADR §6, register R-38). ARCHIVE and RESTORE are WRITES to the registry row of the caller's
+  // own tenant — the tenant the scope proves keys the row they flip, so a header-fillable tenant
+  // here would archive another tenant's project. Neither derives a staging project (they touch no
+  // sheet), so neither is in the inline-staging set below.
+  'stockPreparationProjectTargetArchive',
+  'stockPreparationProjectTargetRestore',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one

@@ -154,6 +154,67 @@
         :disabled="busy"
         @click="onRun"
       >{{ bi(targetPlain('retry_action').zh, targetPlain('retry_action').en) }}</button>
+      <!-- S4 (ADR §4 archived row / §6, register R-38): 「恢复并重新拉取」 — only for a caller with the
+           pull right on a sheet the server says may be restored. It asks for the project number to be
+           TYPED, restores, then runs this same pull again (which now finds the sheet active and asks
+           the 「重新拉取」 question). Anyone else reads 「请联系拉取人员恢复」 in the line above. -->
+      <button
+        v-if="targetNotice.kind === 'archived' && targetNotice.mayRestore && canRun && !restorePrompt"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-restore"
+        :disabled="busy"
+        @click="openRestorePrompt"
+      >{{ bi(targetPlain('restore_and_repull_action').zh, targetPlain('restore_and_repull_action').en) }}</button>
+    </p>
+    <div
+      v-if="restorePrompt"
+      class="sp-sync__target-prompt"
+      role="group"
+      data-testid="stock-prep-project-sync-restore-prompt"
+    >
+      <p class="sp-sync__target-line">{{ bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}</p>
+      <label class="sp-sync__field">
+        <span class="sp-sync__label">
+          {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+          <strong data-testid="stock-prep-project-sync-restore-project-no">{{ submittedProjectNo }}</strong>
+        </span>
+        <input
+          v-model="restoreTyped"
+          type="text"
+          class="sp-sync__input"
+          data-testid="stock-prep-project-sync-restore-input"
+          :disabled="busy"
+          :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+        />
+      </label>
+      <div class="sp-sync__target-actions">
+        <button
+          type="button"
+          class="sp-sync__link"
+          data-testid="stock-prep-project-sync-restore-confirm"
+          :disabled="busy || !restoreTypedMatches"
+          @click="onRestoreAndRepull"
+        >{{ bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}</button>
+        <button
+          type="button"
+          class="sp-sync__link"
+          data-testid="stock-prep-project-sync-restore-cancel"
+          :disabled="busy"
+          @click="closeRestorePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+    </div>
+    <p
+      v-if="restoreRefusal"
+      class="sp-sync__target-notice"
+      role="status"
+      data-testid="stock-prep-project-sync-restore-refused"
+      :data-result="restoreRefusal.kind"
+    >
+      {{ bi(restoreRefusalText.zh, restoreRefusalText.en) }}
+      <span v-if="restoreRefusalText.zhNext" class="sp-sync__verdict-next">{{ bi(restoreRefusalText.zhNext, restoreRefusalText.enNext ?? '') }}</span>
+      <code v-if="restoreRefusal.kind === 'refused' && restoreRefusal.code" class="sp-sync__token">{{ restoreRefusal.code }}</code>
     </p>
 
     <!-- The row-refresh explanation. It appears only when a row's 刷新 armed this panel, because
@@ -492,10 +553,13 @@ import {
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
+  changeStockPreparationProjectTargetLifecycle,
   createStockPreparationProjectTargetApi,
   repairStockPreparationProjectSheet,
   runStockPreparationProjectPull,
+  stockPrepProjectNumbersMatch,
   stockPrepProjectSheetRepairAffordance,
+  type StockPrepProjectLifecycleOutcome,
   type StockPrepProjectPullOutcome,
   type StockPrepProjectTargetConfirmRequest,
   type StockPrepProjectTargetState,
@@ -780,6 +844,55 @@ function resetRunState(): void {
   afterState.value = null
   lastRunOnProjectSheet.value = false
   missingComponentsCopyState.value = 'idle'
+  restorePrompt.value = false
+  restoreTyped.value = ''
+  restoreRefusal.value = null
+}
+
+// ── S4 (R-38) — 「恢复并重新拉取」 ───────────────────────────────────────────────────────────────────
+const restorePrompt = ref(false)
+const restoreTyped = ref('')
+const restoreRefusal = ref<Exclude<StockPrepProjectLifecycleOutcome, { kind: 'done' }> | null>(null)
+const restoreTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(submittedProjectNo.value, restoreTyped.value))
+
+function openRestorePrompt(): void {
+  restorePrompt.value = true
+  restoreTyped.value = ''
+  restoreRefusal.value = null
+}
+
+function closeRestorePrompt(): void {
+  restorePrompt.value = false
+  restoreTyped.value = ''
+}
+
+const restoreRefusalText = computed<StockPrepPlainEntry>(() => {
+  const refusal = restoreRefusal.value
+  if (!refusal) return { zh: '', en: '' }
+  if (refusal.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (refusal.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(refusal.code ?? '')
+})
+
+/** RESTORE, then this same pull again — the restored sheet is active, so the run asks 「重新拉取」. */
+async function onRestoreAndRepull(): Promise<void> {
+  const target = submittedProjectNo.value
+  if (!target || busy.value || !canRun.value) return
+  busy.value = true
+  let outcome: StockPrepProjectLifecycleOutcome
+  try {
+    outcome = await changeStockPreparationProjectTargetLifecycle({ targetApi: resolveTargetApi(), canPull: canRun.value }, 'restore', target, restoreTyped.value)
+  } finally {
+    busy.value = false
+  }
+  if (outcome.kind !== 'done') {
+    restoreRefusal.value = outcome
+    return
+  }
+  closeRestorePrompt()
+  emit('project-target-changed', outcome.state)
+  projectNo.value = target
+  await onRun()
 }
 
 const afterRowsText = computed<string>(() => {
