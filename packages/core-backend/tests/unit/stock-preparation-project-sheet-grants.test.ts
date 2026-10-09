@@ -20,6 +20,11 @@
  *        the strict hook cannot grant at all. Only after all six does the host method run, with the
  *        normalized role list.
  *   G-07 the history entity id matches the operator route's `permissionConfigEntityId` shape.
+ *   G-08 (R5) THE WRAPPER hands the port to `plugin-integration-core` ONLY: any other plugin name
+ *        gets `undefined` (never a throw), host or no host; the rest of its scoped surface is intact.
+ *   G-09 (E2f) THE ROLE-ID RULE IS ANCHORED: a namespace-prefixed id with an unexpected trailing or
+ *        embedded character (space, `;`, `/`, newline, non-ASCII, a bare `stock-prep_`, an over-long
+ *        suffix) is refused with its own code; the shipped shapes pass unchanged.
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -195,10 +200,11 @@ describe('plugin-scope grantSheetRoleWrite wrapper (G1)', () => {
   // `assertSheetOwnedByPlugin: null` means "the host provides NO strict hook" (a default parameter
   // would re-create the hook on an explicit `undefined`, which is how an earlier cut of case 5b
   // tested nothing).
-  function build({ withHost = true, assertSheetOwnedByPlugin = vi.fn(async () => {}), isSheetOwnedByProject = vi.fn(async () => true) }: {
+  function build({ withHost = true, assertSheetOwnedByPlugin = vi.fn(async () => {}), isSheetOwnedByProject = vi.fn(async () => true), pluginName = PLUGIN }: {
     withHost?: boolean
     assertSheetOwnedByPlugin?: ((input: { pluginName: string; sheetId: string }) => Promise<void>) | null
     isSheetOwnedByProject?: (input: { sheetId: string; projectId: string }) => Promise<boolean>
+    pluginName?: string
   } = {}) {
     const host = vi.fn(async (input: { sheetId: string; roleIds: string[] }) => ({ sheetId: input.sheetId, granted: [...input.roleIds], alreadyGranted: [] }))
     const multitable = {
@@ -212,13 +218,53 @@ describe('plugin-scope grantSheetRoleWrite wrapper (G1)', () => {
     const hooks = assertSheetOwnedByPlugin === null
       ? { isSheetOwnedByProject }
       : { assertSheetOwnedByPlugin, isSheetOwnedByProject }
-    const scoped = createPluginScopedMultitableApi(multitable as never, PLUGIN, hooks)
+    const scoped = createPluginScopedMultitableApi(multitable as never, pluginName, hooks)
     return { scoped, host, assertSheetOwnedByPlugin, isSheetOwnedByProject }
   }
 
   it('is exposed iff the host exposes it', () => {
     expect(typeof build({ withHost: true }).scoped.provisioning.grantSheetRoleWrite).toBe('function')
     expect(build({ withHost: false }).scoped.provisioning.grantSheetRoleWrite).toBeUndefined()
+  })
+
+  it('G-08 (R5) is handed to plugin-integration-core ONLY: another plugin name gets no port (undefined, not a throw), host or no host', () => {
+    for (const other of ['plugin-attendance', 'plugin-after-sales', 'plugin-integration-core-fork', 'Plugin-Integration-Core']) {
+      const withHost = build({ withHost: true, pluginName: other })
+      expect(withHost.scoped.provisioning.grantSheetRoleWrite, other).toBeUndefined()
+      expect('grantSheetRoleWrite' in withHost.scoped.provisioning, other).toBe(false)
+      expect(withHost.host).not.toHaveBeenCalled()
+      expect(build({ withHost: false, pluginName: other }).scoped.provisioning.grantSheetRoleWrite, other).toBeUndefined()
+      // The rest of that plugin's scoped provisioning surface is untouched.
+      expect(typeof withHost.scoped.provisioning.ensureObject).toBe('function')
+    }
+    expect(typeof build({ pluginName: 'plugin-integration-core' }).scoped.provisioning.grantSheetRoleWrite).toBe('function')
+  })
+
+  it('G-09 (E2f) the role-id rule is anchored: shipped shapes pass, an unexpected trailing or embedded character is refused', () => {
+    expect(normalizeStockPreparationGrantRoleIds(['stock-prep', 'stock-prep_frontline', 'stock-prep_s1test_0a1b2c3d4e_a', 'stock-prep_x-y', ' stock-prep_puller ']))
+      .toEqual(['stock-prep', 'stock-prep_frontline', 'stock-prep_s1test_0a1b2c3d4e_a', 'stock-prep_x-y', 'stock-prep_puller'])
+    for (const bad of [
+      'stock-prep_x;DROP TABLE roles',
+      'stock-prep_x y',
+      'stock-prep_x/../admin',
+      'stock-prep_x\ny',
+      'stock-prep_x.admin',
+      'stock-prep_é',
+      'stock-prep_',
+      'stock-prep__',
+      'stock-prep_-x',
+      `stock-prep_${'a'.repeat(65)}`,
+    ]) {
+      expect(() => normalizeStockPreparationGrantRoleIds([bad]), JSON.stringify(bad)).toThrow(StockPreparationProjectSheetGrantError)
+      expect(() => normalizeStockPreparationGrantRoleIds([bad]), JSON.stringify(bad)).toThrow(expect.objectContaining({ status: 422, code: 'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_ID_INVALID' }))
+    }
+    // The 64-character suffix is the edge that still passes; outside the namespace keeps its own code.
+    expect(normalizeStockPreparationGrantRoleIds([`stock-prep_${'a'.repeat(64)}`])).toHaveLength(1)
+    expect(() => normalizeStockPreparationGrantRoleIds(['stock-prepx'])).toThrow(expect.objectContaining({ code: 'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_OUTSIDE_NAMESPACE' }))
+    // Values-free: the refused id is not echoed in the details.
+    try { normalizeStockPreparationGrantRoleIds(['stock-prep_x;DROP']) } catch (error) {
+      expect(JSON.stringify((error as StockPreparationProjectSheetGrantError).details)).not.toContain('DROP')
+    }
   })
 
   it('G-06 refuses, in order, before the host method runs', async () => {

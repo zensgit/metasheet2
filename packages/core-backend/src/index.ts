@@ -1112,7 +1112,10 @@ export class MetaSheetServer {
           // history row); every refusal propagates unwrapped so the plugin route sees `.status` /
           // `.code`. The plugin-scope wrapper in front of this has already refused everything about
           // WHICH sheet (shape, derivation, registry ownership by plugin and by project); this binds
-          // only the DATA (services/stock-preparation-project-sheet-grants.ts).
+          // only the DATA (services/stock-preparation-project-sheet-grants.ts). The wrapper also hands
+          // the port to plugin-integration-core ONLY (plugin-scope.ts, R5 — the same posture as
+          // `stockPreparationFieldPermissions` below): every other plugin's scoped api has no
+          // `grantSheetRoleWrite` at all, even though this shared host api carries it.
           grantSheetRoleWrite: async ({ sheetId, roleIds, actorId }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery = async (sql: string, params?: unknown[]) => {

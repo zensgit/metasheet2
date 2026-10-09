@@ -12,8 +12,9 @@
  *
  *   * role subjects ONLY — never a user, never a member group;
  *   * every role id inside the `stock-prep` role namespace (`stock-prep` or `stock-prep_…`, the
- *     same rule `roleIdMatchesNamespace` applies to delegated role assignment), and every role
- *     must exist;
+ *     same rule `roleIdMatchesNamespace` applies to delegated role assignment) AND well-formed end
+ *     to end (E2f: the id is matched against an ANCHORED pattern, so `stock-prep_x<anything>` is
+ *     not a role id just because it starts right), and every role must exist;
  *   * the level is the literal `spreadsheet:write`, fixed here and nowhere else — NOT read, because
  *     the first grant row on a sheet switches it to intersection mode and a read-only row would
  *     stop the floor from entering values (frontline plan); NOT admin;
@@ -23,8 +24,11 @@
  *     derived for (the plugin's own project, that objectId) AND which the registry records as this
  *     plugin's and this project's. A hand-named sandbox twin, the canonical main table and another
  *     tenant's sheet all fail before any statement;
- *   * every grant that lands writes a config-revision row (entity `permission`, keyed by sheet and
- *     role) — the same history the operator-facing grant route writes.
+ *   * every grant that lands AND changes the role's level writes a config-revision row (entity
+ *     `permission`, keyed by sheet and role) — the same history the operator-facing grant route
+ *     writes. A role that already held a HIGHER level (admin) gets the write row (reported as
+ *     granted) and no history row, because the grant changed nothing the history can describe
+ *     (E3; pinned by G-04).
  *
  * KNOWN COST, stated: table-level `spreadsheet:write` also opens field and view management on that
  * one sheet (permission-service applySheetPermissionScope). The floor already holds exactly that
@@ -36,6 +40,14 @@ export const STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN = /^plm_stock_pre
 
 /** The role namespace a grantable role must sit in (`stock-prep` or `stock-prep_<x>`). */
 export const STOCK_PREPARATION_ROLE_NAMESPACE = 'stock-prep'
+
+/**
+ * THE WHOLE ID, ANCHORED (E2f). The namespace alone, or the namespace, one underscore and a suffix
+ * that starts alphanumeric and continues with [A-Za-z0-9_-] for at most 64 characters. A prefix
+ * test alone admitted `stock-prep_x<request-derived suffix>`; this is the shape every role id this
+ * repository seeds in the namespace has (`stock-prep_frontline`, `stock-prep_s1test_<hex>_a`).
+ */
+export const STOCK_PREPARATION_GRANT_ROLE_ID_PATTERN = new RegExp(`^${STOCK_PREPARATION_ROLE_NAMESPACE}(?:_[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$`)
 
 /** THE ONE permission level this port can write. A literal, never a parameter. */
 export const STOCK_PREPARATION_PROJECT_SHEET_GRANT_PERM_CODE = 'spreadsheet:write' as const
@@ -79,6 +91,16 @@ export function normalizeStockPreparationGrantRoleIds(roleIds: unknown): string[
         'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_OUTSIDE_NAMESPACE',
         `a project-sheet grant may name only roles in the "${STOCK_PREPARATION_ROLE_NAMESPACE}" namespace`,
         { field: 'roleIds', roleId: id, namespace: STOCK_PREPARATION_ROLE_NAMESPACE },
+      )
+    }
+    // E2f: inside the namespace by prefix is not enough — the WHOLE id must have the role-id shape.
+    // Values-free details: the id is not echoed (it is the thing we just refused to trust).
+    if (!STOCK_PREPARATION_GRANT_ROLE_ID_PATTERN.test(id)) {
+      throw new StockPreparationProjectSheetGrantError(
+        422,
+        'STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_ID_INVALID',
+        `a role id in the "${STOCK_PREPARATION_ROLE_NAMESPACE}" namespace must be the namespace alone, or the namespace, an underscore and an alphanumeric suffix ([A-Za-z0-9_-], at most 64 characters)`,
+        { field: 'roleIds', namespace: STOCK_PREPARATION_ROLE_NAMESPACE },
       )
     }
     if (!out.includes(id)) out.push(id)

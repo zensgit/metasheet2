@@ -307,6 +307,14 @@ export async function assertPluginOwnsObject(
   return true
 }
 
+/**
+ * R5 (S1 fix round 1): the ONE plugin whose scoped api carries the G1 grant port. Mirrors how
+ * index.ts hands `stockPreparationFieldPermissions` / `dataSources` to `plugin-integration-core`
+ * alone: a port that writes authorization rows is a capability boundary, not a type description,
+ * so every other plugin's scoped api simply has no `grantSheetRoleWrite` (undefined, never a throw).
+ */
+const STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN = 'plugin-integration-core'
+
 export function createPluginScopedMultitableApi(
   multitable: MultitableAPI,
   pluginName: string,
@@ -515,8 +523,10 @@ export function createPluginScopedMultitableApi(
         : {}),
       // G1 (R-35): the project-sheet role grant — an AUTHORIZATION write, so it takes MORE than the
       // two assertions every other write here takes. Exposed iff the host exposes it (the optional-
-      // capability idiom above). Every value is read ONCE and the checked values are what the host
-      // receives. Order, each refusing before the next does any IO:
+      // capability idiom above) AND the plugin is `plugin-integration-core` (R5: the same least-
+      // privilege posture index.ts applies to the field-permissions port — every other plugin gets
+      // no port at all, `undefined`, and so cannot even ask). Every value is read ONCE and the
+      // checked values are what the host receives. Order, each refusing before the next does any IO:
       //   1. project namespace (pure);
       //   2. the role list is well-formed and entirely inside the `stock-prep` namespace (pure);
       //   3. the objectId has the project-sheet shape (pure) — the canonical main table and a
@@ -528,6 +538,7 @@ export function createPluginScopedMultitableApi(
       //   6. the registry records the sheet as THIS project's (the same boolean port the tenant
       //      wall uses, never an owner id).
       ...(typeof multitable.provisioning?.grantSheetRoleWrite === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
         ? {
             grantSheetRoleWrite: async (input: {
               projectId: string

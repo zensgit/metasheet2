@@ -20,9 +20,14 @@
  *   * `user_id` IS NULL — the row shape the subjects migration (zzzz20260406030000) gives a non-user
  *     subject, so `listSheetPermissionEntries` and the grid's scope loader read it exactly like a
  *     grant the operator route wrote.
- *   * EVERY LANDED GRANT HAS A HISTORY ROW (`meta_config_revisions`, entity `permission`, keyed by
- *     sheet + ('role', roleId)) in the SAME transaction, so a grant and its record commit or roll
- *     back together — the T9-L4 rule the operator route follows.
+ *   * A HISTORY ROW PER LANDED GRANT THAT CHANGES THE ROLE'S LEVEL (`meta_config_revisions`, entity
+ *     `permission`, keyed by sheet + ('role', roleId)) in the SAME transaction, so a grant and its
+ *     record commit or roll back together — the T9-L4 rule the operator route follows. The one
+ *     landed row WITHOUT a history row: a role that already held a HIGHER level (admin). It gets
+ *     the write row, is reported in `granted`, and its derived level is unchanged, so there is
+ *     nothing the history could describe (E3; G-04 pins both halves). Chosen over an unconditional
+ *     row because a revision whose before and after are identical is noise the operator route
+ *     never writes either.
  *
  * WHAT THE WRAPPER ALREADY PROVED BEFORE THIS RUNS (multitable/plugin-scope.ts `grantSheetRoleWrite`):
  * the plugin's project namespace, the role-namespace rule, the project-sheet objectId shape, that
