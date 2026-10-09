@@ -687,10 +687,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     activationValue: 'true',
     dependsOn: [],
     conflictsWith: [],
-    danger: 'low',
+    // ASSUMPTION(task-m4): [own-28] danger raised from low: turning this on now depends on a
+    // migration that is not applied yet. The purpose names all four route prefixes it mounts.
+    danger: 'medium',
     purpose:
-      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds).',
-    source: 'packages/core-backend/src/routes/tasks.ts:35',
+      'Mounts the task routes: /api/tasks (P0-A/P0-B), /api/task-settings, /api/task-lists and /api/task-groups (M4). Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode registers none of them. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds). Since M4 PR-3a the task routes read task_list_items, task_list_members and task_user_settings, so any environment that sets this to true must have the M4 migration (zzzz20261009130000_create_task_m4_tables) applied; without it the task routes answer 500.',
+    source: 'packages/core-backend/src/routes/tasks.ts#tasksRouter; packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled',
   },
   {
     key: 'APPROVAL_CC_UNREAD_BADGE_ENABLED',
