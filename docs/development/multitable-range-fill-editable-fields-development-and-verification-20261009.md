@@ -2,6 +2,8 @@
 
 日期：2026-10-09。关联 [PR #6271](https://github.com/zensgit/metasheet2/pull/6271)，分支 `codex/multitable-range-fill-20261008`。本报告覆盖用户追加的多选、人员及其他可编辑字段拖动复制，扩展契约见[设计锁](multitable-range-fill-editable-fields-design-lock-20261009.md)。原始范围填充的 G1–G7 证据保留在[原验证报告](multitable-range-fill-verification-20261009.md)。
 
+后续镜像构建参数接线、main 同步和 staging 准备见[构建交付验证](multitable-range-fill-build-readiness-20261009.md)；以下 737 项是字段扩展实现当轮的本地证据，不代替后续提交 CI。
+
 ## 实现范围
 
 | 字段组 | 支持内容 |

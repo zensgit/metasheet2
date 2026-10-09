@@ -23,3 +23,13 @@ Date: 2026-10-09. Owner follow-up to PR #6271: support multi-select and people, 
 | E6 | Independent code review, development/verification MD and updated Draft PR; report CI separately for the new head, never reuse earlier green checks as new-head evidence |
 
 The user authorized this functional extension. Merge, staging/production deployment and feature enablement are separate release actions.
+
+## Build delivery follow-up
+
+The existing frontend image must accept the already registered build-time flag `VITE_MULTITABLE_RANGE_FILL_ENABLED`, defaulting to `false`. The staging image builder accepts only literal `true` or `false`; an unset value remains disabled. Enabled builds require `STAGING_DEPLOY_SCOPE=full` and forward the flag only to the frontend build. Invalid values and enabled backend-only builds fail before any image build, using fixed messages that do not echo the supplied value. Default/explicit-false build arguments and provenance stay unchanged. Runtime container environment changes do not enable a Vite build-time feature.
+
+| Gate | Required evidence |
+| --- | --- |
+| E7 | Executable builder tests for default/false parity, true frontend-only forwarding, invalid-value and wrong-scope refusal; Dockerfile argument/environment before web build; existing two frontend test lists preserved after main sync; independent review |
+
+This follow-up prepares an opt-in build; it does not authorize publishing, deployment, shared-runner configuration changes or feature activation. Staging acceptance requires a reachable target, exact image identity, a disposable synthetic dataset and refresh-persistence verification. Preserve the previous image IDs and flag state for rollback.
