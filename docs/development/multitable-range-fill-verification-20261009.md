@@ -2,7 +2,7 @@
 
 日期：2026-10-09（Asia/Taipei）。[PR #6271](https://github.com/zensgit/metasheet2/pull/6271)，分支 `codex/multitable-range-fill-20261008`。契约见[设计锁](multitable-range-fill-design-lock-20261008.md)，实现和使用方式见[开发说明](multitable-range-fill-development-20261009.md)。
 
-**结论：本地实现与独立复核通过；远端 CI、真实后端验收、合并和部署尚未完成。** 功能默认关闭，只在构建时精确设置 `VITE_MULTITABLE_RANGE_FILL_ENABLED=true` 才启用。
+**结论：本地实现、独立复核及真实 JWT / PostgreSQL API 验收通过；新增规格的远端 CI 尚待完成，浏览器直连后端、staging、合并和部署未验收。** 功能默认关闭，只在构建时精确设置 `VITE_MULTITABLE_RANGE_FILL_ENABLED=true` 才启用。下述 CI 为文档提交时快照，最终状态以对应提交的运行记录为准。
 
 ## 验证对象
 
@@ -11,6 +11,7 @@
 - 本轮修复、浏览器脚本和截图提交：`74af99627c1068f777019568684dbf06bbf90168`。文档提交为 `d5ee37e48d7de1aa947d4199ca0328142817aec1`；随后在功能分支同步 main 并重跑验证，核心文件哈希不变。
 - 已同步的 `origin/main`：`fc139c868ea9ceba8c15eb133437342bfcedbbe9`。唯一人工冲突位于开关登记表，保留 main 的两个审批提示开关和本功能开关；49 个开关定义与 557 个 required 测试条目均核对为两边完整并集。未把功能 PR 合入 main。
 - 独立 worktree 内完成修改；未修改其他功能分支的源码、共享 runner 变量或部署配置。
+- 真实后端规格及 CI 接线提交：`8bbe8d3c5d`，应用源码和上列基线保持不变；随后只更新本组文档。
 
 复核并恢复变异后的核心文件 SHA-256：
 
@@ -37,8 +38,9 @@
 | G2 网格交互 | 42 项真实组件测试；Chromium 八步操作、真实剪贴板、截图检查 | 本地通过；浏览器 writer 为合成内存实现 |
 | G3 安全边界 | 9 项开关测试；权限、只读、锁定、隐藏、过期版本/上下文、异步取消负例 | 本地通过 |
 | G4 原子写入 | 82 项：单次请求、版本、完整响应、确认值投影、403/409/422、网络失败、互斥、导航及实时数据 | 本地通过；传输为 mock |
-| G5 接线与回归 | 190 项相邻前端；5 项前端清单检查；63 项后端清单守卫；52 项已有后端写入测试；38 项开关登记检查 | 同步 main 后本地通过；远端 CI 未通过验收 |
+| G5 接线与回归 | 190 项相邻前端；5 项前端清单检查；63 项后端清单守卫；52 项已有后端写入测试；38 项开关登记检查 | 同步 main 后本地通过；`fa99d518...` 两个前端 CI 通过，新增规格的当前提交 CI 待验收 |
 | G6 独立复核 | 新守卫变异造成 4 项失败，恢复后 213 项功能测试通过；应用类型检查与 Vite 打包通过 | 本地通过；完整质量链限制见下文 |
+| G7 真实后端 | 真实 JWT、前端规划器、生产路由和 PostgreSQL；新增 10 项、邻接 7 项；签名变异与缺失数据库负对照 | 本地 17/17；CI 整文件接线完成，远端执行待验收 |
 
 同步 main 后 **561 项唯一测试通过**：213 功能前端（80+42+9+82）+190 邻接前端+5 前端清单+63 后端清单+52 后端写入+38 开关登记；实际分组为前端 408、后端 115、登记 38。同步前通过 559 项，main 带入两项审批开关测试；不重复计算复跑和子代理测试。后端单测使用 mock 数据库辅助函数，不能当作真实数据库原子性或持久化验收。
 
@@ -102,16 +104,51 @@ node scripts/verify-range-fill-browser.mjs
 
 夹具：`tests/fixtures/range-fill-browser-demo.html`。输出：仓库根目录 `artifacts/range-fill/grid-range-fill.png`。本轮自建 Vite 进程已停止。
 
+## 已认证 API 与真实 PostgreSQL 验收（后续目标）
+
+新增 `packages/core-backend/tests/integration/multitable-range-fill-realdb.test.ts`，提交 `8bbe8d3c5d`。主任务独立运行 Sol 6.1 编写的规格；没有改动生产鉴权、路由或数据库写入实现。
+
+环境为 Node 20.20.2、PostgreSQL 15.17 和临时本地数据库；角色、用户、表和记录均为合成数据。使用现有迁移运行器成功应用 **426 项迁移**，完全沿用 `plugin-tests.yml` 的六项排除：`008_plugin_infrastructure.sql`、`048_create_event_bus_tables.sql`、`049_create_bpmn_workflow_tables.sql`、`042a_core_model_views.sql`、`20250924140000_create_gantt_tables.ts`、`20250925_create_view_tables.sql`。没有新建或修改迁移，没有访问业务数据库。
+
+测试在导入鉴权模块前关闭 `RBAC_BYPASS`、`RBAC_TOKEN_TRUST`，设置生产模式以禁用开发用户回退。每次运行生成临时签名密钥，真实用户记录包含明确的读写权限；请求经过 `jwtAuthMiddleware`、真实 `univerMetaRouter`、`RecordWriteService` 和 SQL。没有注入 `req.user`、mock SQL 或替换服务。前端纯规划器直接生成真实原子 patch 请求；Vue 写入投影仍由前文的组件及 writer 规格单独覆盖。
+
+| 验证项 | 断言 / 结果 |
+| --- | --- |
+| 6 格矩形粘贴 | 持久化全部值、dateTime UTC 规范化；每条记录只加一个版本；记录、修改者和历史 patch/snapshot 精确匹配 |
+| 数值 / 日期序列 | 闰日正确，源记录版本和值不变；目标经真实读取接口返回 |
+| 复制 | 类型化源值持久化，源记录版本不变 |
+| 统一历史批次 | 各记录 revision 共享响应 batchId；历史批次读取包含两条目标记录 |
+| 过期版本 | 第二条记录冲突返回 409；第一条及全部历史与调用前完全一致 |
+| 用户字段只读 | 受限用户返回 403 且全批无变化；同请求由另一非管理员正常写入 |
+| 只读用户 / 非法 select | 分别返回 403 / 400；非法末尾字段使整批值、版本及历史不变 |
+| 缺失 token / 错误签名 | 均返回 401，SQL 快照不变 |
+| 数据库缺失哨兵 | 分别仅设置 `EXPECT_DB=1`、仅设置真实 CI 标记 `METASHEET_REAL_DB_TEST_STEP=1`，缺少 `DATABASE_URL` 均为 1 失败 / 9 跳过，进程非零；跳过项不算通过 |
+| 无数据库通道正对照 | 默认配置同时指定新文件及既有 writer 单测，仅收集后者，52/52 通过；不计入新增测试数 |
+
+最终整组结果：**新规格 10/10（含数据库哨兵），邻接 `multitable-fieldperm-write-gate-patch-realdb` 4/4、`multitable-patch-batchid-echo-realdb` 3/3，总计 17/17**。与之前 561 项证据分开记录，没有把复跑或子代理检查重复计数。
+
+鉴权变异：仅将隔离工作区 `AuthService.verifyToken` 内的签名验证暂时改为解码，执行错误签名这一条测试，得到 **1 失败 / 9 未选中**（预期 401，实际 200）。立即按原文恢复，确认该源码没有 Git 差异；恢复后上述三份文件 **17/17**。这证明该负例能识别签名验证缺失。
+
+CI 接线仅向现有迁移后 `multitable-real-db-integration` 命令增加一份整文件参数，并在默认无数据库 `vitest.config.ts` 中排除；保留现有 `DATABASE_URL` 哨兵和 `METASHEET_REAL_DB_TEST_STEP='1'`。语义比较确认其余 workflow 完全不变。当前 provenance manifest 不再固定该 workflow，因此无需改动无关 pin。
+
+复现时先按上述现有 CI 排除清单迁移一个可丢弃的合成数据库，再在 `packages/core-backend` 执行（`DATABASE_URL` 由环境提供）：
+
+```sh
+METASHEET_REAL_DB_TEST_STEP=1 node node_modules/vitest/vitest.mjs --config vitest.integration.config.ts run tests/integration/multitable-range-fill-realdb.test.ts tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts tests/integration/multitable-patch-batchid-echo-realdb.test.ts --maxWorkers=1 --minWorkers=1 --reporter=dot
+```
+
+迁移、变异、负对照及最终执行日志位于忽略目录 `artifacts/range-fill-realdb/`；本地运行配置不提交。该证据覆盖内嵌 Express HTTP 请求及真实 PostgreSQL 持久化，不代表浏览器到已部署服务的完整链路、staging 或生产验收。
+
 ## 工具链与远端 CI 限制
 
 - 应用 `tsconfig.app.json` 类型检查退出 0；Vite 打包退出 0。同步 main 后两项再次通过，打包包含 3,824 模块，仍有现有大 chunk 提示。
 - 运行 `pnpm validate:all` 时，本机 pnpm 入口先触发依赖自动安装，随后以 `ERR_PNPM_IGNORED_BUILDS` 退出，尚未完成插件/lint/全量类型检查链。自动产生的 `pnpm-lock.yaml` 和 `pnpm-workspace.yaml` 改动已恢复；未批准新的依赖构建脚本，本 PR 不含依赖变更。不能将该聚合命令标为通过。
 - 前轮已复现组合 `vue-tsc -b` 的基线 `vite.config.ts:28 TS2769`（链接依赖中 Vite 7 / Vitest Vite 5 类型冲突）。相关配置、包清单和锁文件相对基线无改动；本轮没有重新运行该组合命令，也不宣称完整 package build 通过。
 - 四个功能规格均进入 `multitable-web-guard.yml` 的实际运行命令和 required web 清单；PR/push 路径触发也已接线。此前提交曾遗漏 token manifest / 排序，引起 8 项断言失败，已在 `5638709d...` 修正；本轮独立重跑相关 63 项守卫通过。
-- 复核前提交 `5638709d...` 的 [Web Tests](https://github.com/zensgit/metasheet2/actions/runs/37811013438) 和 [Plugin System Tests](https://github.com/zensgit/metasheet2/actions/runs/37811013393) 曾在执行前受到账号支付/额度注释阻断。后者 attempt 2 的 `test (20.x)` 本轮查询仍为 queued；不是成功证据。本轮新提交尚未取得对应完整 CI 结果，最终检查状态以 PR 页面为准，不用旧提交结果替代。
+- 复核前提交 `5638709d...` 的 [Web Tests](https://github.com/zensgit/metasheet2/actions/runs/37811013438) 和 [Plugin System Tests](https://github.com/zensgit/metasheet2/actions/runs/37811013393) 曾在执行前受到账号支付/额度注释阻断，不能作为成功证据。后续 `fa99d5189f46060ab23df247737150fe79baa04f` 的 [Web Tests](https://github.com/zensgit/metasheet2/actions/runs/37892483400) 与 [Multitable Web Guard](https://github.com/zensgit/metasheet2/actions/runs/37892483464) 已成功；[Plugin System Tests](https://github.com/zensgit/metasheet2/actions/runs/37892483436) 在文档提交前仍运行，已进入审批真实数据库步骤。该快照为 22 个成功检查、1 个跳过、1 个运行中。新增真实后端规格不在该旧提交中，必须观察新提交对应的 CI，不能用旧结果代替。
 
 ## 模型实际产出与发布边界
 
-Sol 6.1 完成本轮写入审查、修复和回归测试；Luna 6 产出开发说明初稿。Grok 4.7 调用被每周额度限制阻断，无代码或测试产出；Kimi K3 咨询 180 秒超时，没有最终复核交付。本轮不将这两次尝试计为完成审查。Codex 主任务接手规划器复核，核对后端契约，独立执行上述检查、守卫变异与八步浏览器验证，并完成最终文档。
+Sol 6.1 完成本轮写入审查、修复和回归测试，以及后续真实后端规格；Luna 6 产出开发说明初稿。Grok 4.7 调用被每周额度限制阻断，无代码或测试产出；Kimi K3 咨询 180 秒超时，没有最终复核交付。本轮不将这两次尝试计为完成审查。Codex 主任务接手规划器复核，核对后端契约，独立执行上述检查、守卫变异与八步浏览器验证；后续独立执行真实迁移、17 项数据库测试和鉴权变异，并完成最终文档。
 
-PR 保持 Draft / 默认 OFF。未合入 main，未部署或启用 staging/生产，未处理真实客户数据、外部系统写回或迁移。真实已认证后端冒烟、当前提交的 required CI 和上线验收仍是后续发布门。
+PR 保持 Draft / 默认 OFF。未合入 main，未部署或启用 staging/生产，未处理真实客户数据或外部系统写回；仅在合成临时数据库执行现有迁移。真实已认证 API / PostgreSQL 验收已通过；当前提交的 required CI、浏览器直连已认证后端及上线验收仍是后续发布门。

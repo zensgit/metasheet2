@@ -43,5 +43,8 @@ Kimi review decisions: an optional final TSV line terminator is ignored, but a d
 | G4 | Writer: exact single atomic request, version capture, server success projection, 403/409 failure leaves local cells untouched |
 | G5 | New specs wired into multitable-web-guard and required web test list; focused specs plus neighbor grid/edit/virtualization tests |
 | G6 | Guard mutation goes red then source restored; UI browser screenshot; type-check/build or named baseline blockers |
+| G7 | Pure planner output sent through real JWT middleware and production patch route to a disposable PostgreSQL database: durable values/versions/history, atomic rollback, subject-specific permissions, invalid-token rejection and a missing-DB CI sentinel |
+
+G7 was added for the owner's 2026-10-09 acceptance follow-up. It uses only synthetic records and existing migrations; it does not expand the feature or authorize staging/production access. The whole-file real-DB suite runs after migrations in `plugin-tests.yml` and is excluded from the default no-DB unit lane. Browser interaction and authenticated API persistence are separate evidence surfaces; a full browser-to-backend deployed acceptance remains a release gate.
 
 The existing main date-import regression found during review is a separate concern; this slice must not silently fold it into its diff. No new backend API, migrations, customer data, external writes, or feature enablement.
