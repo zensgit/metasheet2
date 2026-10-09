@@ -143,12 +143,13 @@ async function run(input: ManualTargetInput): Promise<number> {
     assert.equal(takenOver.block_fence, stopped.block_fence)
     assert.notEqual(takenOver.worker_owner_id, stopped.worker_owner_id)
     assert.equal(takenOver.archive_generation_id, input.generationId)
+    // This tuple-only diagnostic does not exercise a process-local branded worker claim.
     const stale = await query(`UPDATE public.meta_recovery_archive_jobs SET row_version=row_version+1
       WHERE id=$1::uuid AND state='applying' AND worker_owner_id=$2
         AND worker_fence=$3::bigint AND block_fence=$4::bigint
         AND lease_until=$5::timestamptz AND lease_until>clock_timestamp() RETURNING id`,
       [jobId, stopped.worker_owner_id, stopped.worker_fence, stopped.block_fence, stopped.lease_until])
-    assert.equal(stale.rowCount, 0, 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_CAS_WRITES')
+    assert.equal(stale.rowCount, 0, 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_TUPLE_CAS_WRITES')
     const done = await waitForJob(query, jobId, row => row.state === 'done')
     assert.equal(done.completed_count, '5001')
     assert.equal(done.block_fence, stopped.block_fence)

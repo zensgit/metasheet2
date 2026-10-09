@@ -546,7 +546,8 @@ async function main(): Promise<Record<string, unknown>> {
     assert.deepEqual(await targetCustodyStore.readBackup(rotatedReceipt), copiedBackup,
       'RECOVERY_LOCAL_BACKUP_CUSTODY_BACKUP_CHANGED')
     result = {
-      result: 'PASS',
+      result: 'HOLD',
+      holdReason: 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_WORKER_CLAIM_UNQUALIFIED',
       fixture: 'synthetic-owned-two-database-backup-set',
       records: recoveryLocalBackupRecordCount(),
       nonceSections: finalNonces.length,
@@ -564,7 +565,8 @@ async function main(): Promise<Record<string, unknown>> {
         chunkCommittedCounts: [5000, 1],
         sameJobLeaseTakeover: true,
         higherWorkerFenceSameBlockFence: true,
-        staleWorkerCasWrites: 0,
+        staleTupleCasWrites: 0,
+        staleWorkerClaimQualified: false,
         aggregateMembers: 2,
         exactOnceScalarRestoreRevisions: 5001,
         separateSyncAttachmentRestoreRevisions: 1,
@@ -1264,7 +1266,9 @@ function readCode(error: unknown): unknown {
 }
 
 try {
-  console.log(JSON.stringify(await main()))
+  const result = await main()
+  console.log(JSON.stringify(result))
+  if (result.result !== 'PASS') process.exitCode = 1
 } catch (error) {
   const code = error instanceof Error && /^RECOVERY_[A-Z0-9_]+$/.test(error.message)
     ? error.message : 'RECOVERY_LOCAL_BACKUP_ACCEPTANCE_FAILED'
