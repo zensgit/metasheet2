@@ -68,6 +68,10 @@ const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-n
 // this adds no edge to the load-time cycle documented in
 // stock-preparation-ext-field-mapping.cjs.
 const { assertSandboxObjectId } = require('./stock-preparation-target-provisioning.cjs')
+// 一个项目一张备料表 (S2): the per-project sheet objectId rule, owned by own-base.cjs. Read ONLY by
+// `retargetCustomerPack` below, which refuses every other destination. own-base.cjs requires the
+// templates module alone at load time (its target-provisioning edge is lazy), so this adds no cycle.
+const { isStockPreparationProjectSheetObjectId } = require('./stock-preparation-own-base.cjs')
 
 // The 1-200 cap, duplicate-value rejection, allowed-option-key whitelist and
 // executable-key rejection all live in the C6 option-sync normalizer. Reused
@@ -669,6 +673,43 @@ function normalizeCustomerPack(input) {
 }
 
 /**
+ * 一个项目一张备料表 — THE SAME PACK, PLACED ON A PROJECT SHEET (ADR
+ * adr-stock-prep-project-sheets-20261008 §2 「客户包」; S2, register R-36).
+ *
+ * A deployment's pack declares ONE `targetObjectId` — the env sheet it was installed on. A project
+ * sheet is a different object (`plm_stock_preparation_sandbox_p_<digest>`), and `ensureObject`
+ * cannot create `ext_` columns on it, so the project-sheet create route re-installs the pack the
+ * deployment already carries onto the new object. The installer works off `pack.targetObjectId`
+ * alone, so the re-placement is exactly this: every declared key byte-identical, the placement key
+ * swapped.
+ *
+ * NARROWER THAN `normalizePackTargetObjectId` ON PURPOSE. A pack's own placement may name any
+ * sandbox object; a RE-placement may name a per-project sheet and nothing else — not the canonical
+ * main table, not a hand-named sandbox twin, not an absent value (which the normalizer would turn
+ * into the canonical table). The destination is always server-derived by the caller
+ * (`deriveProjectSheetObjectId`), never request input; this check makes the module refuse anything
+ * else rather than trust that.
+ *
+ * Pure: no I/O. Returns a branded, frozen pack, so the installer's own normalize is a no-op on it.
+ */
+function retargetCustomerPack(pack, targetObjectId) {
+  const normalized = normalizeCustomerPack(pack)
+  if (typeof targetObjectId !== 'string' || !isStockPreparationProjectSheetObjectId(targetObjectId)) {
+    fail('PACK_TARGET_OBJECT_ID_INVALID', 'a customer pack may only be re-placed onto a per-project stock-preparation sheet', {
+      field: 'targetObjectId',
+      provisioningReason: 'not_project_sheet',
+    })
+  }
+  // The sandbox rule still applies (the project-sheet prefix sits inside the namespace, so this is a
+  // second, independent statement of the same fact, not a widening).
+  const objectId = normalizePackTargetObjectId(targetObjectId)
+  if (objectId === normalized.targetObjectId) return normalized
+  // Every OTHER key is the normalized pack's own, already frozen — shared, never re-derived, so the
+  // re-placed pack cannot drift from the one the deployment installed.
+  return brandAndFreeze({ ...normalized, targetObjectId: objectId })
+}
+
+/**
  * Values-free evidence projection: counts and schema ids only, never option
  * values or labels (those are customer dictionary data).
  */
@@ -714,6 +755,7 @@ module.exports = {
   StockPreparationCustomerPackError,
   isNormalizedCustomerPack,
   normalizeCustomerPack,
+  retargetCustomerPack,
   summarizeCustomerPackForEvidence,
   __internals: {
     PACK_KEYS,

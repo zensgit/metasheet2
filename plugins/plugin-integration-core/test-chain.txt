@@ -75,6 +75,7 @@ node __tests__/stock-preparation-project-target-store.test.cjs
 node __tests__/stock-preparation-project-targets.test.cjs
 node __tests__/stock-preparation-project-target-routes.test.cjs
 node __tests__/stock-preparation-project-target-call-site-guard.test.cjs
+node __tests__/stock-preparation-project-target-pack-reinstall.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs

@@ -503,6 +503,9 @@ const {
   grantProjectSheetRoles,
   projectSheetViewHandles,
   buildProjectTargetBinding,
+  // S2 (ADR §2 「客户包」): the deployment's customer pack, re-placed onto each project sheet.
+  planProjectSheetCustomerPacks,
+  installProjectSheetCustomerPacks,
 } = require('./stock-preparation-project-targets.cjs')
 const { StockPreparationProjectTargetStoreError } = require('./stock-preparation-project-target-store.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
@@ -3980,7 +3983,7 @@ function requireStockPreparationAudit() {
         }
       : null,
     resolveProjectTarget: stockPreparationProjectTargets
-      ? async ({ tenantId, projectNo, targetPurpose }) => resolveProjectTargetForAction({
+      ? async ({ tenantId, projectNo, targetPurpose, extensionFieldIds }) => resolveProjectTargetForAction({
           store: stockPreparationProjectTargets,
           provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
           // The caller's OWN staging project — the tenant the registry is keyed by. Never a request
@@ -3989,6 +3992,9 @@ function requireStockPreparationAudit() {
           tenantId,
           projectNo,
           targetPurpose,
+          // S2: the looked-up action's own declared `ext_` band (server config, threaded by the
+          // registry from the normalized action) — never a request field.
+          extensionFieldIds,
           env: process.env,
         })
       : null,
@@ -8816,10 +8822,18 @@ function requireStockPreparationAudit() {
     // CREATE + REGISTER + GRANT. R-35's named exception to R-11: a PULLER provisions ONE sheet, from
     // the frozen template, with every identifier derived server-side and an EMPTY request body.
     // Ordering: switch → gate → body/number shape → scope → audit vocabulary probe (migration 088)
-    // → cap (pre-count, so nothing is provisioned past it) → registry read → provision → register
-    // (E1: the store re-checks the cap under a per-tenant advisory lock, in the same transaction as
-    // its insert) → audit → grant → audit. A race partner's insert is arbitrated by the registry's
-    // unique index (the store maps 23505 to 409).
+    // → registry read → customer-pack PLAN (S2, reads only) → cap (pre-count, so nothing is
+    // provisioned past it) → provision → customer-pack INSTALL (S2) → register (E1: the store
+    // re-checks the cap under a per-tenant advisory lock, in the same transaction as its insert) →
+    // audit → grant → audit. A race partner's insert is arbitrated by the registry's unique index
+    // (the store maps 23505 to 409).
+    //
+    // S2 (ADR §2 「客户包」, register R-36): the deployment's customer pack is installed onto the new
+    // sheet BEFORE the registry row is written. A pack that cannot be installed therefore leaves no
+    // registered row pointing at a sheet without its `ext_` columns — the sheet itself may exist
+    // (provisioned, unregistered, uncounted by the cap) and the same POST is the retry, because
+    // provisioning and the installer are both idempotent. The 200 replay heals an already registered
+    // sheet the same way when its own install ledger does not show the pack.
     async stockPreparationProjectTargetCreate(req, res) {
       const user = requireAccess(req, STOCK_PREP_PULL)
       requireProjectSheetsEnabled()
@@ -8845,9 +8859,47 @@ function requireStockPreparationAudit() {
       if (existing && existing.status === 'archived') {
         throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it instead of creating a second one', { field: 'projectNo' })
       }
+      // S2 — WHICH CUSTOMER PACKS THE SHEET MUST CARRY, decided before any write. The DEPLOYMENT's
+      // own action, read as an env-binding probe ('readiness' is never overlaid by the registry):
+      // its env target objectId keys the install ledger, its declared `extensionFieldIds` is the
+      // band the packs must cover. A deployment without the pull action configured has no band
+      // and no env object, so there is nothing to carry over. Server config only — the request
+      // body is the empty allowlist above.
+      let deploymentAction = null
+      try {
+        deploymentAction = await tableActions.getTableAction({
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          tenantId,
+          targetPurpose: 'readiness',
+        })
+      } catch (error) {
+        const code = error && error.code
+        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+        deploymentAction = null
+      }
+      const packPlan = await planProjectSheetCustomerPacks({
+        tenantId,
+        projectId: targetProjectId,
+        deploymentObjectId: deploymentAction && deploymentAction.target ? deploymentAction.target.objectId : null,
+        extensionFieldIds: deploymentAction ? deploymentAction.extensionFieldIds : undefined,
+        packCatalog: customerPackCatalog,
+        packInstallStore: stockPreparationPackInstalls,
+      })
+      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+      const installPacks = (objectId) => installProjectSheetCustomerPacks({
+        plan: packPlan,
+        provisioning,
+        projectId: targetProjectId,
+        tenantId,
+        objectId,
+        packInstallStore: stockPreparationPackInstalls,
+        fieldPermissions: stockPreparationFieldPermissions,
+        logger: routeLogger,
+      })
       let registered = existing
       let created = false
       let provisioned = null
+      let packs = null
       if (!registered) {
         // THE CAP counts archived rows too (§6: an archived sheet is a live sheet).
         const registeredCount = await store.count({ tenantId })
@@ -8861,6 +8913,8 @@ function requireStockPreparationAudit() {
           projectNo,
           env: process.env,
         })
+        // S2: INSTALL BEFORE REGISTER — see the ordering note above this handler.
+        packs = await installPacks(provisioned.objectId)
         registered = await store.create({
           tenantId,
           projectNo,
@@ -8885,11 +8939,42 @@ function requireStockPreparationAudit() {
             ownBaseSource: provisioned.ownBaseSource || 'unknown',
           },
         })
+      } else {
+        // S2: the 200 replay HEALS a registered sheet whose own ledger does not show the planned
+        // pack at the catalog's version (a sheet registered before S2, or a pack revision since).
+        // Idempotent: a pack already live there is skipped without a host call.
+        packs = await installPacks(registered.objectId)
+      }
+      // S2: the pack install is audited under the EXISTING `project_target_create` action (it is
+      // the part of creating the sheet that makes it usable), with its own closed mode — no new
+      // vocabulary migration. Written only when a pack actually landed; values-free: counts, and
+      // the pack ids (deployment slugs) as a version count map.
+      if (packs && packs.installedPackCount > 0) {
+        const packVersions = {}
+        for (const entry of packs.packs) {
+          if (entry.outcome === 'installed') packVersions[entry.packId] = entry.packVersion
+        }
+        await audit.append({
+          tenantId,
+          projectId: projectNo,
+          action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+          subjectId: registered.sheetId,
+          mode: 'customer_pack_installed',
+          actor,
+          detail: {
+            installedPackCount: packs.installedPackCount,
+            alreadyInstalledPackCount: packs.alreadyInstalledPackCount,
+            notInCatalogPackCount: packs.notInCatalogPackCount,
+            declaredExtensionFieldCount: packs.declaredExtensionFieldCount,
+            createdFieldCount: packs.packs.reduce((total, entry) => total + entry.createdFieldCount, 0),
+            stampedFieldCount: packs.packs.reduce((total, entry) => total + entry.stampedFieldCount, 0),
+            packVersions,
+          },
+        })
       }
       // G1 — on the fresh create AND on an idempotent replay: the host grant is ON CONFLICT DO
       // NOTHING, so a replay heals a grant that failed after the row was registered and never adds
       // a second permission row. Server-configured roles only; a refusal from the host propagates.
-      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
       const grant = await grantProjectSheetRoles({
         provisioning,
         projectId: targetProjectId,
@@ -8924,6 +9009,13 @@ function requireStockPreparationAudit() {
           roleCount: grant.roleCount,
           granted: grant.granted,
           alreadyGranted: grant.alreadyGranted,
+        },
+        // S2: what the customer-pack carry-over did, as counts (values-free).
+        customerPacks: {
+          planned: packs ? packs.packs.length : 0,
+          installed: packs ? packs.installedPackCount : 0,
+          alreadyInstalled: packs ? packs.alreadyInstalledPackCount : 0,
+          notInCatalog: packs ? packs.notInCatalogPackCount : 0,
         },
         ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
       }, created ? 201 : 200)
