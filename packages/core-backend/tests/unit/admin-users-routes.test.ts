@@ -145,6 +145,7 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
 vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
+import { LOGIN_NAME_RULE_MESSAGE } from '../../src/auth/login-name-rule'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { censusFile } from './lib/recovery-census-recorder'
 
@@ -4438,6 +4439,35 @@ describe('admin-users routes', () => {
         },
       }),
     )
+  })
+
+  // #6259: POST /api/admin/users and the DingTalk directory admission use ONE login-name rule
+  // (auth/login-name-rule.ts). This leg pins that the create-user route answers with the shared
+  // module's sentence and accepts what the shared rule accepts; login-name-rule.test.ts pins that
+  // no private copy of the rule is left in this route.
+  it('create-user applies the shared login-name rule (#6259)', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const rejected = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: '测试员',
+        name: '测试员',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(rejected.statusCode).toBe(400)
+    expect((rejected.body as Record<string, any>).error.code).toBe('INVALID_USERNAME')
+    expect((rejected.body as Record<string, any>).error.message).toBe(LOGIN_NAME_RULE_MESSAGE)
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
+
+    for (const tooShort of ['ab', '12345']) {
+      const response = await invokeRoute('post', '/api/admin/users', {
+        body: { username: tooShort, name: 'Operator A', password: 'WelcomePass9A' },
+      })
+      expect(response.statusCode, tooShort).toBe(400)
+      expect((response.body as Record<string, any>).error.message, tooShort).toBe(LOGIN_NAME_RULE_MESSAGE)
+    }
   })
 
 // O2-A1 (census reachability): one discriminating behaviour leg PER
