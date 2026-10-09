@@ -52,6 +52,35 @@ test('online-enrollment manifest provenance names the canonical exported flag', 
   ])
 })
 
+test('approval CC unread badge switch (test report 2026-10-08): boolean, exact true, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_CC_UNREAD_BADGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalCcUnreadBadgeEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+})
+
+test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact true, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'True'), false)
+})
+
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
 // a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
 // the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which
@@ -214,12 +243,15 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !NON_GH_EXACT.has(t))
   // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
   const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // Approval center read-state badges (test report 2026-10-08): default-OFF exact-'true' switches,
+  // one family by name shape so a new badge switch joins the population as soon as source reads it.
+  const approvalBadges = grepFlagTokens('APPROVAL_[A-Z_0-9]+_BADGE_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...attendanceCancelRound])].sort()
 }
 
 test('leave cancel-round launch flag: registered against the plugin reader, exact literal true only', () => {

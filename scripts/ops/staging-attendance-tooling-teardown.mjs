@@ -24,6 +24,16 @@ function asRows(result) {
   return []
 }
 
+// The userIdPrefix filter: `<column>` starts with the prefix. The prefix is one text parameter
+// used twice, as the comparison value and, through length(), as left()'s length; both uses cast
+// it to text. Passing the same placeholder straight to left() as its length
+// (`left(user_id, $N) = $N`) makes PostgreSQL type the parameter as integer from left(text,
+// integer) and then reject the comparison as `text = integer` (42883), so every scope with a
+// userIdPrefix failed on its first statement.
+function userIdPrefixClause(column, placeholder) {
+  return ` AND left(${column}, length(${placeholder}::text)) = ${placeholder}::text`
+}
+
 function assertBoundedCleanupScope(scope) {
   const hasUserIds = Array.isArray(scope?.userIds) && scope.userIds.length > 0
   const hasRecordIds = Array.isArray(scope?.recordIds) && scope.recordIds.length > 0
@@ -52,7 +62,7 @@ export async function countW4ImmutableAttendanceRows(db, scope) {
   }
   if (typeof scope.userIdPrefix === 'string' && scope.userIdPrefix.length > 0) {
     params.push(scope.userIdPrefix)
-    filter += ` AND left(user_id, $${params.length}) = $${params.length}`
+    filter += userIdPrefixClause('user_id', `$${params.length}`)
   }
   const result = await db.query(
     `SELECT COUNT(*)::int AS n
@@ -215,7 +225,7 @@ export async function runStagingAttendanceRecordTeardown(db, scope) {
   }
   if (typeof scope.userIdPrefix === 'string' && scope.userIdPrefix.length > 0) {
     params.push(scope.userIdPrefix)
-    filter += ` AND left(user_id, $${params.length}) = $${params.length}`
+    filter += userIdPrefixClause('user_id', `$${params.length}`)
   }
   await db.query(
     `/* tooling_only_non_w4_fixture_teardown */
@@ -277,8 +287,8 @@ export async function cleanupStagingAttendanceScope(db, scope, options = {}) {
   }
   if (typeof scope.userIdPrefix === 'string' && scope.userIdPrefix.length > 0) {
     params.push(scope.userIdPrefix)
-    filter += ` AND left(user_id, $${params.length}) = $${params.length}`
-    listedFilter += ` AND left(record.user_id, $${params.length}) = $${params.length}`
+    filter += userIdPrefixClause('user_id', `$${params.length}`)
+    listedFilter += userIdPrefixClause('record.user_id', `$${params.length}`)
   }
 
   const listed = await db.query(

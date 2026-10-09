@@ -11,6 +11,9 @@ import {
 // validation (roadmap §7.8), and the SAME class `directory-sync-scheduler.ts` uses to actually run the
 // job. Importing it directly here pins its actual acceptance semantics, independent of any route-level mock.
 import { SimpleCronExpression } from '../../src/services/SchedulerService'
+// NOT mocked below — the admit-user route discriminates these REAL classes with `instanceof` (#6259).
+import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/login-name-rule'
+import { PasswordPolicyError } from '../../src/auth/password-policy-error'
 
 const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
 const DEPROVISION_EVENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -2380,6 +2383,70 @@ describe('adminDirectoryRouter', () => {
       error: {
         code: 'DIRECTORY_ADMISSION_FAILED',
       },
+    })
+  })
+
+  // #6259: a login-name rule failure used to match none of the message patterns and fell through to
+  // 500 DIRECTORY_ADMISSION_FAILED. The route now recognises the TYPED errors and answers 400 with the
+  // same stable codes POST /api/admin/users uses; the English message is unchanged.
+  it('answers a login-name rule failure with 400 INVALID_USERNAME and details.rule', async () => {
+    directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new LoginNameRuleError())
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: { name: '测试员', username: '测试员', enableDingTalkGrant: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_MESSAGE,
+        details: { rule: 'login_name_ascii' },
+      },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('answers a password-policy failure with 400 PASSWORD_POLICY_FAILED and the policy strings', async () => {
+    directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new PasswordPolicyError([
+      'Password contains a common weak pattern',
+    ]))
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: { name: '李青', username: 'liqing', password: '123456Asd', enableDingTalkGrant: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PASSWORD_POLICY_FAILED',
+        message: 'Password contains a common weak pattern',
+        details: { details: ['Password contains a common weak pattern'] },
+      },
+    })
+  })
+
+  it('maps by error type, not by prose: an untyped error carrying the same sentence is still 500', async () => {
+    // Pins that the 400 above comes from recognising LoginNameRuleError — the message-regex ladder
+    // was NOT widened, so any other unclassified failure keeps its 500 DIRECTORY_ADMISSION_FAILED.
+    directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new Error(LOGIN_NAME_RULE_MESSAGE))
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: { name: '测试员', username: '测试员', enableDingTalkGrant: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_ADMISSION_FAILED' },
     })
   })
 
