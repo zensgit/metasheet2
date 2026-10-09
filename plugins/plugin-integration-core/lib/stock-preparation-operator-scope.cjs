@@ -123,6 +123,20 @@
 //           源就绪预检 (「检查这个源」): up to two observed project numbers as liveness evidence. The
 //           proven tenant is the one value its table-action lookup, binding peek and load run under.
 //
+//   D. 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008; all three behind the
+//      default-OFF switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, 404 before any IO without it).
+//      The registry they read (migration 087) is keyed by the tenant this scope proves, so what a
+//      caller learns — ABSENT / ACTIVE / ARCHIVED, handles, counts — is only ever about their own.
+//       11. GET  …/projects/:projectNo/target          `stockPreparationProjectTargetGet`
+//           The project's registry state plus its deep-link handles and bounded row counts (OPERATE,
+//           the board's tier). `may.*` is computed on the PULL tier.
+//       12. POST …/projects/:projectNo/target          `stockPreparationProjectTargetCreate`
+//           A WRITE: provisions the project's sheet INTO the staging project of the proven tenant and
+//           registers it under that tenant (PULL; the R-35 exception to R-11). A header-fillable
+//           tenant here would plant a sheet in another tenant's staging project.
+//       13. GET  …/stock-preparation/project-targets   `stockPreparationProjectTargetList`
+//           The tenant's registry rows (handles and enums only; OPERATE).
+//
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
 // both handoff entries so this list cannot go stale unnoticed.

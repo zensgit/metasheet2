@@ -899,15 +899,15 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (31) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) = 48. Get each file's own count locally with
+      # (6) = 51. Get each file's own count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=48
+          EXPECTED_OPS_TESTS_COUNT=51
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1424,6 +1424,7 @@ jobs:
             tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
             tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
             tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts \
+            tests/integration/stock-preparation-prep-line-export-tenant-wall-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \

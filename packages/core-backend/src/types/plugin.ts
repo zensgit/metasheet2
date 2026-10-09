@@ -631,6 +631,30 @@ export interface MultitableProvisioningAPI {
     revisionCount: number
     batchId: string | null
   }>
+  /**
+   * 一个项目一张备料表 G1 (ADR adr-stock-prep-project-sheets-20261008 §2, addendum A.6; R-35): grant
+   * the SERVER-CONFIGURED roles `spreadsheet:write` on ONE project sheet the plugin just created.
+   *
+   * THE NARROWEST AUTHORIZATION VERB THIS SURFACE HAS, bounded by the host, not by the caller:
+   * role subjects only, every role inside the `stock-prep` namespace and existing; the level is the
+   * literal `spreadsheet:write` (never read, never admin); ADD-ONLY (`ON CONFLICT DO NOTHING`, no
+   * revoke, no downgrade); only a sheet whose objectId has the project-sheet shape, whose id is the
+   * one derived for (projectId, objectId), and which the plugin object registry records as this
+   * plugin's and this project's. Every grant that lands writes a config-revision row. See
+   * multitable/stock-preparation-project-sheet-grant-contract.ts. OPTIONAL like `ensureSystemBase`:
+   * a plugin newer than its host must degrade (report `api_unavailable`), never crash.
+   */
+  grantSheetRoleWrite?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    roleIds: string[]
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    granted: string[]
+    alreadyGranted: string[]
+  }>
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {
     projectId: string
