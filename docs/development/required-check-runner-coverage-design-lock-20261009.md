@@ -1,7 +1,9 @@
 # Required check runner coverage — 2026-10-09
 
 Status: local proposal, publication and runner configuration HOLD.
-Frozen base: `64bf18b5e833b5cf938d83afe420ae0df4370c86`.
+Frozen routing base: `64bf18b5e833b5cf938d83afe420ae0df4370c86`.
+Retain the published runner candidate `fda42afdde099fb0431326adbdbe1e8d3097eea8`
+as an ancestor, including its existing UTC test controls and web routing comment.
 
 The live main protection rule requires 13 contexts. Only the backend job already
 selects the configured Linux runner on this base. The published Draft web routing
@@ -19,7 +21,9 @@ this slice and may still fail to start on hosted runners.
 
 Local acceptance requires parsing all changed YAML, mapping all 13 live required
 contexts to their existing jobs, and proving byte equality with the frozen base
-after restoring only the ten runner lines. Run the existing integration, browser,
+after restoring only the ten runner lines in the initial routing commit. After
+integration, the web workflow must remain byte-identical to the published candidate;
+the other nine workflows retain the same one-line comparison. Run the integration, browser,
 SSH, recovery, observation, and workflow wiring contracts relevant to these jobs.
 The Windows executor is whole-file digest-pinned. Recompute only its evidence
 digest and update the existing exact-header and tamper anchors for the new runner
