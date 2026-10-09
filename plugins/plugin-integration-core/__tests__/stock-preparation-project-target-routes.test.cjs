@@ -544,7 +544,7 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
       grant: { attempted: true, skipped: null, roleCount: 2, granted: 2, alreadyGranted: 0 },
       // S2 (R-36): this deployment's action declares no ext band and its env object carries no pack,
       // so there is nothing to carry over — the counts say so (the pack suite drives the other case).
-      customerPacks: { planned: 0, installed: 0, alreadyInstalled: 0, notInCatalog: 0 },
+      customerPacks: { planned: 0, installed: 0, reinstalled: 0, alreadyInstalled: 0, notInCatalog: 0 },
       todoView: { created: true, skipped: null },
     })
     assert.equal(h.provisioning.calls.filter((c) => c[0] === 'ensureObject').length, 1, 'ONE sheet provisioned')
@@ -572,7 +572,7 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
     assert.equal(again.body.data.created, false)
     assert.equal(again.body.data.sheetId, sheetId)
     assert.deepEqual(again.body.data.grant, { attempted: true, skipped: null, roleCount: 2, granted: 0, alreadyGranted: 2 })
-    assert.deepEqual(again.body.data.customerPacks, { planned: 0, installed: 0, alreadyInstalled: 0, notInCatalog: 0 })
+    assert.deepEqual(again.body.data.customerPacks, { planned: 0, installed: 0, reinstalled: 0, alreadyInstalled: 0, notInCatalog: 0 })
     assert.ok(!('todoView' in again.body.data), 'nothing was provisioned on the replay')
     assert.equal(h.db.rows.length, 1, 'no second row')
     assert.ok(!h.provisioning.calls.some((c) => c[0] === 'ensureObject' || c[0] === 'ensureView'), 'no second sheet, no view rewrite')

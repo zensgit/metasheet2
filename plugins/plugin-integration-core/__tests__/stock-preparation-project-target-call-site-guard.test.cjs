@@ -29,10 +29,11 @@
 //        ONLY lib files that call it (a new caller must be argued here);
 //   C-08 (E2b) `projectSheetGateFor` reads the switch live and the registry objectId from the
 //        RESOLVED target, never a literal and never the deployment objectId.
-//   C-09 (S2, R-36) the project-sheet CREATE reads the deployment's env binding (a 'readiness'
-//        lookup, never overlaid) and plans the customer packs BEFORE it provisions, installs them
-//        AFTER it provisions and BEFORE it registers — so a failed install leaves no registered row —
-//        and heals a replayed (already registered) sheet through the same install.
+//   C-09 (S2, R-36; fix round 1) the project-sheet CREATE reads the deployment's env binding (a
+//        'readiness' lookup, never overlaid), plans AND pre-flights the customer packs (and the
+//        tenant-claim door) BEFORE the cap read and provisioning, installs them AFTER provisioning
+//        and BEFORE it registers — so a failed install leaves no registered row; the REPLAY heals the
+//        G1 grant before it plans or heals the packs.
 //   C-01 also rejects `projectNo: undefined` (key present, no value — E2e).
 //
 // Mutation: delete `projectNo` from any one lookup, or change a `'source'` to `'write'`, or drop a
@@ -280,26 +281,39 @@ check('the three S1 routes check the switch BEFORE any IO and the create route i
   assert.match(createBody, /store\.count\(\{ tenantId \}\)[\s\S]*?MAX_PROJECT_TARGETS_PER_TENANT/, 'the cap is checked before provisioning')
   assert.ok(createBody.indexOf('store.count(') < createBody.indexOf('provisionProjectSheet('), 'cap before provision')
   assert.ok(createBody.indexOf('provisionProjectSheet(') < createBody.indexOf('store.create('), 'provision before register')
-  assert.ok(createBody.indexOf('store.create(') < createBody.indexOf('grantProjectSheetRoles('), 'register before grant')
+  // S2 fix round 1: the grant moved into one `healGrant` closure the replay leg calls FIRST; on the
+  // create leg it still runs only after the registry row exists.
+  assert.ok(createBody.indexOf('store.create(') < createBody.indexOf('if (!grant) grant = await healGrant(registered)'), 'register before the create leg\'s grant')
   assert.match(createBody, /roleIds: resolveProjectSheetGrantRoleIds\(process\.env\)/, 'roles from server config, never the request')
 })
 
-check('C-09 (S2) the create plans the customer packs before provisioning, installs them before registering, and heals a replay', () => {
+check('C-09 (S2) create: plan + pre-flight before provisioning, install before register; replay: grant heal before the pack heal', () => {
   const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
   const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
   const lookupAt = body.indexOf('getTableAction(')
   const planAt = body.indexOf('planProjectSheetCustomerPacks(')
+  // CREATE leg.
+  const createPlanAt = body.indexOf('const createPlan = await planPacks()')
+  const preflightAt = body.indexOf('await preflightProjectSheetCustomerPacks(')
+  const capAt = body.indexOf('await store.count({ tenantId })')
   const provisionAt = body.indexOf('provisionProjectSheet(')
-  const installAt = body.indexOf('installPacks(provisioned.objectId)')
+  const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
   const registerAt = body.indexOf('store.create(')
-  const healAt = body.indexOf('installPacks(registered.objectId)')
+  // REPLAY leg.
+  const replayGrantAt = body.indexOf('grant = await healGrant(registered)')
+  const replayPlanAt = body.indexOf('const replayPlan = await planPacks()')
+  const healAt = body.indexOf('installPacks(replayPlan, registered.objectId)')
   assert.ok(lookupAt !== -1 && planAt !== -1 && lookupAt < planAt, 'the env binding is read before the plan')
-  assert.ok(provisionAt !== -1 && planAt < provisionAt, 'the plan (reads only, may refuse) precedes provisioning')
-  assert.ok(installAt !== -1 && provisionAt < installAt, 'the packs are installed onto the sheet that was just provisioned')
-  assert.ok(registerAt !== -1 && installAt < registerAt, 'INSTALL BEFORE REGISTER: a failed install leaves no registered row')
-  assert.ok(healAt !== -1 && healAt > registerAt, 'the replay leg heals an already registered sheet through the same install')
+  assert.ok(createPlanAt !== -1 && preflightAt !== -1 && createPlanAt < preflightAt, 'create: the plan precedes the pre-flight')
+  assert.ok(capAt !== -1 && preflightAt < capAt, 'create: every sheet-independent refusal precedes the cap read')
+  assert.ok(provisionAt !== -1 && capAt < provisionAt, 'create: the cap precedes provisioning')
+  assert.ok(installAt !== -1 && provisionAt < installAt, 'create: the packs are installed onto the sheet that was just provisioned')
+  assert.ok(registerAt !== -1 && installAt < registerAt, 'create: INSTALL BEFORE REGISTER — a failed install leaves no registered row')
+  assert.ok(replayGrantAt !== -1 && replayPlanAt !== -1 && replayGrantAt < replayPlanAt, 'replay: the G1 grant heal precedes the pack plan')
+  assert.ok(healAt !== -1 && replayPlanAt < healAt, 'replay: the pack heal runs through the same install')
   assert.match(body, /getTableAction\(\{\s*actionId: PLM_STOCK_PREPARATION_ACTION_ID,\s*tenantId,\s*targetPurpose: 'readiness',\s*\}\)/, 'the env binding probe is a tenant-scoped readiness lookup')
   assert.match(body, /packCatalog: customerPackCatalog,\s*packInstallStore: stockPreparationPackInstalls,/, 'packs come from the server-held catalog and the install ledger, never the request')
+  assert.match(body, /tenantClaimVerified: scope\.tenantClaimVerified === true,/, 'the claim door reads the host-vouched scope, never the request')
 })
 
 if (failed) {

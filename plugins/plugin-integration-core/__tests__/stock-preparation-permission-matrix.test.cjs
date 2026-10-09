@@ -39,6 +39,8 @@
 //        stock-prep operator tier for ONE frozen action id (reconcile joined in round-2 C13); only
 //        mvp-persist did not move and still refuses it; the split is not a wildcard over the
 //        table-action namespace; and every refusal still costs no host work
+//   M-12 (S2 fix round 1) the three project-target routes with the switch ON: gate cells refused by
+//        the gate, pass cells served a real 2xx (create 201, read 200, list 200)
 //   M-11 W4 THE TENANT-CLAIM HARD DOOR, over the whole manifest: with
 //        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, the capabilities whose tenancy the shared
 //        helpers decide refuse a CARRIED tenant (403 OPERATOR_SCOPE_TENANT_REQUIRED, zero host work,
@@ -1792,8 +1794,57 @@ function theRailVocabularyAndTheLandingRuleHold() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// M-12 — 一个项目一张备料表 (S2 fix round 1): THE THREE PROJECT-TARGET ROUTES WITH THE SWITCH ON
+// ---------------------------------------------------------------------------
+//
+// The golden matrix above runs with MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED unset, so a 'pass'
+// cell for projectTarget.* means "past the gate, then 404 DISABLED" — true, but it says nothing about
+// whether a permitted actor is actually SERVED. This pass mounts the real routes over the shared
+// project-sheet substrate (a host that can provision, a real registry store) with the switch ON and
+// asks the same matrix question: every 'gate' cell is a 401/403 from the gate, and every 'pass' cell
+// is a real 2xx — the create a 201 for a fresh project, the read and the list a 200.
+const projectSheetHarness = require(path.join(__dirname, 'support', 'stock-preparation-project-sheet-harness.cjs'))
+
+async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
+  const shapes = {
+    'projectTarget.read': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    'projectTarget.create': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target', params: { projectNo: PROJECT_NO }, okStatuses: [201] },
+    'projectTarget.list': { method: 'GET', path: '/api/integration/stock-preparation/project-targets', params: {}, okStatuses: [200] },
+  }
+  let served = 0
+  for (const [actorName, expectations] of Object.entries(MATRIX)) {
+    const user = ACTORS[actorName]
+    for (const [capabilityId, shape] of Object.entries(shapes)) {
+      const capability = STOCK_PREP_WORKBENCH_CAPABILITIES.find((entry) => entry.capability === capabilityId)
+      assert.ok(capability, `M-12: ${capabilityId} is a manifest member`)
+      assert.equal(capability.path, shape.path, `M-12: ${capabilityId} path`)
+      const harness = projectSheetHarness.mountProjectSheetRoutes({ tenantId: TENANT_ID, projectNo: PROJECT_NO, switchOn: true })
+      try {
+        const res = await projectSheetHarness.call(harness.routes, shape.method, shape.path, { user, params: shape.params, body: {} })
+        if (expectations[capabilityId] === 'gate') {
+          assert.ok(refusedByGate(res), `M-12: ${actorName} must be REFUSED at ${capabilityId} with the switch on, got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`)
+          assert.deepEqual(harness.provisioning.calls, [], `M-12: a refused ${actorName} costs no host call at ${capabilityId}`)
+        } else {
+          assert.ok(
+            shape.okStatuses.includes(res.statusCode),
+            `M-12: ${actorName} must be SERVED at ${capabilityId} with the switch on (expected ${shape.okStatuses.join('/')}), got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`,
+          )
+          served += 1
+        }
+      } finally {
+        harness.restore()
+      }
+    }
+  }
+  // Anti-vacuity: puller, workbench admin and platform admin are served all three; the confirming
+  // operator the two reads. 3 + 3 + 3 + 2.
+  assert.equal(served, 11, 'M-12: the served cells are exactly the matrix\'s pass cells for the three routes')
+}
+
 async function main() {
   await matrixGoldenHolds()
+  await projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn()
   await authorizedOperatorGetsRealResponses()
   await theConfirmAuditRowCarriesTheProjectFromTheLedger()
   await platformAdminLosesNothing()
