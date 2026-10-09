@@ -10,16 +10,21 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //
 // Graph (identity-consistent with the instance: template tpl_1, latestVersionId = pinned ver_1_1):
 //   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ join_1 → approval_2 → approval_3 → end
-// Every fixture is a state the server can be in, and what the return path reads is in the wire's
-// shape (see the harness header for the display-only values it simplifies): the
-// main history holds approval_1, cc_1, handler_1, approval_p1, join_1, approval_2 and approval_3
+// Every fixture is a state a server can be in: the #6293 server for the scenarios that carry
+// `returnableNodeKeys`, a server before #6293 for the field-less ones (the harness header says
+// which is which). What the return path reads is in the wire's shape (the harness header lists the
+// display-only values it simplifies).
+// The main history holds approval_1, cc_1, handler_1, approval_p1, join_1, approval_2 and approval_3
 // (a 退回 from approval_3 back to approval_2), so every exclusion rule has a visited key to drop;
-// the handler and parallel scenarios carry the first pass that leads to their cursor.
+// the handler-cursor, server-empty and parallel scenarios carry the first pass that leads to their
+// cursor (server-empty adds the viewer's 评论 at handler_1).
 //
 //   scenario (harness)                | expectation                                | production rule pinned
 //   ----------------------------------|--------------------------------------------|---------------------------------------------
 //   server-list                       | 退回 shown; options exactly [approval_1]    | the DTO's `returnableNodeKeys` is the list
-//   server-empty                      | no 退回 button                              | `[]` hides 退回 although the mirror would offer one
+//   server-empty & template=drifted   | no 退回 button                              | `[]` hides 退回 where the no-graph legacy list
+//                                     |                                            | would offer cc_1 / approval_1 (a #6293 action
+//                                     |                                            | response at handler_1: rule (b) sends [])
 //   server-list-wins                  | 退回 shown; options exactly [approval_1]    | the server list wins over a DISAGREEING mirror
 //                                     |                                            | with the graph present: after an admin forward
 //                                     |                                            | jump history never held approval_1 (mirror: no
@@ -38,7 +43,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 //                                     |                                            | alone hides 退回
 //
 // `server-list` alone cannot tell the server list from the mirror (with the graph in place both
-// compute [approval_1]); `server-list-wins` and the drifted server-list row are the two that can.
+// compute [approval_1]). `server-list-wins`, the drifted server-list row and the drifted
+// server-empty row can; the last is the one where `[]`, as opposed to an absent field, decides.
 //
 // Every scenario first proves the action bar is there (the 转交 button: same `canDecide` /
 // desktop gates as 退回, and a verb the server accepts at a handler cursor too), so a missing 退回
@@ -125,8 +131,8 @@ test('server-list: the DTO\'s returnableNodeKeys is the 退回 option list, verb
   await expectReturnOptions(page, '?scenario=server-list', [APPROVAL_1], 'rc-server-list-1440.png')
 })
 
-test('server-empty: returnableNodeKeys [] hides 退回 although the client mirror would offer approval_1', async ({ page }) => {
-  await expectNoReturnButton(page, '?scenario=server-empty')
+test('server-empty (template drifted): [] at a handler cursor hides 退回 where the no-graph legacy list would offer 抄送人事 / 部门经理初审', async ({ page }) => {
+  await expectNoReturnButton(page, '?scenario=server-empty&template=drifted')
 })
 
 test('server-list-wins: after an admin forward jump history never held approval_1, and the server list still offers it', async ({ page }) => {

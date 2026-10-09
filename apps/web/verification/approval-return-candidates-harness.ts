@@ -23,8 +23,15 @@
 // approval_p1 法务专员, approval_3 总经理, and the viewer at handler_1, approval_p2 and approval_2 — so
 // the seats, the history actors and the graph agree.
 //
-// EVERY FIXTURE IS A STATE THE SERVER CAN BE IN. What the return path and its positive controls
-// read is in the shape the wire carries. Display-only values are simplified, and nothing here reads
+// EVERY FIXTURE IS A STATE A SERVER CAN BE IN, and which server is part of the fixture. The ones
+// that carry `returnableNodeKeys` (server-list, server-empty, server-list-wins, submit) are what the
+// #6293 server sends (`computeReturnableNodeKeys`, approval-return-targets.ts). The field-less ones
+// (client-mirror, handler-cursor, parallel-state) are what a server BEFORE #6293 sends: for every
+// cursor of this pending, graph-pinned instance the #6293 server fills the field (`[]` at a handler
+// cursor or in a parallel state, the trail before the cursor otherwise), and the view's mirror is
+// the fallback for exactly that older server and for bridged instances with no frozen graph.
+// What the return path and its positive controls read is in the shape the wire carries.
+// Display-only values are simplified, and nothing here reads
 // them: `currentStep` / `totalSteps` / `sourceStep` are fixed, `assignments` lists only the active
 // seats (a detail read also lists every inactive one), and history rows carry only the camelCase
 // fields (the wire adds snake_case twins).
@@ -53,7 +60,17 @@
 // `?scenario=` (required; an unknown or missing value throws instead of falling back):
 //   server-list      — detail read: cursor approval_2, the viewer's seat there, the main history,
 //                      `returnableNodeKeys: ['approval_1']` (what the walker yields here).
-//   server-empty     — server-list with `returnableNodeKeys: []`.
+//   server-empty     — #6293 ACTION RESPONSE right after the viewer posted a 评论 at handler_1
+//                      (`dispatchAction`'s comment branch answers with `getApproval` →
+//                      `toUnifiedApprovalDTO`): cursor handler_1, the viewer's seat there, NO
+//                      `currentNodeType` (an action response never carries it), and
+//                      `returnableNodeKeys: []` — rule (b) of `computeReturnableNodeKeys`, a handler
+//                      cursor has no legal target. History is the first pass up to cc @cc_1 plus the
+//                      评论 row @handler_1 (`submitComment` reloads `/history` after it publishes the
+//                      response). Run it with `&template=drifted`: with no graph and no DTO type the
+//                      legacy list would offer cc_1 and approval_1, so only `[]` hides 退回. With
+//                      the graph in place the mirror reads handler_1's type from it and hides 退回
+//                      as well, so that pairing cannot tell `[]` from an absent field.
 //   server-list-wins — server-list, but the instance reached approval_2 by an ADMIN FORWARD JUMP from
 //                      approval_1 (`adminJump`): history is created @start plus the jump row, which
 //                      has no `nodeKey`. The mirror (history ∩ graph) has nothing to offer; the
@@ -71,12 +88,13 @@
 //   submit           — server-list, with ONLY the store's `executeAction` wrapped: every request is
 //                      recorded on `window.__RC_ACTION_REQUESTS__` and resolved with the displayed
 //                      instance. No HTTP, and the original action is never called.
-// `&template=drifted` (with server-list, client-mirror or handler-cursor): the template has moved on
-// to a LATER version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned version is loaded —
-// what an ordinary member has once the template is edited (the version endpoint is admin-gated).
-// The view then has no graph of its own: the server's list still decides; without it the legacy
-// unfiltered list comes back; and at a handler cursor the DTO's own `currentNodeType` is the only
-// thing left that says "handler".
+// `&template=drifted` (with server-list, server-empty, client-mirror or handler-cursor): the
+// template has moved on to a LATER version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned
+// version is loaded — what an ordinary member has once the template is edited (the version endpoint
+// is admin-gated). The view then has no graph of its own: the server's list still decides (a list
+// verbatim, and `[]` by hiding 退回 where the legacy list would offer cc_1 / approval_1); without it
+// the legacy unfiltered list comes back; and at a handler cursor the DTO's own `currentNodeType` is
+// the only thing left that says "handler".
 //
 // `window.__RC_READY__` turns true once the fixture is in place; a harness failure sets
 // `window.__RC_ERROR__` instead, so the paired spec (approval-return-candidates.spec.ts) fails with
@@ -120,7 +138,7 @@ const SCENARIOS = [
   'submit',
 ] as const
 type Scenario = (typeof SCENARIOS)[number]
-const DRIFTABLE: readonly Scenario[] = ['server-list', 'client-mirror', 'handler-cursor']
+const DRIFTABLE: readonly Scenario[] = ['server-list', 'server-empty', 'client-mirror', 'handler-cursor']
 
 const INSTANCE_ID = 'apv_5'
 const TEMPLATE_ID = 'tpl_1'
@@ -238,6 +256,14 @@ const MAIN_HISTORY: UnifiedApprovalHistoryDTO[] = [
 ]
 /** Cursor at handler_1: approval_1 decided, the flow passed cc_1 in the same transaction. */
 const HANDLER_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [CC_1, APPROVE_1, CREATED]
+/**
+ * Cursor still at handler_1 after the viewer's 评论 there: the comment branch writes `action:
+ * 'comment'` with `metadata.nodeKey` = the cursor, and `/history` serves that key.
+ */
+const HANDLER_COMMENTED: UnifiedApprovalHistoryDTO[] = [
+  historyRow('rc_hist_comment_h1', 'comment', VIEWER, '补正材料今天下班前上传', 8, 'handler_1'),
+  ...HANDLER_FIRST_PASS,
+]
 /** Cursor at the fork: the viewer's handle at handler_1 opened both branches. */
 const PARALLEL_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [HANDLE_1, CC_1, APPROVE_1, CREATED]
 /** An admin moved the instance from approval_1 straight to approval_2 (no `nodeKey` on that row). */
@@ -299,8 +325,21 @@ function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): Fixture {
     case 'server-list':
     case 'submit':
       return { approval: detailRead, history: MAIN_HISTORY }
-    case 'server-empty':
-      return { approval: { ...detailRead, returnableNodeKeys: [] }, history: MAIN_HISTORY }
+    case 'server-empty': {
+      // The #6293 action response to the viewer's 评论 at handler_1 (see the header). A handler
+      // cursor is rule (b) of `computeReturnableNodeKeys` → `[]`, which the builder spreads (an
+      // empty array is truthy). An action response carries no `currentNodeType`, and no
+      // `currentNodeKeys` outside a parallel region. `nodeOperations` stays all-allowed, because
+      // handler_1 has no node-operation policy (`resolveEffectiveNodeOperations`).
+      const handlerActionResponse: UnifiedApprovalDTO = {
+        ...detailRead,
+        currentNodeKey: 'handler_1',
+        assignments: [seat(VIEWER, 'handler_1')],
+        returnableNodeKeys: [],
+      }
+      delete handlerActionResponse.currentNodeType
+      return { approval: handlerActionResponse, history: HANDLER_COMMENTED }
+    }
     case 'server-list-wins':
       return { approval: detailRead, history: ADMIN_JUMP_HISTORY }
     case 'client-mirror':
