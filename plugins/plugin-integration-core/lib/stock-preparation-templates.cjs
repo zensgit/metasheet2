@@ -1014,6 +1014,66 @@ const STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE = Object.freeze(nor
   ],
 }))
 
+// 一个项目一张备料表 — THE PROJECT OVERVIEW (S3 of ADR adr-stock-prep-project-sheets-20261008 §5;
+// register R-37). One plugin-managed sheet per tenant staging project, keyed by `projectNo`, ONE ROW
+// PER REGISTRY ROW. Every column is an AGGREGATE or a HANDLE: counts, enums, server clocks, the
+// three O2(a) project-level texts the registry stores, and the O1 deep link (a `/multitable/<sheet>/
+// <view>` PATH to the project's 待填写 view — two ids, never a host). The field types this module
+// allows (string / number / boolean / date / select) make it STRUCTURALLY impossible for a detail
+// row to land here, and the overview suite pins the field-id set to exactly this list.
+//
+// The sheet is HOST-LEVEL READ-ONLY (Q5): the host stamps `system_kind = 'stock_prep_overview'`
+// at provisioning (never deletable, excluded from history contiguity, still listed) and the
+// capability clamp leaves every non-plugin principal — admins included — `canRead` / `canExport`
+// only. The project sheet is the ONE data source; this is a PROJECTION, refreshed by the plugin
+// (`POST …/project-overview/refresh`), never a second writer (no O3).
+//
+// `status` (active | archived) is the column the two provisioned views filter on: 「进行中」 and
+// 「已归档」 — a grid cannot draw 「主列表 + 下方分区」, so two views it is (ADR §5 「只读」).
+const STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE = Object.freeze(normalizeStockPreparationMvpTableTemplate({
+  id: 'plm.stock-preparation.project-overview.v1',
+  objectId: 'plm_stock_preparation_project_overview',
+  label: 'Stock Preparation Project Overview',
+  labelZh: '备料项目总览',
+  version: 'v1',
+  role: 'project_overview',
+  keyFields: ['projectNo'],
+  requiredFields: ['projectNo', 'status'],
+  fields: [
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true, key: true, labelZh: '项目号' }),
+    // O1: the deep link to THIS project's 待填写 view — `/multitable/<sheetId>/<todoViewId>`.
+    field('sheetLink', 'Stock Prep Sheet', 'string', 'plm_system', { labelZh: '备料表' }),
+    // The posture (server-side `stockPrepPosture`, 「已归档」 first) as the display text, plus the
+    // closed enum key so a reader can filter without parsing a sentence.
+    field('posture', 'Posture', 'string', 'plm_system', { labelZh: '状态' }),
+    field('postureKey', 'Posture Key', 'string', 'plm_system', { labelZh: '状态键' }),
+    field('status', 'Registry Status', 'string', 'plm_system', { required: true, labelZh: '登记状态' }),
+    // O2(a): the three project-level columns, PROJECTED from the registry. Edited only through the
+    // plugin's project-fields route; this sheet is read-only to people.
+    field('responsibleLabel', 'Responsible', 'string', 'plm_system', { labelZh: '负责人' }),
+    field('note', 'Note', 'string', 'plm_system', { labelZh: '备注' }),
+    field('plannedFinishOn', 'Planned Finish', 'date', 'plm_system', { labelZh: '计划完成' }),
+    field('rowCount', 'Material Rows', 'number', 'plm_system', { labelZh: '物料行数' }),
+    field('activeRowCount', 'Active Rows', 'number', 'plm_system', { labelZh: '有效行数' }),
+    // ADR §5 「溢出时带「超过」」: true when the bounded count is a floor, not a total.
+    field('countsBounded', 'Counts Exceed Bound', 'boolean', 'plm_system', { labelZh: '行数超过上限' }),
+    field('procurementOpenCount', 'Procurement Open', 'number', 'plm_system', { labelZh: '采购未完成' }),
+    field('warehouseOpenCount', 'Warehouse Open', 'number', 'plm_system', { labelZh: '仓库未完成' }),
+    field('pendingDecisionCount', 'Pending Decisions', 'number', 'plm_system', { labelZh: '等您拿主意' }),
+    field('missingComponentsCount', 'Missing Components', 'number', 'plm_system', { labelZh: '卡住了' }),
+    field('lastPullAt', 'Last Pull At', 'date', 'plm_system', { labelZh: '最近拉取' }),
+    field('lastPullOutcome', 'Last Pull Outcome', 'string', 'plm_system', { labelZh: '最近拉取结果' }),
+    field('countsAt', 'Counts As Of', 'date', 'plm_system', { labelZh: '截至' }),
+  ],
+}))
+
+// The two views the overview is created with (ADR §5): 「进行中」 (status ≠ archived) is the first —
+// and therefore default — view; 「已归档」 the second. Logical ids, derived by the host into view ids.
+const STOCK_PREPARATION_PROJECT_OVERVIEW_VIEWS = Object.freeze([
+  Object.freeze({ id: 'overview-active', label: 'In Progress', labelZh: '进行中', status: 'active' }),
+  Object.freeze({ id: 'overview-archived', label: 'Archived', labelZh: '已归档', status: 'archived' }),
+])
+
 const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
   normalizeStockPreparationMvpTableTemplate({
     id: 'plm.stock-preparation.project.v1',
@@ -1329,6 +1389,9 @@ module.exports = {
   pickFillViewName,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  // S3 (R-37): the project overview template and its two views.
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_VIEWS,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   StockPreparationTemplateError,
