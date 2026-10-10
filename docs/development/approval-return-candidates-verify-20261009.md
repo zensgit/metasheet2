@@ -575,3 +575,37 @@
 卫生：17 个文件都在声明范围内；没有 `migrations/`、`routes/`、开关文件；diff 与七条提交信息的机器名 / 局域网与部署 IP / 用户名 / 家目录路径扫描无命中；7/7 提交带 trailer；没有 `UnifiedApprovalDTO` 键的普查需要更新；实现说明 §10 的声明在 head 上全部属实，唯二不准的是上面两条 NIT 对应的描述。每个变异 `git diff --stat` = 1 个文件、1 行增 1 行删；porcelain 每步与最后都为 0。
 
 门审 r2 的 owner 可见建议：列表端点不带（同意）；NIT-1 建议一行镜像（与规则 (a) 同一个叶模块），收窄描述也可接受；NIT-2 只改描述，并入下一次 OpenAPI 改动；导入环接受为延迟绑定。
+
+## 9. G-4：只留服务端列表与旧列表（删除客户端镜像）
+
+- 对象：分支 `refactor/approval-return-candidates-server-list-only-20261010`，叠在 #6294 的 `91e48ae298` 上，并以合并 `134f6daad4` 带入本文与开发说明（`998e6e7b2e`，只有这两份 MD）。代码提交两个：`a8ce598a6c`（视图与 jsdom spec）、`50167870cb`（浏览器 spec 与 harness）；其后只有本文档提交，只改 `docs/development/` 下的两份 MD，所以下面在 `50167870cb` 上的运行就是最终 head 的代码。未推送、未开 Draft、未经门审。依据：收口目标 G-4（开发说明 §5、§6.4 行 23–25）。
+- 改动（相对 `91e48ae298`，4 个代码文件 +198/−618）：
+  - `ApprovalDetailView.vue`（+13/−177）：`returnableNodes` 只剩三支。非 pending → 空；`returnableNodeKeys` 是数组 → 原样（服务端的轨迹顺序，`[]` 隐藏按钮）；否则旧列表：除游标、`start`、`end` 之外的历史节点键，按 `store.history` 里首次出现的顺序（`/history` 最新在前）。删除 `ownApprovalGraph`、`returnCursorNodeType`、`returnBlockedByParallelRegion`、`upstreamNodeKeys`、`returnEligibleGraphKeys` 与它们的注释块（这一段从 193 行缩到 30 行），以及 `ApprovalNodeType`、`collectParallelRegionNodeKeys` 两个导入；`parallelBranchNodeKeys` 另有四处读者，保留。按钮的 `v-if` 与对话框不动。
+  - jsdom spec：27 例 → 11 例。删 T2–T15（20 例，钉的是镜像的过滤、图身份与漂移规则）；留 T1（正控）与 TS1、TS2、TS2b、TS3、TS3b、TS4（TS4 改为期望旧列表）；新增 L1（字段缺省，自图已加载，历史含下游、并行分支、办理、抄送与重复键 → 旧列表六项）、L2（同一历史，`[]` → 无按钮）、L3（非 pending → 无按钮）、L3b（非 pending 且带列表 → 无按钮，钉住状态检查在服务端列表之前）。
+  - 浏览器：10 条 → 6 条。退役 `client-mirror`、`handler-cursor`、`parallel-state`、`client-mirror&template=drifted`、`handler-cursor&template=drifted`；新增 `legacy`（#6293 之前的详情读，自图与钉定版本都已加载），选项恰为 总经理终审、会签结果抄送、法务会签、资料补正办理、抄送人事、部门经理初审（approval_3、join_1、approval_p1、handler_1、cc_1、approval_1，按给定的 `/history` 顺序）。`server-list`、`server-empty&template=drifted`、`server-list-wins`、`submit`、`server-list&template=drifted` 的夹具与期望不变，只改说明文字。
+  - 登记不动：Playwright 配置、两个工作流、车道脚本与清单、覆盖守卫都按文件名或通配匹配，两个 spec 文件名不变。退役的场景名作为场景名只出现在本文与开发说明的历史段落（其他文件里同形的词另有所指）。
+- 运行（另一台机器，独立 detached 工作树，`50167870cb`；依赖安装 `--frozen-lockfile` 完成，锁文件未变；运行前、每个变异还原后与收尾时 porcelain 都为 0）：
+
+| 运行 | 结果 |
+|---|---|
+| web vitest：`approval-detail-return-candidates` · `approval-member-bar-operation-policy` · `approval-detail-instance-consistency` · `approval-detail-can-decide-current-node` | 4 files / **86 passed**（11 · 27 · 39 · 9） |
+| Playwright（`playwright.approval-verification.config.ts`，`--retries=0`）：`approval-return-candidates.spec.ts` + `approval-member-action-dialog.spec.ts` | **14 passed**（6 + 8） |
+| web `type-check`（`vue-tsc -b` 与两个 verification tsconfig） | rc=0，0 个 `error TS` |
+| core-backend `approval-ci-coverage-enumeration` | 1 file / **402 passed** |
+
+- 变异（`ApprovalDetailView.vue`；每次精确单锚替换，锚点恰好出现一次；`git diff --shortstat` 确认只动 1 个文件；跑完用 `git show HEAD:<path>` 的副本还原，porcelain 每步为 0）：
+
+| # | 变异 | jsdom spec（11 例） | 浏览器（只跑候选 spec，6 条） |
+|---|---|---|---|
+| `G4·m1` | 不读服务端列表（`false && Array.isArray(serverKeys)`） | 6 红：L2、TS1、TS2、TS2b、TS3、TS3b | 5 红：`server-list`、`server-empty`（drifted）、`server-list-wins`、`submit`、drifted `server-list`；`legacy` 绿 |
+| `G4·m2` | `[]` 当缺省（`&& serverKeys.length > 0`） | 3 红：L2、TS2、TS2b | 1 红：`server-empty`（drifted） |
+| `G4·m3` | 旧列表不排除游标 | 2 红：L1、TS4 | 1 红：`legacy` |
+| `G4·m4` | 去掉状态检查 | 2 红：L3、L3b | 未跑（浏览器没有非 pending 场景） |
+| `G4·m5` | 状态检查挪到服务端列表之后（#6293 时的顺序） | 1 红：L3b | 未跑（同上） |
+| `G4·m6` | 在旧列表上加回客户端图过滤（只留自图里的审批节点） | 2 红：L1、TS4 | 1 红：`legacy` |
+| `G4·m7` | 服务端列表与历史取交集 | 1 红：TS3b | 1 红：`server-list-wins` |
+
+- 相对 #6291 + #6293 的行为差异：字段是数组时不变（非 pending 却带列表的 DTO 现在给空；#6293 的服务端不发这种形状，L3b 只作纵深防御）。字段缺省时不再有任何客户端闸：图过滤（类型、并行域、上游）和只读 DTO 的办理节点闸、并行闸（`currentNodeType`、`currentNodeKeys`）都没有了。受影响的只有两种情形：(1) 前端连到 #6293 之前的服务端（只在单独部署 web 镜像时出现，开发说明 §6.4 行 25）；(2) #6293 的服务端没能为一个 pending 的平台实例算出列表（无游标、图形状不对、执行器抛错）。桥接 / 旧实例没有冻结图（DTO 也不带 `currentNodeType`），在 #6291 下本来就给旧列表。两种情形下非法目标由服务端的 409 拒绝（`APPROVAL_HANDLER_ACTION_NOT_ALLOWED`、`APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED`、`APPROVAL_RETURN_TARGET_INVALID`）。
+- 残留：四个登记文件里的注释仍按镜像描述候选规则（`playwright.approval-verification.config.ts` 与 `approval-browser-verify.yml` 的文件头、`approval-web-guard.yml` 两处路径注释、`run-required-web-tests.sh` 该 token 的说明块）。G-4 按「登记不动」没有改它们；它们只是注释，不影响任何匹配，可在后续只改注释的提交里更新。
+- 未跑：全量车道与托管 CI（推送后交 CI）；真服务端与真实 HTTP（同 §7）。
+- 提交 trailer：G-4 的四个提交（含合并提交与本文档提交）都署 `Claude Opus 5.5`（实际执行模型）。

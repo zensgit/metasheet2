@@ -753,12 +753,12 @@ npx vitest run approval-detail-can-decide-current-node --reporter=dot
 
 # 退回候选 (return candidates), 2026-10-09: ONE token added — `approval-detail-return-candidates`, a
 # NEW spec (apps/web/tests/approval-detail-return-candidates.spec.ts) over the mounted
-# ApprovalDetailView. It pins the 退回 target list against the three checks the server's return
-# dispatch applies (handler cursor, parallel region, target off the executor's visited approval
-# trail). It covers both DTO shapes — the detail read carries `currentNodeType`, an action response
-# carries `currentNodeKeys` — and the owner-visible choices: no graph ⇒ today's unfiltered list,
-# only the instance's own template / pinned version may judge it, and the pinned version wins over a
-# drifted live template.
+# ApprovalDetailView. It pins the 退回 target list: the DTO's `returnableNodeKeys` is offered
+# verbatim, in the server's order (`[]` hides 退回, whatever the history holds), and when the field
+# is absent or null the view shows the legacy unfiltered history list (every visited node key but
+# the cursor, `start` and `end`). There is no client-side filter any more: the server slice #6293
+# computes the legal targets. It covers both DTO shapes, the detail read and an action response,
+# which carry the field alike.
 #
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file, using the counting rule of scripts/ops/required-web-lane-exec-block.mjs `allVitestTokens`
