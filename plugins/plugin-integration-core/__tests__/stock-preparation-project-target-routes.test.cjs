@@ -821,21 +821,6 @@ test('R-13 board, switch ON: an unregistered project renders with no bound targe
   } finally { h.restore() }
 })
 
-;(async () => {
-  let failed = 0
-  for (const [name, fn] of tests) {
-    try {
-      await fn()
-      console.log(`  ${name} OK`)
-    } catch (error) {
-      failed += 1
-      console.error(`FAIL: ${name}`)
-      console.error(error && error.stack ? error.stack : error)
-    }
-  }
-  if (failed) {
-    console.error(`stock-preparation-project-target-routes.test.cjs FAILED (${failed})`)
-    process.exit(1)
-  }
-  console.log('✓ stock-preparation-project-target-routes')
-})()
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — the same per-test loop
+// and output lines, plus the exit sentinel and the per-test timeout: a hung test can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-project-target-routes.test.cjs', tests, { passLine: '✓ stock-preparation-project-target-routes' })

@@ -1126,3 +1126,83 @@ describe('S3 follow-up E — the overview MODULE still provisions through the re
     expect(host.ensureView).toHaveBeenCalledTimes(2)
   })
 })
+
+// S3 follow-ups 2 (item 3): the four READ-only object-keyed methods (and the two inside the repair transaction) read
+// projectId / objectId ONCE, like the writes (E-06): the namespace check, the scope hook and the host all see the
+// snapshot that was checked. Before, they checked `input.*` and forwarded `input` itself, so a getter could pass the
+// checks with the plugin's own object (or namespace) and have the host read another one.
+//   E-07 objectId: a getter answering the plugin's own object first and a foreign object afterwards.
+//   E-08 projectId: a getter answering the plugin's own namespace first and a foreign project afterwards.
+describe('S3 follow-ups 2 (item 3) — read-once on the READ-only object-keyed plugin-scope methods', () => {
+  const OWN_OBJECT = 'plm_stock_preparation_main'
+  const FOREIGN_OBJECT = 'someone_elses_object'
+  const FOREIGN_PROJECT = 'tenant_1:after-sales'
+  type HostFn = { mock: { calls: unknown[][] } }
+  const build = () => {
+    const txSurface = {
+      findObjectSheet: vi.fn(async () => null),
+      resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+      readObjectFieldsContent: vi.fn(async () => ({})),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })),
+    }
+    const host = {
+      getObjectSheetId,
+      resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+      readObjectFieldsContent: vi.fn(async () => ({})),
+      findObjectView: vi.fn(async () => null),
+      getObjectField: vi.fn(async () => null),
+      runObjectFieldsRepairTransaction: vi.fn(async (fn: (surface: typeof txSurface) => Promise<unknown>) => fn(txSurface)),
+    }
+    const hooks = { assertObjectScope: vi.fn(async () => {}) }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-integration-core', hooks as never)
+    return { api, host, hooks, txSurface }
+  }
+  type Built = ReturnType<typeof build>
+  const flipping = (base: Record<string, unknown>, key: string, first: unknown, later: unknown) => {
+    let reads = 0
+    const input: Record<string, unknown> = { ...base }
+    Object.defineProperty(input, key, { enumerable: true, get() { reads += 1; return reads === 1 ? first : later } })
+    return { input, reads: () => reads }
+  }
+  const cases: Array<[string, (s: Built, input: Record<string, unknown>) => Promise<unknown>, (s: Built) => HostFn, Record<string, unknown>]> = [
+    ['resolveExistingObjectFieldIds', (s, input) => s.api.provisioning.resolveExistingObjectFieldIds(input as never), (s) => s.host.resolveExistingObjectFieldIds, { fieldIds: ['status'] }],
+    ['readObjectFieldsContent', (s, input) => s.api.provisioning.readObjectFieldsContent(input as never), (s) => s.host.readObjectFieldsContent, { fieldIds: ['status'] }],
+    ['findObjectView', (s, input) => s.api.provisioning.findObjectView!(input as never), (s) => s.host.findObjectView, { viewId: 'default' }],
+    ['getObjectField', (s, input) => s.api.provisioning.getObjectField(input as never), (s) => s.host.getObjectField, { fieldId: 'status' }],
+    ['repair-tx resolveExistingObjectFieldIds', (s, input) => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.resolveExistingObjectFieldIds(input as never)), (s) => s.txSurface.resolveExistingObjectFieldIds, { fieldIds: ['status'] }],
+    ['repair-tx readObjectFieldsContent', (s, input) => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.readObjectFieldsContent(input as never)), (s) => s.txSurface.readObjectFieldsContent, { fieldIds: ['status'] }],
+  ]
+
+  it('E-07 objectId read once: the scope hook AND the host see the object that was checked — never the foreign one a getter answers later', async () => {
+    for (const [name, run, hostFn, extra] of cases) {
+      const s = build()
+      const f = flipping({ projectId: OV_PROJECT, ...extra }, 'objectId', OWN_OBJECT, FOREIGN_OBJECT)
+      await run(s, f.input)
+      const seen = hostFn(s).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.objectId, `${name}: the host reads the object that was checked`).toBe(OWN_OBJECT)
+      expect(f.reads(), `${name}: objectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId, `${name}: the scope hook gets the checked object`).toBe(OWN_OBJECT)
+      expect(seen!.projectId, `${name}: projectId forwarded`).toBe(OV_PROJECT)
+      for (const [key, value] of Object.entries(extra)) expect(seen![key], `${name}: ${key} forwarded`).toEqual(value)
+    }
+  })
+
+  it('E-08 projectId read once: the namespace check, the scope hook and the host see the project that was checked — never a foreign project a getter answers later', async () => {
+    for (const [name, run, hostFn, extra] of cases) {
+      const s = build()
+      const f = flipping({ objectId: OWN_OBJECT, ...extra }, 'projectId', OV_PROJECT, FOREIGN_PROJECT)
+      await run(s, f.input)
+      const seen = hostFn(s).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.projectId, `${name}: the host reads the project that was checked`).toBe(OV_PROJECT)
+      expect(f.reads(), `${name}: projectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { projectId?: unknown }).projectId, `${name}: the scope hook gets the checked project`).toBe(OV_PROJECT)
+    }
+    // Control: the foreign project itself is refused by the namespace check before the hook or the host.
+    const s = build()
+    await expect(s.api.provisioning.getObjectField({ projectId: FOREIGN_PROJECT, objectId: OWN_OBJECT, fieldId: 'status' } as never)).rejects.toBeInstanceOf(MultitableProjectNamespaceError)
+    expect(s.hooks.assertObjectScope).not.toHaveBeenCalled()
+    expect(s.host.getObjectField).not.toHaveBeenCalled()
+  })
+})

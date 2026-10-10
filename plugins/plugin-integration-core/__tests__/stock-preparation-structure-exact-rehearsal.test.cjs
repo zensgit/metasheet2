@@ -659,10 +659,6 @@ async function main() {
   console.log('stock-preparation-structure-exact-rehearsal.test.cjs OK')
 }
 
-main().then(
-  () => {},
-  (error) => {
-    console.error(error)
-    process.exitCode = 1
-  },
-)
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-structure-exact-rehearsal.test.cjs', main)

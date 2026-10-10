@@ -567,6 +567,8 @@ const {
   grantProjectOverviewRoles,
   updateProjectOverviewRow,
   PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+  // S3 follow-ups 2 (item 1): the shorter cooldown an INCOMPLETE refresh leaves behind.
+  PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS,
   // S3 follow-up C: the typed 503 of a refresh that could not write every project (audited `incomplete`).
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
 } = require('./stock-preparation-project-overview.cjs')
@@ -4244,6 +4246,10 @@ function requireStockPreparationAudit() {
   // PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS answers 200 `fresh: false` with no refresh IO. Per process by
   // design: a cooldown shared across processes would need a write to decide that nothing should be
   // written; the tenant's overview lock still serializes refreshes that land on different processes.
+  // S3 follow-ups 2 (item 1): the value is `{ atMs, cooldownMs, incomplete }`. A refresh that RAN but answered 503
+  // REFRESH_INCOMPLETE is not cleared: it is re-stamped with PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS from
+  // when it ended (`incomplete: true`, which the cooled answer carries so the page never calls that overview
+  // current). Every other failure still clears the stamp (409 BUSY included — nothing ran).
   const projectOverviewRefreshStartedAt = new Map()
   /**
    * S3 fix round 1 (R5): ONE project's overview row after an event — best-effort BY CONTRACT. Only with
@@ -9785,7 +9791,9 @@ function requireStockPreparationAudit() {
     // no refresh IO (past the operator-scope resolution that names the tenant). Fix round 2 (F4): the lock is
     // a TRY-lock — another overview writer of the tenant running (in this process, or holding the database
     // lock in another) answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once, nothing done, and the
-    // cooldown stamp is cleared like any refresh that did not complete. Audited `project_overview_refresh`
+    // cooldown stamp is cleared like any refresh that did not complete — except (follow-ups 2, item 1) a refresh that
+    // RAN and answered 503 REFRESH_INCOMPLETE: it keeps the SHORTER PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS from
+    // when it ended, and a click inside it answers `fresh: false` with `incomplete: true`. Audited `project_overview_refresh`
     // with counts only.
     async stockPreparationProjectOverviewRefresh(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
@@ -9799,16 +9807,18 @@ function requireStockPreparationAudit() {
         tenantPrincipalDirectory,
       })
       const tenantId = scope.tenantId
-      const startedAt = projectOverviewRefreshStartedAt.get(tenantId)
+      const stamp = projectOverviewRefreshStartedAt.get(tenantId)
       const nowMs = Date.now()
-      if (typeof startedAt === 'number' && nowMs - startedAt < PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS) {
+      if (stamp && nowMs - stamp.atMs < stamp.cooldownMs) {
         return sendOk(res, {
           fresh: false,
-          cooldownSeconds: Math.round(PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS / 1000),
-          retryAfterSeconds: Math.max(1, Math.ceil((PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS - (nowMs - startedAt)) / 1000)),
+          cooldownSeconds: Math.round(stamp.cooldownMs / 1000),
+          retryAfterSeconds: Math.max(1, Math.ceil((stamp.cooldownMs - (nowMs - stamp.atMs)) / 1000)),
+          // Follow-ups 2 (item 1): the run this cooldown follows did not write every project — never "current".
+          ...(stamp.incomplete === true ? { incomplete: true } : {}),
         })
       }
-      projectOverviewRefreshStartedAt.set(tenantId, nowMs)
+      projectOverviewRefreshStartedAt.set(tenantId, { atMs: nowMs, cooldownMs: PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, incomplete: false })
       const actor = user.id || user.email
       try {
         const store = requireStockPreparationProjectOverview()
@@ -9832,12 +9842,19 @@ function requireStockPreparationAudit() {
         })
         return sendOk(res, { fresh: true, ...result })
       } catch (error) {
-        // A refresh that did not complete is not "fresh": the next click may try again at once — BUSY (another
-        // writer held the lock, here or in another process) and REFRESH_INCOMPLETE included.
-        projectOverviewRefreshStartedAt.delete(tenantId)
+        if (error && error.code === STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE) {
+          // Follow-ups 2 (item 1): this refresh RAN (a full rebuild) and some project could not be written. Under a
+          // persistent failure clearing the stamp would let an OPERATE caller rerun that rebuild back to back, so
+          // it keeps the SHORTER cooldown, from now (when the run ended).
+          projectOverviewRefreshStartedAt.set(tenantId, { atMs: Date.now(), cooldownMs: PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS, incomplete: true })
+        } else {
+          // Any other refresh that did not complete leaves no cooldown, as before: the next click may try again at
+          // once — BUSY (nothing ran: another writer held the lock, here or in another process) included.
+          projectOverviewRefreshStartedAt.delete(tenantId)
+        }
         // S3 follow-up C: some projects could not be written. The run is audited as `incomplete` with its counts
-        // and the failed count (never a value), one values-free warn names the first failure's CODE, and the
-        // typed 503 is the answer — never `fresh: true`.
+        // and the failed count (never a value), one values-free warn names the CODE of the last failure that still
+        // stands (follow-ups 2, item 4), and the typed 503 is the answer — never `fresh: true`.
         if (error && error.code === STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE && error.summary) {
           const failedProjectCount = error.details && Number.isInteger(error.details.failedProjectCount) ? error.details.failedProjectCount : 0
           await audit.append({

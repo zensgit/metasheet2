@@ -200,6 +200,11 @@ export interface StockPrepProjectOverviewRefreshCooled {
   fresh: false
   cooldownSeconds: number
   retryAfterSeconds: number
+  /**
+   * S3 follow-ups 2 (item 1): present (and only ever `true`) when the cooldown follows a refresh that could not write
+   * every project (503 REFRESH_INCOMPLETE) — the overview is NOT current, and the page must not say it is.
+   */
+  incomplete?: true
 }
 
 /** POST …/project-overview/ensure (PULL) — the overview's handles and what its G1 READ grant did. */
@@ -462,7 +467,8 @@ export function clampStockPrepProjectOverviewRefresh(raw: unknown): StockPrepPro
     const cooldownSeconds = countOf(raw.cooldownSeconds)
     const retryAfterSeconds = countOf(raw.retryAfterSeconds)
     if (cooldownSeconds === null || retryAfterSeconds === null) return null
-    return { fresh: false, cooldownSeconds, retryAfterSeconds }
+    // Follow-ups 2 (item 1): only the literal `true` marks the after-INCOMPLETE cooldown; anything else is the plain one.
+    return { fresh: false, cooldownSeconds, retryAfterSeconds, ...(raw.incomplete === true ? { incomplete: true as const } : {}) }
   }
   if (raw.fresh !== true) return null
   const sheetId = handleOf(raw.sheetId)
@@ -959,8 +965,11 @@ export async function saveStockPreparationProjectFields(
 
 export type StockPrepProjectOverviewRefreshOutcome =
   | { kind: 'done'; result: StockPrepProjectOverviewRefreshResult }
-  /** Fix round 1 (R6): the server's cooldown — nothing was done; try again in `retryAfterSeconds`. */
-  | { kind: 'cooled'; retryAfterSeconds: number }
+  /**
+   * Fix round 1 (R6): the server's cooldown — nothing was done; try again in `retryAfterSeconds`. Follow-ups 2 (item 1):
+   * `incomplete` — the cooldown follows a refresh that could not write every project, so the overview is not current.
+   */
+  | { kind: 'cooled'; retryAfterSeconds: number; incomplete: boolean }
   | { kind: 'refused'; status: number; code: string | null }
 
 export async function refreshStockPreparationProjectOverview(
@@ -969,7 +978,7 @@ export async function refreshStockPreparationProjectOverview(
   if (!api || typeof api.refreshOverview !== 'function') return { kind: 'refused', status: 0, code: null }
   try {
     const answer = await api.refreshOverview()
-    if (answer.fresh === false) return { kind: 'cooled', retryAfterSeconds: answer.retryAfterSeconds }
+    if (answer.fresh === false) return { kind: 'cooled', retryAfterSeconds: answer.retryAfterSeconds, incomplete: answer.incomplete === true }
     return { kind: 'done', result: answer }
   } catch (error) {
     return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }

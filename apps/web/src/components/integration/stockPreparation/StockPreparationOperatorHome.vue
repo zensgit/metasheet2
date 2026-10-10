@@ -787,7 +787,8 @@ const overviewNoticeText = computed<StockPrepPlainEntry>(() => {
   if (notice.kind === 'done') {
     return 'fresh' in notice.result ? stockPrepProjectOverviewRefreshText(notice.result) : overviewPlain('overview_ensured')
   }
-  if (notice.kind === 'cooled') return overviewPlain('overview_cooled')
+  // Follow-ups 2 (item 1): a cooldown after an INCOMPLETE refresh never says the numbers are current.
+  if (notice.kind === 'cooled') return overviewPlain(notice.incomplete ? 'overview_cooled_incomplete' : 'overview_cooled')
   return stockPrepErrorPlain(notice.code ?? '')
 })
 
