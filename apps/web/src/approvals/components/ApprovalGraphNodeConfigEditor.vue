@@ -339,13 +339,16 @@
       >共 {{ (node.config as ParallelNodeConfig).branches.length }} 个并行分支，点击上方「+添加分支」可再增加一路</p>
     </div>
 
-    <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
-         position are TOPOLOGY: preserved byte-for-byte on save. -->
+    <!-- G-4: editable cc node — targetType (用户/角色/用户组) + targetIds. The cc node's edges /
+         position are TOPOLOGY: preserved byte-for-byte on save. Lock-1 OD-L1-7(a): 用户组 is offered
+         only while the "`user_group` (cc)" capability-registry row is present (`ccTargetTypeOptions`);
+         `data-cc-target-types` exposes the offered set so a test can pin it without opening the popper. -->
     <div
       v-else-if="node.type === 'cc' && ccEditFor(node.key)"
       class="template-authoring__cc"
       data-testid="approval-cc-editor"
       :data-cc-node="node.key"
+      :data-cc-target-types="ccTargetTypeOptions.join(',')"
     >
       <el-form-item label="抄送类型">
         <el-select
@@ -357,7 +360,7 @@
           @change="syncCcOptions(node.key)"
         >
           <el-option
-            v-for="targetType in CC_TARGET_TYPES"
+            v-for="targetType in ccTargetTypeOptions"
             :key="targetType"
             :label="ccTargetTypeLabel(targetType)"
             :value="targetType"
@@ -389,7 +392,7 @@
           />
         </el-select>
         <el-select
-          v-else
+          v-else-if="ccEditFor(node.key)!.targetType === 'role'"
           :model-value="ccEditFor(node.key)!.targetIds"
           multiple
           filterable
@@ -408,6 +411,43 @@
             :value="role.id"
           />
         </el-select>
+        <!-- Lock-1 OD-L1-7(a) (用户组 cc target): the SAME typed, org-scoped bound-group multi-select
+             the approver user_group sub-form uses (D0 §10.2 — never a free-text/raw-id input). An
+             unbound group fails PUBLISH (values-free 400, `assertUserGroupSourcesBoundToOrg`), never
+             at dispatch; the picker only OFFERS bound candidates. -->
+        <el-select
+          v-else-if="ccEditFor(node.key)!.targetType === 'group'"
+          :model-value="ccEditFor(node.key)!.targetIds"
+          multiple
+          filterable
+          size="small"
+          :disabled="readOnly"
+          :loading="memberGroupOptionsLoading"
+          class="ms-w-360"
+          placeholder="选择已绑定的用户组"
+          data-testid="approval-cc-target-ids"
+          @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+          @visible-change="(visible: boolean) => visible && syncCcOptions(node.key)"
+        >
+          <el-option
+            v-for="group in memberGroupOptions"
+            :key="group.id"
+            :label="formatMemberGroupLabel(group)"
+            :value="group.id"
+          />
+        </el-select>
+        <!-- G-16 unknown-value safety: a persisted targetType this editor does not know renders
+             read-only (ids preserved, never re-typed); `validateCcEdits` flags it before save. -->
+        <p
+          v-else
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-unknown"
+        >未知的抄送类型「{{ ccEditFor(node.key)!.targetType }}」，已保留原值（{{ ccEditFor(node.key)!.targetIds.length }} 个对象）；请选择已知类型后再保存</p>
+        <p
+          v-if="ccEditFor(node.key)!.targetType === 'group' && !readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-group-empty"
+        >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
       </el-form-item>
     </div>
 
@@ -1218,6 +1258,12 @@ const showFieldPermissionsSection = computed(
 
 // ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
 const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
+// Lock-1 OD-L1-7(a): the cc target-type select offers the backend-accepted set (CC_TARGET_TYPES),
+// with 用户组 gated on the "`user_group` (cc)" registry row — the cc half's M4 admission, read
+// mechanically from the same registry the approver/handler rosters read, never a hand flag.
+const ccTargetTypeOptions = computed(() =>
+  CC_TARGET_TYPES.filter((targetType) => targetType !== 'group' || isRegisteredAssigneeSourceKind(registry.value, 'cc', 'user_group')),
+)
 const assigneeSourceRosterForNode = computed(() => {
   const roster = assigneeSourceRoster(registry.value, props.node.type)
   // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are

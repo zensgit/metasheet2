@@ -2437,6 +2437,101 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
+  // Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc half's registry treatment + picker (G-4 FE side;
+  // G-16 unknown-value safety). The "`user_group` (cc) | 用户组 | cc" row is the SEPARATE row the
+  // lock requires ("the approver row does not admit it"); the cc editor offers 用户组 in its
+  // target-type select ONLY while that row is present (M4, read mechanically from the registry).
+  function makeCcNode(key: string, targetType: string, targetIds: string[]): ApprovalNode {
+    return { key, type: 'cc', name: '抄送', config: { targetType, targetIds } as never }
+  }
+  function ccStubApi(
+    edit: { targetType: string; targetIds: string[] },
+    overrides: Partial<ApprovalNodeConfigEditorApi> = {},
+  ): ApprovalNodeConfigEditorApi {
+    const reactiveEdit = reactive({ nodeKey: 'cc_g', ...edit })
+    return {
+      ...createStubConfigApi({}),
+      ccEditFor: () => reactiveEdit as any,
+      ccTargetTypeLabel: (t: string) => (t === 'role' ? '角色' : t === 'group' ? '用户组' : '用户'),
+      ...overrides,
+    }
+  }
+  const REGISTRY_WITHOUT_CC_ROW: ApprovalCapabilityRegistry = {
+    ...DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+    assigneeSourcesByNodeType: {
+      approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval'),
+      handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'),
+    },
+  }
+
+  it('OD-L1-7(a) registry row: the cc roster is exactly the single user_group row; the cc editor offers 用户组 only while that row is present, and renders the bound-group picker for a persisted group target', () => {
+    expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'cc')).toEqual([{ kind: 'user_group', label: '用户组' }])
+
+    const node = makeCcNode('cc_g', 'group', ['grp-1'])
+    const withRow = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: ['grp-1'] }),
+    })
+    const editor = withRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editor).not.toBeNull()
+    expect(editor.getAttribute('data-cc-target-types')).toBe('user,role,group')
+    // The group branch rendered (typed bound-group multi-select), not the role branch and not the
+    // unknown line; the fixture has two bound options so no empty hint.
+    expect(editor.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-unknown"]')).toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    withRow.unmount()
+
+    // Positive control (M4): without the cc row, 用户组 is NOT offered — while the persisted 'group'
+    // value is untouched (G-16: still rendered through the group branch, never re-typed).
+    const noRow = mountDirectInspector({
+      node,
+      registry: REGISTRY_WITHOUT_CC_ROW,
+      api: ccStubApi({ targetType: 'group', targetIds: ['grp-1'] }),
+    })
+    const editorNoRow = noRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editorNoRow.getAttribute('data-cc-target-types')).toBe('user,role')
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    noRow.unmount()
+  })
+
+  it('OD-L1-7(a) group picker: an empty bound-group list shows the honest empty hint (proves the group branch rendered, not the role branch)', () => {
+    const node = makeCcNode('cc_g', 'group', [])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: [] }, { memberGroupOptions: [] }),
+    })
+    expect(c.querySelector('[data-testid="approval-cc-target-group-empty"]')).not.toBeNull()
+    unmount()
+    // Positive control: the role branch has no such hint even with zero roles.
+    const roleNode = makeCcNode('cc_g', 'role', [])
+    const roleMount = mountDirectInspector({
+      node: roleNode,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'role', targetIds: [] }, { memberGroupOptions: [], directoryRoles: [] }),
+    })
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    roleMount.unmount()
+  })
+
+  it('G-16: an off-enum persisted cc targetType renders the read-only unknown line (ids preserved, count shown), never a picker', () => {
+    const node = makeCcNode('cc_g', 'dept', ['d-1', 'd-2'])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'dept', targetIds: ['d-1', 'd-2'] }),
+    })
+    const unknown = c.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknown).not.toBeNull()
+    expect(unknown.textContent).toContain('dept')
+    expect(unknown.textContent).toContain('2 个对象')
+    expect(c.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
+    unmount()
+  })
+
   // Lock-1 §K4 — continuous_dept_heads authoring sub-form (canvas/graph inspector surface,
   // ApprovalGraphNodeConfigEditor.vue — distinct from the linear TemplateAuthoringView.vue steps
   // editor covered in approvalTemplateAuthoring.spec.ts): registry-admitted, renders EDITABLE with
