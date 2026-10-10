@@ -5076,6 +5076,12 @@ describe('ApprovalProductService', () => {
   it('redacts stored record-link ids when getApproval omits a viewer', async () => {
     pgState.pool.query.mockImplementation(async (sql: string) => {
       const statement = normalize(sql)
+      // `getApproval` reads the instance's frozen runtime graph for `returnableNodeKeys` whether or
+      // not a viewer is passed (the field is viewer-independent). This fixture's published definition
+      // has no stored row, so the production answer is no graph — and no `returnableNodeKeys`.
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [], rowCount: 0 }
+      }
       if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
         return {
           rows: [buildInstanceRow({
@@ -5116,6 +5122,61 @@ describe('ApprovalProductService', () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const approval = await new ApprovalProductService().getApproval('apr-1')
     expect(approval?.formSnapshot).toEqual({ linked: { inaccessible: true } })
+  })
+
+  it("getApproval ships returnableNodeKeys from the instance's frozen runtime graph — the action-response carrier's call site", async () => {
+    // Gate r1 P2-1(b): every `dispatchAction` verb arm returns `(await this.getApproval(id,
+    // actor.userId, actor.roles))!`, so THIS method's one call of `toUnifiedApprovalDTO` is the
+    // action-response carrier's call-site wiring (the carriers seam test proves the builder, not
+    // the call). The dispatchAction fixtures in this suite spy `getApproval` out, so this is the one
+    // place the real wiring runs: the frozen graph is served the way production serves it and the
+    // field is asserted on the DTO — passing `null` to the builder instead of the loaded graph
+    // leaves the field absent and turns this red.
+    const frozenRuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'approval_2', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-2'] } },
+        { key: 'approval_3', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-3'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-2-3', source: 'approval_2', target: 'approval_3' },
+        { key: 'edge-3-end', source: 'approval_3', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow({ current_node_key: 'approval_3' })], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [{ form_schema: { fields: [] } }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [{ runtime_graph: frozenRuntimeGraph }], rowCount: 1 }
+      }
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    // The production call shape — every HTTP caller passes the viewer; the field is viewer-independent.
+    const approval = await new ApprovalProductService().getApproval('apr-1', 'manager-3', [])
+    expect(approval?.currentNodeKey).toBe('approval_3')
+    expect(approval?.returnableNodeKeys).toEqual(['approval_1', 'approval_2'])
+    // Read ONCE: the same loaded graph feeds this field and the viewer-scoped `nodeOperations`.
+    const graphReads = pgState.pool.query.mock.calls
+      .filter(([sql]) => normalize(String(sql)).startsWith('SELECT runtime_graph FROM approval_published_definitions'))
+    expect(graphReads).toHaveLength(1)
   })
 
   // B3-08 (模板治理 — 停用/启用 + 用量): archiveTemplate/unarchiveTemplate is the only way to REACH

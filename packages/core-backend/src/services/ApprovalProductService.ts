@@ -109,6 +109,7 @@ import {
   serializeApprovalDesignatedFallbackEligibility,
   type ApprovalDesignatedFallbackEligibilitySnapshot,
 } from './approval-designated-fallback-eligibility'
+import { computeReturnableNodeKeys } from './approval-return-targets'
 import {
   inheritSequentialQueueMetadata,
   isSequentialQueueActive,
@@ -4780,11 +4781,29 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
   }
 }
 
-function toUnifiedApprovalDTO(
+// Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the
+// action-response carrier below); `getApproval` in this module remains its caller.
+export function toUnifiedApprovalDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentDTO[],
   frozenFormSchema?: FormSchema | null,
+  // The instance's OWN frozen runtime graph (`approval_published_definitions.runtime_graph`, the raw
+  // stored blob), when the caller has it — the one input `returnableNodeKeys` needs beyond the row.
+  runtimeGraph: unknown = null,
 ): UnifiedApprovalDTO {
+  // The server-computed 退回 target list (see `computeReturnableNodeKeys` for the contract) — shipped
+  // on the ACTION response too, not only the detail read, because the FE store publishes an action
+  // response into the slot the detail read fills: a builder that omitted it would flip the field to
+  // `undefined` (the client's own fallback) the moment an approver acts. Spread only when computed.
+  const returnableNodeKeys = computeReturnableNodeKeys({
+    runtimeGraph,
+    formSnapshot: row.form_snapshot,
+    requesterSnapshot: row.requester_snapshot,
+    workflowKey: row.workflow_key,
+    currentNodeKey: row.current_node_key,
+    status: row.status,
+    metadata: row.metadata,
+  })
   // Surface `currentNodeKeys` when the instance is inside a parallel region so
   // consumers (frontend timeline, callers checking `.length > 1`) can detect
   // parallel state without peeking at metadata. When there's no parallel
@@ -4820,6 +4839,7 @@ function toUnifiedApprovalDTO(
     ...(frozenFormSchema ? { formSchema: frozenFormSchema } : {}),
     currentNodeKey: row.current_node_key,
     ...(currentNodeKeys ? { currentNodeKeys } : {}),
+    ...(returnableNodeKeys ? { returnableNodeKeys } : {}),
     assignments,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -13890,6 +13910,20 @@ export class ApprovalProductService {
       if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
     }
 
+    // The instance's OWN frozen runtime graph, read ONCE for the two carriers that walk it: the
+    // builder's `returnableNodeKeys` (viewer-independent, so no longer behind the viewer check the
+    // `nodeOperations` read below used to sit behind — every HTTP caller passes the viewer anyway)
+    // and the viewer-scoped `nodeOperations` further down. Null for an instance with no published
+    // definition (a legacy row), which then carries neither.
+    let frozenRuntimeGraph: unknown = null
+    if (row.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [row.published_definition_id],
+      )
+      frozenRuntimeGraph = runtimeResult.rows[0]?.runtime_graph ?? null
+    }
+
     const dto = toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
@@ -13902,6 +13936,7 @@ export class ApprovalProductService {
         metadata: assignment.metadata || {},
       })),
       frozenFormSchema,
+      frozenRuntimeGraph,
     )
 
     // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
@@ -13924,11 +13959,7 @@ export class ApprovalProductService {
     // after the action (they approved and the node advanced past them), the honest value is exactly
     // what a fresh GET would now return: no carrier — there is no bar to mirror.
     if (viewerUserId && row.published_definition_id) {
-      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
-        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
-        [row.published_definition_id],
-      )
-      const runtimeGraphView = (runtimeResult.rows[0]?.runtime_graph ?? null) as NodeOperationGraphView | null
+      const runtimeGraphView = frozenRuntimeGraph as NodeOperationGraphView | null
       if (runtimeGraphView) {
         const nodeOperations = resolveEffectiveNodeOperations(
           runtimeGraphView,
