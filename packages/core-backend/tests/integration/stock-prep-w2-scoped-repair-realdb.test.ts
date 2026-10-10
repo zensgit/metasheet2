@@ -1474,7 +1474,9 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 //   * RF-06 (S5) 98 custom roles + 6 parallel creates → exactly 2 land, the cap holds at 100;
 //     RF-06b the same at 99 with a barrier that holds the first in-lock count open: one lands;
 //   * RF-07 (S5) an out-of-scope member appointed after the fast scan is seen by the scan under the
-//     locks (refused); one appointed DURING the locked transaction waits for its commit;
+//     locks (refused); one appointed DURING the locked transaction through the delegated arm (the
+//     delegation route's shape: the role row FOR SHARE, then rbac/role-assignment.ts) waits for its
+//     commit — the role row is the lock since the owner's 2026-10-10 ruling (a), see the LR block;
 //   * RF-08 (S5) the grantor's admission revoked after the fast check is seen under the locks
 //     (refused); one revoked DURING the locked transaction waits for its commit.
 // Synthetic ids, random per run; everything this block creates is removed afterwards.
@@ -1482,6 +1484,53 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 import { createStockPrepMembersHostDeps } from '../../src/services/stock-preparation-members-host'
 import { createStockPrepMembersPort, type StockPrepMembersQueryFn } from '../../src/services/stock-preparation-members'
 import { listUserPermissions as rbacListUserPermissions } from '../../src/rbac/service'
+import { assignUserRoles, unassignUserRoles, type RoleAssignmentExecutor } from '../../src/rbac/role-assignment'
+import { pool as appPool, query as appQuery, transaction as appTransaction } from '../../src/db/pg'
+
+/**
+ * A membership change through the DELEGATED arm, in the delegation route's transaction shape
+ * (admin-users.ts `/api/admin/role-delegation/users/:userId/roles/:action`, delegated admin): the role
+ * row `FOR SHARE`, the role's codes read, then rbac/role-assignment.ts under a `namespaces` scope
+ * (which takes the same row `FOR SHARE` again and reads the codes again before it writes
+ * `user_roles`) — on the app pool, like the route. `afterRoleLock` pauses right after the route's
+ * own row lock; `onCodesRead` sees the codes role-assignment reviewed. Resolves to 'ok' or the
+ * SQLSTATE (e.g. 40P01) / error code.
+ */
+function delegatedMembershipChange(
+  action: 'assign' | 'unassign',
+  userId: string,
+  roleId: string,
+  hooks: { afterRoleLock?: () => Promise<void>; onCodesRead?: (codes: string[]) => void } = {},
+) {
+  let settled = false
+  const promise = (async () => {
+    try {
+      await appTransaction(async (client) => {
+        await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+        if (hooks.afterRoleLock) await hooks.afterRoleLock()
+        await client.query('SELECT permission_code FROM role_permissions WHERE role_id = $1', [roleId])
+        const executor: RoleAssignmentExecutor = {
+          query: async (sql, params) => {
+            const result = await client.query(sql, params)
+            if (hooks.onCodesRead && sql.startsWith('SELECT permission_code FROM role_permissions')) {
+              hooks.onCodesRead((result.rows as Array<{ permission_code: string }>).map((row) => row.permission_code).sort())
+            }
+            return result as never
+          },
+        }
+        const scope = { kind: 'namespaces' as const, namespaces: ['stock-prep'] }
+        if (action === 'assign') await assignUserRoles({ userIds: [userId], roleId, scope, executor })
+        else await unassignUserRoles({ userIds: [userId], roleId, scope, executor })
+      })
+      return 'ok'
+    } catch (error) {
+      return String((error as { code?: unknown }).code ?? (error as Error).message)
+    } finally {
+      settled = true
+    }
+  })()
+  return { promise, settled: () => settled }
+}
 
 describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)', () => {
   const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
@@ -1807,13 +1856,16 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
     expect(await roleCodes(roleId)).toEqual(['stock-prep:read'])
     await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [OUT_SCOPE, roleId])
-    // (b) during the locked transaction: the appointment cannot commit before this one does.
-    let appointment: ReturnType<typeof concurrently> | null = null
+    // (b) during the locked transaction: an appointment through the delegated arm (the route's FOR
+    // SHARE on the role row) cannot commit before this one does. Since the owner's ruling (a) the
+    // lock is the role row, so a user_roles write that does not take it — another role's, or a
+    // platform-admin assignment, which reads none of this role's codes — is not held (LR-01).
+    let appointment: ReturnType<typeof delegatedMembershipChange> | null = null
     let observed = ''
     const racedDuring = hookedPort({
       afterTx: (sql) => {
         if (appointment || !isMemberScan(sql)) return
-        appointment = concurrently('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [OUT_SCOPE, roleId])
+        appointment = delegatedMembershipChange('assign', OUT_SCOPE, roleId)
       },
       beforeTx: async (sql) => {
         if (!appointment || observed || !sql.startsWith('UPDATE roles SET name')) return
@@ -1864,5 +1916,384 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     } finally {
       await pool.query(revokeSql, [DELEGATED, true])
     }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// S5b LOCK REDESIGN (owner ruling 2026-10-10 「(a) 只锁被写的那个角色」) — the members port locks the
+// custom role's ROW, not `user_roles`, decides on its transaction's own connection, bounds its G1
+// calls, and holds the grantor's own sheet grants (N3), through the REAL host wiring on real PostgreSQL:
+//   * LR-01 (i) while a members grant holds its locks behind a G1 call blocked on a sheet row held
+//     elsewhere, an unrelated `user_roles` INSERT (another role) lands in < 1 s; the G1 wait is bounded
+//     by the lock timeout, so the grant answers 409 BUSY at ≈ 5 s instead of holding until the blocker
+//     lets go;
+//   * LR-02 (ii) a delegated-arm appointment to the SAME custom role waits for the members PATCH and
+//     then reviews the codes that PATCH committed;
+//   * LR-03 (iii) the delegation route's transaction (role row FOR SHARE, then the user_roles write)
+//     racing a members PATCH on the same role: no 40P01 either way round — an assign by another
+//     delegated admin, and the revoke of the grantor's own membership of that role — both finish, the
+//     PATCH waits;
+//   * LR-04 (iv) N3: the grantor's sheet write revoked before the locks → refused under them, no G1
+//     call; revoked during the G1 call → the revoke waits for the commit (the grant landed while the
+//     grantor could write);
+//   * LR-05 (v) pool-size concurrent members writes (updates, then sheet grants whose G1 runs on the
+//     app pool like the host binding) never stall an unrelated `SELECT 1` on the app pool beyond a
+//     small bound;
+//   * LR-06 a role editor that commits a platform code while the PATCH waits for the role row: the
+//     PATCH reads the committed codes after the lock and refuses (409 HAS_PLATFORM_CODES).
+// Synthetic ids, random per run; everything this block creates is removed afterwards.
+// ---------------------------------------------------------------------------------------------
+describeDb('S5b members port — role-row lock redesign (real host wiring, real DB)', () => {
+  const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
+  const sfx = randomUUID().replace(/-/g, '').slice(0, 10)
+  const ADMIN = `s5bl_admin_${sfx}`
+  const DELEGATED = `s5bl_deleg_${sfx}`
+  const IN_SCOPE = `s5bl_in_${sfx}`
+  const OTHER = `s5bl_other_${sfx}`
+  const NEWBIE = `s5bl_new_${sfx}`
+  const USERS = [ADMIN, DELEGATED, IN_SCOPE, OTHER, NEWBIE]
+  const MAIN = 'stock-prep_admin'
+  const OTHER_ROLE = `s5bl_otherrole_${sfx}`
+  const BASE = `s5bl_base_${sfx}`
+  const SHEET = `s5bl_sheet_${sfx}`
+  const SHEET_2 = `s5bl_sheet2_${sfx}`
+  let pool: Pool
+  let previousEnv: string | undefined
+  let createdAdminRole = false
+  let createdMainRole = false
+  let createdMainCode = false
+  let groupId = ''
+  const createdRoleIds: string[] = [OTHER_ROLE]
+  const createdSheets: string[] = [SHEET, SHEET_2]
+  const port = () => createStockPrepMembersPort(createStockPrepMembersHostDeps())
+  const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
+
+  const roleCodes = async (roleId: string) => (await pool.query(
+    'SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code', [roleId],
+  )).rows.map((row: { permission_code: string }) => row.permission_code)
+  const outcome = (promise: Promise<unknown>) => promise.then(() => 'ok', (error: { status?: number; code?: string; message?: string }) => `${error.status ?? ''}/${error.code ?? error.message}`)
+  const createRole = async (name: string, codes: string[]) => {
+    const created = await port().createCustomRole({ actorId: ADMIN, name, permissionCodes: codes }) as { roleId: string }
+    createdRoleIds.push(created.roleId)
+    return created.roleId
+  }
+  /** G1 in its own transaction on the TEST pool (the shape of RD-06 / RF-01). */
+  const g1 = (roleId: string, sheetId: string, before?: () => Promise<void>) => async () => {
+    if (before) await before()
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const cq = async (sql: string, params?: unknown[]) => {
+        const r = await client.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }
+      const result = await grantStockPreparationProjectSheetRoleWrite(cq, { sheetId, roleIds: [roleId], actorId: 'actor' })
+      await client.query('COMMIT')
+      return { granted: result.granted.length > 0 }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+  /** G1 in its own transaction on the APP pool — the host binding's shape (index.ts grantSheetRoleWrite). */
+  const g1OnAppPool = (roleId: string, sheetId: string) => async () => appTransaction(async (client) => {
+    const result = await grantStockPreparationProjectSheetRoleWrite(
+      async (sql, params) => { const r = await client.query(sql, params); return { rows: r.rows as unknown[], rowCount: r.rowCount } },
+      { sheetId, roleIds: [roleId], actorId: 'actor' },
+    )
+    return { granted: result.granted.length > 0 }
+  })
+  /** The real host wiring with a seam after / before each TRANSACTION statement. */
+  const hookedPort = (hooks: { afterTx?: (sql: string) => Promise<void> | void; beforeTx?: (sql: string) => Promise<void> | void }) => {
+    const deps = createStockPrepMembersHostDeps()
+    return createStockPrepMembersPort({
+      ...deps,
+      transaction: (fn) => deps.transaction((txQuery) => fn((async (sql: string, params?: unknown[]) => {
+        if (hooks.beforeTx) await hooks.beforeTx(sql)
+        const result = await txQuery(sql, params)
+        if (hooks.afterTx) await hooks.afterTx(sql)
+        return result
+      }) as StockPrepMembersQueryFn)),
+    })
+  }
+  /** A statement on its own connection of the TEST pool; resolves to { outcome, ms }. */
+  const timedStatement = (sql: string, params: unknown[]) => {
+    let settled = false
+    const started = Date.now()
+    const promise = (async () => {
+      const client = await pool.connect()
+      try {
+        await client.query("SET lock_timeout = '15s'")
+        await client.query(sql, params)
+        return { outcome: 'ok', ms: Date.now() - started }
+      } catch (error) {
+        return { outcome: String((error as { code?: unknown }).code ?? 'error'), ms: Date.now() - started }
+      } finally {
+        await client.query('RESET lock_timeout').catch(() => {})
+        client.release()
+        settled = true
+      }
+    })()
+    return { promise, settled: () => settled }
+  }
+  const waitSettled = async (probe: { settled: () => boolean }, ms: number) => {
+    const until = Date.now() + ms
+    while (Date.now() < until && !probe.settled()) await sleep(20)
+    return probe.settled() ? 'settled' : 'pending'
+  }
+  const setDelegatedSheetWrite = async (sheetId: string, on: boolean) => {
+    await pool.query("DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [sheetId, DELEGATED])
+    if (on) await pool.query("INSERT INTO spreadsheet_permissions (sheet_id, user_id, perm_code, subject_type, subject_id) VALUES ($1, $2, 'spreadsheet:write', 'user', $2)", [sheetId, DELEGATED])
+  }
+  const roleRowsOn = async (sheetId: string, roleId: string) => Number((await pool.query(
+    "SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2", [sheetId, roleId],
+  )).rows[0].n)
+
+  beforeAll(async () => {
+    previousEnv = process.env[ENV]
+    process.env[ENV] = 'true'
+    pool = new Pool({ connectionString: dbUrl })
+    for (const id of USERS) {
+      await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S5bl ${id.split('_')[1]}`, id])
+    }
+    createdAdminRole = (await pool.query("INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING RETURNING id")).rows.length > 0
+    createdMainRole = (await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id', [MAIN, 'S5bl test main admin'])).rows.length > 0
+    createdMainCode = (await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin') ON CONFLICT DO NOTHING RETURNING role_id", [MAIN])).rows.length > 0
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ADMIN])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MAIN])
+    await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin')", [DELEGATED])
+    groupId = (await pool.query('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', [`s5bl group ${sfx}`])).rows[0].id
+    for (const userId of [IN_SCOPE, DELEGATED, NEWBIE]) {
+      await pool.query('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1, $2)', [groupId, userId])
+    }
+    await pool.query("INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id) VALUES ($1, 'stock-prep', $2)", [DELEGATED, groupId])
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $1)', [OTHER_ROLE])
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [BASE, 's5bl base'])
+    for (const sheetId of createdSheets) {
+      await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [sheetId, BASE, sheetId])
+    }
+  })
+
+  afterAll(async () => {
+    if (previousEnv === undefined) delete process.env[ENV]
+    else process.env[ENV] = previousEnv
+    for (const sheetId of createdSheets) {
+      await pool.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    }
+    await pool.query('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    if (createdMainCode) await pool.query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'stock-prep:admin'", [MAIN]).catch(() => {})
+    if (createdMainRole) await pool.query('DELETE FROM roles WHERE id = $1', [MAIN]).catch(() => {})
+    if (createdAdminRole) await pool.query("DELETE FROM roles WHERE id = 'admin'").catch(() => {})
+    await pool.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    if (groupId) {
+      await pool.query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId]).catch(() => {})
+      await pool.query('DELETE FROM platform_member_groups WHERE id = $1', [groupId]).catch(() => {})
+    }
+    await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.end()
+  })
+
+  it('LR-01 (i) a members grant whose G1 is blocked holds no user_roles lock — an unrelated appointment lands in < 1 s — and the G1 wait is bounded (409 BUSY at ≈ 5 s)', async () => {
+    const roleId = await createRole('S5bl 甲', ['stock-prep:read'])
+    await setDelegatedSheetWrite(SHEET, true)
+    const blocker = await pool.connect()
+    let unrelated: { outcome: string; ms: number } | null = null
+    let grantStartedAt = 0
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE', [SHEET])
+      const started = Date.now()
+      const grant = outcome(port().grantCustomRoleProjectSheets({
+        actorId: DELEGATED,
+        roleId,
+        resolveTargets: async () => [{ sheetId: SHEET, grant: g1(roleId, SHEET, async () => { grantStartedAt = Date.now() }) }],
+      }))
+      while (!grantStartedAt && Date.now() - started < 10_000) await sleep(10)
+      await sleep(300)
+      // The members transaction now holds its role row and the grantor's rows; its G1 waits on the sheet row.
+      unrelated = await timedStatement('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [OTHER, OTHER_ROLE]).promise
+      const result = await grant
+      const held = Date.now() - started
+      console.log(`[S5bl LR-01] unrelated user_roles INSERT ${unrelated.outcome} in ${unrelated.ms} ms while the members grant held its locks; members grant → ${result} after ${held} ms (blocker still held)`)
+      expect(unrelated.outcome).toBe('ok')
+      expect(unrelated.ms).toBeLessThan(1000)
+      expect(result).toBe('409/STOCK_PREP_MEMBERS_BUSY')
+      expect(held, 'the G1 wait is bounded by the lock timeout, not by the blocker').toBeLessThan(7500)
+      // ≈ the 5 s bound (the database's own clock decides it; a WSL / CI host may run a little apart).
+      expect(held).toBeGreaterThanOrEqual(4000)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+    expect(await roleRowsOn(SHEET, roleId)).toBe(0)
+    // Retry-safe: once the sheet row is free the same call lands.
+    await expect(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: g1(roleId, SHEET) }] }))
+      .resolves.toEqual({ roleId, sheets: [{ sheetId: SHEET, granted: true }] })
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [OTHER, OTHER_ROLE])
+  }, 30_000)
+
+  it('LR-02 (ii) a delegated-arm appointment to the SAME custom role waits for the members PATCH, then reviews the codes it committed', async () => {
+    const roleId = await createRole('S5bl 乙', ['stock-prep:read'])
+    let appointment: ReturnType<typeof delegatedMembershipChange> | null = null
+    let reviewed: string[] = []
+    let observed = ''
+    const patched = hookedPort({
+      afterTx: (sql) => {
+        if (appointment || !sql.startsWith('SELECT id FROM roles WHERE id = $1 FOR UPDATE')) return
+        appointment = delegatedMembershipChange('assign', NEWBIE, roleId, { onCodesRead: (codes) => { reviewed = codes } })
+      },
+      beforeTx: async (sql) => {
+        if (!appointment || observed || !sql.startsWith('UPDATE roles SET name')) return
+        observed = await waitSettled(appointment, 400)
+      },
+    })
+    await expect(patched.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })).resolves.toMatchObject({ added: ['stock-prep:operate'] })
+    expect(observed, 'the appointment waited on the role row').toBe('pending')
+    expect(await appointment!.promise).toBe('ok')
+    expect(reviewed, 'the appointment reviewed the codes the PATCH committed').toEqual(['stock-prep:operate', 'stock-prep:read'])
+    console.log(`[S5bl LR-02] same-role delegated appointment: ${observed} during the PATCH, then ok; reviewed codes ${reviewed.join(',')}`)
+    expect((await pool.query('SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2', [NEWBIE, roleId])).rows).toHaveLength(1)
+  })
+
+  it('LR-03 (iii) the delegation route\'s transaction racing a members PATCH on the same role: no 40P01, both finish, the PATCH waits', async () => {
+    // (a) another delegated admin's assign: the route holds the role row FOR SHARE first, then writes user_roles.
+    // (b) the revoke of the GRANTOR's own membership of that role: the route's user_roles delete is a
+    //     row the PATCH would lock as one of the grantor's rows — safe only because the PATCH takes the
+    //     role row FIRST.
+    for (const scenario of ['assign', 'unassign-grantor'] as const) {
+      const roleId = await createRole(`S5bl 丙 ${scenario}`, ['stock-prep:read'])
+      if (scenario === 'unassign-grantor') await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, roleId])
+      let releaseRoute: () => void = () => {}
+      const routeMayContinue = new Promise<void>((done) => { releaseRoute = done })
+      let routeHoldsRow = false
+      const route = scenario === 'assign'
+        ? delegatedMembershipChange('assign', IN_SCOPE, roleId, { afterRoleLock: async () => { routeHoldsRow = true; await routeMayContinue } })
+        : delegatedMembershipChange('unassign', DELEGATED, roleId, { afterRoleLock: async () => { routeHoldsRow = true; await routeMayContinue } })
+      while (!routeHoldsRow) await sleep(10)
+      const started = Date.now()
+      const patch = outcome(port().updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      await sleep(400) // the PATCH is now waiting for the role row the route holds
+      releaseRoute()
+      const [routeResult, patchResult] = await Promise.all([route.promise, patch])
+      const patchMs = Date.now() - started
+      console.log(`[S5bl LR-03 ${scenario}] route → ${routeResult}; members PATCH → ${patchResult} after ${patchMs} ms`)
+      expect(routeResult, scenario).toBe('ok')
+      expect(patchResult, scenario).toBe('ok')
+      expect(patchMs, `${scenario}: the PATCH waited for the route`).toBeGreaterThanOrEqual(350)
+      expect(await roleCodes(roleId)).toEqual(['stock-prep:operate', 'stock-prep:read'])
+    }
+  }, 30_000)
+
+  it('LR-04 (iv) N3: the grantor\'s sheet write revoked before the locks is refused under them; one revoked during the G1 call waits for the commit', async () => {
+    const roleId = await createRole('S5bl 丁', ['stock-prep:read'])
+    // (a) revoked between the fast check and the transaction → the in-lock check refuses, no G1 call.
+    await setDelegatedSheetWrite(SHEET_2, true)
+    let fired = false
+    const calls: string[] = []
+    const racedBefore = hookedPort({
+      beforeTx: async (sql) => {
+        if (fired || !sql.startsWith("SELECT set_config('lock_timeout'")) return
+        fired = true
+        await setDelegatedSheetWrite(SHEET_2, false)
+      },
+    })
+    const refused = await outcome(racedBefore.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_2, grant: async () => { calls.push(SHEET_2); return { granted: true } } }] }))
+    expect(fired).toBe(true)
+    expect(refused).toBe('403/STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE')
+    expect(calls).toEqual([])
+    expect(await roleRowsOn(SHEET_2, roleId)).toBe(0)
+    // (b) revoked DURING the G1 call → the revoke waits for the members commit.
+    await setDelegatedSheetWrite(SHEET_2, true)
+    let revoke: ReturnType<typeof timedStatement> | null = null
+    let observed = ''
+    const result = await port().grantCustomRoleProjectSheets({
+      actorId: DELEGATED,
+      roleId,
+      resolveTargets: async () => [{
+        sheetId: SHEET_2,
+        grant: g1(roleId, SHEET_2, async () => {
+          revoke = timedStatement("DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [SHEET_2, DELEGATED])
+          observed = await waitSettled(revoke, 400)
+        }),
+      }],
+    })
+    expect(result).toEqual({ roleId, sheets: [{ sheetId: SHEET_2, granted: true }] })
+    expect(observed, 'the revoke of the grantor\'s write waited for the members transaction').toBe('pending')
+    expect((await revoke!.promise).outcome).toBe('ok')
+    console.log(`[S5bl LR-04] (a) revoke before the locks → ${refused}; (b) revoke during the G1 call was ${observed} until the grant committed`)
+    expect(await roleRowsOn(SHEET_2, roleId)).toBe(1)
+  }, 30_000)
+
+  it('LR-05 (v) pool-size concurrent members writes never stall an unrelated SELECT 1 on the app pool', async () => {
+    const max = Number((appPool as unknown as { options?: { max?: number } })?.options?.max ?? 20)
+    const n = Math.max(2, max)
+    const roleIds: string[] = []
+    for (let i = 0; i < n; i += 1) roleIds.push(await createRole(`S5bl pool ${i}`, ['stock-prep:read']))
+    const sheets = Array.from({ length: n }, (_, i) => `s5bl_psheet_${i}_${sfx}`)
+    createdSheets.push(...sheets)
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) SELECT x, $2, x FROM unnest($1::text[]) x', [sheets, BASE])
+    const ping = () => {
+      let stop = false
+      let worst = 0
+      const loop = (async () => {
+        while (!stop) {
+          const t0 = Date.now()
+          await appQuery('SELECT 1')
+          worst = Math.max(worst, Date.now() - t0)
+          await sleep(10)
+        }
+      })()
+      return { stop: async () => { stop = true; await loop; return worst } }
+    }
+    // Updates.
+    const p1 = ping()
+    const t1 = Date.now()
+    const updates = await Promise.all(roleIds.map((roleId) => outcome(port().updateCustomRole({ actorId: ADMIN, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))))
+    const updateWall = Date.now() - t1
+    const worstDuringUpdates = await p1.stop()
+    // Sheet grants, each G1 on the APP pool (the host binding's shape).
+    const p2 = ping()
+    const t2 = Date.now()
+    const grants = await Promise.all(roleIds.map((roleId, i) => outcome(port().grantCustomRoleProjectSheets({ actorId: ADMIN, roleId, resolveTargets: async () => [{ sheetId: sheets[i], grant: g1OnAppPool(roleId, sheets[i]) }] }))))
+    const grantWall = Date.now() - t2
+    const worstDuringGrants = await p2.stop()
+    console.log(`[S5bl LR-05] app pool max=${max}; ${n} concurrent updates: ${updates.filter((x) => x === 'ok').length} ok in ${updateWall} ms, worst SELECT 1 ${worstDuringUpdates} ms; ${n} concurrent grants: ${grants.filter((x) => x === 'ok').length} ok in ${grantWall} ms, worst SELECT 1 ${worstDuringGrants} ms`)
+    expect(updates.every((x) => x === 'ok'), updates.join(',')).toBe(true)
+    expect(grants.every((x) => x === 'ok'), grants.join(',')).toBe(true)
+    expect(worstDuringUpdates).toBeLessThan(1000)
+    expect(worstDuringGrants).toBeLessThan(1000)
+  }, 60_000)
+
+  it('LR-06 a role editor that commits a platform code while the PATCH waits for the role row: the PATCH reads it after the lock and refuses', async () => {
+    const roleId = await createRole('S5bl 戊', ['stock-prep:read'])
+    const editor = await pool.connect()
+    let patch: Promise<string> | null = null
+    try {
+      await editor.query('BEGIN')
+      // routes/roles.ts: the role row FOR UPDATE first, then role_permissions.
+      await editor.query('SELECT id FROM roles WHERE id = $1 FOR UPDATE', [roleId])
+      await editor.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:write')", [roleId])
+      patch = outcome(port().updateCustomRole({ actorId: ADMIN, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      await sleep(400)
+      await editor.query('COMMIT')
+    } catch (error) {
+      await editor.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      editor.release()
+    }
+    const result = await patch!
+    console.log(`[S5bl LR-06] PATCH after a role editor committed a platform code → ${result}`)
+    expect(result).toBe('409/STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES')
+    expect(await roleCodes(roleId)).toEqual(['multitable:write', 'stock-prep:read'])
   })
 })

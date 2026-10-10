@@ -22,6 +22,7 @@ vi.mock('../../src/metrics/metrics', () => ({
 }))
 
 import { listUserPermissions, userHasPermission } from '../../src/rbac/service'
+import { userHasEffectiveNamespaceAccess } from '../../src/rbac/namespace-admission'
 
 describe('rbac namespace admission', () => {
   beforeEach(() => {
@@ -105,6 +106,57 @@ describe('rbac namespace admission', () => {
     const allowed = await userHasPermission('user-1', 'crm:read')
 
     expect(allowed).toBe(false)
+    expect(state.poolQuery).not.toHaveBeenCalled()
+  })
+
+  // S5b lock redesign: a caller deciding inside its own transaction (the stock-prep members port)
+  // hands its transaction query; every statement of the read must run there, never on the pool.
+  it('on a caller transaction query: every statement runs on it, the pool and the permission memo are untouched', async () => {
+    const statements: string[] = []
+    const txQuery = vi.fn(async (sql: string) => {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      statements.push(text.slice(0, 40))
+      if (text.includes('AS code FROM')) return { rows: [{ code: 'crm:read' }, { code: 'workflow:read' }] }
+      if (text.startsWith('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      if (text.includes('FROM user_roles ur LEFT JOIN role_permissions')) return { rows: [{ role_id: 'crm_operator', permission_code: 'crm:read' }] }
+      if (text.includes('FROM user_namespace_admissions')) {
+        return { rows: [{ namespace: 'crm', enabled: true, source: 'platform_admin', granted_by: null, updated_by: null, created_at: null, updated_at: null }] }
+      }
+      throw new Error(`unexpected statement: ${text}`)
+    })
+
+    const permissions = await listUserPermissions('user-tx', txQuery)
+    expect(permissions.sort()).toEqual(['crm:read', 'workflow:read'])
+    expect(statements).toHaveLength(4)
+    expect(state.poolQuery).not.toHaveBeenCalled()
+    expect(state.query).not.toHaveBeenCalled()
+    // Not served from, nor written to, the memo: a pool read afterwards misses and reads the pool.
+    expect(state.cacheHits).not.toHaveBeenCalled()
+    expect(state.cacheMiss).not.toHaveBeenCalled()
+
+    state.poolQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ permissions: [] }] })
+    await listUserPermissions('user-tx')
+    expect(state.cacheMiss).toHaveBeenCalledTimes(1)
+    expect(state.poolQuery).toHaveBeenCalledTimes(2)
+  })
+
+  it('userHasEffectiveNamespaceAccess on a caller transaction query reads both admission inputs there, one after the other', async () => {
+    const order: string[] = []
+    const txQuery = vi.fn(async (sql: string) => {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.includes('FROM user_roles ur LEFT JOIN role_permissions')) {
+        order.push('roles')
+        return { rows: [{ role_id: 'stock-prep_admin', permission_code: 'stock-prep:admin' }] }
+      }
+      if (text.includes('FROM user_namespace_admissions')) {
+        order.push('admissions')
+        return { rows: [{ namespace: 'stock-prep', enabled: false, source: 'platform_admin', granted_by: null, updated_by: null, created_at: null, updated_at: null }] }
+      }
+      throw new Error(`unexpected statement: ${text}`)
+    })
+    await expect(userHasEffectiveNamespaceAccess('user-tx', 'stock-prep', txQuery)).resolves.toBe(false)
+    expect(order).toEqual(['roles', 'admissions'])
+    expect(state.query).not.toHaveBeenCalled()
     expect(state.poolQuery).not.toHaveBeenCalled()
   })
 })

@@ -28,18 +28,29 @@
  *   SM-20 (S1) a role carrying a code outside the selectable list is LOCKED: not appointable, not
  *         editable, every port write 409 STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES (built-ins too).
  *   SM-21 (S4) a rename-only update writes its audit row; removing codes drops the members' memo.
- *   SM-22 (S5) every write takes its locks first, in order, and decides again under them: the caller,
- *         the grantor's codes, every member's scope, the cap; a lock wait past the bound is 409 BUSY.
+ *   SM-22 (S5, lock redesign) every write takes its locks first, in order — the custom role's row
+ *         FOR UPDATE (a create: the advisory lock) FIRST, then the grantor's rows, then (a grant) the
+ *         grantor's grants on the named sheets; never a table lock — and decides again under them: the
+ *         caller, the grantor's codes, every member's scope, the cap, the sheets; a lock wait past the
+ *         bound is 409 BUSY; a role gone by the time its row is locked is 404.
  *   SM-23 (S6) more than 16 permissionCodes entries is 400 before any IO.
  *   SM-24 (S7) the audit section shows no unreadable sheet and no actor beyond the role views.
  *   SM-25 (S8) a custom role may not take a built-in's display name, however it is spelled.
  *   SM-26 (S4) the caller tier's role check is an exact equality on `stock-prep_admin`.
+ *   Lock redesign (owner ruling 2026-10-10 「(a) 只锁被写的那个角色」):
+ *   SM-27 every in-lock decision runs on the TRANSACTION's own query — no pool statement, no decision
+ *         dependency on the pool, no audit write while a write's transaction is open.
+ *   SM-28 every G1 call runs inside deps.boundGrantLockWaits with the lock timeout.
+ *   SM-29 no further G1 call starts once the grant budget has passed: 409 BUSY (retryable); the landed
+ *         calls are audited.
+ *   SM-30 one sheet-grant transaction at a time per process: a second waits without a transaction
+ *         and, past the lock timeout, is 409 BUSY with no transaction opened.
  */
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { RecoveryConflictError } from '../../src/db/recovery-conflict'
 import { censusFile } from './lib/recovery-census-recorder'
@@ -50,13 +61,16 @@ import {
   STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL,
   STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL,
   STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL,
+  STOCK_PREP_MEMBERS_GRANT_BUDGET_MS,
   STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL,
+  STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL,
+  STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS,
   STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL,
   STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
   STOCK_PREP_MEMBERS_PERMISSION_CODES,
+  STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL,
   STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL,
   STOCK_PREP_MEMBERS_SCOPED_USERS_SQL,
-  STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL,
   StockPrepMembersError,
   createStockPrepMembersPort,
   stockPrepCodeEffective,
@@ -181,18 +195,27 @@ interface Harness {
   world: World
   calls: Record<string, number>
   statements: string[]
-  /** The statements run on the TRANSACTION's query, in order. */
+  /** The statements run on the TRANSACTION's query, in order (and their parameters). */
   txStatements: string[]
+  txParams: unknown[][]
   audits: Array<Record<string, unknown>>
   invalidated: string[]
   depCallCount: () => number
+  /** SM-27: what touched the POOL while a write's transaction was open (statements, deps, audits). */
+  poolWhileTx: string[]
+  /** SM-27: the decision deps that WERE handed the transaction's query. */
+  depsOnTx: string[]
+  /** SM-28: the lock bound each G1 call ran under, in order. */
+  boundCalls: number[]
+  /** SM-30: [start, end] of every transaction, in start order. */
+  txWindows: Array<{ start: number; end: number }>
 }
 
 const LOCK_STATEMENTS = new Set([
   norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL),
   norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL),
-  norm(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL),
   ...STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm),
+  norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL),
 ])
 
 interface HarnessOptions {
@@ -202,6 +225,7 @@ interface HarnessOptions {
   transactionThrows?: unknown
   /** Runs before a TRANSACTION statement is answered — the "someone else committed meanwhile" seam. */
   onTxStatement?: (text: string, world: World) => void
+  grantBudgetMs?: number
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -209,13 +233,21 @@ function harness(options: HarnessOptions = {}): Harness {
   const calls: Record<string, number> = { query: 0, transaction: 0, isPlatformAdmin: 0, listEffectivePermissions: 0, hasEffectiveNamespaceAdmission: 0, resolveReadableSheetIds: 0, resolveWritableSheetIds: 0, auditLog: 0, invalidateUserPerms: 0 }
   const statements: string[] = []
   const txStatements: string[] = []
+  const txParams: unknown[][] = []
   const audits: Array<Record<string, unknown>> = []
   const invalidated: string[] = []
-  const query = async (sql: string, params: unknown[] = []) => {
-    calls.query += 1
+  const poolWhileTx: string[] = []
+  const depsOnTx: string[] = []
+  const boundCalls: number[] = []
+  const txWindows: Array<{ start: number; end: number }> = []
+  let txOpen = 0
+  const answer = async (sql: string, params: unknown[] = []) => {
     const text = norm(sql)
     statements.push(text)
     if (LOCK_STATEMENTS.has(text)) return { rows: [] }
+    if (text === norm(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL)) {
+      return { rows: world.roles.has(params[0] as string) ? [{ id: params[0] }] : [] }
+    }
     if (text.startsWith(norm(STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL))) {
       const role = world.roles.get(params[0] as string)
       return { rows: role ? [{ ...role, permissions: world.rolePermissions.filter((row) => row.role_id === role.id).map((row) => row.permission_code).sort() }] : [] }
@@ -288,11 +320,23 @@ function harness(options: HarnessOptions = {}): Harness {
     }
     throw new Error(`unexpected statement: ${text.slice(0, 80)}`)
   }
+  const query = async (sql: string, params: unknown[] = []) => {
+    calls.query += 1
+    if (txOpen > 0) poolWhileTx.push(`query:${norm(sql).slice(0, 40)}`)
+    return answer(sql, params)
+  }
   const txQuery = async (sql: string, params: unknown[] = []) => {
     const text = norm(sql)
     txStatements.push(text)
+    txParams.push(params)
     options.onTxStatement?.(text, world)
-    return query(sql, params)
+    return answer(sql, params)
+  }
+  /** A decision dependency: inside an open transaction it must have been handed THE transaction query. */
+  const decisionDep = (name: string, handed: unknown) => {
+    if (txOpen === 0) return
+    if (handed === txQuery) depsOnTx.push(name)
+    else poolWhileTx.push(`dep:${name}`)
   }
   const sheetSet = (map: Map<string, Set<string> | 'all'>, userId: string, sheetIds: string[]) => {
     const allowed = map.get(userId)
@@ -305,29 +349,51 @@ function harness(options: HarnessOptions = {}): Harness {
       calls.transaction += 1
       if (options.transactionThrows) throw options.transactionThrows
       const snapshot = { roles: new Map(Array.from(world.roles.entries()).map(([k, v]) => [k, { ...v }])), rolePermissions: world.rolePermissions.map((row) => ({ ...row })) }
+      const window = { start: Date.now(), end: 0 }
+      txWindows.push(window)
+      txOpen += 1
       try {
         return await fn(txQuery)
       } catch (error) {
         world.roles = snapshot.roles
         world.rolePermissions = snapshot.rolePermissions
         throw error
+      } finally {
+        txOpen -= 1
+        window.end = Date.now()
       }
     },
-    isPlatformAdmin: async (userId) => { calls.isPlatformAdmin += 1; return world.platformAdmins.has(userId) },
-    listEffectivePermissions: async (userId) => { calls.listEffectivePermissions += 1; return [...(world.effective.get(userId) ?? [])] },
-    hasEffectiveNamespaceAdmission: async (userId, namespace) => { calls.hasEffectiveNamespaceAdmission += 1; return namespace === 'stock-prep' && world.admitted.has(userId) },
+    isPlatformAdmin: async (userId, handed) => { calls.isPlatformAdmin += 1; decisionDep('isPlatformAdmin', handed); return world.platformAdmins.has(userId) },
+    listEffectivePermissions: async (userId, handed) => { calls.listEffectivePermissions += 1; decisionDep('listEffectivePermissions', handed); return [...(world.effective.get(userId) ?? [])] },
+    hasEffectiveNamespaceAdmission: async (userId, namespace, handed) => { calls.hasEffectiveNamespaceAdmission += 1; decisionDep('hasEffectiveNamespaceAdmission', handed); return namespace === 'stock-prep' && world.admitted.has(userId) },
     resolveReadableSheetIds: async (userId, sheetIds) => {
       calls.resolveReadableSheetIds += 1
+      if (txOpen > 0) poolWhileTx.push('dep:resolveReadableSheetIds')
       return sheetSet(world.readable, userId, sheetIds)
     },
-    resolveWritableSheetIds: async (userId, sheetIds) => {
+    resolveWritableSheetIds: async (userId, sheetIds, handed) => {
       calls.resolveWritableSheetIds += 1
+      decisionDep('resolveWritableSheetIds', handed)
       return sheetSet(world.writable, userId, sheetIds)
     },
-    auditLog: async (entry) => { calls.auditLog += 1; audits.push(entry as unknown as Record<string, unknown>) },
+    boundGrantLockWaits: async (lockTimeoutMs, fn) => {
+      boundCalls.push(lockTimeoutMs)
+      insideBound += 1
+      try {
+        return await fn()
+      } finally {
+        insideBound -= 1
+      }
+    },
+    auditLog: async (entry) => {
+      calls.auditLog += 1
+      if (txOpen > 0) poolWhileTx.push('auditLog')
+      audits.push(entry as unknown as Record<string, unknown>)
+    },
     invalidateUserPerms: (userId) => { calls.invalidateUserPerms += 1; invalidated.push(userId) },
     env: () => options.env ?? { [STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV]: 'true' },
     ...(options.randomSuffix ? { randomSuffix: options.randomSuffix } : {}),
+    ...(options.grantBudgetMs ? { grantBudgetMs: options.grantBudgetMs } : {}),
   }
   return {
     port: createStockPrepMembersPort(deps),
@@ -335,11 +401,19 @@ function harness(options: HarnessOptions = {}): Harness {
     calls,
     statements,
     txStatements,
+    txParams,
     audits,
     invalidated,
     depCallCount: () => Object.values(calls).reduce((sum, value) => sum + value, 0),
+    poolWhileTx,
+    depsOnTx,
+    boundCalls,
+    txWindows,
   }
 }
+
+/** SM-28: > 0 while a G1 call runs inside deps.boundGrantLockWaits (module-level: the targets read it). */
+let insideBound = 0
 
 async function refusal(promise: Promise<unknown>): Promise<StockPrepMembersError> {
   try {
@@ -351,13 +425,18 @@ async function refusal(promise: Promise<unknown>): Promise<StockPrepMembersError
   throw new Error('expected a refusal, got a result')
 }
 
-function targets(sheetIds: string[], landed: string[] = []): { list: StockPrepMembersGrantTarget[]; granted: string[] } {
+function targets(sheetIds: string[], landed: string[] = [], options: { delayMs?: number; gate?: Promise<void> } = {}): { list: StockPrepMembersGrantTarget[]; granted: string[]; bounded: boolean[] } {
   const granted: string[] = []
+  const bounded: boolean[] = []
   return {
     granted,
+    bounded,
     list: sheetIds.map((sheetId) => ({
       sheetId,
       grant: async () => {
+        bounded.push(insideBound > 0)
+        if (options.gate) await options.gate
+        if (options.delayMs) await new Promise((done) => setTimeout(done, options.delayMs))
         granted.push(sheetId)
         return { granted: !landed.includes(sheetId) }
       },
@@ -824,30 +903,56 @@ describe('stock-prep members port (S5b, R-39)', () => {
     }])
   })
 
-  it('SM-22 (S5): every write takes its locks first, in order, then decides again under them', async () => {
+  it('SM-22 (S5, lock redesign): every write takes its locks first — the role row (a create: the advisory lock) FIRST, never a table lock — then decides again under them', async () => {
     expect(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL).toBe("SELECT set_config('lock_timeout', $1, true)")
     expect(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL).toBe('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))')
     expect([...STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY]).toEqual(['stock-prep', 'members-port'])
-    expect(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL).toBe('LOCK TABLE user_roles IN SHARE MODE')
+    expect(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL).toBe('SELECT id FROM roles WHERE id = $1 FOR UPDATE')
     for (const sql of STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL) expect(sql).toMatch(/ = \$1\)? FOR SHARE$/)
-    const prefix = [STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL, STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL, STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL, ...STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL].map(norm)
-    const writes: Array<[string, (h: Harness) => Promise<unknown>]> = [
-      ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] })],
-      ['update', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })],
-      ['rename', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '乙' })],
-      ['grant', (h) => h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list })],
+    expect(norm(STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL[0])).toBe('SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1 FOR SHARE')
+    expect(norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)).toMatch(/^SELECT sp\.sheet_id FROM spreadsheet_permissions sp WHERE sp\.sheet_id = ANY\(\$2::text\[\]\) .* FOR SHARE OF sp$/)
+    const timeout = norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL)
+    const grantor = STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm)
+    const roleRow = norm(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL)
+    const writes: Array<[string, (h: Harness) => Promise<unknown>, string[]]> = [
+      ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] }), [timeout, norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL), ...grantor]],
+      ['update', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }), [timeout, roleRow, ...grantor]],
+      ['rename', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '乙' }), [timeout, roleRow, ...grantor]],
+      ['grant', (h) => h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list }), [timeout, roleRow, ...grantor, norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)]],
     ]
-    for (const [name, run] of writes) {
+    for (const [name, run, prefix] of writes) {
       const h = harness()
       await run(h)
       expect(h.txStatements.slice(0, prefix.length), `${name}: the locks open the transaction, in order`).toEqual(prefix)
       expect(h.calls.transaction, name).toBe(1)
+      // No table lock, ever; the advisory lock only for a create; the role row only for the role writes.
+      expect(h.txStatements.filter((text) => /LOCK\s+TABLE/i.test(text)), name).toEqual([])
+      expect(h.txStatements.filter((text) => text === norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL)).length, name).toBe(name === 'create' ? 1 : 0)
+      if (name !== 'create') {
+        expect(h.txParams[1], `${name}: the row locked is the role being written`).toEqual([CUSTOM])
+      }
+      if (name === 'grant') {
+        expect(h.txParams[prefix.length - 1], 'the grantor\'s grants on exactly the named sheets').toEqual([DELEGATED, [SHEET_A]])
+      }
+    }
+
+    // A role that is gone by the time its row is locked is 404 — nothing written, nothing granted.
+    for (const kind of ['update', 'grant'] as const) {
+      const vanish = (text: string, world: World) => { if (text === roleRow) world.roles.delete(CUSTOM) }
+      const h = harness({ onTxStatement: vanish })
+      const t = targets([SHEET_A])
+      const error = await refusal(kind === 'update'
+        ? h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '丁' })
+        : h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+      expect([error.status, error.code], kind).toEqual([404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND'])
+      expect(t.granted).toEqual([])
+      expect(h.audits).toEqual([])
     }
 
     // The window between the fast checks and the locks: someone else commits there. `at` = the
-    // moment the transaction asks for the user_roles lock (the change committed just before it).
+    // moment the transaction asks for the grantor's first row lock (the change committed just before).
     const at = (change: (world: World) => void) => (text: string, world: World) => {
-      if (text === norm(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL)) change(world)
+      if (text === grantor[0]) change(world)
     }
     // (a) the grantor's codes are decided again
     {
@@ -986,5 +1091,99 @@ describe('stock-prep members port (S5b, R-39)', () => {
     const h = harness({ world })
     const error = await refusal(h.port.describe({ actorId: 'u_sub_admin' }))
     expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+  })
+
+  // ── lock redesign (owner ruling 2026-10-10 「(a) 只锁被写的那个角色」) ─────────────────────────────
+
+  it('SM-27: every in-lock decision runs on the transaction\'s own query — nothing touches the pool while a write\'s transaction is open', async () => {
+    const writes: Array<[string, string, (h: Harness, actorId: string) => Promise<unknown>, string[]]> = [
+      ['create', DELEGATED, (h, a) => h.port.createCustomRole({ actorId: a, name: '甲', permissionCodes: ['stock-prep:read'] }), ['isPlatformAdmin', 'hasEffectiveNamespaceAdmission', 'listEffectivePermissions']],
+      ['update', DELEGATED, (h, a) => h.port.updateCustomRole({ actorId: a, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }), ['isPlatformAdmin', 'hasEffectiveNamespaceAdmission', 'listEffectivePermissions']],
+      ['rename', DELEGATED, (h, a) => h.port.updateCustomRole({ actorId: a, roleId: CUSTOM, name: '乙' }), ['isPlatformAdmin', 'hasEffectiveNamespaceAdmission']],
+      ['grant', DELEGATED, (h, a) => h.port.grantCustomRoleProjectSheets({ actorId: a, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A, SHEET_B]).list }), ['isPlatformAdmin', 'hasEffectiveNamespaceAdmission', 'resolveWritableSheetIds']],
+      ['grant (platform admin)', PLATFORM_ADMIN, (h, a) => h.port.grantCustomRoleProjectSheets({ actorId: a, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list }), ['isPlatformAdmin', 'resolveWritableSheetIds']],
+    ]
+    for (const [name, actorId, run, expectedOnTx] of writes) {
+      const h = harness()
+      await run(h, actorId)
+      expect(h.poolWhileTx, `${name}: nothing on the pool while the transaction is open`).toEqual([])
+      for (const dep of expectedOnTx) expect(h.depsOnTx, `${name}: ${dep} decided on the transaction's query`).toContain(dep)
+    }
+    // The landed grants are still audited — after the transaction, one row each.
+    const h = harness()
+    await h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A, SHEET_B]).list })
+    expect(h.audits.map((entry) => (entry.meta as Record<string, unknown>).sheetId)).toEqual([SHEET_A, SHEET_B])
+    expect(h.poolWhileTx).toEqual([])
+  })
+
+  it('SM-28: every G1 call runs inside deps.boundGrantLockWaits with the lock timeout', async () => {
+    const h = harness()
+    const t = targets([SHEET_A, SHEET_B])
+    await h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list })
+    expect(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS).toBe(5000)
+    expect(h.boundCalls).toEqual([STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS, STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS])
+    expect(t.bounded).toEqual([true, true])
+    expect(t.granted).toEqual([SHEET_A, SHEET_B])
+  })
+
+  it('SM-29: no further G1 call starts once the grant budget has passed — 409 BUSY (retryable), the landed calls audited', async () => {
+    expect(STOCK_PREP_MEMBERS_GRANT_BUDGET_MS).toBe(15000)
+    const h = harness({ grantBudgetMs: 60 })
+    const t = targets(['sheet_b1', 'sheet_b2', 'sheet_b3', 'sheet_b4'], [], { delayMs: 40 })
+    h.world.writable.set(DELEGATED, new Set(['sheet_b1', 'sheet_b2', 'sheet_b3', 'sheet_b4']))
+    const error = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+    expect([error.status, error.code, error.details]).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', { retryable: true }])
+    expect(t.granted.length).toBeGreaterThanOrEqual(1)
+    expect(t.granted.length).toBeLessThan(4)
+    expect(h.audits.map((entry) => (entry.meta as Record<string, unknown>).sheetId)).toEqual(t.granted)
+    expect(h.poolWhileTx).toEqual([])
+    // Without the pressure of a budget the same call lands every sheet.
+    const relaxed = harness()
+    const all = targets(['sheet_b1', 'sheet_b2', 'sheet_b3', 'sheet_b4'], [], { delayMs: 40 })
+    relaxed.world.writable.set(DELEGATED, new Set(['sheet_b1', 'sheet_b2', 'sheet_b3', 'sheet_b4']))
+    await expect(relaxed.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => all.list })).resolves.toMatchObject({ roleId: CUSTOM })
+    expect(all.granted).toHaveLength(4)
+  })
+
+  it('SM-30: one sheet-grant transaction at a time per process; a waiter past the lock timeout is 409 BUSY with no transaction', async () => {
+    // (a) two concurrent grants: the second transaction opens only after the first has ended.
+    const h = harness()
+    const a = targets([SHEET_A], [], { delayMs: 40 })
+    const b = targets([SHEET_B], [], { delayMs: 40 })
+    await Promise.all([
+      h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => a.list }),
+      h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => b.list }),
+    ])
+    expect(h.txWindows).toHaveLength(2)
+    expect(h.txWindows[1].start, 'the second grant transaction waited for the first to end').toBeGreaterThanOrEqual(h.txWindows[0].end)
+    // Updates do not take the slot: an update runs while a grant holds it.
+    // (b) the waiter's bound: past STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS it is BUSY, having opened nothing.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      let release: () => void = () => {}
+      const gate = new Promise<void>((done) => { release = done })
+      const holder = harness()
+      const held = targets([SHEET_A], [], { gate })
+      const first = holder.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => held.list })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(held.bounded, 'the first grant is inside its G1 call').toEqual([true])
+      const waiter = harness()
+      const waiting = targets([SHEET_B])
+      const second = waiter.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => waiting.list }).then(() => 'granted', (error: StockPrepMembersError) => `${error.status}/${error.code}`)
+      const update = waiter.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '戊' })
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(update, 'an update does not wait for the grant slot').resolves.toMatchObject({ name: '戊' })
+      await vi.advanceTimersByTimeAsync(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS + 1)
+      await expect(second).resolves.toBe('409/STOCK_PREP_MEMBERS_BUSY')
+      expect(waiting.granted).toEqual([])
+      expect(waiter.txWindows, 'only the update opened a transaction').toHaveLength(1)
+      release()
+      await expect(first).resolves.toMatchObject({ sheets: [{ sheetId: SHEET_A, granted: true }] })
+      // The slot is free again.
+      const after = harness()
+      await expect(after.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_B]).list })).resolves.toMatchObject({ roleId: CUSTOM })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

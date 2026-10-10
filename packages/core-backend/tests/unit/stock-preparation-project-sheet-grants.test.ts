@@ -25,6 +25,9 @@
  *   G-09 (E2f) THE ROLE-ID RULE IS ANCHORED: a namespace-prefixed id with an unexpected trailing or
  *        embedded character (space, `;`, `/`, newline, non-ASCII, a bare `stock-prep_`, an over-long
  *        suffix) is refused with its own code; the shipped shapes pass unchanged.
+ *   G-10 (S5b lock redesign) THE CALLER'S LOCK BOUND: inside
+ *        runWithStockPreparationProjectSheetGrantLockTimeout the grant's FIRST statement sets a
+ *        transaction-local lock_timeout (before the sheet row lock); outside it no statement is added.
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -39,7 +42,10 @@ import {
   normalizeStockPreparationGrantRoleIds,
 } from '../../src/multitable/stock-preparation-project-sheet-grant-contract'
 import {
+  STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL,
+  currentStockPreparationProjectSheetGrantLockTimeoutMs,
   grantStockPreparationProjectSheetRoleWrite,
+  runWithStockPreparationProjectSheetGrantLockTimeout,
   stockPreparationProjectSheetGrantEntityId,
 } from '../../src/services/stock-preparation-project-sheet-grants'
 import {
@@ -188,6 +194,35 @@ describe('stock-preparation project-sheet grant port (G1)', () => {
 
   it('G-07 the history entity id matches the operator route\'s shape', () => {
     expect(stockPreparationProjectSheetGrantEntityId(ROLE_A)).toBe(permissionConfigEntityId('sheet', ['role', ROLE_A]))
+  })
+
+  it('G-10 inside the caller\'s lock bound the grant sets lock_timeout FIRST; outside it adds no statement', async () => {
+    expect(STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL).toBe("SELECT set_config('lock_timeout', $1, true)")
+    const bounded = makeFakeQuery()
+    const inner = bounded.query
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (sql === STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL) {
+        bounded.statements.push({ sql, params })
+        return { rows: [], rowCount: 1 }
+      }
+      return inner(sql, params)
+    })
+    expect(currentStockPreparationProjectSheetGrantLockTimeoutMs()).toBeNull()
+    await runWithStockPreparationProjectSheetGrantLockTimeout(5000, async () => {
+      expect(currentStockPreparationProjectSheetGrantLockTimeoutMs()).toBe(5000)
+      // The bound survives the awaits between the caller and the host's transaction.
+      await new Promise((done) => setTimeout(done, 1))
+      return grantStockPreparationProjectSheetRoleWrite(query, { sheetId: SHEET, roleIds: [ROLE_A] })
+    })
+    expect(bounded.statements[0]).toEqual({ sql: STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL, params: ['5000'] })
+    expect(bounded.statements[1].sql).toMatch(/FROM meta_sheets .*FOR UPDATE/)
+    expect(currentStockPreparationProjectSheetGrantLockTimeoutMs()).toBeNull()
+    // Outside the bound: the first statement is the sheet row lock, as before.
+    const plain = makeFakeQuery()
+    await grantStockPreparationProjectSheetRoleWrite(plain.query, { sheetId: SHEET, roleIds: [ROLE_A] })
+    expect(plain.statements[0].sql).toMatch(/FROM meta_sheets .*FOR UPDATE/)
+    expect(plain.statements.some((entry) => entry.sql.includes('lock_timeout'))).toBe(false)
+    expect(() => runWithStockPreparationProjectSheetGrantLockTimeout(0, async () => null)).toThrow(RangeError)
   })
 })
 

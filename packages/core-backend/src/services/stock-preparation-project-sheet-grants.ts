@@ -37,6 +37,8 @@
  * database can answer: the sheet is live, and every role exists.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 import { recordConfigRevision } from '../multitable/config-revision-recorder'
 import {
   MANAGED_SHEET_PERMISSION_CODES,
@@ -82,6 +84,33 @@ export function stockPreparationProjectSheetGrantEntityId(roleId: string): strin
 
 const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
 
+/**
+ * A BOUNDED LOCK WAIT for a grant that runs while its caller holds locks of its own (S5b, register
+ * R-39: the members port grants project sheets while it holds the custom role's row lock and the
+ * grantor's authority rows). The grant runs in ITS OWN transaction on another pool connection — the
+ * plugin-scope wrapper and the host binding (index.ts `grantSheetRoleWrite`) open it — so the caller
+ * cannot bound its waits by itself. Inside {@link runWithStockPreparationProjectSheetGrantLockTimeout}
+ * the grant's FIRST statement sets a transaction-local `lock_timeout`, so a sheet row (or a grant
+ * row) held elsewhere fails the grant with SQLSTATE 55P03 after that bound instead of holding the
+ * caller's locks until the statement timeout. Outside it (the project-target routes, every other
+ * caller) nothing changes: no statement is added.
+ */
+const projectSheetGrantLockBound = new AsyncLocalStorage<{ lockTimeoutMs: number }>()
+
+export const STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL = "SELECT set_config('lock_timeout', $1, true)"
+
+export function runWithStockPreparationProjectSheetGrantLockTimeout<T>(lockTimeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new RangeError('lockTimeoutMs must be a positive integer')
+  }
+  return projectSheetGrantLockBound.run({ lockTimeoutMs }, fn)
+}
+
+/** The bound in force for the current call chain, or null outside one. */
+export function currentStockPreparationProjectSheetGrantLockTimeoutMs(): number | null {
+  return projectSheetGrantLockBound.getStore()?.lockTimeoutMs ?? null
+}
+
 function generateBatchId(): string {
   // Lazy require keeps the pure contract module and this file free of a top-level crypto import
   // in the test's source census; `randomUUID` is the same generator the operator route uses.
@@ -113,6 +142,13 @@ export async function grantStockPreparationProjectSheetRoleWrite(
   }
   const actorId = typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null
   const batchId = typeof input.batchId === 'string' && input.batchId.trim() ? input.batchId.trim() : generateBatchId()
+
+  // The caller's bound on every lock wait below, when it set one (see the context above) — first,
+  // before the sheet row lock, so that wait is bounded too.
+  const lockTimeoutMs = currentStockPreparationProjectSheetGrantLockTimeoutMs()
+  if (lockTimeoutMs !== null) {
+    await query(STOCK_PREPARATION_PROJECT_SHEET_GRANT_LOCK_TIMEOUT_SQL, [String(lockTimeoutMs)])
+  }
 
   // LIVENESS + the never-escalate-under-concurrency row lock, in one statement — the SAME
   // `meta_sheets` lock the operator grant route and the permission-revert path take, so this write

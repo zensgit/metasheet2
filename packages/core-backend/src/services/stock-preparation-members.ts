@@ -43,17 +43,33 @@
  *     grants reach all of its members, and the delegation routes would not let this admin appoint the
  *     others. A platform admin is unbounded, as on the delegation routes. A rename is not refused.
  *   * AT MOST 100 CUSTOM ROLES (tightening).
- *   * DECIDED UNDER A LOCK (fix round 1). Every write re-runs its decisive checks INSIDE its
- *     transaction, after taking — with a bounded wait (`lock_timeout`, 409 STOCK_PREP_MEMBERS_BUSY on
- *     expiry, never an unbounded hold of a pool connection) — a per-namespace advisory lock (so two
- *     creates cannot both pass the 100 cap), a SHARE lock on `user_roles` (so no appointment or revoke
- *     can commit between the member-scope scan / the caller re-check and this commit) and FOR SHARE
- *     row locks on the grantor's own authority rows (role codes, direct codes, admission, delegation
- *     scope). The checks that ran before the transaction stay as fast refusals.
+ *   * DECIDED UNDER A LOCK ON THE ROLE BEING WRITTEN — AND ONLY THAT ROLE (owner ruling 2026-10-10,
+ *     「(a) 只锁被写的那个角色」; it replaced fix round 1's platform-wide `LOCK TABLE user_roles IN SHARE
+ *     MODE`). Every write re-runs its decisive checks INSIDE its transaction, ON THAT TRANSACTION'S OWN
+ *     CONNECTION (no second pool connection while the locks are held), after taking — each wait
+ *     bounded by `lock_timeout` (409 STOCK_PREP_MEMBERS_BUSY on expiry) — the locks of
+ *     STOCK_PREP_MEMBERS_* lock SQL below, in the SAME order as the delegation route and
+ *     rbac/role-assignment.ts (the role row first, then everything else): an update or a sheet grant
+ *     takes the custom role's row `FOR UPDATE` (an appointment to that role through the delegated arm
+ *     takes it `FOR SHARE` and so waits, then reads the committed codes; every other `user_roles` write
+ *     is untouched); a create takes the per-namespace advisory lock instead (the role does not exist
+ *     yet, and the 100 cap is a count no row lock can serialise). Then FOR SHARE on the grantor's own
+ *     authority rows — role memberships, role codes, direct codes, member groups, admission,
+ *     delegation scope, and (for a sheet grant) their existing grants on the named sheets — so none of
+ *     them can be revoked between the decision and the commit. The checks that ran before the
+ *     transaction stay as fast refusals.
  *   * PROJECT SHEETS: ADD-ONLY, WRITE LEVEL, THROUGH G1. This port never writes a sheet grant
  *     itself; the plugin hands it the G1 port call (`grantSheetRoleWrite` via the plugin-scope
  *     wrapper: plugin-owned project sheets only, role subjects only, `spreadsheet:write` literal,
- *     `ON CONFLICT DO NOTHING`). There is no remove path (ADR §11.7).
+ *     `ON CONFLICT DO NOTHING`). There is no remove path (ADR §11.7). The G1 calls run while this
+ *     port's locks are held — so the decision (role, members, grantor, the grantor's own grants on
+ *     those sheets) cannot change under them — and each runs in its own transaction on another
+ *     connection, so the hold is BOUNDED three ways: every lock wait inside a G1 call is bounded by
+ *     the same `lock_timeout` (deps.boundGrantLockWaits → the G1 service sets it transaction-locally),
+ *     no further G1 call starts once STOCK_PREP_MEMBERS_GRANT_BUDGET_MS has passed (409 BUSY,
+ *     retryable — the grant is idempotent), and at most one grant transaction per process is open at
+ *     a time (a second waits WITHOUT a connection, up to the lock timeout), so grants cannot exhaust
+ *     the pool by each holding one connection while asking for another.
  *
  * WHO MAY CALL: a platform admin (the DB `admin` role — the legacy token claim and the legacy
  * `users.is_admin` / `users.role` columns are NOT honoured here, the port sees an actor id only), or
@@ -130,8 +146,10 @@ export const STOCK_PREP_CUSTOM_ROLE_MAX_SHEETS_PER_CALL = 50
 /** At most this many custom roles per deployment — a delegated admin cannot grow the role table without bound. */
 export const STOCK_PREP_CUSTOM_ROLE_MAX = 100
 export const STOCK_PREP_MEMBERS_AUDIT_LIMIT = 50
-/** The bounded wait for every lock a write takes (`lock_timeout`, transaction-local). */
+/** The bounded wait for every lock a write takes (`lock_timeout`, transaction-local) — G1 calls included. */
 export const STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS = 5000
+/** No further G1 call starts once a sheet grant has held its locks this long (409 BUSY, retryable). */
+export const STOCK_PREP_MEMBERS_GRANT_BUDGET_MS = 15000
 export const STOCK_PREP_MEMBERS_BUSY_CODE = 'STOCK_PREP_MEMBERS_BUSY'
 const CUSTOM_ROLE_ID_ATTEMPTS = 5
 const AUDIT_SOURCE = 'stock-prep-members'
@@ -140,26 +158,54 @@ const SHEET_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,128}$/
 const LOCK_WAIT_SQLSTATES = new Set(['55P03', '40P01'])
 
 /**
- * THE LOCKS every write takes, in this order, at the start of its transaction (pinned by SM-22):
+ * THE LOCKS every write takes, in this order, at the start of its transaction (pinned by SM-22). No
+ * table lock: nothing here stops a `user_roles` write that touches neither the role being written nor
+ * the grantor's own rows.
  *   1. the transaction-local `lock_timeout` — every wait below is bounded;
- *   2. the per-namespace advisory lock — this port's writes are serial (the 100-cap count and its
- *      insert cannot interleave with another create's);
- *   3. SHARE on `user_roles` — no appointment, revoke or role change of anyone can COMMIT between this
- *      transaction's member-scope scan / caller re-check and its commit (an attempt waits for it);
- *   4. FOR SHARE on the grantor's own authority rows — a code removed from one of their roles, a
- *      direct code, their admission and their delegation scope cannot change under the decision.
+ *   2. EITHER the custom role's row `FOR UPDATE` (update, rename, sheet grant) — FIRST, the order the
+ *      delegation route (admin-users.ts) and the role-assignment writers (rbac/role-assignment.ts) use:
+ *      they take the same row `FOR SHARE` before they write `user_roles`, and the role editor
+ *      (routes/roles.ts) takes it `FOR UPDATE` before it touches `role_permissions`, so the paths queue
+ *      on one row instead of each holding what the other waits for (the 40P01 of the table-lock
+ *      design). A delegated appointment to this role therefore waits for this commit and then reads
+ *      the codes this transaction wrote. The role's state is read in a SEPARATE statement after the
+ *      lock is granted, so it is the committed state, not the snapshot the locking statement began
+ *      with;
+ *      OR, for a create, the per-namespace advisory lock — the role does not exist yet, and the
+ *      100-cap is a count over a set (two creates that both count 99 would both insert), which only a
+ *      lock on something other than a row can serialise. Only creates take it;
+ *   3. FOR SHARE on the grantor's own authority rows — their role memberships (the caller tier and
+ *      every role-derived code), the codes of those roles, their direct codes, their member groups,
+ *      their admission and their delegation scope cannot be revoked under the decision;
+ *   4. (sheet grant only) FOR SHARE on the grantor's existing grants on the named sheets — direct,
+ *      member-group and role subjects, the rows the grid's write decision reads — so the grantor's own
+ *      write on a sheet cannot be revoked between the in-lock check and the G1 call (N3). The sheet
+ *      row (`meta_sheets`) is deliberately NOT locked: the G1 call takes it `FOR UPDATE` on its own
+ *      connection while these locks are held, and would wait on this transaction.
  */
 export const STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL = "SELECT set_config('lock_timeout', $1, true)"
 export const STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))'
 export const STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY = Object.freeze([STOCK_PREP_MEMBERS_NAMESPACE, 'members-port'] as const)
-export const STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL = 'LOCK TABLE user_roles IN SHARE MODE'
+export const STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL = 'SELECT id FROM roles WHERE id = $1 FOR UPDATE'
 export const STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL = Object.freeze([
+  'SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1 FOR SHARE',
   'SELECT rp.role_id FROM role_permissions rp WHERE rp.role_id IN (SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1) FOR SHARE',
   'SELECT up.permission_code FROM user_permissions up WHERE up.user_id = $1 FOR SHARE',
+  'SELECT gm.group_id FROM platform_member_group_members gm WHERE gm.user_id = $1 FOR SHARE',
   'SELECT una.namespace FROM user_namespace_admissions una WHERE una.user_id = $1 FOR SHARE',
   'SELECT s.namespace FROM delegated_role_admin_scopes s WHERE s.admin_user_id = $1 FOR SHARE',
   'SELECT g.namespace FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1 FOR SHARE',
 ] as const)
+/** Lock 4: the grantor's grants on the named sheets — the subject predicate of permission-service.ts `loadSheetPermissionScopeMap`. */
+export const STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL = `SELECT sp.sheet_id
+  FROM spreadsheet_permissions sp
+ WHERE sp.sheet_id = ANY($2::text[])
+   AND (
+     (sp.subject_type = 'user' AND sp.subject_id = $1)
+     OR (sp.subject_type = 'member-group' AND sp.subject_id IN (SELECT gm.group_id::text FROM platform_member_group_members gm WHERE gm.user_id = $1))
+     OR (sp.subject_type = 'role' AND sp.subject_id IN (SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1))
+   )
+   FOR SHARE OF sp`
 
 export function stockPrepMembersPageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV] === 'true'
@@ -315,15 +361,21 @@ function sqlStateOf(error: unknown): string {
 
 export type StockPrepMembersQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
+/**
+ * The four decision reads take an optional `query`: absent, they read through the pool (the fast
+ * refusals before a write's transaction, and `describe`); present — always, inside a write's
+ * transaction — they run every statement on THAT transaction's connection, so the decision is made
+ * on what the transaction's locks protect and no second pool connection is taken while they are held.
+ */
 export interface StockPrepMembersDeps {
   query: StockPrepMembersQueryFn
   transaction: <T>(fn: (query: StockPrepMembersQueryFn) => Promise<T>) => Promise<T>
   /** DB `admin` role membership (rbac/service.ts `isAdmin`). */
-  isPlatformAdmin: (userId: string) => Promise<boolean>
+  isPlatformAdmin: (userId: string, query?: StockPrepMembersQueryFn) => Promise<boolean>
   /** The actor's CURRENT effective codes (fresh, admission-filtered — rbac/service.ts). */
-  listEffectivePermissions: (userId: string) => Promise<string[]>
+  listEffectivePermissions: (userId: string, query?: StockPrepMembersQueryFn) => Promise<string[]>
   /** namespace-admission.ts `userHasEffectiveNamespaceAccess`. */
-  hasEffectiveNamespaceAdmission: (userId: string, namespace: string) => Promise<boolean>
+  hasEffectiveNamespaceAdmission: (userId: string, namespace: string, query?: StockPrepMembersQueryFn) => Promise<boolean>
   /** The grid's own readability decision (permission-service.ts `resolveReadableSheetIds`), fresh. */
   resolveReadableSheetIds: (userId: string, sheetIds: string[]) => Promise<Set<string>>
   /**
@@ -332,11 +384,20 @@ export interface StockPrepMembersDeps {
    * (permission-service.ts `resolveSheetCapabilitiesForAccess`), fresh. The G1 grant hands out
    * `spreadsheet:write`, so this — not readability — is the grantor bound for a project sheet.
    */
-  resolveWritableSheetIds: (userId: string, sheetIds: string[]) => Promise<Set<string>>
+  resolveWritableSheetIds: (userId: string, sheetIds: string[], query?: StockPrepMembersQueryFn) => Promise<Set<string>>
+  /**
+   * Runs ONE G1 call with every lock wait inside it bounded by `lockTimeoutMs` (host: the G1
+   * service's `runWithStockPreparationProjectSheetGrantLockTimeout`). The G1 call opens its own
+   * transaction on another connection while this port's locks are held; this is what keeps a sheet
+   * row held elsewhere from holding them until the statement timeout.
+   */
+  boundGrantLockWaits: <T>(lockTimeoutMs: number, fn: () => Promise<T>) => Promise<T>
   auditLog: (entry: AuditLogOptions) => Promise<void>
   invalidateUserPerms: (userId: string) => void
   env?: () => NodeJS.ProcessEnv
   randomSuffix?: () => string
+  /** Overrides STOCK_PREP_MEMBERS_GRANT_BUDGET_MS (tests). */
+  grantBudgetMs?: number
 }
 
 export interface StockPrepMembersCaller {
@@ -438,15 +499,67 @@ export const STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL = `SELECT (
 /** The caller tier's role check: EXACTLY `stock-prep_admin` (an equality, never a pattern). */
 export const STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL = 'SELECT 1 AS held FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1'
 
-/** One custom role's name and codes (`FOR UPDATE` variant inside a write). */
+/**
+ * One custom role's name and codes. Inside a write it is a plain read issued AFTER
+ * STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL was granted, so it reads what a role editor that held the row
+ * just committed.
+ */
 export const STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL = `SELECT r.id, r.name,
        COALESCE((SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp WHERE rp.role_id = r.id), ARRAY[]::text[]) AS permissions
   FROM roles r
  WHERE r.id = $1`
 
+function membersBusyError(): StockPrepMembersError {
+  return new StockPrepMembersError(409, STOCK_PREP_MEMBERS_BUSY_CODE, 'another change to stock-prep members is in progress; retry shortly', { retryable: true })
+}
+
+/**
+ * ONE SHEET-GRANT TRANSACTION AT A TIME IN THIS PROCESS. A sheet grant is the one write that, while
+ * its transaction holds a pool connection, needs more of them (each G1 call opens its own
+ * transaction; the plugin's ownership hooks and audit row read and write on the pool). Without this,
+ * as many concurrent grants as the pool has connections could each hold one and wait for another —
+ * every request on the process stalled until the connect timeout. A grant that finds the slot taken
+ * waits for it WITHOUT holding a connection, for at most `waitMs`, then answers 409 BUSY (retryable).
+ * Creates and updates need no second connection and do not take it.
+ */
+const grantSlot: { busy: boolean; queue: Array<() => void> } = { busy: false, queue: [] }
+
+async function withGrantSlot<T>(waitMs: number, fn: () => Promise<T>): Promise<T> {
+  if (grantSlot.busy) {
+    await new Promise<void>((resolve, reject) => {
+      const wake = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        const at = grantSlot.queue.indexOf(wake)
+        if (at >= 0) grantSlot.queue.splice(at, 1)
+        reject(membersBusyError())
+      }, waitMs)
+      grantSlot.queue.push(wake)
+    })
+  } else {
+    grantSlot.busy = true
+  }
+  try {
+    return await fn()
+  } finally {
+    const next = grantSlot.queue.shift()
+    // Hand the slot straight to the next waiter (it stays busy), or free it.
+    if (next) next()
+    else grantSlot.busy = false
+  }
+}
+
+/** What a locked write locks first: the custom role's row, or (a create) the namespace's advisory lock. */
+type LockedWriteTarget =
+  | { kind: 'create' }
+  | { kind: 'role'; roleId: string; sheetIds?: readonly string[] }
+
 export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPrepMembersPort {
   const readEnv = deps.env ?? (() => process.env)
   const randomSuffix = deps.randomSuffix ?? (() => randomBytes(4).toString('hex'))
+  const grantBudgetMs = typeof deps.grantBudgetMs === 'number' && deps.grantBudgetMs > 0 ? deps.grantBudgetMs : STOCK_PREP_MEMBERS_GRANT_BUDGET_MS
 
   /** THE SWITCH — first, pure, before any IO. */
   function assertEnabled(): void {
@@ -460,19 +573,24 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
    * `stock-prep_admin` AND have an effective `stock-prep` admission, else 403; and a delegated admin
    * must have a department / member-group scope for `stock-prep`, else 403
    * ROLE_DELEGATION_SCOPE_REQUIRED. Every write runs it twice: before its transaction (a fast
-   * refusal) and again inside it, under the locks, where the answer decides.
+   * refusal, on the pool) and again inside it, under the locks and on the transaction's own
+   * connection (`txQuery`), where the answer decides.
    */
-  async function resolveCaller(rawActorId: unknown): Promise<StockPrepMembersCaller> {
+  async function resolveCaller(rawActorId: unknown, txQuery?: StockPrepMembersQueryFn): Promise<StockPrepMembersCaller> {
     const actorId = normalizeActorId(rawActorId)
-    if (await deps.isPlatformAdmin(actorId)) return { actorId, isPlatformAdmin: true, delegated: false }
-    const held = await deps.query(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL, [actorId, STOCK_PREP_DELEGATED_ADMIN_ROLE_ID])
+    const run = txQuery ?? deps.query
+    if (await (txQuery ? deps.isPlatformAdmin(actorId, txQuery) : deps.isPlatformAdmin(actorId))) return { actorId, isPlatformAdmin: true, delegated: false }
+    const held = await run(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL, [actorId, STOCK_PREP_DELEGATED_ADMIN_ROLE_ID])
     if ((held.rows as unknown[]).length === 0) {
       throw new StockPrepMembersError(403, 'STOCK_PREP_MEMBERS_FORBIDDEN', 'only a platform administrator or the stock-prep main administrator may manage stock-prep members')
     }
-    if (!(await deps.hasEffectiveNamespaceAdmission(actorId, STOCK_PREP_MEMBERS_NAMESPACE))) {
+    const admitted = txQuery
+      ? await deps.hasEffectiveNamespaceAdmission(actorId, STOCK_PREP_MEMBERS_NAMESPACE, txQuery)
+      : await deps.hasEffectiveNamespaceAdmission(actorId, STOCK_PREP_MEMBERS_NAMESPACE)
+    if (!admitted) {
       throw new StockPrepMembersError(403, 'STOCK_PREP_MEMBERS_FORBIDDEN', 'the stock-prep main administrator role is held but its plugin admission is not enabled', { reason: 'admission' })
     }
-    const scope = await deps.query(STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL, [actorId, STOCK_PREP_MEMBERS_NAMESPACE])
+    const scope = await run(STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL, [actorId, STOCK_PREP_MEMBERS_NAMESPACE])
     const configured = (scope.rows as Array<{ configured?: unknown }>)[0]?.configured === true
     if (!configured) {
       throw new StockPrepMembersError(403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
@@ -480,16 +598,20 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
     return { actorId, isPlatformAdmin: false, delegated: true }
   }
 
-  /** INVARIANT 1, code half: what this grantor may hand out, read fresh. */
-  async function grantorSelectableCodes(caller: StockPrepMembersCaller): Promise<string[]> {
-    const held = caller.isPlatformAdmin ? [] : await deps.listEffectivePermissions(caller.actorId)
+  /** INVARIANT 1, code half: what this grantor may hand out, read fresh (on `txQuery` inside a write). */
+  async function grantorSelectableCodes(caller: StockPrepMembersCaller, txQuery?: StockPrepMembersQueryFn): Promise<string[]> {
+    const held = caller.isPlatformAdmin
+      ? []
+      : txQuery
+        ? await deps.listEffectivePermissions(caller.actorId, txQuery)
+        : await deps.listEffectivePermissions(caller.actorId)
     return (STOCK_PREP_CUSTOM_ROLE_SELECTABLE_CODES as readonly string[])
       .filter((code) => stockPrepCodeEffective(held, caller.isPlatformAdmin, code))
   }
 
-  async function assertCodesWithinGrantor(caller: StockPrepMembersCaller, codes: readonly string[]): Promise<void> {
+  async function assertCodesWithinGrantor(caller: StockPrepMembersCaller, codes: readonly string[], txQuery?: StockPrepMembersQueryFn): Promise<void> {
     if (codes.length === 0) return
-    const allowed = await grantorSelectableCodes(caller)
+    const allowed = await grantorSelectableCodes(caller, txQuery)
     const exceeding = codes.filter((code) => !allowed.includes(code))
     if (exceeding.length > 0) {
       throw new StockPrepMembersError(403, 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', 'a custom role may not carry a code the grantor does not currently hold', { exceedingCount: exceeding.length })
@@ -503,7 +625,11 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
    * access of people they may not manage (members a platform admin or another delegated admin
    * appointed). A platform admin is unbounded here, as on the delegation routes. A rename alone
    * changes nobody's access and is not refused. `query` is the transaction's inside a write, so the
-   * scan sees the locked `user_roles`.
+   * scan runs under the role row lock: an appointment through the delegated arm (the delegation route
+   * and rbac/role-assignment.ts take that row FOR SHARE) cannot commit until this write has. An
+   * assignment that does not take the row — a platform administrator's, which reviews none of this
+   * role's codes — is NOT held; landing between the scan and the commit, it has the same outcome as the
+   * same platform administrator appointing right after this write.
    */
   async function assertRoleMembersWithinScope(caller: StockPrepMembersCaller, roleId: string, query: StockPrepMembersQueryFn): Promise<void> {
     if (!caller.delegated) return
@@ -534,8 +660,8 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
    * when it carries a code outside the selectable list (S1) — such a role is changed only on the
    * platform role editor, never here, whoever asks.
    */
-  async function loadWritableCustomRole(query: StockPrepMembersQueryFn, roleId: string, forUpdate: boolean): Promise<{ name: string; codes: string[] }> {
-    const result = await query(`${STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL}${forUpdate ? '\n   FOR UPDATE OF r' : ''}`, [roleId])
+  async function loadWritableCustomRole(query: StockPrepMembersQueryFn, roleId: string): Promise<{ name: string; codes: string[] }> {
+    const result = await query(STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL, [roleId])
     const row = (result.rows as Array<{ id?: unknown; name?: unknown; permissions?: unknown }>)[0]
     if (!row) {
       throw new StockPrepMembersError(404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND', 'custom role not found', { field: 'roleId' })
@@ -548,8 +674,10 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
     return { name: typeof row.name === 'string' ? row.name : '', codes }
   }
 
-  async function assertSheetsWritable(caller: StockPrepMembersCaller, sheetIds: string[]): Promise<void> {
-    const writable = await deps.resolveWritableSheetIds(caller.actorId, sheetIds)
+  async function assertSheetsWritable(caller: StockPrepMembersCaller, sheetIds: string[], txQuery?: StockPrepMembersQueryFn): Promise<void> {
+    const writable = txQuery
+      ? await deps.resolveWritableSheetIds(caller.actorId, sheetIds, txQuery)
+      : await deps.resolveWritableSheetIds(caller.actorId, sheetIds)
     const refused = sheetIds.filter((sheetId) => !writable.has(sheetId))
     if (refused.length > 0) {
       throw new StockPrepMembersError(403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE', 'a custom role may be given only project sheets the grantor can write', { notWritableCount: refused.length })
@@ -583,7 +711,7 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       // A lock this write waited for longer than STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS (or a deadlock the
       // server broke): nothing was written; the caller may retry.
       if (LOCK_WAIT_SQLSTATES.has(sqlStateOf(error))) {
-        throw new StockPrepMembersError(409, STOCK_PREP_MEMBERS_BUSY_CODE, 'another change to stock-prep members is in progress; retry shortly', { retryable: true })
+        throw membersBusyError()
       }
       // role_permissions is a recovery-authority table: a held recovery lease answers the uniform
       // retryable 409 (routes/roles.ts does the same).
@@ -595,16 +723,27 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
   }
 
   /**
-   * A write transaction that first takes the locks (STOCK_PREP_MEMBERS_* lock SQL, in that order),
-   * then re-resolves the caller FRESH under them, and only then runs `fn` with that caller.
+   * A write transaction that first takes the locks (STOCK_PREP_MEMBERS_* lock SQL, in that order:
+   * the role row — or, for a create, the advisory lock — then the grantor's rows, then the grantor's
+   * grants on the named sheets), then re-resolves the caller FRESH under them on the transaction's
+   * own connection, and only then runs `fn` with that caller. `fn` must decide on `query` only.
    */
-  async function runLockedWrite<T>(actorId: string, fn: (query: StockPrepMembersQueryFn, caller: StockPrepMembersCaller) => Promise<T>): Promise<T> {
+  async function runLockedWrite<T>(actorId: string, target: LockedWriteTarget, fn: (query: StockPrepMembersQueryFn, caller: StockPrepMembersCaller) => Promise<T>): Promise<T> {
     return runWrite(async (query) => {
       await query(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL, [String(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS)])
-      await query(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL, [...STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY])
-      await query(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL)
+      if (target.kind === 'create') {
+        await query(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL, [...STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY])
+      } else {
+        const locked = await query(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL, [target.roleId])
+        if ((locked.rows as unknown[]).length === 0) {
+          throw new StockPrepMembersError(404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND', 'custom role not found', { field: 'roleId' })
+        }
+      }
       for (const sql of STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL) await query(sql, [actorId])
-      const caller = await resolveCaller(actorId)
+      if (target.kind === 'role' && target.sheetIds && target.sheetIds.length > 0) {
+        await query(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL, [actorId, [...target.sheetIds]])
+      }
+      const caller = await resolveCaller(actorId, query)
       return fn(query, caller)
     })
   }
@@ -836,9 +975,9 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       await assertCustomRoleCapacity(deps.query)
       // The generated ids run the role-id fence BEFORE any transaction opens.
       const candidates = Array.from({ length: CUSTOM_ROLE_ID_ATTEMPTS }, () => assertStockPrepCustomRoleIdWritable(`${STOCK_PREP_CUSTOM_ROLE_ID_PREFIX}${randomSuffix()}`))
-      const { caller, roleId } = await runLockedWrite(precheck.actorId, async (query, lockedCaller) => {
-        // Decided again under the locks: the grantor's codes and the cap.
-        await assertCodesWithinGrantor(lockedCaller, codes)
+      const { caller, roleId } = await runLockedWrite(precheck.actorId, { kind: 'create' }, async (query, lockedCaller) => {
+        // Decided again under the locks, on the transaction's connection: the grantor's codes and the cap.
+        await assertCodesWithinGrantor(lockedCaller, codes, query)
         await assertCustomRoleCapacity(query)
         await assertCodesInCatalog(query, codes)
         for (const candidate of candidates) {
@@ -875,14 +1014,16 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
         await assertCodesWithinGrantor(precheck, nextCodes)
         await assertRoleMembersWithinScope(precheck, id, deps.query)
       }
-      const outcome = await runLockedWrite(precheck.actorId, async (query, caller) => {
-        const current = await loadWritableCustomRole(query, id, true)
+      const outcome = await runLockedWrite(precheck.actorId, { kind: 'role', roleId: id }, async (query, caller) => {
+        // Read AFTER the role row lock was granted: the committed state, not a pre-wait snapshot.
+        const current = await loadWritableCustomRole(query, id)
         let added: string[] = []
         let removed: string[] = []
         let after: string[] = []
         if (nextCodes !== undefined) {
-          // Decided again under the locks: the grantor's codes and every member's scope.
-          await assertCodesWithinGrantor(caller, nextCodes)
+          // Decided again under the locks, on the transaction's connection: the grantor's codes and
+          // every member's scope.
+          await assertCodesWithinGrantor(caller, nextCodes, query)
           await assertRoleMembersWithinScope(caller, id, query)
           await assertCodesInCatalog(query, nextCodes)
           // ONLY `stock-prep:*` rows are this port's to change (a role with any other row was refused
@@ -930,7 +1071,7 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
         throw new StockPrepMembersError(500, 'STOCK_PREP_MEMBERS_INTERNAL', 'grant targets resolver is required')
       }
       const precheck = await resolveCaller(actorId)
-      await loadWritableCustomRole(deps.query, id, false)
+      await loadWritableCustomRole(deps.query, id)
       await assertRoleMembersWithinScope(precheck, id, deps.query)
       const targets = await resolveTargets()
       if (!Array.isArray(targets) || targets.length === 0 || targets.length > STOCK_PREP_CUSTOM_ROLE_MAX_SHEETS_PER_CALL) {
@@ -948,30 +1089,47 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       // grid's own capability resolver. Refused as a whole, before any grant.
       const sheetIds = Array.from(seen)
       await assertSheetsWritable(precheck, sheetIds)
-      return runLockedWrite(precheck.actorId, async (query, caller) => {
-        // Decided again under the locks: the role, every member's scope, the sheets — and the G1 calls
-        // run while `user_roles` is SHARE-locked, so nobody joins the role between the scan and them.
-        await loadWritableCustomRole(query, id, true)
-        await assertRoleMembersWithinScope(caller, id, query)
-        await assertSheetsWritable(caller, sheetIds)
-        const results: Array<{ sheetId: string; granted: boolean }> = []
-        for (const target of targets) {
-          const outcome = await target.grant()
-          const granted = Boolean(outcome && outcome.granted === true)
-          // Audited per landed call, immediately — a later sheet's failure cannot leave an earlier
-          // grant unrecorded. The plugin's own audit row is written inside `grant()` and is
-          // best-effort there, so it cannot prevent this one.
-          await deps.auditLog({
-            actorId: caller.actorId,
-            actorType: 'user',
-            action: 'grant',
-            resourceType: 'role',
-            resourceId: id,
-            meta: { ...delegationMeta(caller), roleId: id, sheetId: target.sheetId, permission: 'spreadsheet:write', granted },
+      return withGrantSlot(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS, async () => {
+        // Every G1 call that LANDED, in order — audited below whether or not a later one fails.
+        const landed: Array<{ sheetId: string; granted: boolean }> = []
+        const decided: { caller: StockPrepMembersCaller | null } = { caller: null }
+        try {
+          await runLockedWrite(precheck.actorId, { kind: 'role', roleId: id, sheetIds }, async (query, caller) => {
+            decided.caller = caller
+            // Decided again under the locks, on the transaction's connection: the role, every
+            // member's scope, the sheets. The G1 calls then run while those locks are held — the
+            // role row (no delegated appointment to it can land), the grantor's rows and their
+            // grants on these sheets (no revoke of the grantor's write can land) — each bounded.
+            await loadWritableCustomRole(query, id)
+            await assertRoleMembersWithinScope(caller, id, query)
+            await assertSheetsWritable(caller, sheetIds, query)
+            const lockedAt = Date.now()
+            for (const target of targets) {
+              if (Date.now() - lockedAt > grantBudgetMs) throw membersBusyError()
+              const outcome = await deps.boundGrantLockWaits(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS, () => target.grant())
+              landed.push({ sheetId: target.sheetId, granted: Boolean(outcome && outcome.granted === true) })
+            }
           })
-          results.push({ sheetId: target.sheetId, granted })
+        } finally {
+          // Audited per LANDED call — a later sheet's failure (or the budget) cannot leave an earlier
+          // grant unrecorded — and only after this transaction has ended, so no audit write holds a
+          // second pool connection while the locks are held. The plugin's own audit row is written
+          // inside `grant()` and is best-effort there, so it cannot prevent this one.
+          const caller = decided.caller
+          if (caller) {
+            for (const entry of landed) {
+              await deps.auditLog({
+                actorId: caller.actorId,
+                actorType: 'user',
+                action: 'grant',
+                resourceType: 'role',
+                resourceId: id,
+                meta: { ...delegationMeta(caller), roleId: id, sheetId: entry.sheetId, permission: 'spreadsheet:write', granted: entry.granted },
+              })
+            }
+          }
         }
-        return { roleId: id, sheets: results }
+        return { roleId: id, sheets: landed }
       })
     },
   }
