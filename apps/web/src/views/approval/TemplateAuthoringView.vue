@@ -182,6 +182,13 @@
             <div>
               <strong>{{ preset.title }}</strong>
               <p>{{ preset.description }}</p>
+              <p
+                v-if="presetBoundaryNote(preset.id)"
+                class="template-authoring__preset-note"
+                :data-testid="`approval-template-preset-${preset.id}-boundary-note`"
+              >
+                {{ presetBoundaryNote(preset.id) }}
+              </p>
             </div>
             <el-button
               type="primary"
@@ -1572,6 +1579,8 @@ import {
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
+  presetBoundaryNote,
+  presetCreatedMessage,
   type CommonApprovalTemplatePresetId,
 } from '../../approvals/commonTemplatePresets'
 import type {
@@ -4201,7 +4210,12 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
-    ElMessage.success('表单草稿已创建')
+    if (presetBoundaryNote(presetId)) {
+      // A1: a preset with a boundary note (请假审批) says so at creation, and stays up long enough to be read.
+      ElMessage.success({ message: presetCreatedMessage(presetId), duration: 8000, showClose: true })
+    } else {
+      ElMessage.success(presetCreatedMessage(presetId))
+    }
   } catch (error: unknown) {
     loadError.value = describeTemplateAuthoringError(error, '创建常用表单失败')
   } finally {
@@ -4659,6 +4673,12 @@ onUnmounted(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+/* A1: the boundary note must read as a caveat, not as one more description line. */
+.template-authoring__preset p.template-authoring__preset-note {
+  color: var(--el-color-warning-dark-2);
+  font-weight: 600;
 }
 
 .template-authoring__visibility {

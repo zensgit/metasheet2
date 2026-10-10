@@ -2279,6 +2279,12 @@
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Report digest subscription', '统计通知订阅') }}</h4>
               </div>
+              <AttendanceScheduledFeatureStatus
+                :tr="tr"
+                feature="reportDigest"
+                :configured="reportDigestConfiguredState"
+                :gate="attendanceRuntimeGates?.reportDigest ?? null"
+              />
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-enabled">
                   <span>{{ tr('Enable report digest subscription', '启用统计通知订阅') }}</span>
@@ -7106,14 +7112,25 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-approval">
-                  <span>{{ tr('Requires approval', '需要审批') }}</span>
+                  <span>
+                    {{ tr('Requires approval', '需要审批') }}
+                    <span class="attendance__shift-preview-badge" data-attendance-approval-option-badge="leave">{{ leaveApprovalOptionCopy.badge }}</span>
+                  </span>
                   <input
                     id="attendance-leave-approval"
                     name="leaveRequiresApproval"
                     v-model="leaveTypeForm.requiresApproval"
                     type="checkbox"
+                    aria-describedby="attendance-leave-approval-note"
                   />
                 </label>
+                <p
+                  id="attendance-leave-approval-note"
+                  class="attendance__field-hint attendance__field-hint--warning attendance__admin-grid-note"
+                  data-attendance-approval-option-hint="leave"
+                >
+                  {{ leaveApprovalOptionCopy.hint }}
+                </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-attachment">
                   <span>{{ tr('Requires attachment', '需要附件') }}</span>
                   <input
@@ -7153,7 +7170,7 @@
                     <tr>
                       <th>{{ tr('Code', '编码') }}</th>
                       <th>{{ tr('Name', '名称') }}</th>
-                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th data-attendance-approval-option-column="leave">{{ leaveApprovalOptionCopy.columnHeader }}</th>
                       <th>{{ tr('Attachment', '附件') }}</th>
                       <th>{{ tr('Minutes', '分钟') }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
@@ -7338,9 +7355,15 @@
                 </label>
               </div>
               <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
-                <p class="attendance__field-hint">
-                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                <p class="attendance__field-hint" data-annual-policy-scheduled-hint>
+                  {{ annualAccrualSwitchHintText }}
                 </p>
+                <AttendanceScheduledFeatureStatus
+                  :tr="tr"
+                  feature="annualLeaveAccrualScheduled"
+                  :configured="annualAccrualConfiguredState"
+                  :gate="attendanceRuntimeGates?.annualLeaveAccrualScheduled ?? null"
+                />
                 <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
                   <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
                   <input
@@ -7651,14 +7674,25 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-approval">
-                  <span>{{ tr('Requires approval', '需要审批') }}</span>
+                  <span>
+                    {{ tr('Requires approval', '需要审批') }}
+                    <span class="attendance__shift-preview-badge" data-attendance-approval-option-badge="overtime">{{ overtimeApprovalOptionCopy.badge }}</span>
+                  </span>
                   <input
                     id="attendance-overtime-approval"
                     name="overtimeRequiresApproval"
                     v-model="overtimeRuleForm.requiresApproval"
                     type="checkbox"
+                    aria-describedby="attendance-overtime-approval-note"
                   />
                 </label>
+                <p
+                  id="attendance-overtime-approval-note"
+                  class="attendance__field-hint attendance__field-hint--warning attendance__admin-grid-note"
+                  data-attendance-approval-option-hint="overtime"
+                >
+                  {{ overtimeApprovalOptionCopy.hint }}
+                </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-active">
                   <span>{{ tr('Active', '启用') }}</span>
                   <input
@@ -7695,7 +7729,7 @@
                       <th>{{ tr('Min', '最小') }}</th>
                       <th>{{ tr('Rounding', '取整') }}</th>
                       <th>{{ tr('Max', '上限') }}</th>
-                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th data-attendance-approval-option-column="overtime">{{ overtimeApprovalOptionCopy.columnHeader }}</th>
                       <th>{{ tr('Active', '启用') }}</th>
                       <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
@@ -10224,6 +10258,22 @@ import { useAttendanceDecisionTrace } from './attendance/useAttendanceDecisionTr
 import AttendanceContextHelp from './attendance/AttendanceContextHelp.vue'
 import type { AttendanceContextHelpEvidenceLink } from './attendance/attendanceContextHelp'
 import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTemplatePrefillDialog.vue'
+// A1 「提示与实际状态」: honest status for options that are stored but not enforced / org switches that also need
+// an ops env gate. Pure modules + one display component; no behaviour change (see the module headers).
+import AttendanceScheduledFeatureStatus from './attendance/AttendanceScheduledFeatureStatus.vue'
+import {
+  attendanceApprovalOptionCopy,
+  withApprovalOptionSaveNotice,
+} from './attendance/attendanceApprovalOptionHint'
+import {
+  annualAccrualSwitchHint,
+  attendanceAnnualAccrualConfiguredState,
+  attendanceReportDigestConfiguredState,
+  parseAttendanceRuntimeGates,
+  withScheduledFeatureSaveNotice,
+  type AttendanceAnnualPolicySaved,
+  type AttendanceRuntimeGates,
+} from './attendance/attendanceScheduledFeatureStatus'
 import {
   analyzeAttendanceShiftFlexPolicy,
   analyzeAttendanceShiftSegments,
@@ -10569,6 +10619,10 @@ const emit = defineEmits<{
 
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+// A1: copy for the leave-type / overtime-rule 「需要审批」 option, which is stored but not enforced.
+const leaveApprovalOptionCopy = computed(() => attendanceApprovalOptionCopy(tr, 'leave'))
+const overtimeApprovalOptionCopy = computed(() => attendanceApprovalOptionCopy(tr, 'overtime'))
+const annualAccrualSwitchHintText = computed(() => annualAccrualSwitchHint(tr))
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
 
 interface AttendanceCalendarDisplayPrefs {
@@ -12138,6 +12192,15 @@ const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
+// A1: the env half of the two scheduled features' double gate - a read-only sibling of `data` on GET
+// /api/attendance/settings (never persisted, never on the PUT response). null = not reported; the status
+// component then shows "unknown" and the cards do not assume the feature can run.
+const attendanceRuntimeGates = ref<AttendanceRuntimeGates | null>(null)
+// A1: the annual policy as the server last returned it (load or save response) - NOT the live form - so the
+// 「已配置」 status never moves before something is saved.
+const annualPolicySaved = ref<AttendanceAnnualPolicySaved | null>(null)
+const reportDigestConfiguredState = computed(() => attendanceReportDigestConfiguredState(attendanceSettings.value))
+const annualAccrualConfiguredState = computed(() => attendanceAnnualAccrualConfiguredState(annualPolicySaved.value))
 const holidaySyncLoading = ref(false)
 const provisionLoading = ref(false)
 const provisionHasLoaded = ref(false)
@@ -23601,6 +23664,7 @@ async function loadSettings() {
       adminForbidden.value = true
       attendanceResultEditAdminCapability.value = 'forbidden'
       attendanceSettings.value = null
+      attendanceRuntimeGates.value = null
       return
     }
     const data = await response.json()
@@ -23610,6 +23674,7 @@ async function loadSettings() {
     adminForbidden.value = false
     attendanceResultEditAdminCapability.value = 'allowed'
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
+    attendanceRuntimeGates.value = parseAttendanceRuntimeGates(data.runtimeGates)
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
     applyOvertimeBankPolicyToForm(data.data || {})
@@ -23625,6 +23690,7 @@ async function loadSettings() {
     applyAnnualPolicyToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
+    attendanceRuntimeGates.value = null
     attendanceResultEditAdminCapability.value = 'unknown'
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
   } finally {
@@ -23867,7 +23933,19 @@ async function saveReportDigestPolicy(): Promise<void> {
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
     applyReportDigestPolicyToForm(savedSettings)
-    setStatus(tr('Report digest subscription saved', '统计通知订阅已保存'), 'info')
+    // A1: saving the subscription must not read as "digests are now being sent" - append the env-gate fact.
+    setStatus(
+      withScheduledFeatureSaveNotice(
+        tr,
+        {
+          feature: 'reportDigest',
+          configured: reportDigestConfiguredState.value,
+          gate: attendanceRuntimeGates.value?.reportDigest ?? null,
+        },
+        tr('Report digest subscription saved', '统计通知订阅已保存'),
+      ),
+      'info',
+    )
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save report digest subscription', '保存统计通知订阅失败'), 'save-settings')
   } finally {
@@ -25529,15 +25607,25 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
     annualPolicyForm.timezone = p.timezone || ''
     annualPolicyForm.scheduledTriggerEnabled = !!p.scheduledTrigger?.enabled
   }
+  // A1: remember what the SERVER returned (load or save response), separate from the editable form above.
+  annualPolicySaved.value = {
+    engineEnabled: !!p?.enabled,
+    scheduledTriggerEnabled: !!p?.scheduledTrigger?.enabled,
+  }
   annualPolicyLoaded.value = true
 }
 
+// A1: this card's own "Reload policy" reads the same GET /api/attendance/settings as loadSettings(), so it follows the
+// same rule: a denied (403) or failed read is "not loaded" and the previous gate report must not survive it - a stale
+// "server run switches are on" would otherwise read as current. Only the gate report is dropped; the saved annual
+// policy and the settings document stay as last loaded, like the annual form beside the card.
 async function loadAnnualPolicy() {
   annualPolicyLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/settings?${buildQuery({ orgId: normalizedOrgId() }).toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceRuntimeGates.value = null
       return
     }
     const data = await response.json()
@@ -25545,8 +25633,10 @@ async function loadAnnualPolicy() {
       throw new Error(readErrorMessage(data, tr('Failed to load annual leave policy', '加载年假策略失败')))
     }
     adminForbidden.value = false
+    attendanceRuntimeGates.value = parseAttendanceRuntimeGates(data.runtimeGates)
     applyAnnualPolicyToForm((data.data || {}) as AttendanceSettings)
   } catch (error: any) {
+    attendanceRuntimeGates.value = null
     setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
   } finally {
     annualPolicyLoading.value = false
@@ -25625,7 +25715,19 @@ async function saveAnnualPolicy() {
     // Backfill from the server's normalized response (falling back to the payload), mirroring the other policy
     // cards — so the form reflects exactly what persisted (e.g. a malformed ladder the backend reverted).
     applyAnnualPolicyToForm((data.data || payload) as AttendanceSettings)
-    setStatus(tr('Annual leave policy saved', '年假策略已保存'), 'info')
+    // A1: saving the switch must not read as "it now runs" - append the env-gate fact, if any.
+    setStatus(
+      withScheduledFeatureSaveNotice(
+        tr,
+        {
+          feature: 'annualLeaveAccrualScheduled',
+          configured: annualAccrualConfiguredState.value,
+          gate: attendanceRuntimeGates.value?.annualLeaveAccrualScheduled ?? null,
+        },
+        tr('Annual leave policy saved', '年假策略已保存'),
+      ),
+      'info',
+    )
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
   } finally {
@@ -26164,7 +26266,13 @@ async function saveLeaveType() {
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
-    setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
+    // A1: the 「需要审批」 option is stored but not enforced; saving it unticked must not read as "approval skipped".
+    setStatus(withApprovalOptionSaveNotice(
+      tr,
+      'leave',
+      payload.requiresApproval,
+      isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'),
+    ))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save leave type', '保存请假类型失败')), 'error')
   } finally {
@@ -26271,11 +26379,15 @@ async function saveOvertimeRule() {
     adminForbidden.value = false
     await loadOvertimeRules()
     resetOvertimeRuleForm()
-    setStatus(
+    // A1: same as the leave-type save above - the option is stored but not enforced.
+    setStatus(withApprovalOptionSaveNotice(
+      tr,
+      'overtime',
+      payload.requiresApproval,
       isEditing
         ? tr('Overtime rule updated.', '加班规则已更新。')
-        : tr('Overtime rule created.', '加班规则已创建。')
-    )
+        : tr('Overtime rule created.', '加班规则已创建。'),
+    ))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save overtime rule', '保存加班规则失败')), 'error')
   } finally {
@@ -32027,6 +32139,12 @@ defineExpose({
 
 .attendance__admin-grid--compact {
   margin-top: 12px;
+}
+
+/* A1: a hint that sits inside an .attendance__admin-grid but belongs to the control above it. */
+.attendance__admin-grid-note {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .attendance__group-layout {
