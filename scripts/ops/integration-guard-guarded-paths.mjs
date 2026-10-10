@@ -29,6 +29,7 @@
 
 export const GUARDED_PATH_ENTRIES = Object.freeze([
   // Owner-only YiDa: exact real files, paired with workflow push paths. No unsupported mid-globs.
+  'apps/web/scripts/run-required-web-tests.sh',
   'apps/web/scripts/run-required-web-tests.tokens',
   'apps/web/src/services/integration/yidaInitialization.ts',
   'apps/web/src/services/integration/yidaOwner.ts',

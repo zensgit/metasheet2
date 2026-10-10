@@ -244,6 +244,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'apps/web/scripts/run-required-web-tests.sh'
       - 'apps/web/scripts/run-required-web-tests.tokens'
       - 'apps/web/src/services/integration/yidaInitialization.ts'
       - 'apps/web/src/services/integration/yidaOwner.ts'
