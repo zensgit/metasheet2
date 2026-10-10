@@ -108,7 +108,7 @@ function object(value: unknown, required: readonly string[], optional: readonly 
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
   const row = value as Row
   const keys = Object.keys(row)
-  if (required.some(key => !Object.hasOwn(row, key)) || keys.some(key => ![...required, ...optional].includes(key))) invalid()
+  if (required.some(key => !Object.prototype.hasOwnProperty.call(row, key)) || keys.some(key => ![...required, ...optional].includes(key))) invalid()
   return row
 }
 function canonical(value: unknown): string {
@@ -284,7 +284,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: () => void } = 
       } catch { current(); controller.abort(); throw new YidaOwnerClientError('YIDA_OWNER_RESPONSE_INVALID') }
       if (!response.ok) {
         const error = object(envelope.error, ['code'])
-        if (typeof error.code !== 'string' || !Object.hasOwn(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
+        if (typeof error.code !== 'string' || !Object.prototype.hasOwnProperty.call(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
         if (error.code === 'YIDA_OWNER_HTTP_DENIED') invalidate()
         throw new YidaOwnerClientError(error.code)
       }
@@ -313,7 +313,7 @@ export function createYidaOwnerClient(options: { onInvalidated?: () => void } = 
         const row = object(input, ['operationId', 'rowKey', 'confirmationId', 'acknowledgeOnce'], ['ttlMs'])
         if (row.acknowledgeOnce !== true) invalid()
         return { operationId: uuid(row.operationId), rowKey: uuid(row.rowKey), confirmationId: uuid(row.confirmationId), acknowledgeOnce: true,
-          ...(Object.hasOwn(row, 'ttlMs') ? { ttlMs: integer(row.ttlMs, 1, 900000) } : {}) }
+          ...(Object.prototype.hasOwnProperty.call(row, 'ttlMs') ? { ttlMs: integer(row.ttlMs, 1, 900000) } : {}) }
       })
       return request('/approvals', 'POST', 201, value => {
         const result = approvalResult(value)

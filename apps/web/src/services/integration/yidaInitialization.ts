@@ -41,7 +41,7 @@ function invalid(): never { throw new YidaInitializationClientError('YIDA_INITIA
 function object(value: unknown, keys: readonly string[]): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
   const row = value as Row
-  if (keys.some(key => !Object.hasOwn(row, key)) || Object.keys(row).some(key => !keys.includes(key))) invalid()
+  if (keys.some(key => !Object.prototype.hasOwnProperty.call(row, key)) || Object.keys(row).some(key => !keys.includes(key))) invalid()
   return row
 }
 function canonical(value: unknown): string {
@@ -168,7 +168,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: () => 
       } catch { current(); controller.abort(); throw new YidaInitializationClientError('YIDA_INITIALIZATION_RESPONSE_INVALID') }
       if (!response.ok) {
         const error = object(envelope.error, ['code'])
-        if (typeof error.code !== 'string' || !Object.hasOwn(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
+        if (typeof error.code !== 'string' || !Object.prototype.hasOwnProperty.call(errorStatuses, error.code) || !errorStatuses[error.code].includes(response.status)) invalid()
         if (error.code === 'YIDA_OWNER_HTTP_DENIED' || error.code === 'YIDA_INITIALIZATION_DENIED') invalidate()
         throw new YidaInitializationClientError(error.code)
       }

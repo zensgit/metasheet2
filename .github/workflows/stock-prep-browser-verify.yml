@@ -92,6 +92,8 @@ jobs:
                 apps/web/src/components/integration/stockPreparation/*|\
                 apps/web/src/services/integration/stockPreparation/*|\
                 apps/web/src/services/integration/workbench.ts|\
+                apps/web/src/services/integration/yidaInitialization.ts|\
+                apps/web/src/services/integration/yidaOwner.ts|\
                 apps/web/src/components/layout/PageShell.vue|\
                 apps/web/src/components/layout/PageHeader.vue|\
                 apps/web/src/components/status/EmptyState.vue|\
@@ -118,6 +120,9 @@ jobs:
                 package.json|\
                 pnpm-lock.yaml|\
                 plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs|\
+                plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.mjs|\
+                plugins/plugin-integration-core/lib/yida-rule-template.mjs|\
+                plugins/plugin-integration-core/lib/yida-static-plan.mjs|\
                 scripts/ops/stock-prep-browser-ci-wiring.test.mjs|\
                 .github/workflows/stock-prep-browser-verify.yml)
                   relevant=true
