@@ -40,6 +40,7 @@ import { toTaskListMemberships, visibleTaskListIds, type TaskListMemberRole } fr
 import { parsePageParams, TASK_PAGE_SORT_KEY, type TaskPageParams } from '../tasks/task-pagination'
 import { pendingScopeForBadge } from '../tasks/task-settings'
 import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
+import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
@@ -76,6 +77,11 @@ function sameInstant(left: Date | null, right: Date | null): boolean {
 function changedAssigneeRows(before: TaskAssigneeRow[], after: TaskAssigneeRow[]): TaskAssigneeRow[] {
   const prior = new Map(before.map((row) => [row.userId, row.completedAt]))
   return after.filter((row) => !sameInstant(prior.get(row.userId) ?? null, row.completedAt))
+}
+
+/** The user ids of assignee rows, for the counts signal (task-counts-realtime.ts). */
+export function assigneeIds(rows: readonly { userId: string }[]): string[] {
+  return rows.map((row) => row.userId)
 }
 
 // The structure lock is transaction-scoped. Reads of the task, the caller's
@@ -120,6 +126,7 @@ export async function createTask(input: {
   const remind = parseRemindAtInput(input.remindAt)
   if (remind.ok === false) fail(422, 'INVALID_REMIND_AT')
   const id = newTaskId()
+  const counts = taskCountsSignal()
   await transaction(async (client) => {
     const q = asQuery(client)
     const db: Db = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows as Row[] }) }
@@ -159,7 +166,12 @@ export async function createTask(input: {
       `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, 'created')`,
       [newTaskEventId(), id, input.creatorId],
     )
+    // RULED(2026-10-07): [R16] a new task's assignees (none before the write); an empty list sends
+    // nothing. ASSUMPTION(task-m4): [own-3c-08] a creator who is the only assignee is a recipient.
+    counts.note({ before: [], after: assignees })
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
   // A new row starts at the column default, version 1.
   return { id, version: 1 }
 }
@@ -645,7 +657,8 @@ export async function writeEvents(db: Db, taskId: string, events: TaskCompletion
 // RULED(2026-10-07): [R03] complete / reopen answer with `version`: the value read under the
 // lock, plus one when this call flipped the task's status (the only write that bumps it here).
 export async function completeTask(input: { orgId: string; actorId: string; taskId: string }): Promise<{ done: boolean; version: number }> {
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const result = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
     const { roles, assignees: rows } = await loadRowRoles(db, { ...input, createdBy: task.createdBy })
     // Lock §6.2: zero-assignee tasks are completed by the creator only. Refused here as the same
@@ -666,8 +679,15 @@ export async function completeTask(input: { orgId: string; actorId: string; task
     const written = await writeEvents(db, input.taskId, next.events, now)
     // M4 PR-3b: outbox rows for the events that notify, in this transaction.
     await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // RULED(2026-10-07): [R16] the status or an assignee's completion changed: every assignee.
+    if (flipped || changedAssigneeRows(rows, next.rows).length > 0) {
+      counts.note({ before: assigneeIds(rows), after: assigneeIds(next.rows) })
+    }
     return { done: next.done, version: flipped ? task.version + 1 : task.version }
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return result
 }
 
 export async function reopenTask(input: {
@@ -676,7 +696,8 @@ export async function reopenTask(input: {
   taskId: string
   scope?: TaskReopenScope
 }): Promise<{ ok: true; version: number }> {
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const result = await withOrgStructure<{ ok: true; version: number }>(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
     const { roles, assignees: rows } = await loadRowRoles(db, { ...input, createdBy: task.createdBy })
     // Lock §6.2, same as `completeTask`.
@@ -697,6 +718,13 @@ export async function reopenTask(input: {
     const written = await writeEvents(db, input.taskId, next.events, now)
     // M4 PR-3b: outbox rows for the events that notify, in this transaction.
     await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // RULED(2026-10-07): [R16] same rule as `completeTask`.
+    if (flipped || changedAssigneeRows(rows, next.rows).length > 0) {
+      counts.note({ before: assigneeIds(rows), after: assigneeIds(next.rows) })
+    }
     return { ok: true, version: flipped ? task.version + 1 : task.version }
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return result
 }

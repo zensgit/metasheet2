@@ -1881,6 +1881,7 @@ export default defineConfig({
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
       'tests/integration/task-m4-dingtalk.db.test.ts',
+      'tests/integration/task-m4-realtime.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
