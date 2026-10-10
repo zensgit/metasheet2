@@ -406,6 +406,42 @@ check('C-09 (S2) create: plan + pre-flight before provisioning, install before r
   assert.match(body, /tenantClaimVerified: scope\.tenantClaimVerified === true,/, 'the claim door reads the host-vouched scope, never the request')
 })
 
+check('C-13 (S3 fix round 1) the four S3 routes: gate → switch before any IO; the overview is PROVISIONED only by the PULL ensure; the OPERATE refresh never provisions and cools down before any refresh IO', () => {
+  const EXPECTED = {
+    stockPreparationProjectFieldsGet: 'STOCK_PREP_OPERATE',
+    stockPreparationProjectFieldsUpdate: 'STOCK_PREP_OPERATE',
+    stockPreparationProjectOverviewRefresh: 'STOCK_PREP_OPERATE',
+    stockPreparationProjectOverviewEnsure: 'STOCK_PREP_PULL',
+  }
+  for (const [handler, code] of Object.entries(EXPECTED)) {
+    const start = CODE.indexOf(`    async ${handler}(req, res) {`)
+    assert.notEqual(start, -1, `${handler} exists`)
+    const body = CODE.slice(start, CODE.indexOf('\n    },', start))
+    assert.match(body, new RegExp(`^ {4}async [A-Za-z]+\\(req, res\\) \\{\\n {6}const user = requireAccess\\(req, ${code}\\)\\n {6}requireProjectSheetsEnabled\\(\\)\\n`), `${handler}: the ${code} gate is the first statement and the switch the second`)
+    const firstAwait = body.indexOf('await ')
+    assert.ok(firstAwait > body.indexOf('requireProjectSheetsEnabled()'), `${handler}: no IO before the switch`)
+    assert.match(body, /resolveOperatorValueScope\(\{/, `${handler}: tenant from the host-vouched scope`)
+    for (const forbidden of ['resolveTenantId(', 'user.tenantId', 'input.projectId', 'body.projectId']) {
+      assert.ok(!body.includes(forbidden), `${handler}: must not reach ${forbidden}`)
+    }
+  }
+  const refreshStart = CODE.indexOf('    async stockPreparationProjectOverviewRefresh(req, res) {')
+  const refreshBody = CODE.slice(refreshStart, CODE.indexOf('\n    },', refreshStart))
+  for (const forbidden of ['ensureProjectOverviewSheet(', 'ensureProjectOverviewAndGrant(', 'grantProjectOverviewRoles(', 'ensureObject(']) {
+    assert.ok(!refreshBody.includes(forbidden), `the OPERATE refresh must not provision (${forbidden})`)
+  }
+  const cooldownAt = refreshBody.indexOf('projectOverviewRefreshStartedAt.get(tenantId)')
+  const storeAt = refreshBody.indexOf('requireStockPreparationProjectOverview()')
+  const scopeAt = refreshBody.indexOf('resolveOperatorValueScope({')
+  assert.ok(scopeAt !== -1 && cooldownAt > scopeAt && cooldownAt < storeAt, 'the cooldown is decided on the VERIFIED tenant, before any store / host / audit work')
+  const ensureStart = CODE.indexOf('    async stockPreparationProjectOverviewEnsure(req, res) {')
+  const ensureBody = CODE.slice(ensureStart, CODE.indexOf('\n    },', ensureStart))
+  assert.match(ensureBody, /normalizeStockPreparationConfirmBody\(requestBody\(req\), VALID_EMPTY_REQUEST_KEYS/, 'ensure: an EMPTY closed body')
+  assert.match(ensureBody, /ensureProjectOverviewAndGrant\(\{ audit, tenantId, projectId: targetProjectId, actor \}\)/, 'ensure: the shared provisioning + G1 READ leg, on the scope-derived staging project')
+  const helper = CODE.slice(CODE.indexOf('  async function ensureProjectOverviewAndGrant('), CODE.indexOf('  async function ensureProjectOverviewBestEffort('))
+  assert.match(helper, /roleIds: resolveProjectSheetGrantRoleIds\(process\.env\)/, 'the overview READ grant: roles from server config, never the request')
+})
+
 if (failed) {
   console.error(`stock-preparation-project-target-call-site-guard.test.cjs FAILED (${failed} of ${passed + failed})`)
   process.exit(1)

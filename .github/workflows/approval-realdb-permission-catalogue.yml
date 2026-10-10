@@ -1,15 +1,17 @@
 name: Approval real-DB acceptance (permission catalogue registration)
 
-# EVIDENCE LANE for the approvals:read permission-catalogue registration real-DB
-# acceptance suite (tests/integration/approval-permission-catalogue-grant.db.test.ts) — proves,
-# through the real HTTP register → admin-elevate(seed) → grant → gate round trip, that
-# migration zzzz20260920130000_add_approval_product_permissions makes approvals:read exist in
-# `permissions` and grantable through the product endpoint (routes/permissions.ts:133), and that a
-# non-admin holder of a grant then passes rbacGuard('approvals','read') on
-# GET /api/approvals/pending-count where it previously 403ed. approvals:write/act are deliberately
-# out of scope for this migration and this lane (see the migration's own file header). Ephemeral
-# first-party PostgreSQL container; no customer source, no deployment, no flag change, no
-# role_permissions default grant.
+# EVIDENCE LANE for the approval-product permission-catalogue registration real-DB acceptance
+# suite (tests/integration/approval-permission-catalogue-grant.db.test.ts) — proves, through the
+# real HTTP register → admin-elevate(seed) → grant → gate round trip, that
+# migration zzzz20260920130000_add_approval_product_permissions (approvals:read) and
+# migration zzzz20261010120000_add_approval_write_act_template_manage_permissions
+# (approvals:write, approvals:act, approval-templates:manage) make those codes exist in
+# `permissions` and grantable through the product endpoints (routes/permissions.ts per-user grant,
+# routes/roles.ts role create), and that a non-admin holder of a grant then passes that code's own
+# guard (approvals:read on GET /api/approvals/pending-count, approvals:write on the form-draft list,
+# approvals:act on the card-delivery summary) where it previously 403ed. Ephemeral first-party
+# PostgreSQL container; no customer source, no deployment, no flag change, no role_permissions
+# default grant.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -40,9 +42,11 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-permission-catalogue-grant.db.test.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260920130000_add_approval_product_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20261010120000_add_approval_write_act_template_manage_permissions.ts'
       - 'packages/core-backend/src/routes/permissions.ts'
       - 'packages/core-backend/src/routes/roles.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/routes/approval-form-drafts.ts'
       - 'packages/core-backend/src/rbac/rbac.ts'
       - 'packages/core-backend/src/rbac/service.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
@@ -54,9 +58,11 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-permission-catalogue-grant.db.test.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260920130000_add_approval_product_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20261010120000_add_approval_write_act_template_manage_permissions.ts'
       - 'packages/core-backend/src/routes/permissions.ts'
       - 'packages/core-backend/src/routes/roles.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/routes/approval-form-drafts.ts'
       - 'packages/core-backend/src/rbac/rbac.ts'
       - 'packages/core-backend/src/rbac/service.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
@@ -91,14 +97,14 @@ jobs:
       # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
       # never a silent skipped-green.
       EXPECT_DB: '1'
-      # The suite registers 13 real users via POST /api/auth/register from one IP (mechanically
-      # counted, 20260921, from the suite file with ITS OWN block-comment lines stripped first, since
+      # The suite registers 19 real users via POST /api/auth/register from one IP (mechanically
+      # counted, 20261010, from the suite file with ITS OWN block-comment lines stripped first, since
       # that file's docstring explains this same recipe and would otherwise self-match:
       # `grep -v '^\s*\*' the suite file | grep -c 'await registerUser('`); the default per-IP
       # register limit (DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxRegisterPerIp = 3) would 429 starting at
       # the 4th. Same override the real-browser acceptance run used for the identical reason
       # (todo-center-real-browser-acceptance-20260920.md §0 table). This count grows whenever a
-      # case is added to the suite — re-count rather than assume this number stays 13.
+      # case is added to the suite — re-count rather than assume this number stays 19.
       AUTH_REGISTER_MAX_PER_IP: '50'
     steps:
       - name: Checkout repository
@@ -145,7 +151,7 @@ jobs:
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
             echo "suites=approval-permission-catalogue-grant.db.test.ts"
-            echo "scope=approvals:read catalogue registration (write/act out of scope) + product grant endpoint + GET /api/approvals/pending-count gate"
+            echo "scope=approval-product permission catalogue registration (approvals:read, approvals:write, approvals:act, approval-templates:manage) + product grant and role endpoints + per-code gate flips"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"

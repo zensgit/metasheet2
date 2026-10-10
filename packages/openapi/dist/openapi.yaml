@@ -3389,6 +3389,46 @@ components:
                 - user
                 - briefcase
                 - pin
+    AttendanceRuntimeGates:
+      type: object
+      description: >-
+        Read-only report of the server-side run switches that the two scheduled
+        attendance features need in addition to their saved org-side settings.
+        Present only as a sibling of `data` on GET /api/attendance/settings
+        (omitted by older servers); never part of the persisted settings
+        document and never on the PUT response. It carries symbolic gate ids and
+        booleans only, no environment variable names or values. An open gate
+        means "not blocked by these switches", not that the feature is running.
+        The report is the switch snapshot of the one process that answered this
+        request; another instance may be configured differently, so it is never
+        a cluster-wide state.
+      required:
+        - reportDigest
+        - annualLeaveAccrualScheduled
+      properties:
+        reportDigest:
+          $ref: '#/components/schemas/AttendanceRuntimeGateEntry'
+        annualLeaveAccrualScheduled:
+          $ref: '#/components/schemas/AttendanceRuntimeGateEntry'
+    AttendanceRuntimeGateEntry:
+      type: object
+      required:
+        - gatesOpen
+        - closedGates
+      properties:
+        gatesOpen:
+          type: boolean
+          description: >-
+            True when none of the feature's server run switches is closed. Not
+            "running".
+        closedGates:
+          type: array
+          description: >-
+            Symbolic ids of the closed switches, in the server's order.
+            Currently digestProducer, accrualTrigger, scheduler and
+            deliveryWorker; open-ended, so a newer server may add ids.
+          items:
+            type: string
     Spreadsheet:
       type: object
       properties:
@@ -4799,12 +4839,21 @@ components:
         - branches
     ApprovalCcNodeConfig:
       type: object
+      description: >
+        Lock-1 OD-L1-7(a): `targetType: group` names member-group ids in
+        `targetIds`; the template
+
+        keeps the group reference and the executor expands it into one user cc
+        record per frozen
+
+        member at dispatch, so persisted cc records stay user/role.
       properties:
         targetType:
           type: string
           enum:
             - user
             - role
+            - group
         targetIds:
           type: array
           items:
@@ -5385,6 +5434,65 @@ components:
             branches. Each entry is the current approval node key for one
             branch. When absent or length < 2, use `currentNodeKey`
             unchanged for the linear / non-parallel flow.
+        returnableNodeKeys:
+          type: array
+          items:
+            type: string
+          description: >
+            退回 (return) targets the server's return gate would accept RIGHT NOW,
+            in trail
+
+            order (start → cursor). Computed server-side from the instance's
+            FROZEN runtime
+
+            graph with every VIEWER-INDEPENDENT check the action endpoint
+            applies to a
+
+            `return`, in the endpoint's order: the instance is not a cancel
+            round
+
+            (CANCEL_ROUND_OUTLET_FORBIDDEN), the current node is not a handler
+
+            (APPROVAL_HANDLER_ACTION_NOT_ALLOWED), the current node's
+            node-operation policy
+
+            does not carry an explicit `allowReturn: false`
+            (APPROVAL_NODE_OPERATION_DISABLED),
+
+            the instance is not inside a parallel region
+
+            (APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED), and the target is an
+            approval node the
+
+            walker visits before the cursor (APPROVAL_RETURN_TARGET_INVALID).
+            The per-viewer
+
+            seat checks (APPROVAL_ASSIGNMENT_REQUIRED) are NOT folded in:
+            `nodeOperations` and
+
+            `canDecideCurrentNode` answer those for the calling viewer, and a
+            client offers the
+
+            return action only when all three agree. An EMPTY array means
+            nothing is legal —
+
+            clients hide the return action. ABSENT means the server did not
+            compute it: an
+
+            older server, a non-pending instance, a bridged / legacy instance
+            with no frozen
+
+            graph, or a graph the walker could not evaluate — clients fall back
+            to their prior
+
+            behaviour, never read absence as empty. Present on the detail read
+
+            (GET /api/approvals/{id}) and on action responses
+
+            (POST /api/approvals/{id}/actions); never on list responses.
+            Presentation only:
+
+            the return gate's own 409s remain the authority.
         assignments:
           type: array
           items:
@@ -14774,6 +14882,8 @@ paths:
                     type: boolean
                   data:
                     $ref: '#/components/schemas/AttendanceSettings'
+                  runtimeGates:
+                    $ref: '#/components/schemas/AttendanceRuntimeGates'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

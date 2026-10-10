@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createApp, nextTick } from 'vue'
 import { describe, expect, it } from 'vitest'
 import AttendanceEmployeeWorkspace from '../src/views/attendance/AttendanceEmployeeWorkspace.vue'
@@ -305,6 +307,17 @@ describe('employee self-balance card copy', () => {
     expect(text).toContain('已过期 0天')
     expect(text).not.toContain('分钟剩余')
     unmount()
+  })
+
+  it('uses the shared calm surface tokens without a decorative page wash', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceEmployeeWorkspace.vue'), 'utf8')
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*border:\s*1px solid var\(--ms-border-light\)/)
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*box-shadow:\s*var\(--ms-shadow-card\)/)
+    expect(css).toMatch(/\.attendance__btn--primary\s*\{[^}]*background:\s*var\(--ms-color-primary\)/)
+    expect(css).toMatch(/\.attendance-ew__primary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.6fr\) minmax\(0,\s*1fr\)/)
+    expect(css).not.toMatch(/radial-gradient/)
+    expect(css).not.toMatch(/#3370ff/)
+    expect(css).toMatch(/\.attendance-ew__history-filters-panel\s*\{[^}]*minmax\(140px,\s*1fr\)/)
   })
 
   it('keeps the empty-copy path when no summary is loaded', async () => {

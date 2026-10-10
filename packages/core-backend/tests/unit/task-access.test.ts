@@ -4,9 +4,13 @@ import {
   TASK_ROLES,
   TASK_ROLE_ABILITY,
   TASK_VIEWS,
+  buildTaskByIdCondition,
+  buildTaskInListCondition,
   buildTaskPendingCondition,
   buildTaskScopeCondition,
   can,
+  canChangeCompletion,
+  canChangeTaskMembers,
   resolveTaskRoles,
   taskMatchesView,
   type TaskAbility,
@@ -477,5 +481,143 @@ describe('task-access — bind-slot contract (review round 2)', () => {
     const outerParams = [...pending.params, 'open', 50]
     const maxSlot = Math.max(...(outer.match(/\$(\d+)/g) ?? []).map((m) => Number(m.slice(1))))
     expect(maxSlot).toBe(outerParams.length)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// M4 PR-3a S2 (design task-m4-pr3a-backend-design-20260930.md §6.1, §6.3).
+// ASSUMPTION(task-m4): [own-01] by-id / by-list builders bind `$1` = object id, `$2` = org.
+// ---------------------------------------------------------------------------------------------
+
+describe('buildTaskByIdCondition / buildTaskInListCondition (M4 R04)', () => {
+  it('by id: pinned text and params', () => {
+    const cond = buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.id = $1 AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL')
+    expect(cond.params).toEqual(['tsk_a', 'org1'])
+  })
+
+  it('by list: pinned text and params (ASSUMPTION(task-m4): [own-02]; no consumer before S7)', () => {
+    const cond = buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' })
+    expect(cond.sql).toBe(
+      'EXISTS (SELECT 1 FROM task_list_items tli WHERE tli.task_id = tasks.id AND tli.list_id = $1) ' +
+        'AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL',
+    )
+    expect(cond.params).toEqual(['tlst_a', 'org1'])
+  })
+
+  it('the org clause appears exactly once in each, and each uses exactly $1/$2', () => {
+    for (const cond of [
+      buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }),
+    ]) {
+      expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
+      expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+      expect(cond.params).toHaveLength(2)
+    }
+  })
+
+  it('shares the org + liveness clause text with the view builders', () => {
+    const clause = '(tasks.org_id = $2) AND tasks.deleted_at IS NULL'
+    for (const view of TASK_VIEWS) {
+      expect(buildTaskScopeCondition({ view, actorParam: 'u1', orgParam: 'org1' }).sql.startsWith(`${clause} AND (`)).toBe(true)
+    }
+    expect(buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }).sql.endsWith(clause)).toBe(true)
+    expect(buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }).sql.endsWith(clause)).toBe(true)
+  })
+})
+
+describe('canChangeCompletion (lock §6.2 zero-assignee rule, M4 §6.3)', () => {
+  const identities: TaskRole[][] = [
+    ['creator'],
+    ['assignee'],
+    ['follower'],
+    ['list-editor'],
+    ['list-reader'],
+    ['none'],
+    ['follower', 'list-reader'],
+    ['follower', 'list-editor'],
+    ['creator', 'list-editor'],
+    ['assignee', 'list-reader'],
+  ]
+
+  for (const ability of ['complete', 'reopen'] as const) {
+    for (const roles of identities) {
+      for (const assigneeCount of [0, 1, 3]) {
+        const expected = can(roles, ability) && (assigneeCount > 0 || roles.includes('creator'))
+        it(`${ability} | ${roles.join('+')} | assignees=${assigneeCount} ⇒ ${expected}`, () => {
+          expect(canChangeCompletion(roles, ability, assigneeCount)).toBe(expected)
+        })
+      }
+    }
+  }
+
+  it('pins the cells the guard exists for', () => {
+    expect(canChangeCompletion(['list-editor'], 'complete', 0)).toBe(false)
+    expect(canChangeCompletion(['list-editor'], 'reopen', 0)).toBe(false)
+    expect(canChangeCompletion(['list-editor'], 'complete', 1)).toBe(true)
+    expect(canChangeCompletion(['creator'], 'complete', 0)).toBe(true)
+    expect(canChangeCompletion(['creator', 'list-editor'], 'reopen', 0)).toBe(true)
+    expect(canChangeCompletion(['list-reader'], 'complete', 1)).toBe(false)
+  })
+
+  it('throws for any ability other than complete / reopen', () => {
+    for (const ability of TASK_ABILITIES.filter((a) => a !== 'complete' && a !== 'reopen')) {
+      expect(() => canChangeCompletion(['creator'], ability, 1)).toThrow(TypeError)
+    }
+  })
+})
+
+// RULED(2026-10-07): [own-53]: assignee and follower changes take a direct role.
+describe('canChangeTaskMembers ([own-53], M4 §6.3)', () => {
+  const ME = 'usr_me'
+  const row = (input: { creator?: boolean; assignee?: boolean; follower?: boolean }) => ({
+    createdBy: input.creator ? ME : 'usr_other',
+    assigneeIds: input.assignee ? ['usr_x', ME] : ['usr_x'],
+    followerIds: input.follower ? [ME] : [],
+  })
+  const cells: Array<[string, { creator?: boolean; assignee?: boolean; follower?: boolean }, boolean]> = [
+    ['creator', { creator: true }, true],
+    ['assignee', { assignee: true }, true],
+    ['creator + assignee', { creator: true, assignee: true }, true],
+    ['creator + follower', { creator: true, follower: true }, true],
+    ['assignee + follower', { assignee: true, follower: true }, true],
+    ['follower', { follower: true }, false],
+    ['no direct role', {}, false],
+  ]
+
+  for (const [label, roles, expected] of cells) {
+    it(`${label} ⇒ ${expected}`, () => {
+      expect(canChangeTaskMembers({ task: row(roles), me: ME })).toBe(expected)
+    })
+  }
+
+  it('agrees with `edit` over the direct roles for every combination of the three columns', () => {
+    for (const creator of [false, true]) {
+      for (const assignee of [false, true]) {
+        for (const follower of [false, true]) {
+          const task = row({ creator, assignee, follower })
+          expect(canChangeTaskMembers({ task, me: ME })).toBe(can(resolveTaskRoles(task, ME), 'edit'))
+        }
+      }
+    }
+  })
+
+  it('takes no list identity: memberships passed alongside the row, or on it, change nothing', () => {
+    expect(canChangeTaskMembers.length).toBe(1)
+    const editorship = [{ listId: 'tlst_1', role: 'editor' as const }]
+    for (const roles of [{}, { follower: true }]) {
+      const withMemberships = { task: { ...row(roles), listMemberships: editorship }, me: ME, listMemberships: editorship }
+      expect(canChangeTaskMembers(withMemberships as never)).toBe(false)
+      // Control: the role set resolved with list identity holds `edit`; the predicate reads direct
+      // roles only.
+      expect(can(resolveTaskRoles(row(roles), ME, editorship), 'edit')).toBe(true)
+    }
+  })
+
+  it('pins the cells the rule exists for', () => {
+    expect(canChangeTaskMembers({ task: row({}), me: ME })).toBe(false)
+    expect(canChangeTaskMembers({ task: row({ follower: true }), me: ME })).toBe(false)
+    expect(canChangeTaskMembers({ task: row({ creator: true }), me: ME })).toBe(true)
+    expect(canChangeTaskMembers({ task: row({ assignee: true }), me: ME })).toBe(true)
   })
 })

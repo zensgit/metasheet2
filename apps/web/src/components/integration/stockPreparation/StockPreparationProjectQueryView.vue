@@ -89,6 +89,21 @@
               {{ bi(sourceHint.zh, sourceHint.en) }}
             </p>
 
+            <!-- S3 (ADR §5 「项目查询」): 「含已归档」 — an INDEPENDENT toggle, default ON, and NOT a status
+                 chip (the chips are the home page's five keys; one more would change the home too).
+                 Offered only when the directory carries the registry's `archived` flag at all. -->
+            <label
+              v-if="archiveKnown"
+              class="sp-pq__field sp-pq__field--inline"
+            >
+              <input
+                v-model="includeArchived"
+                type="checkbox"
+                data-testid="stock-prep-project-query-include-archived"
+              />
+              <span class="sp-pq__field-label">{{ bi(overviewPlain('query_include_archived').zh, overviewPlain('query_include_archived').en) }}</span>
+            </label>
+
             <label class="sp-pq__field sp-pq__field--grow">
               <span class="sp-pq__field-label">{{ bi('搜索', 'Search') }}</span>
               <input
@@ -133,7 +148,15 @@
               <span class="sp-pq__row-head">
                 <span class="sp-pq__row-no">{{ row.projectNo }}</span>
                 <span v-if="row.projectName" class="sp-pq__row-name">{{ row.projectName }}</span>
+                <!-- S3: an archived row carries the 「已归档」 tag IN PLACE OF the posture badge — the
+                     posture of an archived project IS 已归档, and saying it twice is noise. -->
                 <span
+                  v-if="row.archived"
+                  class="sp-pq__badge sp-pq__badge--neutral"
+                  data-testid="stock-prep-project-query-archived-tag"
+                >{{ bi(overviewPlain('archived_tag').zh, overviewPlain('archived_tag').en) }}</span>
+                <span
+                  v-else
                   class="sp-pq__badge"
                   :class="`sp-pq__badge--${row.posture.tone}`"
                   data-testid="stock-prep-project-query-row-badge"
@@ -322,6 +345,7 @@ import {
   stockPrepLastExportDisplay,
   stockPrepProjectQuerySearchFromQuery,
   stockPrepProjectQuerySelectionFromQuery,
+  stockPrepProjectQueryArchiveKnown,
   stockPrepProjectQuerySourceAvailable,
   stockPrepProjectQuerySourceFromQuery,
   stockPrepProjectQueryStatusFromQuery,
@@ -336,6 +360,7 @@ import { stockPrepHomeStatusLabel } from '../../../services/integration/stockPre
 import {
   resolveStockPrepPullBanner,
   stockPrepBoardErrorPlain,
+  stockPrepProjectOverviewPlain,
   STOCK_PREP_SOURCE_MVP_LABEL,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
@@ -466,9 +491,22 @@ const effectiveSource = computed<StockPrepProjectQuerySourceKey>(() => (
   sourceAvailable.value ? source.value : 'all'
 ))
 
+function overviewPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+/**
+ * S3 「含已归档」 (ADR §5): default ON, session-local (not a URL bit — the four URL keys stay the
+ * ones the shell knows to clear). Applies only while the directory carries the registry's flag; with
+ * it absent there is nothing archived to hide and the toggle is not rendered.
+ */
+const includeArchived = ref<boolean>(true)
+const archiveKnown = computed<boolean>(() => stockPrepProjectQueryArchiveKnown(directory.value))
+
 const activeFilter = computed(() => ({
   source: effectiveSource.value,
   search: search.value,
+  includeArchived: archiveKnown.value ? includeArchived.value : true,
 }))
 
 const visibleRows = computed<StockPrepProjectQueryRow[]>(() => filterStockPrepProjectQueryRows(rows.value, {
@@ -505,7 +543,10 @@ const statusChips = computed(() => STOCK_PREP_PROJECT_QUERY_STATUS_KEYS.map((key
  * count and a claim. Shown only when it is actually the case: with remembered rows in the list the
  * chips do cover them, and the sentence would then be over-stated in the other direction.
  */
+// S3: with the registry enumerated (`archiveKnown`) the directory's registry rows carry their own
+// counts, so the sentence would be false — it is not shown.
 const memoryOnlyChipsNote = computed<boolean>(() => rows.value.length > 0
+  && !archiveKnown.value
   && !rows.value.some((row) => row.postureFromMemory || row.origin === 'memory'))
 
 // Q8 (ADR adr-stock-prep-project-sheets-20261008 default (iii); S2, R-36): the `mvp` source reads
@@ -837,6 +878,14 @@ const lastChangedText = computed<string>(() => {
 
 .sp-pq__field--grow {
   flex: 1 1 200px;
+}
+
+/* S3: 「含已归档」 — a checkbox and its label on one line. */
+.sp-pq__field--inline {
+  flex-direction: row;
+  align-items: center;
+  align-self: flex-end;
+  gap: 6px;
 }
 
 .sp-pq__field-label {
