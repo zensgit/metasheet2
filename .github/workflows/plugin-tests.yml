@@ -1319,13 +1319,21 @@ jobs:
       - name: Run owner YiDa JWT HTTP and browser real-DB proof
         id: stock-preparation-yida-owner-real-db
         if: matrix.node-version == '20.x'
-        env:
-          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
-          EXPECT_DB: '1'
         run: |
-          : "${DATABASE_URL:?DATABASE_URL is required for owner YiDa real-DB proof}"
-          pnpm --filter @metasheet/core-backend exec vitest --config vitest.yida-owner-realdb.config.ts run \
-            --reporter=verbose
+          # Clean before the FIRST Node exec, not only before its children.
+          # The launcher owns a fresh local PG and a loopback-only USER/NET/PID tree;
+          # All five whole files still exercise actual JWT/HTTP/Chromium.
+          yida_node="$(/usr/bin/readlink -f "$(command -v node)")"
+          yida_pg_bin="$(/usr/bin/readlink -f "$(/usr/bin/pg_config --bindir)")"
+          for yida_tool in "$yida_node" "$yida_pg_bin/initdb" "$yida_pg_bin/pg_ctl" \
+            "$yida_pg_bin/postgres" /usr/bin/unshare /usr/bin/setpriv /usr/bin/python3 /usr/sbin/ip; do
+            test -x "$yida_tool"
+          done
+          /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
+            scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs
+          /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin"
 
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'

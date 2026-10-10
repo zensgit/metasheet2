@@ -394,6 +394,13 @@ on:
       - 'scripts/ops/integration-guard-noop.sh'
       - 'scripts/ops/integration-guard-run-web-specs.sh'
       - 'scripts/ops/integration-guard-required-wiring-contract.test.mjs'
+      - 'scripts/ops/run-stock-preparation-yida-browser-ci.mjs'
+      - 'scripts/ops/stock-preparation-yida-browser-ci.test.mjs'
+      - 'scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs'
+      - 'scripts/ops/lib/stock-preparation-yida-browser-ci-namespace.py'
+      - 'scripts/ops/lib/stock-preparation-yida-browser-ci-preload.cjs'
+      - 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs'
+      - 'scripts/ops/lib/stock-preparation-plm-owned-pg.mjs'
       - '.github/workflows/plugin-tests.yml'
       - '.github/workflows/stock-prep-powershell51.yml'
 

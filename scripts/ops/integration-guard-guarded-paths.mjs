@@ -188,6 +188,14 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'scripts/ops/integration-guard-noop.sh',
   'scripts/ops/integration-guard-run-web-specs.sh',
   'scripts/ops/integration-guard-required-wiring-contract.test.mjs',
+  // YiDa native browser proof must not become disconnected when its launcher changes.
+  'scripts/ops/run-stock-preparation-yida-browser-ci.mjs',
+  'scripts/ops/stock-preparation-yida-browser-ci.test.mjs',
+  'scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs',
+  'scripts/ops/lib/stock-preparation-yida-browser-ci-namespace.py',
+  'scripts/ops/lib/stock-preparation-yida-browser-ci-preload.cjs',
+  'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs',
+  'scripts/ops/lib/stock-preparation-plm-owned-pg.mjs',
   // #4614 P1 two-point wiring: plugin-tests.yml is the contract's OTHER executable caller
   // (test (20.x) runs it via `node --test scripts/ops/integration-guard-required-wiring-
   // contract.test.mjs`). Before this entry, a PR that deleted ONLY that one invocation line
