@@ -62,6 +62,10 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 // — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
 // column). See the service file header for the load-bearing property and the removal path.
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
+import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
+import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
+import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
+import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -855,6 +859,10 @@ export class MetaSheetServer {
           // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
           // link from this, AFTER proving the sheet itself exists through findObjectSheet.
           getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
+          // S3 fix round 1 (R8c): this host stamps a requested `systemKind` at INSERT, refuses to adopt an
+          // existing sheet of another kind (provisioning.ts), and reports `systemKind` on every sheet it
+          // returns. The overview plugin checks this declaration before any write and fails closed without it.
+          supportsSystemKindStamp: true,
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -879,7 +887,9 @@ export class MetaSheetServer {
           // forward it). Dropping it here silently downgraded a caller's explicit
           // opt-in to the fail-closed default, i.e. an advertised API option
           // (types/plugin.ts EnsureObjectInput) was inert on this path.
-          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
+          // S3: `systemKind` likewise — the host-owned stamp the plugin-scope gate admitted (only
+          // plugin-integration-core's overview object); provisioning re-checks it is a known kind.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode, systemKind }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -895,6 +905,7 @@ export class MetaSheetServer {
                 baseId,
                 descriptor,
                 overwriteMode,
+                systemKind,
               })
             })
           },
@@ -1105,6 +1116,49 @@ export class MetaSheetServer {
               args,
               invalidateSheetDisplayNameCaches,
             )
+          },
+          // 一个项目一张备料表 G1 (R-35): grant the configured stock-prep roles `spreadsheet:write` on
+          // one project sheet. ONE transaction (row lock + liveness, role existence, add-only insert,
+          // history row); every refusal propagates unwrapped so the plugin route sees `.status` /
+          // `.code`. The plugin-scope wrapper in front of this has already refused everything about
+          // WHICH sheet (shape, derivation, registry ownership by plugin and by project); this binds
+          // only the DATA (services/stock-preparation-project-sheet-grants.ts). The wrapper also hands
+          // the port to plugin-integration-core ONLY (plugin-scope.ts, R5 — the same posture as
+          // `stockPreparationFieldPermissions` below): every other plugin's scoped api has no
+          // `grantSheetRoleWrite` at all, even though this shared host api carries it.
+          grantSheetRoleWrite: async ({ sheetId, roleIds, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return grantStockPreparationProjectSheetRoleWrite(txQuery, { sheetId, roleIds, actorId })
+            })
+          },
+          // 一个项目一张备料表 S3 fix round 1 (R1): G1 for the PROJECT OVERVIEW — the configured stock-prep
+          // roles get `spreadsheet:read` (a literal) on the overview sheet, so the floor can open the
+          // read-only overview. ONE transaction (row lock + liveness, the overview kind re-read under the
+          // lock, role existence, add-only insert, history row); refusals propagate unwrapped. The scope
+          // wrapper (plugin-scope.ts) already refused everything about WHICH sheet and hands the port to
+          // plugin-integration-core only.
+          grantOverviewRoleRead: async ({ sheetId, roleIds, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return grantStockPreparationOverviewRoleRead(txQuery, { sheetId, roleIds, actorId })
+            })
           },
         },
         records: {
@@ -2263,7 +2317,9 @@ export class MetaSheetServer {
             // destructive-reconcile opt-in, and this hook is the shipped host path for every
             // plugin ensureObject — dropping it here would silently re-arm the fail-closed
             // default for callers that legitimately own the columns they re-derive.
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
+            // S3: `systemKind` MUST stay in it too — the overview stamp the scope gate admitted; dropping
+            // it here would provision the overview as an ordinary, writable, deletable sheet.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode, systemKind }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -2287,6 +2343,7 @@ export class MetaSheetServer {
                   baseId,
                   descriptor,
                   overwriteMode,
+                  systemKind,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,
@@ -2338,6 +2395,39 @@ export class MetaSheetServer {
                   sheetId,
                 })
               })
+            },
+            // G1 (R-35): the STRICT ownership assertion the project-sheet grant port runs. Unlike
+            // `assertSheetScope` below it has NO `observe` tolerance: a grant is an authorization
+            // write, and a sheet nobody has claimed must never admit one in any deployment mode.
+            // `assertPluginOwnsSheet` already throws on a DIFFERENT owner; the unregistered case is
+            // turned into the same refusal here.
+            assertSheetOwnedByPlugin: async ({ sheetId, pluginName }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await poolManager.get().query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, { pluginName, sheetId })
+              if (!ownsSheet) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+              }
+            },
+            // S3 fix round 2 (F3; register R-37): the host's stamp, read for the plugin-scope wrapper — the generic
+            // record writes refuse a sheet this answers `true` for, and the overview port writes only one it
+            // answers `true` for. The contract's column-tolerant, id-prefiltered lookup (one indexed statement for
+            // a derived-shape id, none otherwise).
+            isStockPreparationOverviewSheet: async ({ sheetId }) => {
+              const overviewIds = await loadStockPreparationOverviewSheetIds(
+                (sql, params) => poolManager.get().query(sql, params) as Promise<{ rows: unknown[]; rowCount?: number | null }>,
+                [sheetId],
+              )
+              return overviewIds.has(sheetId)
             },
             assertSheetScope: async ({ sheetId, pluginName }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
@@ -3342,6 +3432,15 @@ export class MetaSheetServer {
         stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
           ? new StockPreparationFieldPermissionsService()
           : undefined,
+        // 备料「成员与权限」(S5b, register R-39): the narrow members port for plugin-integration-core
+        // ONLY — create / update server-generated `stock-prep_c_…` roles (never `_admin`, never a
+        // built-in, never outside the namespace), `stock-prep:*` codes only and within the grantor's own,
+        // project-sheet scope through the plugin's G1 call and within what the grantor can write, every
+        // change audited. Platform admin or the `stock-prep` delegated admin only; behind the default-OFF
+        // STOCK_PREP_MEMBERS_PAGE_ENABLED. Absent for every other plugin.
+        stockPreparationMembers: manifest.name === 'plugin-integration-core'
+          ? createStockPrepMembersHostPort()
+          : undefined,
         // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
         // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
         // title, body })`; this wraps the EXISTING group-destination machinery
@@ -4131,6 +4230,17 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('DataSourceManager initialization failed; continuing in degraded mode', e as Error)
     }
+
+    // #6164 step 1: read-only trial decrypt of every encrypted store (counts only). Not awaited; never throws.
+    void import('./security/encrypted-store-probe')
+      .then(({ runEncryptedStoreProbeAtStartup }) => runEncryptedStoreProbeAtStartup({ resolvePool: () => poolManager.get() }))
+      .catch(() => {
+        try {
+          this.logger.warn('Encrypted store probe could not be loaded; startup continues without it')
+        } catch {
+          // a throwing logger must not turn into an unhandled rejection
+        }
+      })
 
     try {
       await startDirectorySyncScheduler()

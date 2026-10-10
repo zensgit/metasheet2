@@ -18,10 +18,16 @@
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
       :can-pull="canRunPull"
+      :project-targets="projectTargetList"
+      :can-refresh-overview="canRefreshOverview"
+      :can-ensure-overview="canEnsureOverview"
+      :target-api="projectTargetApi"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
-      @open-multitable="openFillTarget"
+      @open-multitable="onHomeOpenMultitable"
+      @overview-refreshed="loadProjectTargetList"
+      @overview-ensured="loadProjectTargetList"
     />
 
     <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
@@ -114,7 +120,7 @@
           @keyup.enter="openProject"
         >
         <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
-             list holds 「这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目」 — so it
+             list holds 「这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目」 — so it
              has to. A directory row is labelled by its own name; a row only this computer's memory
              knows is labelled with the home page's words for that half of the list, verbatim. The
              memory is written only when this page opens a project, so "opened" is literally true. -->
@@ -153,6 +159,198 @@
          the board still answers a foreign tenant's project number with a 404 byte-identical to the
          one an unknown number gets (the server decides that, and its suite asserts it) — what
          changed is only what this tab renders around that refusal. -->
+    <!-- 一个项目一张备料表 (S2, R-36) — THIS PROJECT'S SHEET, said in one line. The projectTarget.read
+         control of the workbench manifest (OPERATE, the board's own tier): rendered only once GET
+         …/projects/:projectNo/target answered, i.e. the server's switch is on. 「直接打开」 deep-links
+         the fill view of the project's OWN sheet; archived reads 「打开(已归档)」 and says who restores
+         it. A caller without the pull right is told to contact a pull operator — never pointed at a
+         button they do not have. -->
+    <section
+      v-if="openedProjectNo && projectTarget"
+      class="sp-board__target"
+      data-testid="stock-prep-project-target-status"
+      :data-target-status="projectTarget.status"
+    >
+      <p class="sp-board__target-line">
+        {{ bi(targetStatusText.zh, targetStatusText.en) }}
+        <span v-if="targetRowsText" class="sp-board__target-rows" data-testid="stock-prep-project-target-rows">{{ targetRowsText }}</span>
+      </p>
+      <p v-if="targetNextText" class="sp-board__hint" data-testid="stock-prep-project-target-next">
+        {{ bi(targetNextText.zh, targetNextText.en) }}
+      </p>
+      <button
+        v-if="projectTargetFillTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-open"
+        @click="openProjectTargetSheet"
+      >
+        {{ projectTarget.status === 'archived'
+          ? bi(targetPlain('open_archived_action').zh, targetPlain('open_archived_action').en)
+          : bi(targetPlain('open_action').zh, targetPlain('open_action').en) }}
+      </button>
+      <!-- S4 (ADR §6, register R-38) — 归档代替删除 (Q2). The projectTarget.archive / .restore controls
+           of the workbench manifest (PULL tier): rendered only when the caller holds that capability
+           AND the server says the action fits this sheet's state (`may.archive` / `may.restore`). A
+           caller without the pull right gets no button — the line above already says to contact a
+           pull operator. Pressing asks for the project number to be TYPED before anything is sent. -->
+      <button
+        v-if="canArchiveTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-archive"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('archive')"
+      >{{ bi(targetPlain('archive_action').zh, targetPlain('archive_action').en) }}</button>
+      <button
+        v-if="canRestoreTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-restore"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('restore')"
+      >{{ bi(targetPlain('restore_action').zh, targetPlain('restore_action').en) }}</button>
+      <div
+        v-if="lifecyclePrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-target-lifecycle-prompt"
+        :data-action="lifecyclePrompt"
+      >
+        <p class="sp-board__hint">
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive').zh, targetPlain('confirm_archive').en)
+            : bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}
+        </p>
+        <p v-if="lifecyclePrompt === 'archive'" class="sp-board__hint" data-testid="stock-prep-project-target-lifecycle-remove-vs-archive">
+          {{ bi(targetPlain('remove_vs_archive').zh, targetPlain('remove_vs_archive').en) }}
+        </p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-target-lifecycle-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="lifecycleTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-target-lifecycle-input"
+            :disabled="lifecycleBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-confirm"
+          :disabled="lifecycleBusy || !lifecycleTypedMatches"
+          @click="confirmLifecycle"
+        >
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive_action').zh, targetPlain('confirm_archive_action').en)
+            : bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}
+        </button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-cancel"
+          :disabled="lifecycleBusy"
+          @click="closeLifecyclePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="lifecycleNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-target-lifecycle-result"
+        :data-result="lifecycleNotice.kind"
+      >
+        {{ bi(lifecycleNoticeText.zh, lifecycleNoticeText.en) }}
+        <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
+        <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
+      </p>
+      <!-- S3 (ADR §5 O2(a), register R-37) — 负责人 / 备注 / 计划完成. The projectFields.read control of the
+           workbench manifest (OPERATE): read LAZILY, only once this line knows the sheet exists (active or
+           archived — never on absent), and only for a holder of the capability. 「保存」 is the
+           projectFields.update control: rendered only for its holder AND when the server says the sheet
+           takes the write (`may.update`, i.e. active). Saving sends ONLY the fields the operator changed.
+           Archived: the three show read-only with 「已归档，不能改」 — the grid itself stays fillable. -->
+      <div
+        v-if="projectFields"
+        class="sp-board__fields"
+        role="group"
+        data-testid="stock-prep-project-fields"
+        :data-fields-status="projectFields.status"
+        :aria-label="bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en)"
+      >
+        <p class="sp-board__fields-title">{{ bi(fieldsPlain('fields_title').zh, fieldsPlain('fields_title').en) }}</p>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_responsibleLabel').zh, fieldsPlain('field_responsibleLabel').en) }}</span>
+          <input
+            v-model="fieldsDraft.responsibleLabel"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-responsible"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.responsibleLabel"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field sp-board__fields-field--grow">
+          <span>{{ bi(fieldsPlain('field_note').zh, fieldsPlain('field_note').en) }}</span>
+          <input
+            v-model="fieldsDraft.note"
+            type="text"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-note"
+            :maxlength="STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS.note"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <label class="sp-board__fields-field">
+          <span>{{ bi(fieldsPlain('field_plannedFinishOn').zh, fieldsPlain('field_plannedFinishOn').en) }}</span>
+          <input
+            v-model="fieldsDraft.plannedFinishOn"
+            type="date"
+            class="sp-board__fields-input"
+            data-testid="stock-prep-project-fields-planned-finish"
+            :disabled="!fieldsEditable || fieldsBusy"
+          />
+        </label>
+        <button
+          v-if="canSaveProjectFields"
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-fields-save"
+          :disabled="fieldsBusy || !fieldsChanged"
+          @click="saveProjectFields"
+        >
+          {{ fieldsBusy
+            ? bi(fieldsPlain('fields_saving').zh, fieldsPlain('fields_saving').en)
+            : bi(fieldsPlain('fields_save_action').zh, fieldsPlain('fields_save_action').en) }}
+        </button>
+        <p
+          v-if="projectFields.status === 'archived'"
+          class="sp-board__hint"
+          data-testid="stock-prep-project-fields-archived"
+        >
+          {{ bi(fieldsPlain('fields_archived_readonly').zh, fieldsPlain('fields_archived_readonly').en) }}
+        </p>
+        <p v-else class="sp-board__hint">{{ bi(fieldsPlain('fields_hint').zh, fieldsPlain('fields_hint').en) }}</p>
+        <p
+          v-if="fieldsNotice"
+          class="sp-board__hint"
+          role="status"
+          data-testid="stock-prep-project-fields-result"
+          :data-result="fieldsNotice.kind"
+          :data-field="fieldsNotice.kind === 'refused' ? (fieldsNotice.field ?? '') : ''"
+        >
+          {{ bi(fieldsNoticeText.zh, fieldsNoticeText.en) }}
+          <span v-if="fieldsNoticeText.zhNext">{{ bi(fieldsNoticeText.zhNext, fieldsNoticeText.enNext ?? '') }}</span>
+          <code v-if="fieldsNotice.kind === 'refused' && fieldsNotice.code" class="sp-board__token">{{ fieldsNotice.code }}</code>
+        </p>
+      </div>
+    </section>
+
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
       <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
            button by that name. `run-variant` makes the button actually carry it. See the panel. -->
@@ -166,10 +364,12 @@
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
         :fill-target="composedFillTarget"
+        :target-api="projectTargetApi"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
         @busy-changed="onSyncBusyChanged"
+        @project-target-changed="onProjectTargetChanged"
       />
     </section>
 
@@ -454,7 +654,9 @@
 //
 // IT HAS NO EDITABLE CELL, on purpose. Filling stays in the multitable grid, where the column-level
 // write permissions and the human-field wall already live. A cell here would be a second write path
-// into the same rows with none of that behind it.
+// into the same rows with none of that behind it. (S3's three project-level fields — 负责人 / 备注 /
+// 计划完成 — are not cells of any sheet: they live on the server's registry row and have their own
+// OPERATE route, ADR §5 O2(a); the overview only projects them, read-only.)
 //
 // THE DEEP LINK IS A LINK, NOT A PERMISSION CHECK. The board returns a handle only when the sheet
 // exists; whether this operator may open it is multitable's answer, given when they land. The page
@@ -489,11 +691,33 @@ import {
   type StockPreparationProjectBoard,
 } from '../../../services/integration/stockPreparation/projectBoard'
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
+import {
+  changeStockPreparationProjectTargetLifecycle,
+  createStockPreparationProjectTargetApi,
+  saveStockPreparationProjectFields,
+  stockPrepProjectFieldsChangedPatch,
+  stockPrepProjectFieldsDraft,
+  stockPrepProjectNumbersMatch,
+  stockPrepProjectTargetFillTarget,
+  STOCK_PREP_PROJECT_FIELD_TEXT_LIMITS,
+  type StockPrepProjectFieldsDraft,
+  type StockPrepProjectFieldsSaveOutcome,
+  type StockPrepProjectFieldsState,
+  type StockPrepProjectLifecycleAction,
+  type StockPrepProjectLifecycleOutcome,
+  type StockPrepProjectTargetList,
+  type StockPrepProjectTargetState,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   STOCK_PREP_CONFIRM_PANEL_NOTE,
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
+  STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS,
   stockPrepBoardErrorPlain,
+  stockPrepProjectOverviewPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepHandoffOutcomePlain,
@@ -502,7 +726,7 @@ import {
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { canRunStockPrepProjectSync, grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
 import {
   operatorNextStep,
@@ -528,8 +752,13 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * Test seam ONLY (S2) — the project-target client, shared with the composed pull panel. Null in
+     * production: built from `scope`.
+     */
+    projectTargetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null, projectTargetApi: null },
 )
 
 const emit = defineEmits<{
@@ -1020,7 +1249,10 @@ const lastChangedFromPlmText = computed<string>(() => {
 })
 
 /** I-20: 表里有多少行's tooltip, the design's own worked example. */
-const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
+const rowsTooltip: StockPrepPlainText = {
+  zh: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.zh}${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.zh}`,
+  en: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.en} ${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.en}`,
+}
 
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
@@ -1227,6 +1459,7 @@ async function loadDirectory(): Promise<void> {
   try {
     // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
     // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
+    if (home) void loadProjectTargetList()
     directory.value = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
@@ -1292,8 +1525,15 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     handoff.value = null
     handoffNotice.value = ''
     exportEmptyNotice.value = false
+    projectTarget.value = null
+    // S4: a question about one project's lifecycle never survives a switch to another project.
+    closeLifecyclePrompt()
+    lifecycleNotice.value = null
   }
   if (!target) return
+  // S2: this project's sheet state — independent of the board read, silent on failure (switch off is
+  // a 404 DISABLED and means "no line", not an error the operator should see).
+  void loadProjectTarget(target)
   if (refresh) {
     refreshing.value = true
     errorCode.value = null
@@ -1532,6 +1772,9 @@ function triggerExportDownload(blob: Blob, filename: string): void {
  * so that read never happens) and a project the board 404s on — where nothing has claimed anything.
  */
 const composedFillTarget = computed(() => {
+  // S2: once the project has its OWN sheet (switch on, registry row), that sheet's fill view is the
+  // destination — the registry is the one authority for "which sheet is this project's" (ADR §3).
+  if (projectTargetFillTarget.value) return projectTargetFillTarget.value
   if (board.value) return board.value.fillTarget ?? null
   return directory.value?.fillTarget ?? null
 })
@@ -1557,6 +1800,20 @@ function openFillTarget(): void {
 }
 
 /**
+ * The home page's two multitable entries. 「打开备料多维表」 sends no target and resolves through
+ * `openFillTarget` exactly as before; S3's 「打开项目总览」 sends the overview's own handles (the
+ * overview is not the fill sheet, so `composedFillTarget` must not answer for it), which go to the
+ * shell unchanged — the shell's `handleOpenFillTarget` pushes `/multitable/<sheetId>/<viewId>`.
+ */
+function onHomeOpenMultitable(target?: { sheetId: string; viewId: string }): void {
+  if (target && typeof target.sheetId === 'string' && target.sheetId && typeof target.viewId === 'string' && target.viewId) {
+    emit('open-multitable', { sheetId: target.sheetId, viewId: target.viewId })
+    return
+  }
+  openFillTarget()
+}
+
+/**
  * The shell's `?projectNo=` is the state bit for 首页 ⇄ 工作区 (§2.3), so it has to be followed in
  * BOTH directions. The empty case used to early-return, which meant browser Back — and the shell's
  * own 「返回今天要处理」 — left the workspace on screen with no way out.
@@ -1566,6 +1823,269 @@ watch(() => props.projectNo, (next) => {
   if (target === openedProjectNo.value) return
   projectNoInput.value = target
   void loadBoard(target)
+})
+
+// ── 一个项目一张备料表 (S2, R-36) — the project's own sheet, as the server's registry states it ──────
+
+/** This project's sheet; null = no line (switch off, unreadable, or not loaded yet). */
+const projectTarget = ref<StockPrepProjectTargetState | null>(null)
+/** The tenant's registry rows, for 今天要处理; null = the switch is off or the list was unreadable. */
+const projectTargetList = ref<StockPrepProjectTargetList | null>(null)
+let projectTargetGeneration = 0
+
+function projectTargetClient(): StockPreparationProjectTargetApi {
+  return props.projectTargetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+async function loadProjectTarget(projectNo: string): Promise<void> {
+  const mine = ++projectTargetGeneration
+  try {
+    const state = await projectTargetClient().get(projectNo)
+    if (mine === projectTargetGeneration && openedProjectNo.value === projectNo) projectTarget.value = state
+  } catch {
+    if (mine === projectTargetGeneration) projectTarget.value = null
+  }
+}
+
+async function loadProjectTargetList(): Promise<void> {
+  try {
+    projectTargetList.value = await projectTargetClient().list()
+  } catch {
+    projectTargetList.value = null
+  }
+}
+
+/** The pull panel re-read the sheet after a create or a re-pull — no second request needed. */
+function onProjectTargetChanged(state: StockPrepProjectTargetState | null): void {
+  if (state) {
+    projectTargetGeneration += 1
+    projectTarget.value = state
+  } else if (openedProjectNo.value) {
+    void loadProjectTarget(openedProjectNo.value)
+  }
+}
+
+const projectTargetFillTarget = computed(() => stockPrepProjectTargetFillTarget(projectTarget.value))
+
+function targetPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectTargetPlain(id) ?? { zh: id, en: id }
+}
+
+const targetStatusText = computed<StockPrepPlainText>(() => {
+  const status = projectTarget.value?.status ?? 'absent'
+  return targetPlain(`status_${status}`)
+})
+
+/** Who acts next — never a button this caller does not have. */
+const targetNextText = computed<StockPrepPlainText | null>(() => {
+  const state = projectTarget.value
+  if (!state) return null
+  if (state.status === 'absent') return targetPlain(canRunPull.value && state.may.create ? 'absent_can_create' : 'contact_puller_create')
+  if (state.status === 'archived') return targetPlain(canRunPull.value && state.may.restore ? 'restore_pending' : 'contact_puller_restore')
+  return null
+})
+
+const targetRowsText = computed<string>(() => {
+  const state = projectTarget.value
+  if (!state || state.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText(state)
+  return text ? bi(text.zh, text.en) : ''
+})
+
+function openProjectTargetSheet(): void {
+  emit('open-multitable', projectTargetFillTarget.value)
+}
+
+// ── S4 (ADR §6, register R-38) — archive / restore this project's sheet ─────────────────────────────
+//
+// The two controls render iff the caller holds the manifest capability (the PULL tier — the same
+// mirror the server's gate is checked against in StockPreparationProjectArchive.spec.ts) AND the
+// server's `may.*` says the action fits the sheet's current state. The project number must be typed
+// before anything is sent; `changeStockPreparationProjectTargetLifecycle` stops a mismatch locally and
+// the server compares it again.
+
+function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'projectTarget.restore'): boolean {
+  return holdsWorkbenchCapability(capability)
+}
+
+/**
+ * ONE resolver for every manifest-gated control on this page: the caller's capabilities as the
+ * workbench manifest mirror computes them (F-01 keeps the mirror byte-equal to the plugin's rows).
+ * S4's archive / restore and S3's project-fields / overview-refresh all go through it.
+ */
+function holdsWorkbenchCapability(
+  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh' | 'projectOverview.ensure',
+): boolean {
+  return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
+}
+
+const canArchiveTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'active' && state.may.archive && holdsLifecycleCapability('projectTarget.archive'))
+})
+
+const canRestoreTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'archived' && state.may.restore && holdsLifecycleCapability('projectTarget.restore'))
+})
+
+const lifecyclePrompt = ref<StockPrepProjectLifecycleAction | null>(null)
+const lifecycleTyped = ref('')
+const lifecycleBusy = ref(false)
+const lifecycleNotice = ref<StockPrepProjectLifecycleOutcome | null>(null)
+const lifecycleTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, lifecycleTyped.value))
+
+function openLifecyclePrompt(action: StockPrepProjectLifecycleAction): void {
+  lifecyclePrompt.value = action
+  lifecycleTyped.value = ''
+  lifecycleNotice.value = null
+}
+
+function closeLifecyclePrompt(): void {
+  lifecyclePrompt.value = null
+  lifecycleTyped.value = ''
+}
+
+async function confirmLifecycle(): Promise<void> {
+  const action = lifecyclePrompt.value
+  const projectNo = openedProjectNo.value
+  if (!action || !projectNo || lifecycleBusy.value) return
+  lifecycleBusy.value = true
+  try {
+    const outcome = await changeStockPreparationProjectTargetLifecycle({
+      targetApi: projectTargetClient(),
+      canPull: holdsLifecycleCapability(action === 'archive' ? 'projectTarget.archive' : 'projectTarget.restore'),
+    }, action, projectNo, lifecycleTyped.value)
+    lifecycleNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closeLifecyclePrompt()
+      if (outcome.state && openedProjectNo.value === projectNo) {
+        projectTargetGeneration += 1
+        projectTarget.value = outcome.state
+      } else if (openedProjectNo.value === projectNo) {
+        void loadProjectTarget(projectNo)
+      }
+    }
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
+
+const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = lifecycleNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+// ── S3 (ADR §5 O2(a) / Q5, register R-37) — the project-level columns and the overview refresh ─────
+//
+// 「刷新项目总览」 lives on the home page; this page only resolves whether the caller holds it.
+const canRefreshOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.refresh'))
+// S3 fix round 1 (R6): 「建立项目总览」 is the PULL tier's (the manifest's projectOverview.ensure row).
+const canEnsureOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.ensure'))
+
+/** This project's three project-level texts; null = no form (not loaded, absent, switch off, no right, unreadable). */
+const projectFields = ref<StockPrepProjectFieldsState | null>(null)
+const fieldsDraft = ref<StockPrepProjectFieldsDraft>(stockPrepProjectFieldsDraft(null))
+const fieldsBusy = ref(false)
+const fieldsNotice = ref<StockPrepProjectFieldsSaveOutcome | null>(null)
+let projectFieldsGeneration = 0
+
+function fieldsPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+function setProjectFields(state: StockPrepProjectFieldsState | null): void {
+  projectFields.value = state
+  fieldsDraft.value = stockPrepProjectFieldsDraft(state?.fields ?? null)
+}
+
+/**
+ * LAZY: read only once the sheet-state line knows the sheet EXISTS (active / archived — never on
+ * absent, never with the switch off), and only for a holder of `projectFields.read`. Silent on
+ * failure — a predread nobody asked for; the line simply shows no form.
+ */
+async function loadProjectFields(projectNo: string): Promise<void> {
+  const mine = ++projectFieldsGeneration
+  const api = projectTargetClient()
+  if (typeof api.getProjectFields !== 'function') return
+  try {
+    const state = await api.getProjectFields(projectNo)
+    if (mine !== projectFieldsGeneration || openedProjectNo.value !== projectNo) return
+    setProjectFields(state.status === 'absent' ? null : state)
+  } catch {
+    if (mine === projectFieldsGeneration) setProjectFields(null)
+  }
+}
+
+/** Re-read on a change of PROJECT or of the sheet's STATUS (archive / restore) — not on every re-read of the same state. */
+watch(
+  // Multi-source on purpose: Vue compares each source on its own, so replacing `projectTarget` with
+  // an equal-status state (every board re-read does) does not re-read the fields.
+  [openedProjectNo, () => projectTarget.value?.status ?? null],
+  ([projectNo, status], previous) => {
+    if (!previous || previous[0] !== projectNo) fieldsNotice.value = null
+    if (!projectNo || (status !== 'active' && status !== 'archived') || !holdsWorkbenchCapability('projectFields.read')) {
+      projectFieldsGeneration += 1
+      setProjectFields(null)
+      return
+    }
+    void loadProjectFields(projectNo)
+  },
+)
+
+/** Editable iff the caller holds `projectFields.update` AND the server says the sheet takes it (`may.update`, active). */
+const canSaveProjectFields = computed<boolean>(() => {
+  const state = projectFields.value
+  return Boolean(state && state.status === 'active' && state.may.update && holdsWorkbenchCapability('projectFields.update'))
+})
+
+const fieldsEditable = computed<boolean>(() => canSaveProjectFields.value)
+
+const fieldsChanged = computed<boolean>(() =>
+  Object.keys(stockPrepProjectFieldsChangedPatch(projectFields.value?.fields ?? null, fieldsDraft.value)).length > 0)
+
+async function saveProjectFields(): Promise<void> {
+  const projectNo = openedProjectNo.value
+  const state = projectFields.value
+  if (!projectNo || !state || fieldsBusy.value || !canSaveProjectFields.value) return
+  fieldsBusy.value = true
+  fieldsNotice.value = null
+  try {
+    const outcome = await saveStockPreparationProjectFields(projectTargetClient(), projectNo, state.fields, fieldsDraft.value)
+    if (openedProjectNo.value !== projectNo) return
+    fieldsNotice.value = outcome
+    if (outcome.kind === 'saved') {
+      projectFieldsGeneration += 1
+      setProjectFields({ status: outcome.saved.status, fields: outcome.saved.fields, updatedAt: outcome.saved.updatedAt, may: state.may })
+    } else if (outcome.kind === 'refused' && outcome.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
+      // A colleague archived it meanwhile: re-read the sheet's state; the form follows it.
+      void loadProjectTarget(projectNo)
+    }
+  } finally {
+    fieldsBusy.value = false
+  }
+}
+
+/** The one result line: 已保存, or the refusal's plain sentence — naming the FIELD for a 422, never its value. */
+const fieldsNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = fieldsNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'saved') return fieldsPlain('fields_saved')
+  if (notice.kind === 'unchanged') return { zh: '', en: '' }
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') return fieldsPlain('fields_archived_refused')
+  if (notice.code === 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID') {
+    // S3 fix round 1 (R13): a 400 under this code is the control-character refusal, whichever field it names.
+    const specific = notice.status === 400
+      ? stockPrepProjectOverviewPlain('fields_invalid_control')
+      : (notice.field && notice.field !== 'body' ? stockPrepProjectOverviewPlain(`fields_invalid_${notice.field}`) : null)
+    const general = stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
+    return specific ? { zh: specific.zh, en: specific.en, zhNext: general.zhNext, enNext: general.enNext } : general
+  }
+  return stockPrepErrorPlain(notice.code ?? '')
 })
 
 onMounted(async () => {
@@ -1784,6 +2304,60 @@ onMounted(async () => {
   text-decoration: underline;
 }
 
+/* S4: the typed confirmation for archive / restore, inside the sheet-state line. */
+.sp-board__lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__lifecycle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__lifecycle-input {
+  min-width: 10em;
+}
+
+/* S3: 负责人 / 备注 / 计划完成, inside the sheet-state line — a small inline form, never a grid. */
+.sp-board__fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__fields-title {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.sp-board__fields-field--grow {
+  flex: 1 1 16em;
+}
+
+.sp-board__fields-input {
+  padding: 4px 6px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  font: inherit;
+}
+
 /* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */
 .sp-board__confirm-panel {
   display: flex;
@@ -1892,5 +2466,29 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-3);
+}
+
+/* S2: this project's own sheet, one line. Outlined, never a filled primary (G1). */
+.sp-board__target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sp-board__target-line {
+  margin: 0;
+  color: var(--ms-text-1);
+}
+
+.sp-board__target-rows {
+  margin-left: var(--ms-space-2);
+  color: var(--ms-text-2);
 }
 </style>

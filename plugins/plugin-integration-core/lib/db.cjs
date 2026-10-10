@@ -451,8 +451,48 @@ function createDb({ database, logger } = {}) {
         const statement = transactionIsolationStatement(level)
         await trx.query(statement, [])
       }
+      /**
+       * `SELECT pg_advisory_xact_lock(hashtext($1))` on THIS transaction — a per-key mutex PostgreSQL
+       * releases at COMMIT / ROLLBACK, for "count, then insert under a cap" sequences that have no
+       * row to lock (the handoff cursor locks its row with selectOneForUpdate; a per-tenant cap has
+       * no parent row — stock-preparation-project-target-store.cjs `create` is the first caller).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal, the key
+       * is its ONE parameter and never reaches the SQL text, and `hashtext` keys the lock space by a
+       * string a caller can name (`<table>:<tenant>`) instead of an integer a caller must allocate
+       * (a hash collision only serializes two unrelated callers, it never admits one). The key must
+       * be a non-empty string. Offered ONLY on the transaction handle: `pg_advisory_xact_lock` is
+       * transaction-scoped by definition, so outside a block it would guard nothing.
+       */
+      async function advisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])
+      }
+      /**
+       * The NON-BLOCKING sibling of `advisoryXactLock`: `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS
+       * locked` on THIS transaction. `true` = the lock is now held until COMMIT / ROLLBACK; `false` = another
+       * transaction holds it, answered AT ONCE — this never queues. For a caller that must not hold a pooled
+       * connection while it waits: the stock-preparation project overview writers (S3 fix round 2, F4), whose
+       * lock holder needs MORE pool connections for its host calls, so N blocked waiters each holding one could
+       * starve the very holder they wait on. Same key rules as `advisoryXactLock` (the key is the ONE parameter
+       * of a fixed literal); only an explicit boolean `true` from PostgreSQL counts as acquired.
+       */
+      async function tryAdvisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        const result = await trx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [key])
+        const rows = Array.isArray(result)
+          ? result
+          : (result && Array.isArray(result.rows) ? result.rows : [])
+        return Boolean(rows[0] && rows[0].locked === true)
+      }
       return callback({
         setTransactionIsolationLevel,
+        advisoryXactLock,
+        tryAdvisoryXactLock,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,

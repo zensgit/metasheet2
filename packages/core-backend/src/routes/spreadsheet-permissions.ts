@@ -63,6 +63,10 @@ import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
 import { SheetNotLiveError, assertSheetLiveForUpdate } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
+import {
+  STOCK_PREP_OVERVIEW_GRANT_REFUSAL,
+  STOCK_PREPARATION_OVERVIEW_GRANT_PERM_CODE,
+} from '../multitable/stock-preparation-overview-contract'
 
 // Use the global Express.Request type which already includes user property
 type AuthenticatedRequest = Request
@@ -93,18 +97,24 @@ const sheetPerms = new Map<string, Map<string, Set<string>>>()
  * `sheetId` is passed through UNNORMALISED, exactly as the list/grant/revoke SQL below binds it: a gate
  * that trimmed while the write did not would authorise one row key and write another.
  */
-async function answerUnlessSheetManageable(req: Request, res: Response, sheetId: string): Promise<boolean> {
-  const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, dbQuery, sheetId)
+async function answerUnlessSheetManageable(req: Request, res: Response, sheetId: string): Promise<SheetManageGate | null> {
+  const { capabilities, sheetLiveness, stockPrepOverview } = await resolveSheetCapabilities(req, dbQuery, sheetId)
   if (!capabilities.canManageSheetAccess) {
     sendForbidden(res)
-    return false
+    return null
   }
   if (sheetLiveness !== 'live') {
     sendSheetNotLive(res, sheetLiveness)
-    return false
+    return null
   }
-  return true
+  return { stockPrepOverview: stockPrepOverview === true }
 }
+
+/**
+ * What a passed gate knows about the sheet beyond "you may manage it". S3 fix round 1 (R1): whether it is
+ * the stock-preparation project overview, on which this door may write the READ code only.
+ */
+type SheetManageGate = { stockPrepOverview: boolean }
 
 /**
  * FAIL-CLOSED wrapper. A capability/liveness lookup that throws (pool absent, DB unreachable, a
@@ -112,12 +122,12 @@ async function answerUnlessSheetManageable(req: Request, res: Response, sheetId:
  * denial answers, so the failure mode cannot be used to tell "the gate broke" apart from "you may
  * not", which would hand back the existence signal the order of the checks exists to withhold.
  */
-async function mayManageSheetAccess(req: Request, res: Response, sheetId: string): Promise<boolean> {
+async function mayManageSheetAccess(req: Request, res: Response, sheetId: string): Promise<SheetManageGate | null> {
   try {
     return await answerUnlessSheetManageable(req, res, sheetId)
   } catch {
     sendForbidden(res)
-    return false
+    return null
   }
 }
 
@@ -153,10 +163,16 @@ export function spreadsheetPermissionsRouter(): Router {
   r.post('/api/spreadsheets/:id/permissions/grant', rbacGuard('spreadsheet-permissions', 'write'), async (req: AuthenticatedRequest, res: Response) => {
     // #5829: BEFORE the body validation, so a caller without sheet authority gets the identical 403 on
     // a live, a soft-deleted and an absent sheet — and cannot read the sheet's state out of a 400/404.
-    if (!(await mayManageSheetAccess(req, res, req.params.id))) return
+    const gate = await mayManageSheetAccess(req, res, req.params.id)
+    if (!gate) return
     const userId = req.body?.userId
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
+    // S3 fix round 1 (R1): on the stock-preparation project overview this door writes the READ code only
+    // (the forward PUT refuses every level above read the same way). Values-free; nothing is written.
+    if (gate.stockPrepOverview && perm !== STOCK_PREPARATION_OVERVIEW_GRANT_PERM_CODE) {
+      return res.status(409).json(STOCK_PREP_OVERVIEW_GRANT_REFUSAL)
+    }
     if (pool) {
       // Never-escalate-under-concurrency (#3389 / #3402 follow-up): take the SAME meta_sheets row lock the
       // permission-revert execute path (and the multitable forward grant/revoke routes, #3402) hold, so this legacy

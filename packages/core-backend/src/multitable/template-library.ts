@@ -72,7 +72,12 @@ export type InstallMultitableTemplateInput = {
 export type InstallMultitableTemplateResult = {
   template: MultitableTemplate
   base: MultitableTemplateBase
-  sheets: MultitableProvisioningSheet[]
+  /**
+   * S3 fix round 1 (R12): the install response is a client-facing body, so a template sheet — which never
+   * carries a server-owned kind — answers WITHOUT the `systemKind` key provisioning reads (byte-identical
+   * to the pre-S3 response). A sheet that somehow did carry a kind keeps it.
+   */
+  sheets: Array<Omit<MultitableProvisioningSheet, 'systemKind'> & { systemKind?: string | null }>
   fields: MultitableProvisioningField[]
   views: MultitableProvisioningView[]
 }
@@ -608,7 +613,7 @@ export async function installMultitableTemplate(
     workspace_id: input.workspaceId ?? null,
   })
 
-  const sheets: MultitableProvisioningSheet[] = []
+  const sheets: InstallMultitableTemplateResult['sheets'] = []
   const fields: MultitableProvisioningField[] = []
   const views: MultitableProvisioningView[] = []
 
@@ -637,7 +642,9 @@ export async function installMultitableTemplate(
     if (!sheetResult.created || !sheetResult.sheet) {
       throw new MultitableTemplateConflictError(`Sheet already exists: ${sheetId}`)
     }
-    sheets.push(sheetResult.sheet)
+    // S3 fix round 1 (R12): no `systemKind: null` key in the client-facing install response.
+    const { systemKind: installedSheetKind, ...installedSheet } = sheetResult.sheet
+    sheets.push(installedSheetKind ? sheetResult.sheet : installedSheet)
 
     const fieldIds = mapFieldIds(sheetId, template.id, templateSheet)
     const installedFields = await ensureFields({

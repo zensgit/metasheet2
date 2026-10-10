@@ -28,6 +28,7 @@ import {
   type TasksClient,
   type TasksListener,
 } from '../helpers/tasks-http-harness'
+import { orgMemberSeeds } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-m3-membership.db.test.ts requires EXPECT_DB=1')
@@ -55,6 +56,11 @@ function listenerPort(): number {
 // (M3R2-TM-9).
 const actors = createActorFixture('tasks-m3mem.test', JWT_SECRET)
 const actorBearer = actors.bearer
+
+// RULED(2026-10-07): [N2] an assignee or follower someone else writes must be an active member
+// of the org (design §4.6), so a cell seeds each such target here, before the write that names it;
+// afterAll drops exactly those rows. Actors from the fixture above are members already.
+const orgMembers = orgMemberSeeds()
 
 function ids(label: string): { orgId: string; userA: string; userB: string } {
   const stamp = randomUUID()
@@ -147,12 +153,14 @@ describe('tasks M3 membership real db', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', [`${ORG_PREFIX}%`])
     await actors.cleanup()
+    await orgMembers.drop()
     await listener?.close()
   })
 
   describe('gate 3: add/remove assignee x all/any x done/open, over HTTP', () => {
     it('all mode: adding an assignee to a done task reopens it (version +1)', async () => {
       const { orgId, userA, userB } = ids('all-add-reopen')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA], completionMode: 'all' })
       const server = app()
       const complete = await server.post(`/api/tasks/${created.id}/complete`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({})
@@ -175,6 +183,7 @@ describe('tasks M3 membership real db', () => {
 
     it('all mode: adding an assignee to an open task with an incomplete row stays open (no version bump)', async () => {
       const { orgId, userA, userB } = ids('all-add-open')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA], completionMode: 'all' })
       expect(await taskRow(created.id)).toMatchObject({ status: 'open', version: 1 })
       const server = app()
@@ -188,6 +197,7 @@ describe('tasks M3 membership real db', () => {
 
     it('all mode: removing the last incomplete assignee promotes the task to done', async () => {
       const { orgId, userA, userB } = ids('all-remove-promote')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       const server = app()
       const completeA = await server.post(`/api/tasks/${created.id}/complete`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({})
@@ -212,6 +222,7 @@ describe('tasks M3 membership real db', () => {
 
     it('all mode: removing one of two incomplete assignees stays open', async () => {
       const { orgId, userA, userB } = ids('all-remove-open')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       const server = app()
       const removeB = await server.delete(`/api/tasks/${created.id}/assignees/${userB}`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`)
@@ -224,6 +235,7 @@ describe('tasks M3 membership real db', () => {
 
     it('any mode: adding an assignee to an open task never flips status', async () => {
       const { orgId, userA, userB } = ids('any-add-open')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA], completionMode: 'any' })
       const server = app()
       const add = await server.post(`/api/tasks/${created.id}/assignees`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({ userId: userB })
@@ -236,6 +248,7 @@ describe('tasks M3 membership real db', () => {
 
     it('any mode: adding an assignee to an already-done task leaves it done (A1)', async () => {
       const { orgId, userA, userB } = ids('any-add-done')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA], completionMode: 'any' })
       const server = app()
       const complete = await server.post(`/api/tasks/${created.id}/complete`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({})
@@ -274,6 +287,7 @@ describe('tasks M3 membership real db', () => {
 
     it('all mode: removing an assignee from an already-done task stays done (no version bump)', async () => {
       const { orgId, userA, userB } = ids('all-remove-done')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       const server = app()
       const bearerA = await actorBearer(orgId, userA)
@@ -334,6 +348,7 @@ describe('tasks M3 membership real db', () => {
     it('all -> any while open with someone already complete makes the task done in one version bump, stamping every remaining row to ONE shared instant (M3-CONC-3/M3G-3)', async () => {
       const { orgId, userA, userB } = ids('switch-done')
       const userC = `usrC_switchdone_${randomUUID()}`
+      await orgMembers.seed(orgId, [userB, userC])
       // THREE assignees, TWO of them incomplete before the switch — a
       // single incomplete row cannot show "every open row shares one
       // instant" (there is nothing else to compare it to).
@@ -382,6 +397,7 @@ describe('tasks M3 membership real db', () => {
 
     it('all -> any while open with nobody complete stays open (mode-only update, no version bump)', async () => {
       const { orgId, userA, userB } = ids('switch-open')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       const server = app()
       const switchRes = await server.patch(`/api/tasks/${created.id}/completion-mode`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({ completionMode: 'any' })
@@ -432,6 +448,7 @@ describe('tasks M3 membership real db', () => {
   describe('followers and leave (§3.5)', () => {
     it('adds, no-ops on a duplicate add, and lets another editor remove a follower', async () => {
       const { orgId, userA, userB } = ids('followers')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA] })
       const server = app()
       const bearerA = await actorBearer(orgId, userA)
@@ -459,6 +476,7 @@ describe('tasks M3 membership real db', () => {
     it('leave works only for followers; a non-follower gets 404', async () => {
       const { orgId, userA, userB } = ids('leave')
       const follower = `usrF_leave_${randomUUID()}`
+      await orgMembers.seed(orgId, [follower])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA] })
       const server = app()
       await server.post(`/api/tasks/${created.id}/followers`).set('Authorization', `Bearer ${await actorBearer(orgId, userA)}`).send({ userId: follower })
@@ -483,6 +501,7 @@ describe('tasks M3 membership real db', () => {
     it('leave by the creator or an assignee who is not a follower is 404 and writes nothing', async () => {
       const { orgId, userA, userB } = ids('leavenonfollower')
       const follower = `usrF_leavenf_${randomUUID()}`
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userB] })
       await poolManager.get().query('INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2)', [created.id, follower])
       const server = app()
@@ -557,13 +576,17 @@ describe('tasks M3 membership real db', () => {
   describe('row-level 404 on the five membership/mode writes (M3-AUTHZ-2/M3G-1)', () => {
     type MembershipCase = {
       label: string
+      /** The write names ROW_TARGET as a new member ([N2]: seeded before the creator's control only). */
+      addsTarget?: true
       send: (server: TasksClient, taskId: string, bearer: string) => supertest.Test
     }
+    // Stamped so the seeded row cannot collide with a row a killed earlier run left behind.
+    const ROW_TARGET = `usr_row_target_${randomUUID()}`
     const cases: MembershipCase[] = [
-      { label: 'POST assignees', send: (server, id, bearer) => server.post(`/api/tasks/${id}/assignees`).set('Authorization', `Bearer ${bearer}`).send({ userId: 'usr_row_target' }) },
+      { label: 'POST assignees', addsTarget: true, send: (server, id, bearer) => server.post(`/api/tasks/${id}/assignees`).set('Authorization', `Bearer ${bearer}`).send({ userId: ROW_TARGET }) },
       { label: 'DELETE assignees/:userId', send: (server, id, bearer) => server.delete(`/api/tasks/${id}/assignees/usr_seed_assignee`).set('Authorization', `Bearer ${bearer}`) },
       { label: 'PATCH completion-mode', send: (server, id, bearer) => server.patch(`/api/tasks/${id}/completion-mode`).set('Authorization', `Bearer ${bearer}`).send({ completionMode: 'any' }) },
-      { label: 'POST followers', send: (server, id, bearer) => server.post(`/api/tasks/${id}/followers`).set('Authorization', `Bearer ${bearer}`).send({ userId: 'usr_row_target' }) },
+      { label: 'POST followers', addsTarget: true, send: (server, id, bearer) => server.post(`/api/tasks/${id}/followers`).set('Authorization', `Bearer ${bearer}`).send({ userId: ROW_TARGET }) },
       { label: 'DELETE followers/:userId', send: (server, id, bearer) => server.delete(`/api/tasks/${id}/followers/usr_seed_follower`).set('Authorization', `Bearer ${bearer}`) },
     ]
 
@@ -578,7 +601,7 @@ describe('tasks M3 membership real db', () => {
     // `assertRowAbility(..., 'edit')` lines at once) turns each of these
     // five tests red independently, in one run — a shared `it` with a loop
     // would stop at the first failure and hide the rest.
-    it.each(cases)('$label: an outsider, a view-only follower, and a soft-deleted task each 404; the creator succeeds', async ({ label, send }) => {
+    it.each(cases)('$label: an outsider, a view-only follower, and a soft-deleted task each 404; the creator succeeds', async ({ label, addsTarget, send }) => {
       const stamp = randomUUID()
       const orgId = `${ORG_PREFIX}rowauthz_${stamp}`
       const userA = `usrA_rowauthz_${stamp}`
@@ -615,6 +638,7 @@ describe('tasks M3 membership real db', () => {
       expect(deletedRes.body, label).toEqual({ error: { code: 'NOT_FOUND' } })
 
       // Control: the creator succeeds on a live task.
+      if (addsTarget) await orgMembers.seed(orgId, [ROW_TARGET])
       const t4 = await seedTask(orgId, userA)
       const controlRes = await send(server, t4.id, bearerA)
       expect(controlRes.status, label).toBe(200)
@@ -691,6 +715,7 @@ describe('tasks M3 membership real db', () => {
       expect(events.rows[0]?.n, label).toBe('0')
 
       const longest = idOfLength(255)
+      await orgMembers.seed(orgId, [longest])
       const ok = await server.post(path(created.id)).set('Authorization', `Bearer ${bearerA}`).send({ userId: longest })
       expect(ok.status, label).toBe(200)
       expect(JSON.stringify(await rows(created.id)), label).toContain(longest)
@@ -708,6 +733,7 @@ describe('tasks M3 membership real db', () => {
       const count = await poolManager.get().query<{ n: string }>('SELECT count(*)::text AS n FROM tasks WHERE org_id = $1', [orgId])
       expect(count.rows[0]?.n).toBe('0')
       const longest = idOfLength(255)
+      await orgMembers.seed(orgId, [longest])
       const ok = await server.post('/api/tasks').set('Authorization', `Bearer ${bearerA}`).send({ title: '任务', assignees: [longest] })
       expect(ok.status).toBe(200)
       expect(await assigneeRows(String(ok.body.id))).toEqual([{ userId: longest, completedAt: null }])
@@ -734,10 +760,12 @@ describe('tasks M3 membership real db', () => {
       expect(none.rows[0]?.n).toBe('0')
 
       const fifty = distinct(50)
+      await orgMembers.seed(orgId, fifty)
       const ok = await server.post('/api/tasks').set('Authorization', `Bearer ${bearerA}`).send({ title: '任务', assignees: fifty })
       expect(ok.status).toBe(200)
       expect((await assigneeRows(String(ok.body.id))).map((row) => row.userId)).toEqual([...fifty].sort())
       const dup = distinct(50)
+      await orgMembers.seed(orgId, dup)
       const okDup = await server.post('/api/tasks').set('Authorization', `Bearer ${bearerA}`).send({ title: '任务', assignees: [...dup, dup[7]] })
       expect(okDup.status).toBe(200)
       expect((await assigneeRows(String(okDup.body.id))).map((row) => row.userId)).toEqual([...dup].sort())
@@ -793,6 +821,7 @@ describe('tasks M3 membership real db', () => {
   describe('assignee events', () => {
     it('a real add and a real remove write assignee_added / assignee_removed with actor_id and payload.targetUserId', async () => {
       const { orgId, userA, userB } = ids('aevents')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA] })
       const server = app()
       const bearerA = await actorBearer(orgId, userA)
@@ -840,12 +869,15 @@ describe('tasks M3 membership real db', () => {
     type LockCtx = { orgId: string; userA: string; userB: string; userC: string; taskId: string }
     type LockCase = {
       label: string
+      /** The write names userC as a new member ([N2]: userC is seeded for these cases only). */
+      addsC?: true
       run: (c: LockCtx) => Promise<unknown>
       check: (c: LockCtx) => Promise<void>
     }
     const lockCases: LockCase[] = [
       {
         label: 'addAssignee',
+        addsC: true,
         run: (c) => addAssignee({ orgId: c.orgId, actorId: c.userA, taskId: c.taskId, body: { userId: c.userC } }),
         check: async (c) => { expect((await assigneeRows(c.taskId)).map((r) => r.userId)).toContain(c.userC) },
       },
@@ -861,6 +893,7 @@ describe('tasks M3 membership real db', () => {
       },
       {
         label: 'addFollower',
+        addsC: true,
         run: (c) => addFollower({ orgId: c.orgId, actorId: c.userA, taskId: c.taskId, body: { userId: c.userC } }),
         check: async (c) => { expect(await followerRows(c.taskId)).toContain(c.userC) },
       },
@@ -876,9 +909,10 @@ describe('tasks M3 membership real db', () => {
       },
     ]
 
-    it.each(lockCases)('$label queues on the org structure lock held by another connection, then completes', async ({ label, run, check }) => {
+    it.each(lockCases)('$label queues on the org structure lock held by another connection, then completes', async ({ label, addsC, run, check }) => {
       const { orgId, userA, userB } = ids(`lock_${label}`)
       const userC = `usrC_lock_${randomUUID()}`
+      await orgMembers.seed(orgId, addsC ? [userB, userC] : [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       await poolManager.get().query('INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2)', [created.id, userB])
       const ctx: LockCtx = { orgId, userA, userB, userC, taskId: created.id }
@@ -918,6 +952,7 @@ describe('tasks M3 membership real db', () => {
     // switch has already read as incomplete.
     it('switchCompletionMode(all -> any) racing completeTask keeps the any-mode invariant and done <=> completed_at', async () => {
       const { orgId, userA, userB } = ids('switchvscomplete')
+      await orgMembers.seed(orgId, [userB])
       const created = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB], completionMode: 'all' })
       const pool = poolManager.get().getInternalPool()
       const holder = await pool.connect()
@@ -976,6 +1011,7 @@ describe('tasks M3 membership real db', () => {
       const { orgId, userA, userB } = ids('detail')
       const follower = `usrF_detail_${randomUUID()}`
       const invisibleViewerChild = `usrC_detail_${randomUUID()}`
+      await orgMembers.seed(orgId, [userB])
       const root = await createTask({ orgId, creatorId: userA, title: '根', assignees: [userA] })
       const visibleChild = await createTask({ orgId, creatorId: userA, title: '可见子', assignees: [userB] })
       const invisibleChild = await createTask({ orgId, creatorId: invisibleViewerChild, title: '不可见子', assignees: [invisibleViewerChild] })

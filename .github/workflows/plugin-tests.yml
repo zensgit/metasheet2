@@ -125,15 +125,9 @@ jobs:
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
   test:
-    # Runner routing pilot (same shape as PR #4449 for web-tests). Set the repository variable
-    # MS2_PLUGIN_RUNNER to a self-hosted runner label to move this job off GitHub-hosted runners;
-    # unset it for instant fallback to ubuntu-latest. This job is the repository's biggest Actions
-    # consumer (~56 runner-minutes per run on the 20.x leg; ~62% of a busy day's minutes), which
-    # started to bill when the repository went private on 2026-10-07. Default behaviour is
-    # unchanged while the variable is unset.
-    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
-    # GitHub-hosted runs take 65-75 minutes. A self-hosted runner keeps the job (and its PostgreSQL)
-    # until the job ends, so a hung step must not hold the runner for the 6-hour default.
+    # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
+    runs-on: ubuntu-latest
+    # Leave headroom for the full integration suite without using the six-hour default timeout.
     timeout-minutes: 150
 
     strategy:
@@ -156,6 +150,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: GitHub-hosted runner routing contract
+        run: node --test scripts/ops/github-hosted-runner-routing.test.mjs
 
       # R12-C: the Global History flag manifest is an operator contract — the status helper reads it to
       # decide safe flag combinations. This node:test (no deps, no DB) is source-derived: it fails if a
@@ -899,15 +896,16 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (31) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) = 48. Get each file's own count locally with
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (24) = 75. Get each file's own
+      # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=48
+          EXPECTED_OPS_TESTS_COUNT=75
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1154,6 +1152,9 @@ jobs:
       # Migrations above must already have applied the zzzz20260824*,
       # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
       # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39); every one
+      # of them runs inside a transaction it rolls back.
       # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate
@@ -1424,6 +1425,7 @@ jobs:
             tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
             tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
             tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts \
+            tests/integration/stock-preparation-prep-line-export-tenant-wall-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \

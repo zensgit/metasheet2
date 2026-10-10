@@ -60,15 +60,26 @@ export function isHiddenSystemSheet(
 }
 
 /**
+ * S3 (ADR adr-stock-prep-project-sheets-20261008 §5 「只读（Q5）」) — server-owned `meta_sheets.system_kind` of the
+ * stock-preparation PROJECT OVERVIEW sheet (项目总览表). Stamped ONLY by host provisioning at INSERT, and only
+ * when the plugin-scope gate admitted the exact (plugin-integration-core, this kind, the overview object id)
+ * triple (see `stock-preparation-overview-contract.ts`). Unlike the People kind it is NOT hidden from sheet
+ * lists — the overview is meant to be SEEN; the host clamps it to read/export for every person instead.
+ */
+export const STOCK_PREP_OVERVIEW_SHEET_KIND = 'stock_prep_overview'
+
+/**
  * W0-1 v3.7 §3/§8 — the server-owned `meta_sheets.system_kind` values. This column is set ONLY by internal
- * provisioning (People preset plus approval/e-learning projection writers) — the L5 migration performs NO
- * backfill — and NEVER by a client create/update request, so it is the NON-FORGEABLE system-sheet signal. `isSystemSheet`
- * treats a recognized `system_kind` as the ONLY authoritative trust signal.
+ * provisioning (People preset plus approval/e-learning projection writers, plus the gated stock-preparation
+ * overview stamp) — the L5 migration performs NO backfill — and NEVER by a client create/update request, so it
+ * is the NON-FORGEABLE system-sheet signal. `isSystemSheet` treats a recognized `system_kind` as the ONLY
+ * authoritative trust signal.
  */
 export const SYSTEM_SHEET_KINDS = [
   'people_directory',
   'approval_projection',
   'elearning_projection',
+  STOCK_PREP_OVERVIEW_SHEET_KIND,
 ] as const
 
 /** True iff `value` is a recognized server-owned system-sheet kind (non-forgeable). */
