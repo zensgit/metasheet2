@@ -1005,6 +1005,21 @@ test('O-15c (R5) the confirmation confirm updates its project\'s row (pending co
 test('O-16 (R2) planned_finish_on reads back as the calendar day it holds on a UTC+ host — no UTC round trip', () => {
   const { execFileSync } = require('node:child_process')
   const storePath = path.join(LIB, 'stock-preparation-project-target-store.cjs')
+  // IN THIS PROCESS first (Node re-reads TZ when it is assigned), so the module under test is the very one
+  // this suite loaded: a DATE parsed as Asia/Shanghai local midnight reads back as the stored day.
+  const { __internals: storeInternals } = require(storePath)
+  const previousTz = process.env.TZ
+  try {
+    for (const tz of ['Asia/Shanghai', 'Pacific/Kiritimati', 'America/Los_Angeles']) {
+      process.env.TZ = tz
+      const localMidnight = new Date(2026, 11, 24)
+      assert.equal(storeInternals.dayOrNull(localMidnight), '2026-12-24', `${tz} (in-process): the stored day, not its UTC shadow ${localMidnight.toISOString()}`)
+    }
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  }
+  // …and in a FRESH process started in each zone (no state carried over from this one).
   // In a process whose local zone is Asia/Shanghai, node-postgres parses DATE '2026-12-24' as LOCAL
   // midnight — 2026-12-23T16:00Z. The old toISOString() read handed back the day BEFORE.
   const script = [
