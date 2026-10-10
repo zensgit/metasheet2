@@ -616,6 +616,96 @@
             <el-form-item label="步骤名称">
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
+            <!-- Lock-4 §1 F4-A — 审批类型 on each linear step. OD-L4-2(a): exactly TWO options (人工审批 /
+                 自动通过), no inert 自动拒绝. A linear graph is never inside a parallel region, so 自动通过 is
+                 always offered here (contrast the canvas inspector, which disables it per node). The
+                 radio `name` carries the step's localId because several step cards render at once. -->
+            <el-form-item label="审批类型">
+              <div
+                class="approval-node-source-roster"
+                role="radiogroup"
+                aria-label="审批类型"
+                data-testid="approval-step-approval-type"
+              >
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="manual"
+                    :checked="step.approvalType !== 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-manual"
+                    @change="() => onStepApprovalTypeChange(step, 'manual')"
+                  />
+                  <span>人工审批</span>
+                </label>
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="auto_approve"
+                    :checked="step.approvalType === 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-auto-approve"
+                    @change="() => onStepApprovalTypeChange(step, 'auto_approve')"
+                  />
+                  <span>自动通过</span>
+                </label>
+              </div>
+              <p
+                v-if="step.approvalType === 'auto_approve'"
+                class="template-authoring__hint"
+                data-testid="approval-step-approval-type-auto-hint"
+              >流程到达此步骤时由系统自动通过，不分配审批人</p>
+              <!-- Only reachable for a template saved through the API: the step still CARRIES a source,
+                   which is saved and validated, so it stays visible; the action drops it. -->
+              <p
+                v-if="step.approvalType === 'auto_approve' && !stepOmitsAssigneeSources(step)"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-live-sources-hint"
+              >
+                该步骤仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+                <el-button
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-drop-sources"
+                  @click="onStepApprovalTypeChange(step, 'auto_approve')"
+                >移除审批人来源</el-button>
+              </p>
+              <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (same mechanism as the canvas inspector): a hidden
+                   block (policy rows / timeout section below) is still saved and validated, so while its
+                   own values fail validation it is rendered again and this notice names the failure.
+                   关闭超时 is an explicit author action; nothing is rewritten at save time. -->
+              <div
+                v-if="stepOmitsAssigneeSources(step) && stepHiddenBlockErrors(step).length > 0"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-hidden-errors-hint"
+              >
+                <p>该步骤有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+                <ul>
+                  <li
+                    v-for="(message, messageIndex) in stepHiddenBlockErrors(step)"
+                    :key="messageIndex"
+                    data-testid="approval-step-approval-type-hidden-error"
+                  >{{ message }}</li>
+                </ul>
+                <el-button
+                  v-if="stepHiddenBlockErrors(step, 'timeout').length > 0"
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-clear-timeout"
+                  @click="clearStepTimeout(step)"
+                >关闭超时</el-button>
+              </div>
+            </el-form-item>
+            <!-- Lock-4 §1 F4-A: a step whose sources are omitted saves NONE, so the source controls
+                 (hidden scratch, restored on 人工审批) are not rendered. Same predicate as
+                 `buildStepConfig` and `validateTemplateApprovalFlow` (`stepOmitsAssigneeSources`). The
+                 person-only policy rows below are a SEPARATE block: hidden too, values preserved
+                 verbatim, but rendered again while they carry a live error (HIDDEN-BLOCK GUARD). -->
+            <template v-if="!stepOmitsAssigneeSources(step)">
             <el-form-item label="审批人来源">
               <el-select v-model="step.sourceKind" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
                 <el-option label="指定用户" value="static_user" />
@@ -890,6 +980,8 @@
                 />
               </el-select>
             </el-form-item>
+            </template>
+            <template v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'policy')">
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
@@ -937,11 +1029,15 @@
                 发起人自动通过（自审合并）
               </el-checkbox>
             </el-form-item>
+            </template>
           </div>
           <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
-               (see the mode-picker comment above), so this section renders unconditionally per step,
-               no gating needed. -->
-          <div class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+               (see the mode-picker comment above), so this section needs no parallel gating. Lock-4
+               §1 F4-A: not rendered for a step whose sources are omitted (an auto_approve step never
+               waits, so a timeout there is inert); the persisted value is preserved verbatim — and
+               rendered again while it carries a live error (HIDDEN-BLOCK GUARD), and then kept rendered
+               until 审批类型 changes, 关闭超时, reload or save (STICKY REVEAL, `stepHiddenBlockRevealed`). -->
+          <div v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'timeout')" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
             <el-form-item label="节点超时">
               <el-checkbox
                 v-model="step.timeoutEnabled"
@@ -1507,6 +1603,13 @@ import {
   addAssigneeSourceCard,
   removeAssigneeSourceCard,
   legalPriorApproverNodeKeys,
+  approvalNodeEditOmitsAssigneeSources,
+  applyApprovalTypeChoice,
+  setStepApprovalType,
+  stepOmitsAssigneeSources,
+  stepHiddenBlockLiveErrors,
+  approvalNodeEditHiddenBlockLiveErrors,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1522,6 +1625,8 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
   moveItemToIndex,
   isTemplateDedupTierLocked,
 } from '../../approvals/templateAuthoring'
@@ -1590,6 +1695,7 @@ import type {
   ApprovalGraph,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   CcNodeConfig,
   ConditionNodeConfig,
   EmptyAssigneePolicy,
@@ -1851,8 +1957,13 @@ const validationSummaryRef = ref<HTMLElement | null>(null)
 // same builders on load/save, so key order is deterministic.
 const draftBaseline = ref(JSON.stringify(draft.value))
 const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaseline.value)
+// Linear STICKY REVEAL state (see `stepHiddenBlockRevealed`): `${step.localId}:${blockId}` keys.
+// Declared here, before `snapshotDraft`, which resets it.
+const stickyStepHiddenBlockReveals = ref(new Set<string>())
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
+  // A re-baselined draft (load / reload / save completed) starts with no sticky hidden-block reveal.
+  stickyStepHiddenBlockReveals.value = new Set()
 }
 
 function promoteLinearDraftAndBaselineToGraphAuthoring(): void {
@@ -2125,6 +2236,13 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     if (approvalConfig.timeout) {
       const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
       if (effectLabel) lines.push(`节点超时：${approvalConfig.timeout.afterMinutes} 分钟后${effectLabel}`)
+    }
+    // Lock-4 §1 F4-A: an auto_approve node decides without a person. With no source saved, the
+    // person-only lines (mode / timeout) are inert and hidden in the editor, so the summary says
+    // only that — and the card no longer falls back to 「点击配置」 for a node that needs nothing.
+    // A node that still carries sources (API-saved) keeps its lines after the type line.
+    if ((config as { approvalType?: unknown }).approvalType === 'auto_approve') {
+      return sources.length > 0 ? ['审批类型：自动通过', ...lines] : ['审批类型：自动通过（不分配审批人）']
     }
     return lines
   }
@@ -2417,6 +2535,21 @@ function setApprovalNodeThreshold(nodeKey: string, value: number): void {
 const parallelRegionNodeKeysInDraft = computed(() => collectParallelRegionNodeKeys(canvasEffectiveGraph.value))
 function approvalNodeInParallelRegion(nodeKey: string): boolean {
   return parallelRegionNodeKeysInDraft.value.has(nodeKey)
+}
+// ── Lock-4 §1 F4-A — node-level 审批类型 (人工审批 / 自动通过) on the canvas edit model ──────────────
+// The whole mutation (and its owner-visible implementer defaults) lives in the pure
+// `applyApprovalTypeChoice` (approvalNodeEdit.ts); this setter only resolves the edit and the
+// parallel-region flag. Refusing 自动通过 inside a parallel region here is the defense-in-depth floor
+// mirroring `setApprovalNodeMode`; the SAVE-blocking floor is `validateApprovalNodeEdits` (backend
+// `APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED`).
+function setApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  applyApprovalTypeChoice(edit, type, approvalNodeInParallelRegion(nodeKey))
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (canvas) — judged against the whole draft by the save validator.
+function approvalNodeHiddenBlockErrors(nodeKey: string): HiddenBlockLiveErrors {
+  return approvalNodeEditHiddenBlockLiveErrors(draft.value, nodeKey)
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
@@ -3433,9 +3566,12 @@ const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
   const driverKinds = new Set(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'])
   for (const step of draft.value.steps) {
+    // Lock-4 §1 F4-A: a sourceless auto_approve step's hidden source scratch routes nobody.
+    if (stepOmitsAssigneeSources(step)) continue
     if (driverKinds.has(step.sourceKind) && step.fieldId.trim()) ids.add(step.fieldId.trim())
   }
   for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalNodeEditOmitsAssigneeSources(edit)) continue
     for (const source of edit.assigneeSources) {
       // Lock-2 §L2-C: the contact-extension kinds reference a driver field too — same hint.
       if ((source.kind === 'form_field_user' || source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') && source.fieldId.trim()) ids.add(source.fieldId.trim())
@@ -3445,6 +3581,65 @@ const routingDriverFieldIds = computed(() => {
 })
 function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, access: NodeFieldAccess): void {
   step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
+}
+// Lock-4 §1 F4-A — the linear 审批类型 radio. The mutation and its owner-visible defaults live in the
+// pure `setStepApprovalType` (templateAuthoring.ts).
+function onStepApprovalTypeChange(step: ApprovalStepDraft, type: ApprovalType): void {
+  if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId)
+  setStepApprovalType(step, type)
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (linear) — per sourceless auto_approve step, the live errors of
+// its hidden blocks, judged by the save validator itself (`stepHiddenBlockLiveErrors`). Computed once
+// per draft change and read many times by the template.
+const stepHiddenBlockErrorsByLocalId = computed(() => {
+  const byLocalId = new Map<string, HiddenBlockLiveErrors>()
+  for (const step of draft.value.steps) {
+    if (stepOmitsAssigneeSources(step)) byLocalId.set(step.localId, stepHiddenBlockLiveErrors(draft.value, step))
+  }
+  return byLocalId
+})
+function stepHiddenBlockErrors(step: ApprovalStepDraft, blockId?: AutoApproveHiddenBlockId): string[] {
+  const errors = stepHiddenBlockErrorsByLocalId.value.get(step.localId)
+  if (!errors) return []
+  if (blockId) return errors[blockId] ?? []
+  return AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((id) => errors[id] ?? [])
+}
+function clearStepTimeout(step: ApprovalStepDraft): void {
+  if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId, 'timeout')
+  step.timeoutEnabled = false
+}
+// STICKY REVEAL (linear; gate r2 P3-1). Keyed on "failing now" alone, a revealed block unmounted on
+// the keystroke that made it valid (提醒 first, then typing 60: the section vanished after the 6 and
+// the save carried 6). So once a step's hidden block has been revealed by a live error it STAYS
+// rendered until (a) the step's 审批类型 changes, (b) 关闭超时 (timeout block only), or (c) the draft
+// is re-baselined — template (re)load, or save completes (`snapshotDraft`). The notice above stays
+// keyed on live errors only. Display state only: never saved, never read by a validator. Canvas needs
+// none: its timeout controls are discrete selects / a clamped number input, so no keystroke unmount.
+const stickyStepHiddenBlockKey = (localId: string, blockId: AutoApproveHiddenBlockId) => `${localId}:${blockId}`
+watch(
+  stepHiddenBlockErrorsByLocalId,
+  (byLocalId) => {
+    for (const [localId, errors] of byLocalId) {
+      for (const blockId of AUTO_APPROVE_HIDDEN_BLOCK_IDS) {
+        const key = stickyStepHiddenBlockKey(localId, blockId)
+        if ((errors[blockId]?.length ?? 0) > 0 && !stickyStepHiddenBlockReveals.value.has(key)) {
+          stickyStepHiddenBlockReveals.value = new Set(stickyStepHiddenBlockReveals.value).add(key)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+function stepHiddenBlockRevealed(step: ApprovalStepDraft, blockId: AutoApproveHiddenBlockId): boolean {
+  return stepHiddenBlockErrors(step, blockId).length > 0
+    || stickyStepHiddenBlockReveals.value.has(stickyStepHiddenBlockKey(step.localId, blockId))
+}
+function releaseStepHiddenBlockReveals(localId: string, blockId?: AutoApproveHiddenBlockId): void {
+  const next = new Set(stickyStepHiddenBlockReveals.value)
+  for (const id of blockId ? [blockId] : AUTO_APPROVE_HIDDEN_BLOCK_IDS) next.delete(stickyStepHiddenBlockKey(localId, id))
+  if (next.size !== stickyStepHiddenBlockReveals.value.size) stickyStepHiddenBlockReveals.value = next
 }
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
@@ -3649,6 +3844,9 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalNodeThreshold,
   setApprovalNodeThreshold,
   approvalNodeInParallelRegion,
+  // Lock-4 §1 F4-A — 审批类型 (OPTIONAL on the api; always present on the shipped app's object).
+  setApprovalNodeApprovalType,
+  approvalNodeHiddenBlockErrors,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,

@@ -84,17 +84,17 @@ const ALL_DAY_REMIND_TIME_OF_DAY = '18:00'
 // a non-padded one (`2026-3-8`). The check is the same two steps as `task-dates.ts`'s private
 // `parseIsoDate` (strict regex, then a UTC round-trip) and stays local rather than imported, as the
 // name validators of `task-lists.ts` and `task-groups.ts` do.
-function assertValidCalendarDateString(dueDate: string): void {
+function assertValidCalendarDateString(dueDate: string, fn = 'computeDefaultRemindAt', name = 'dueDate'): void {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate)
   if (!m) {
-    throw new RangeError(`computeDefaultRemindAt: dueDate must be YYYY-MM-DD, got "${dueDate}"`)
+    throw new RangeError(`${fn}: ${name} must be YYYY-MM-DD, got "${dueDate}"`)
   }
   const year = Number(m[1])
   const month = Number(m[2])
   const day = Number(m[3])
   const probe = new Date(Date.UTC(year, month - 1, day))
   if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
-    throw new RangeError(`computeDefaultRemindAt: "${dueDate}" is not a real calendar date`)
+    throw new RangeError(`${fn}: "${dueDate}" is not a real calendar date`)
   }
 }
 
@@ -327,4 +327,170 @@ export function buildTaskDailyDigestCondition(input: TaskDailyDigestConditionInp
     `(tasks.due_time IS NULL AND tasks.due_date <= ((now() AT TIME ZONE $3)::date + 1)))`
   const sql = `${base.sql} AND tasks.status = 'open' AND ${notCompletedByMe} AND ${dueWithinTomorrow}`
   return { sql, params: [...base.params, viewerTzParam] }
+}
+
+// ── Scheduler-side scan pieces (M4 PR-3b design §6.2 / §6.3; added by PR-3b S1) ─────────────────
+//
+// Everything below is consumed by the task scheduler's two scans. The rules stay here (gate 20:
+// the service only calls them). Items the owner ruled on 2026-10-07 are tagged RULED(2026-10-07);
+// the rest stay ASSUMPTION(task-m4).
+
+/** Reminder scan page size: one page of candidate tasks per query (ASSUMPTION(task-m4): [own-3b-08]). */
+export const TASK_REMINDER_SCAN_BATCH = 500
+
+// RULED(2026-10-07): [R06] the floor of a reminder is the `occurred_at` of the most recent
+// `task_events` row that WROTE the current `remind_at`: the task's `created` event or a
+// `remind_changed` event. The scan's LATERAL subquery filters on exactly this set; a row with no
+// such event has no floor and is never enqueued (fail closed).
+export const TASK_REMINDER_FLOOR_EVENT_TYPES = ['created', 'remind_changed'] as const
+
+export interface TaskReminderScanConditionInput {
+  /** The tick's anchored `now` (`$1`). */
+  nowParam: Date
+  /** `TASK_REMINDER_SCAN_WINDOW_MS` in milliseconds (`$2`, bound as `int`). */
+  windowMsParam: number
+  /**
+   * Keyset cursor, `remind_at` half (`$3`): `'-infinity'` for the first page
+   * (`TASK_REMINDER_SCAN_CURSOR_START`), otherwise the previous page's last `remind_at` EXACTLY as
+   * stored — preferably the database's own text of it (`tasks.remind_at::text`). A JS `Date` keeps
+   * milliseconds only; it is exact for every value the application writes (millisecond ISO text)
+   * but not for a microsecond value written by SQL, where a truncated cursor sorts below the row it
+   * came from and the next page reads that row again (with a full page of such rows the scan would
+   * not advance).
+   */
+  afterAtParam: Date | string
+  /** Keyset cursor, `id` half (`$4`): the previous page's last row id, or `''` for the first page. */
+  afterIdParam: string
+}
+
+// The text forms a cursor may take besides `'-infinity'`: PostgreSQL's ISO output of a
+// timestamptz (`2026-10-07 11:30:00.123456+00`) or an ISO-8601 instant (`2026-10-07T11:30:00.123Z`).
+// Words PostgreSQL would also accept (`'yesterday'`, `'now'`) are refused.
+const TIMESTAMPTZ_TEXT_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2}){0,2})$/
+
+/** The first page's keyset cursor (ASSUMPTION(task-m4): [own-3b-15]): `('-infinity', '')`. */
+export const TASK_REMINDER_SCAN_CURSOR_START: Readonly<Pick<TaskReminderScanConditionInput, 'afterAtParam' | 'afterIdParam'>> =
+  Object.freeze({ afterAtParam: '-infinity' as const, afterIdParam: '' })
+
+/**
+ * The ORDER BY the keyset condition below is only correct with. The service must emit this text
+ * verbatim after the condition; a page is the first `TASK_REMINDER_SCAN_BATCH` rows in this order.
+ */
+export const TASK_REMINDER_SCAN_ORDER_BY = 'tasks.remind_at ASC, tasks.id ASC'
+
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+}
+
+// RULED(2026-10-07): [R06] ASSUMPTION(task-m4): [own-3b-15] the candidate window in SQL is
+// `now − W < remind_at ≤ now` over open, live tasks with a `remind_at`; the floor and the same
+// window are judged again per row in TS by `isTaskReminderDue` (the floor is deliberately NOT in
+// SQL, so its TS guard stays mutation-visible). The `(remind_at, id)` row comparison is the keyset
+// cursor: one tick drains the whole window page by page instead of re-reading the same oldest rows
+// every tick.
+// The scan is cross-org on purpose (each row carries its own `org_id`, read by the caller); there is
+// no org clause here and none may be added — the org clause text is emitted only by
+// `task-access.ts`.
+/**
+ * `{ sql, params }` TEXT selecting one page of reminder candidates. `$1` = now, `$2` = window ms,
+ * `$3` / `$4` = keyset cursor (`remind_at`, `id`). A caller appending its own parameters (the page
+ * LIMIT) numbers them from `params.length + 1`. Must be paired with `TASK_REMINDER_SCAN_ORDER_BY`.
+ */
+export function buildTaskReminderScanCondition(input: TaskReminderScanConditionInput): TaskScopeCondition {
+  if (typeof input !== 'object' || input === null) {
+    throw new TypeError('buildTaskReminderScanCondition: input must be an object')
+  }
+  const { nowParam, windowMsParam, afterAtParam, afterIdParam } = input
+  if (!isValidDate(nowParam)) {
+    throw new TypeError('buildTaskReminderScanCondition: nowParam must be a valid Date')
+  }
+  if (!Number.isSafeInteger(windowMsParam) || windowMsParam <= 0 || windowMsParam > 2_147_483_647) {
+    throw new TypeError('buildTaskReminderScanCondition: windowMsParam must be a positive int4')
+  }
+  const cursorAtOk =
+    afterAtParam === '-infinity' ||
+    isValidDate(afterAtParam) ||
+    (typeof afterAtParam === 'string' && TIMESTAMPTZ_TEXT_RE.test(afterAtParam))
+  if (!cursorAtOk) {
+    throw new TypeError(
+      "buildTaskReminderScanCondition: afterAtParam must be '-infinity', a valid Date or a timestamptz text",
+    )
+  }
+  if (typeof afterIdParam !== 'string') {
+    throw new TypeError('buildTaskReminderScanCondition: afterIdParam must be a string')
+  }
+  const sql =
+    'tasks.remind_at IS NOT NULL AND tasks.remind_at <= $1::timestamptz ' +
+    "AND tasks.remind_at > ($1::timestamptz - ($2::int * interval '1 millisecond')) " +
+    "AND tasks.status = 'open' AND tasks.deleted_at IS NULL " +
+    'AND (tasks.remind_at, tasks.id) > ($3::timestamptz, $4::text)'
+  return { sql, params: [nowParam, windowMsParam, afterAtParam, afterIdParam] }
+}
+
+// ── Daily digest timing (R07: fixed 09:00 in the recipient's `time_zone`) ────────────────────────
+
+// RULED(2026-10-07): [R07] the digest is sent at 09:00 local time, not configurable in M4.
+export const TASK_DAILY_DIGEST_TIME_OF_DAY = '09:00'
+
+/**
+ * The instant of 09:00 on `localDate` (a strict, real `YYYY-MM-DD`) in `timeZone`, through the same
+ * all-day conversion path `computeDefaultRemindAt` uses (no new Intl call site, D12). Both inputs
+ * are validated first and the function THROWS on a bad date or zone rather than degrading to UTC:
+ * `TypeError` for a value that is not a `YYYY-MM-DD` string, `RangeError` for a well-formed date
+ * that does not exist (`2026-02-30`) or an invalid zone (the same classes `computeDefaultRemindAt`
+ * uses for those two). On a day where local 09:00 is skipped or repeated the conversion decides
+ * the instant; the scan window makes an hour of drift harmless.
+ */
+export function computeDailyDigestSendAt(localDate: string, timeZone: string): Date {
+  if (typeof localDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
+    throw new TypeError(`computeDailyDigestSendAt: localDate must be a YYYY-MM-DD string, got "${String(localDate)}"`)
+  }
+  assertValidCalendarDateString(localDate, 'computeDailyDigestSendAt', 'localDate')
+  if (!isValidIanaTimeZone(timeZone)) {
+    throw new RangeError(`computeDailyDigestSendAt: invalid IANA time zone "${String(timeZone)}"`)
+  }
+  const occurrenceIso = computeDateReminderOccurrence(
+    localDate,
+    { offsetDays: 0, direction: 'before', timeOfDay: TASK_DAILY_DIGEST_TIME_OF_DAY, timezone: timeZone },
+    { floating: true },
+  )
+  if (occurrenceIso === null) {
+    throw new RangeError(`computeDailyDigestSendAt: no occurrence for "${localDate}" in "${timeZone}"`)
+  }
+  return new Date(occurrenceIso)
+}
+
+export interface TaskDailyDigestOccurrence {
+  /** The recipient's local calendar date of `now` (`viewerToday`), the `date` of the digest's source key. */
+  localDate: string
+  /** 09:00 of that date in the recipient's zone. */
+  sendAt: Date
+  /** Whether `sendAt ≤ now < sendAt + TASK_REMINDER_SCAN_WINDOW_MS`. */
+  due: boolean
+}
+
+// RULED(2026-10-07): [R07] ASSUMPTION(task-m4): [own-3b-02] the digest is due from 09:00 local for
+// one scan window W; later than that the day's digest is not sent (no catch-up at 15:00). The
+// floor passed to the shared window predicate is the epoch: a digest has no write time, the window
+// is its only lower bound.
+/**
+ * The digest occurrence for `now` in `timeZone`: the local date, its 09:00 instant and whether the
+ * digest is due right now. Throws (never degrades) on an invalid zone or a non-Date `now`.
+ */
+export function resolveDailyDigestOccurrence(now: Date, timeZone: string): TaskDailyDigestOccurrence {
+  if (!isValidDate(now)) {
+    throw new TypeError('resolveDailyDigestOccurrence: now must be a valid Date')
+  }
+  if (!isValidIanaTimeZone(timeZone)) {
+    throw new RangeError(`resolveDailyDigestOccurrence: invalid IANA time zone "${String(timeZone)}"`)
+  }
+  const localDate = viewerToday(now, timeZone)
+  const sendAt = computeDailyDigestSendAt(localDate, timeZone)
+  const due = isDateReminderDue(sendAt.toISOString(), now.getTime(), TASK_REMINDER_SCAN_WINDOW_MS, 0)
+  return { localDate, sendAt, due }
+}
+
+/** `sendAt ≤ now < sendAt + W` for the recipient's local date of `now` (see `resolveDailyDigestOccurrence`). */
+export function isDailyDigestDue(now: Date, timeZone: string): boolean {
+  return resolveDailyDigestOccurrence(now, timeZone).due
 }

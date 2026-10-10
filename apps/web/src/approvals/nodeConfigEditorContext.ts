@@ -4,6 +4,7 @@ import type {
   ApprovalCcTargetType,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
@@ -19,6 +20,7 @@ import type {
   CcNodeEdit,
   ParallelNodeEdit,
   ApprovalNodeSourceEdit,
+  HiddenBlockLiveErrors,
 } from './templateAuthoring'
 import type { FormulaInsertOption } from './conditionEdit'
 
@@ -105,6 +107,23 @@ export interface ApprovalNodeConfigEditorApi {
   // `APPROVAL_THRESHOLD_IN_PARALLEL` / `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED` region). The mode
   // picker must not OFFER 'threshold', and the timeout section must not be enterable, when true.
   approvalNodeInParallelRegion: (nodeKey: string) => boolean
+  /**
+   * Lock-4 §1 F4-A — the node-level 审批类型 (人工审批 / 自动通过) mutator for an `approval` node; L0-1
+   * places the control in the 审批人设置 tab. The current value is read straight off
+   * `approvalNodeEditFor(nodeKey).approvalType`. OPTIONAL (absent ⇒ the control does not render at
+   * all, fail-closed — the same posture as `removeConditionBranch` above), so component harnesses
+   * that do not exercise F4-A can omit it; always present on the shipped app's api.
+   */
+  setApprovalNodeApprovalType?: (nodeKey: string, type: ApprovalType) => void
+  /**
+   * Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — per hidden block (policy grid / timeout section) of a
+   * sourceless auto_approve node, the save validator's messages that block's own values cause
+   * (`approvalNodeEditHiddenBlockLiveErrors`). A block with a live error is rendered again with a
+   * notice instead of staying hidden. OPTIONAL like the mutator above; absent ⇒ no block is ever
+   * revealed (the pre-guard rendering), which only a component harness that also cannot judge the
+   * save can hit — the shipped app's api always provides it.
+   */
+  approvalNodeHiddenBlockErrors?: (nodeKey: string) => HiddenBlockLiveErrors
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
   approvalNodeMergeWithRequester: (nodeKey: string) => boolean

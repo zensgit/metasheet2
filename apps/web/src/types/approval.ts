@@ -39,6 +39,16 @@ export type ParallelJoinMode = 'all' | 'any'
 // below for the ONE new carrier key `'designated'` targets.
 export type EmptyAssigneePolicy = 'error' | 'auto-approve' | 'designated'
 /**
+ * Lock-4 §1 F4-A (OD-L4-1(a) / OD-L4-2(a), RATIFIED) — node-level 审批类型 on `type:'approval'`.
+ * Byte-mirrors backend packages/core-backend/src/types/approval-product.ts `ApprovalType` and its
+ * runtime admission set `APPROVAL_TYPES` (ApprovalProductService.ts). Absent ≡ `'manual'` ≡ today's
+ * behavior. `'auto_reject'` is deliberately NOT a member: OD-L4-2(a) "auto_approve only, auto_reject
+ * deferred … the 审批类型 radio ships 人工/自动通过 only — no inert third option". The ONE FE tuple —
+ * the type, the authoring radios and every read-only value door derive from it.
+ */
+export const APPROVAL_TYPE_VALUES = ['manual', 'auto_approve'] as const
+export type ApprovalType = (typeof APPROVAL_TYPE_VALUES)[number]
+/**
  * Lock-4 §3 F4-B — byte-mirrors backend `EmptyAssigneeFallback`. The ONLY carrier for
  * `emptyAssigneePolicy: 'designated'` targets (one key, not two). Filled through typed pickers
  * only (D0 §10.2) — no picker ships in this fix round, so this type exists purely so the FE
@@ -224,6 +234,10 @@ export interface ApprovalNodeConfig {
   // inside that branch (ApprovalProductService.ts :2281-2305) and never emits it otherwise, so a
   // node carrying it under a different mode is a backend-drop shape, never a valid persisted state.
   approvalThreshold?: number
+  // Lock-4 §1 F4-A — 审批类型. Absent ≡ 'manual'. An `'auto_approve'` node skips assignee
+  // resolution entirely, so it is the ONE approval-node shape that may legally carry no
+  // `assigneeSources`/`assigneeIds` at all (backend `normalizeApprovalGraph` carve-out).
+  approvalType?: ApprovalType
   emptyAssigneePolicy?: EmptyAssigneePolicy
   // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
   // other policy value (byte-mirrors backend types/approval-product.ts's own comment).
