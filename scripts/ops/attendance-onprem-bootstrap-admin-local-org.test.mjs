@@ -42,6 +42,21 @@ const SYNTHETIC_EMAIL = 'synthetic-admin@ci.invalid'
 const SYNTHETIC_PASSWORD = 'synthetic-admin-password-1'
 const ROUTE_PATH = '/api/admin/directory/local/accounts'
 
+// The step's three read-only statements, pinned VERBATIM. They are the tenancy guard (gate r1
+// P2-1): any semantic change to either twin must change these literals in the same PR, and the
+// psql stub below answers ONLY these exact statements (anything else exits 9 = check failed).
+const EXPECTED_EMPTINESS_SQL =
+  "SELECT (SELECT count(*) FROM user_orgs) || ':' || (SELECT count(*) FROM directory_integrations);"
+const EXPECTED_LEFTOVER_ANCHOR_SQL =
+  "SELECT (SELECT count(*) FROM directory_integrations WHERE provider = 'local' AND org_id = 'default' AND status = 'active')" +
+  " || ':' || (SELECT count(*) FROM directory_accounts)" +
+  " || ':' || (SELECT count(*) FROM directory_account_links)" +
+  " || ':' || (SELECT count(*) FROM directory_departments);"
+const EXPECTED_POSTCONDITION_SQL =
+  "SELECT (SELECT count(*) FROM directory_integrations WHERE provider = 'local' AND org_id = 'default' AND status = 'active')" +
+  " || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE)" +
+  " || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE AND org_id = 'default');"
+
 const HAS_PWSH = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0
 
 function makeFixture() {
@@ -50,7 +65,9 @@ function makeFixture() {
   mkdirSync(bin)
   const psqlLog = path.join(dir, 'psql.log')
 
-  // psql stub: every caller in both scripts feeds SQL on stdin. Log it, answer by statement shape.
+  // psql stub: every caller in both scripts feeds SQL on stdin. Log it. The pre-existing admin
+  // upserts are answered by shape; the step's three read-only statements only on an EXACT match
+  // with the pinned literals (passed in via env, so no quoting of them inside this stub).
   const psql = path.join(bin, 'psql')
   writeFileSync(
     psql,
@@ -61,13 +78,19 @@ function makeFixture() {
       'case "$sql" in',
       `  *"INSERT INTO users"*) echo "${SYNTHETIC_ADMIN_ID}" ;;`,
       '  *"INSERT INTO user_roles"*) : ;;',
-      '  *"FROM directory_integrations);"*)',
-      '    [[ "${STUB_EMPTINESS_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
-      '    echo "${STUB_EMPTINESS:-0:0}" ;;',
-      "  *\"provider = 'local'\"*)",
-      '    [[ "${STUB_POSTCONDITION_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
-      '    echo "${STUB_POSTCONDITION:-1:1:1}" ;;',
-      '  *) echo "UNEXPECTED_SQL" >&2; exit 9 ;;',
+      '  *)',
+      '    if [[ "$sql" == "$PINNED_EMPTINESS_SQL" ]]; then',
+      '      [[ "${STUB_EMPTINESS_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
+      '      echo "${STUB_EMPTINESS:-0:0}"',
+      '    elif [[ "$sql" == "$PINNED_LEFTOVER_ANCHOR_SQL" ]]; then',
+      '      [[ "${STUB_LEFTOVER_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
+      '      echo "${STUB_LEFTOVER:-0:0:0:0}"',
+      '    elif [[ "$sql" == "$PINNED_POSTCONDITION_SQL" ]]; then',
+      '      [[ "${STUB_POSTCONDITION_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
+      '      echo "${STUB_POSTCONDITION:-1:1:1}"',
+      '    else',
+      '      echo "UNEXPECTED_SQL" >&2; exit 9',
+      '    fi ;;',
       'esac',
       '',
     ].join('\n'),
@@ -139,6 +162,11 @@ async function withBackend({ routeStatus = 200, loginToken = SYNTHETIC_TOKEN }, 
         return
       }
       if (req.method === 'POST' && req.url === ROUTE_PATH) {
+        if (routeStatus === 'drop') {
+          // No HTTP response at all (what a connection reset looks like to both twins).
+          req.socket.destroy()
+          return
+        }
         res.statusCode = routeStatus
         res.end(JSON.stringify(routeStatus === 200 ? { ok: true, data: { account: {} } } : { ok: false }))
         return
@@ -175,6 +203,9 @@ function baseEnv(fixture, extra) {
   return {
     PATH: `${fixture.bin}:${process.env.PATH}`,
     HOME: process.env.HOME ?? '',
+    PINNED_EMPTINESS_SQL: EXPECTED_EMPTINESS_SQL,
+    PINNED_LEFTOVER_ANCHOR_SQL: EXPECTED_LEFTOVER_ANCHOR_SQL,
+    PINNED_POSTCONDITION_SQL: EXPECTED_POSTCONDITION_SQL,
     ...extra,
   }
 }
@@ -267,17 +298,68 @@ for (const { name, run, enabled } of RUNNERS) {
     }
   })
 
-  for (const counts of ['1:0', '0:1', '3:2']) {
-    test(`${name}: upgrade install (${counts}) writes nothing and says so`, opts, async () => {
+  for (const [counts, leftover] of [
+    ['1:0', null],
+    ['3:2', null],
+    // 0:1 = one integration and no membership: the leftover-anchor check runs, and every shape
+    // other than a bare local anchor (1:0:0:0) is an ordinary upgrade / configured directory.
+    ['0:1', '0:0:0:0'], // e.g. one DingTalk integration
+    ['0:1', '1:0:0:1'], // a local anchor that already has a department
+    ['0:1', '1:1:1:0'], // a local anchor that already has an account + link
+  ]) {
+    test(`${name}: upgrade install (${counts}${leftover ? `, leftover ${leftover}` : ''}) writes nothing and says so`, opts, async () => {
       const fixture = makeFixture()
       try {
-        await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
-          const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: counts } })
+        // No login token at all: on an upgrade install the step must still just skip (gate r1 NIT-3).
+        await withBackend({ routeStatus: 200, loginToken: '' }, async ({ apiBase, calls }) => {
+          const stub = { STUB_EMPTINESS: counts, ...(leftover ? { STUB_LEFTOVER: leftover } : {}) }
+          const result = await run(fixture, { apiBase, stub })
           assert.equal(result.status, 0, result.output)
           assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
           assert.match(result.output, /Local org bootstrap: skipped: org membership or directory data already exists/)
-          assert.equal(fixture.readSql().filter(chunk => chunk.includes("provider = 'local'")).length, 0)
+          const sql = fixture.readSql()
+          assert.equal(sql.filter(chunk => chunk === EXPECTED_POSTCONDITION_SQL).length, 0)
+          assert.equal(sql.filter(chunk => chunk === EXPECTED_LEFTOVER_ANCHOR_SQL).length, leftover ? 1 : 0)
           assertStepLinesValuesFree(result.output)
+          assertStepSqlReadOnly(sql)
+        })
+      } finally {
+        fixture.cleanup()
+      }
+    })
+  }
+
+  test(`${name}: a bare local anchor left by an interrupted run is reported, not mistaken for an upgrade`, opts, async () => {
+    const fixture = makeFixture()
+    try {
+      await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
+        const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:1', STUB_LEFTOVER: '1:0:0:0' } })
+        assert.notEqual(result.status, 0)
+        assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
+        assert.match(
+          result.output,
+          /found a local org anchor with no directory account, department or org membership \(an earlier run or directory call was interrupted\); nothing was written -- complete it by calling POST/,
+        )
+        assert.doesNotMatch(result.output, /skipped: org membership or directory data already exists/)
+        assertStepLinesValuesFree(result.output)
+      })
+    } finally {
+      fixture.cleanup()
+    }
+  })
+
+  for (const [label, stub, pattern] of [
+    ['fails', { STUB_EMPTINESS: '0:1', STUB_LEFTOVER_FAIL: '1' }, /the read-only leftover-anchor check failed; nothing was written/],
+    ['has an unexpected shape', { STUB_EMPTINESS: '0:1', STUB_LEFTOVER: 'garbage' }, /the read-only leftover-anchor check returned an unexpected shape; nothing was written/],
+  ]) {
+    test(`${name}: leftover-anchor check that ${label} exits non-zero before any route call`, opts, async () => {
+      const fixture = makeFixture()
+      try {
+        await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
+          const result = await run(fixture, { apiBase, stub })
+          assert.notEqual(result.status, 0)
+          assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
+          assert.match(result.output, pattern)
         })
       } finally {
         fixture.cleanup()
@@ -309,7 +391,7 @@ for (const { name, run, enabled } of RUNNERS) {
         await withBackend({ routeStatus }, async ({ apiBase }) => {
           const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION: post } })
           assert.notEqual(result.status, 0)
-          assert.match(result.output, /left a PARTIAL state \(anchors=1\); a re-run will skip/)
+          assert.match(result.output, /left a PARTIAL state \(anchors=1, admin memberships=0\); a re-run will not repair it/)
           assertStepLinesValuesFree(result.output)
         })
       } finally {
@@ -317,6 +399,93 @@ for (const { name, run, enabled } of RUNNERS) {
       }
     })
   }
+
+  test(`${name}: a non-200 route answer with a complete state reports it as complete, exit 0`, opts, async () => {
+    const fixture = makeFixture()
+    try {
+      await withBackend({ routeStatus: 409 }, async ({ apiBase }) => {
+        const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION: '1:1:1' } })
+        assert.equal(result.status, 0, result.output)
+        assert.match(result.output, /the route returned HTTP 409, but the local org anchor and the admin membership are already complete/)
+        assert.doesNotMatch(result.output, /PARTIAL/)
+        assertStepLinesValuesFree(result.output)
+      })
+    } finally {
+      fixture.cleanup()
+    }
+  })
+
+  for (const post of ['0:1:1', '1:1:0', '2:1:1', '1:2:1']) {
+    test(`${name}: an unexpected postcondition (${post}) exits non-zero without the PARTIAL advice`, opts, async () => {
+      const fixture = makeFixture()
+      try {
+        await withBackend({ routeStatus: 200 }, async ({ apiBase }) => {
+          const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION: post } })
+          assert.notEqual(result.status, 0)
+          const [anchors, memberships, inDefault] = post.split(':')
+          assert.match(
+            result.output,
+            new RegExp(`HTTP 200 and left an unexpected org state \\(anchors=${anchors}, admin memberships=${memberships}, in default=${inDefault}\\); inspect it before re-running`),
+          )
+          assert.doesNotMatch(result.output, /PARTIAL|Local org bootstrap: OK/)
+        })
+      } finally {
+        fixture.cleanup()
+      }
+    })
+  }
+
+  for (const [label, stub, detail] of [
+    ['fails', { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION_FAIL: '1' }, 'failed'],
+    ['has an unexpected shape', { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION: 'garbage' }, 'returned an unexpected shape'],
+  ]) {
+    test(`${name}: a postcondition check that ${label} reports the state as UNKNOWN, exit non-zero`, opts, async () => {
+      const fixture = makeFixture()
+      try {
+        await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
+          const result = await run(fixture, { apiBase, stub })
+          assert.notEqual(result.status, 0)
+          assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 1)
+          assert.ok(
+            result.output.includes(`HTTP 200 and the read-only postcondition check ${detail}; the org state is UNKNOWN -- inspect it before re-running`),
+            result.output,
+          )
+          assert.doesNotMatch(result.output, /PARTIAL|safe to re-run|Local org bootstrap: OK/)
+          assertStepLinesValuesFree(result.output)
+        })
+      } finally {
+        fixture.cleanup()
+      }
+    })
+  }
+
+  test(`${name}: no HTTP response from the route is reported as HTTP 000`, opts, async () => {
+    const fixture = makeFixture()
+    try {
+      await withBackend({ routeStatus: 'drop' }, async ({ apiBase }) => {
+        const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:0', STUB_POSTCONDITION: '0:0:0' } })
+        assert.notEqual(result.status, 0)
+        assert.match(result.output, /the route returned HTTP 000; no anchor and no membership were written \(safe to re-run\)/)
+      })
+    } finally {
+      fixture.cleanup()
+    }
+  })
+
+  test(`${name}: a login token of an unexpected shape exits non-zero before any route call`, opts, async () => {
+    const fixture = makeFixture()
+    try {
+      await withBackend({ routeStatus: 200, loginToken: 'not a "token"' }, async ({ apiBase, calls }) => {
+        const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:0' } })
+        assert.notEqual(result.status, 0)
+        assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
+        assert.match(result.output, /carried a session token of an unexpected shape; nothing was written/)
+        assertStepLinesValuesFree(result.output)
+      })
+    } finally {
+      fixture.cleanup()
+    }
+  })
 
   test(`${name}: emptiness check failure exits non-zero before any route call`, opts, async () => {
     const fixture = makeFixture()
@@ -395,8 +564,13 @@ test('parity: sh and ps1 issue byte-identical read-only SQL', () => {
   const ps1 = read(PS1_SCRIPT)
   const pairs = [
     [extractShSql(sh, 'LOCAL_ORG_EMPTINESS_SQL'), extractPs1Sql(ps1, 'localOrgEmptinessSql')],
+    [extractShSql(sh, 'LOCAL_ORG_LEFTOVER_ANCHOR_SQL'), extractPs1Sql(ps1, 'localOrgLeftoverAnchorSql')],
     [extractShSql(sh, 'LOCAL_ORG_POSTCONDITION_SQL'), extractPs1Sql(ps1, 'localOrgPostconditionSql')],
   ]
+  // Pinned verbatim (gate r1 P2-1): comparing the twins with each other is not enough.
+  assert.equal(pairs[0][0], EXPECTED_EMPTINESS_SQL)
+  assert.equal(pairs[1][0], EXPECTED_LEFTOVER_ANCHOR_SQL)
+  assert.equal(pairs[2][0], EXPECTED_POSTCONDITION_SQL)
   for (const [shSql, ps1Sql] of pairs) {
     assert.equal(shSql, ps1Sql)
     assert.match(shSql, /^SELECT\b/)
@@ -407,10 +581,19 @@ test('parity: sh and ps1 issue byte-identical read-only SQL', () => {
 test('parity: sh and ps1 call the same existing route and gate on the same counts', () => {
   const sh = read(SH_SCRIPT)
   const ps1 = read(PS1_SCRIPT)
-  assert.match(sh, /\/admin\/directory\/local\/accounts/)
-  assert.match(ps1, /\/admin\/directory\/local\/accounts/)
+  assert.match(sh, /LOCAL_ORG_ROUTE_PATH="\/admin\/directory\/local\/accounts"/)
+  assert.match(ps1, /\$localOrgRoutePath = '\/admin\/directory\/local\/accounts'/)
   assert.match(sh, /"\$emptiness_counts" != "0:0"/)
   assert.match(ps1, /\$emptinessCounts -ne '0:0'/)
+  assert.match(sh, /"\$emptiness_counts" == "0:1"/)
+  assert.match(ps1, /\$emptinessCounts -eq '0:1'/)
+  assert.match(sh, /"\$leftover_counts" == "1:0:0:0"/)
+  assert.match(ps1, /\$leftoverCounts -eq '1:0:0:0'/)
+  assert.match(sh, /--max-time 30/)
+  assert.match(ps1, /-TimeoutSec 30/)
+  // The sh twin hands the bearer header to curl on stdin (-K -), never on argv.
+  assert.match(sh, /printf 'header = "Authorization: Bearer %s"\\n' "\$admin_session_token"/)
+  assert.doesNotMatch(sh, /-H "Authorization: Bearer/)
   assert.match(sh, /"\$postcondition_counts" == "1:1:1"/)
   assert.match(ps1, /\$postconditionCounts -eq '1:1:1'/)
   // Neither twin may write the anchor or the membership itself.
@@ -428,11 +611,21 @@ test('parity: sh and ps1 print the same values-free step messages', () => {
     'the admin login response carried no session token; nothing was written',
     'the read-only emptiness check failed; nothing was written',
     'the read-only emptiness check returned an unexpected shape; nothing was written',
-    'fresh install detected (no org membership, no directory integration); creating the local org anchor and the admin membership via POST',
+    'no org membership and no directory integration found (fresh install); creating the local org anchor and the admin membership via POST',
     'OK: local org anchor and admin membership created (one active anchor, exactly one active membership)',
+    'but the local org anchor and the admin membership are already complete (one active anchor, exactly one active membership; another run may have created them); nothing else was written',
     'no anchor and no membership were written (safe to re-run)',
-    'a re-run will skip -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually',
+    'a re-run will not repair it -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually',
+    'found a local org anchor with no directory account, department or org membership (an earlier run or directory call was interrupted); nothing was written -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually',
+    'the read-only leftover-anchor check failed; nothing was written',
+    'the read-only leftover-anchor check returned an unexpected shape; nothing was written',
+    'the admin login response carried a session token of an unexpected shape; nothing was written',
+    'the read-only postcondition check returned an unexpected shape; the org state is UNKNOWN -- inspect it before re-running',
     'the org state is UNKNOWN -- inspect it before re-running',
+    'left an unexpected org state',
+    'read-only emptiness check',
+    'read-only leftover-anchor check',
+    'read-only postcondition check',
   ]) {
     assert.ok(sh.includes(message), `sh is missing step message: ${message}`)
     assert.ok(ps1.includes(message), `ps1 is missing step message: ${message}`)
