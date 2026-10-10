@@ -527,7 +527,14 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
  * ahead of every status rule (all of them answer 4xx, so a status-only reading would send each to the
  * wrong sentence: ABSENT/ARCHIVED are 409, the wall is 409, the schema refusal is 422).
  */
-export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+/** The closed read-failure vocabulary shared by sync and counts-only preview, never a write verdict. */
+export type StockPreparationProjectPlanFailureReason = Extract<StockPreparationProjectSyncReason,
+  | 'PLAN_READ_FAILED_FOREIGN_PROJECT' | 'PLAN_READ_FAILED_CONNECTION' | 'PLAN_READ_FAILED'
+  | 'PLAN_READ_UNAUTHENTICATED' | 'PLAN_READ_NOT_PERMITTED' | 'PLAN_READ_FAILED_UNKNOWN'
+  | 'PLAN_PROJECT_SHEET_ABSENT' | 'PLAN_PROJECT_SHEET_ARCHIVED' | 'PLAN_TARGET_NOT_OURS'
+  | 'PLAN_TARGET_SCHEMA_INCOMPLETE'>
+
+export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectPlanFailureReason>> = Object.freeze({
   STOCK_PREPARATION_PROJECT_ABSENT: 'PLAN_PROJECT_SHEET_ABSENT',
   STOCK_PREPARATION_PROJECT_ARCHIVED: 'PLAN_PROJECT_SHEET_ARCHIVED',
   TABLE_ACTION_TARGET_TENANT_MISMATCH: 'PLAN_TARGET_NOT_OURS',
@@ -544,7 +551,7 @@ export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<stri
  * reading it had before S2 — the status rules below (a 422 reads as PLAN_READ_FAILED_UNKNOWN) — so
  * the switch-off text is unchanged.
  */
-export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectPlanFailureReason>> = Object.freeze({
   TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
 })
 
@@ -552,7 +559,7 @@ export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
   context: { projectSheet?: boolean } = {},
-): StockPreparationProjectSyncReason {
+): StockPreparationProjectPlanFailureReason {
   if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
     return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
   }
@@ -701,6 +708,60 @@ export interface StockPreparationProjectSyncApi {
   reconcile(projectNo: string): Promise<{ counts?: Record<string, number> }>
   apply(projectNo: string, dryRunToken: string): Promise<StockPreparationProjectSyncApplyResult>
   archive(projectNo: string): Promise<StockPreparationProjectSyncArchiveResult>
+}
+
+export type StockPreparationProjectPreviewReason = Extract<StockPreparationProjectSyncReason,
+  | 'PLAN_READY' | 'PLAN_HELD_FOR_CONFIRMATION' | 'PLAN_PROJECT_NOT_FOUND' | 'PLAN_LARGE_BOM_BOUNDED'
+  | 'PLAN_NOT_APPLYABLE' | 'PLAN_MALFORMED_RESPONSE'>
+  | StockPreparationProjectPlanFailureReason | 'PROJECT_NUMBER_INVALID'
+
+/** Change-plan counts only. No execution token, revision, raw evidence or BOM rows survive here. */
+export interface StockPreparationProjectPreviewReport {
+  status: 'ready' | 'manual_confirm_required' | 'not_found' | 'large_bom_bounded' | 'failed' | null
+  reason: StockPreparationProjectPreviewReason
+  counts: { add: number; update: number; skip: number; inactive: number; manualConfirm: number } | null
+}
+
+export function validStockPreparationProjectPreviewNumber(value: string): boolean {
+  return Boolean(value.trim()) && value.trim().length <= 128
+    && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+}
+
+/** One explicit dryRun call. The existing API's opt-in compatibility fallback remains its own contract. */
+export async function runStockPreparationProjectPreview(
+  api: Pick<StockPreparationProjectSyncApi, 'dryRun'>,
+  projectNo: string,
+): Promise<StockPreparationProjectPreviewReport> {
+  const unavailable = (reason: StockPreparationProjectPreviewReason): StockPreparationProjectPreviewReport => ({ status: null, reason, counts: null })
+  if (!validStockPreparationProjectPreviewNumber(projectNo)) return unavailable('PROJECT_NUMBER_INVALID')
+  try {
+    const plan: unknown = await api.dryRun(projectNo.trim())
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return unavailable('PLAN_MALFORMED_RESPONSE')
+    const source = plan as Record<string, unknown>
+    if (typeof source.status !== 'string' || !STOCK_PREPARATION_DRY_RUN_STATUSES.includes(source.status)
+      || typeof source.canApply !== 'boolean' || !source.counts || typeof source.counts !== 'object'
+      || Array.isArray(source.counts)) return unavailable('PLAN_MALFORMED_RESPONSE')
+    const rawCounts = source.counts as Record<string, unknown>
+    const keys = ['add', 'update', 'skip', 'inactive', 'manual_confirm'] as const
+    if (keys.some(key => !Object.prototype.hasOwnProperty.call(rawCounts, key)
+      || typeof rawCounts[key] !== 'number' || !Number.isSafeInteger(rawCounts[key]) || (rawCounts[key] as number) < 0)) {
+      return unavailable('PLAN_MALFORMED_RESPONSE')
+    }
+    const counts = { add: rawCounts.add as number, update: rawCounts.update as number,
+      skip: rawCounts.skip as number, inactive: rawCounts.inactive as number, manualConfirm: rawCounts.manual_confirm as number }
+    const status = source.status as StockPreparationProjectPreviewReport['status']
+    if ((source.canApply !== (status === 'ready' || status === 'manual_confirm_required'))
+      || (status === 'ready' && counts.manualConfirm !== 0)
+      || (status === 'manual_confirm_required' && counts.manualConfirm === 0)
+      || (status === 'not_found' && Object.values(counts).some(count => count !== 0))) return unavailable('PLAN_MALFORMED_RESPONSE')
+    const reason: StockPreparationProjectPreviewReason = status === 'ready' ? 'PLAN_READY'
+      : status === 'manual_confirm_required' ? 'PLAN_HELD_FOR_CONFIRMATION'
+        : status === 'not_found' ? 'PLAN_PROJECT_NOT_FOUND'
+          : status === 'large_bom_bounded' ? 'PLAN_LARGE_BOM_BOUNDED' : 'PLAN_NOT_APPLYABLE'
+    return { status, reason, counts }
+  } catch (error) {
+    return unavailable(isMalformed(error) ? 'PLAN_MALFORMED_RESPONSE' : classifyPlanReadFailureReason(statusOf(error), codeOf(error)))
+  }
 }
 
 /** HTTP status + clamped error code of a failed call. Never carries a server message. */
@@ -999,7 +1060,7 @@ export async function runStockPreparationProjectSync(
  * proxy answering 200 with an HTML sign-in page would otherwise let this module report an import
  * that never happened, and reporting rows that are not there is worse than reporting a failure.
  */
-async function readEnvelope<T>(response: Response | undefined, route: string): Promise<T> {
+async function readEnvelope<T>(response: Response | undefined, route: string, strictPreview = false): Promise<T> {
   let payload: unknown = null
   try {
     payload = await response?.json()
@@ -1015,7 +1076,7 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
       code: clampErrorCode(envelope?.error?.code),
     })
   }
-  if (!envelope || envelope.ok !== true) {
+  if (!envelope || envelope.ok !== true || (strictPreview && Object.prototype.hasOwnProperty.call(envelope, 'error'))) {
     throw new StockPreparationProjectSyncCallError(status, route, { malformed: true })
   }
   return (envelope.data ?? {}) as T
@@ -1024,6 +1085,7 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
 export function createStockPreparationProjectSyncApi(
   scope: IntegrationScope,
   actionId: string = STOCK_PREPARATION_PULL_BOM_ACTION_ID,
+  options: { strictPreview?: boolean } = {},
 ): StockPreparationProjectSyncApi {
   const query = buildQueryString({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
   const suffix = query ? `?${query}` : ''
@@ -1043,7 +1105,7 @@ export function createStockPreparationProjectSyncApi(
           headers: json,
           body: JSON.stringify({ parameters: { projectNo }, includeMissingComponents: true }),
         })
-        return await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+        return await readEnvelope<StockPreparationProjectSyncPlan>(response, route, options.strictPreview === true)
       } catch (error) {
         // B1 — SINGLE, AUTOMATIC FALLBACK. Merging this PR before the server-side W3a PR (#5500 as
         // of writing) must not 400 every dry run on main: if the flagged request was refused for
@@ -1057,7 +1119,7 @@ export function createStockPreparationProjectSyncApi(
           headers: json,
           body: JSON.stringify({ parameters: { projectNo } }),
         })
-        const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route)
+        const plan = await readEnvelope<StockPreparationProjectSyncPlan>(response, route, options.strictPreview === true)
         return { ...plan, missingComponentsUnavailableReason: reason }
       }
     },

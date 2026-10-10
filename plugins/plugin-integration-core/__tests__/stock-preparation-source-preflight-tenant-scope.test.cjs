@@ -370,6 +370,8 @@ async function mount({
   httpRoutes.registerIntegrationRoutes({
     context,
     services: {
+      // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
       externalSystemRegistry: registry,
       adapterRegistry,
       pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -863,7 +865,7 @@ async function main() {
       .join('\n')
     const proof = body.indexOf('await resolveProvenOwnTenant({')
     const door = body.indexOf('assertVerifiedTenantClaim(req, tenantId)')
-    const lookup = body.indexOf('tableActions.getTableAction(')
+    const lookup = body.indexOf('resolveTableActionExecution(')
     const load = body.indexOf('loadSystem(')
     assert.notEqual(proof, -1, 'the tenant is proven by the shared tenant proof')
     assert.notEqual(door, -1, 'the staged claim door is applied to the proven tenant')
@@ -882,15 +884,19 @@ async function main() {
     assert.equal(/resolveTenantId\(/.test(body), false, 'no request-steerable resolveTenantId in the handler')
     assert.equal(/user\.tenantId/.test(body), false, 'no direct read of the header-fillable user.tenantId')
     assert.equal(/resolveAuthUserTenantId\(/.test(body), false, 'nor through resolveAuthUserTenantId')
-    assert.equal(/getTableAction\(\{\s*actionId/.test(body), false, 'the lookup is never tenant-less again')
-    assert.match(body, /getTableAction\(\{\s*tenantId,/, 'the lookup carries the resolved tenant')
+    assert.equal(/resolveTableActionExecution\(req, \{\s*actionId/.test(body), false, 'the lookup is never tenant-less again')
+    assert.match(body, /resolveTableActionExecution\(req, \{\s*tenantId,/, 'the execution lookup carries the resolved tenant')
     // Every scoped input the handler builds names the resolved tenant explicitly, so the helper's own
     // resolver can only agree with it or refuse.
     const scoped = body.match(/scoped(?:Adapter)?Input\(req, \{[^}]*\}/g) || []
-    assert.ok(scoped.length >= 2, 'the load and the peek are both scoped')
+    assert.equal(scoped.length, 1, 'legacy selector is resolved once into the shared adapter scope')
     for (const call of scoped) {
       assert.match(call, /\btenantId\b/, `${call} must carry the resolved tenant`)
     }
+    assert.match(body, /await loadSystem\(adapterScope\)/, 'source load uses the resolved shared scope')
+    assert.match(body, /await peekTableActionSourceBinding\(adapterScope\)/, 'delegation peek uses that very same scope')
+    assert.match(body, /\? \{ \.\.\.exactSourceScope, id: externalSystemId, principal: requestPrincipal\(req\), runAs: 'user' \}/,
+      'online exact scope still uses the requester, never a borrowed principal')
   })
 
   // -------------------------------------------------------------------------

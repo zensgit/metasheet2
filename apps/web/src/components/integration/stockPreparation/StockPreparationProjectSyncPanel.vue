@@ -40,14 +40,24 @@
         :disabled="!canSubmit"
         @click="onRun"
       >
-        {{ busy && !targetPrompt ? bi(...runningLabel) : bi(...runLabel) }}
+        {{ busy && !targetPrompt && !previewBusy ? bi(...runningLabel) : bi(...runLabel) }}
+      </button>
+      <button
+        v-if="canRun"
+        type="button"
+        class="sp-sync__run sp-sync__run--secondary"
+        data-testid="stock-prep-project-preview-run"
+        :disabled="!canPreviewSubmit"
+        @click="onPreview"
+      >
+        {{ previewBusy ? bi('正在预览变更…', 'Previewing changes…') : bi('仅预览变更', 'Preview changes only') }}
       </button>
       <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
            R-33 (2026-10-08) moved the pull to the 拉取人员 (`stock-prep:pull`): a floor operator
            sees this line instead of the button. It names the 拉取人员 first and the platform
            administrator second, because sending someone to the wrong person is its own kind of
            dead end — and it does NOT say 「备料操作权限」, which the reader already holds. -->
-      <p v-else class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
+      <p v-if="!canRun" class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
         {{ bi(
           '从 PLM 拉数据由拉取人员负责。您可以看这里的结果,需要拉取请联系拉取人员(或平台管理员)。',
           'Pulling data from PLM is done by a pull operator (拉取人员). You can read the results here; to pull, please contact a pull operator — or a platform administrator.',
@@ -216,6 +226,20 @@
       <span v-if="restoreRefusalText.zhNext" class="sp-sync__verdict-next">{{ bi(restoreRefusalText.zhNext, restoreRefusalText.enNext ?? '') }}</span>
       <code v-if="restoreRefusal.kind === 'refused' && restoreRefusal.code" class="sp-sync__token">{{ restoreRefusal.code }}</code>
     </p>
+
+    <p class="sp-sync__hint" data-testid="stock-prep-project-preview-note">
+      {{ bi('预览仅显示变更计划的状态和计数，不是完整 BOM 或已审批数据；不会写入备料表。服务端可能保留短期预览令牌。之后点击同步会重新试算，不复用本次预览。', 'Preview shows only change-plan status and counts, not a complete BOM or approved data; it does not write to the stock-preparation table. The server may retain an expiring preview token. A later sync creates a fresh plan and does not reuse this preview.') }}
+    </p>
+    <section v-if="previewReport" class="sp-sync__counts" data-testid="stock-prep-project-preview" :data-status="previewReport.status ?? 'unavailable'" aria-live="polite">
+      <p data-testid="stock-prep-project-preview-status">{{ previewStatusText }}</p>
+      <p v-if="previewReport.counts" data-testid="stock-prep-project-preview-counts">
+        {{ bi('计划新增', 'Planned additions') }} {{ previewReport.counts.add }} ·
+        {{ bi('计划更新', 'Planned updates') }} {{ previewReport.counts.update }} ·
+        {{ bi('计划跳过', 'Planned skips') }} {{ previewReport.counts.skip }} ·
+        {{ bi('计划停用', 'Planned inactive rows') }} {{ previewReport.counts.inactive }} ·
+        {{ bi('待人工确认', 'Needs manual confirmation') }} {{ previewReport.counts.manualConfirm }}
+      </p>
+    </section>
 
     <!-- The row-refresh explanation. It appears only when a row's 刷新 armed this panel, because
          otherwise it is an answer to a question nobody asked. -->
@@ -524,16 +548,20 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
+import { onAuthPrincipalChange, readAuthSessionSignature } from '../../../composables/authPrincipal'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
 import {
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
+  runStockPreparationProjectPreview,
   runStockPreparationProjectSync,
+  validStockPreparationProjectPreviewNumber,
   type StockPreparationMissingComponent,
   type StockPreparationMissingComponentList,
   type StockPreparationProjectSyncApi,
+  type StockPreparationProjectPreviewReport,
   type StockPreparationProjectSyncReport,
   type StockPreparationProjectSyncStepResult,
   type StockPreparationProjectSyncStepStatus,
@@ -682,7 +710,11 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canRun = computed(() => canRunStockPrepProjectSync(auth.getAccessSnapshot()))
+const accessRevision = ref(0)
+const canRun = computed(() => {
+  void accessRevision.value
+  return canRunStockPrepProjectSync(auth.getAccessSnapshot())
+})
 
 /** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
 const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
@@ -695,6 +727,11 @@ const runningLabel = computed<[string, string]>(() => (props.runVariant === 'pul
 
 const projectNo = ref(props.projectNo ?? '')
 const busy = ref(false)
+const previewBusy = ref(false)
+const previewReport = ref<StockPreparationProjectPreviewReport | null>(null)
+let previewGeneration = 0
+let previewMounted = true
+let previewSession = readPreviewSessionSignature()
 const armedNote = ref(false)
 const results = ref<StockPreparationProjectSyncStepResult[]>([])
 const report = ref<StockPreparationProjectSyncReport | null>(null)
@@ -714,6 +751,83 @@ const missingComponentsTableEl = ref<HTMLTableElement | null>(null)
 const missingComponentsCopyState = ref<'idle' | 'copied' | 'manual'>('idle')
 
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
+const canPreviewSubmit = computed(() => canRun.value && !busy.value
+  && readPreviewSessionSignature() !== 'invalid' && validStockPreparationProjectPreviewNumber(projectNo.value))
+const previewStatusText = computed(() => {
+  switch (previewReport.value?.reason) {
+    case 'PLAN_READY': return bi('变更计划已生成，尚未写入。', 'Change plan generated; nothing has been written.')
+    case 'PLAN_HELD_FOR_CONFIRMATION': return bi('变更计划包含待人工确认的行，尚未写入或加入确认队列。', 'The change plan has rows needing manual confirmation; nothing has been written or queued.')
+    case 'PLAN_PROJECT_NOT_FOUND': return bi('未找到此项目，请核对项目号。', 'Project not found. Check the project number.')
+    case 'PLAN_LARGE_BOM_BOUNDED': return bi('此 BOM 超出交互预览限制；没有启动后台任务，请联系管理员确认处理方式。', 'This BOM exceeds interactive preview limits; no background job was started. Ask an administrator how to proceed.')
+    case 'PROJECT_NUMBER_INVALID': return bi('请填写有效项目号，最多 128 个字符且不含控制字符。', 'Enter a valid project number, at most 128 characters with no control characters.')
+    case 'PLAN_MALFORMED_RESPONSE': return bi('预览响应无法核实，未生成可用变更计划。请联系管理员。', 'The preview response could not be verified; no usable change plan was generated. Contact an administrator.')
+    case 'PLAN_READ_UNAUTHENTICATED': return bi('登录已过期，请重新登录后手动预览。', 'Your session expired. Sign in again, then preview manually.')
+    case 'PLAN_READ_NOT_PERMITTED': return bi('当前账号没有预览权限，请确认登录身份及项目范围。', 'This account cannot preview. Check the signed-in account and project scope.')
+    case 'PLAN_READ_FAILED_CONNECTION': return bi('来源连接配置不可用，请联系管理员检查连接后手动预览。', 'The source connection configuration is unavailable. Ask an administrator to check it, then preview manually.')
+    case 'PLAN_READ_FAILED_FOREIGN_PROJECT': return bi('目标表包含其他项目的数据，请联系管理员确认目标。', 'The target table contains another project’s data. Ask an administrator to check the target.')
+    case 'PLAN_PROJECT_SHEET_ABSENT': return bi('这个项目还没有备料表。请由拉取人员通过明确的拉取流程确认新建后再预览；仅预览不会新建表。', 'This project has no stock-preparation sheet. A pull operator must explicitly confirm creation through the pull flow before previewing; preview alone creates no sheet.')
+    case 'PLAN_PROJECT_SHEET_ARCHIVED': return bi('这个项目的备料表已归档。请联系拉取人员确认恢复后再预览；仅预览不会恢复表。', 'This project’s stock-preparation sheet is archived. Ask a pull operator to explicitly restore it before previewing; preview alone restores no sheet.')
+    case 'PLAN_TARGET_NOT_OURS': return bi('项目目标表的归属无法核实。请联系管理员检查目标和权限；仅预览不会更换或修复目标。', 'The project target’s ownership could not be verified. Ask an administrator to check the target and permissions; preview alone neither changes nor repairs a target.')
+    case 'PLAN_TARGET_SCHEMA_INCOMPLETE': return bi('项目备料表缺少必需字段。请联系拉取人员通过明确的修复流程处理；仅预览不会修复表。', 'The project’s stock-preparation sheet is missing required fields. Ask a pull operator to use the explicit repair flow; preview alone repairs no sheet.')
+    case 'PLAN_NOT_APPLYABLE': return bi('变更计划未通过检查，尚未写入。请联系管理员检查来源和映射。', 'The change plan did not pass checks; nothing has been written. Ask an administrator to check the source and mappings.')
+    default: return bi('未能生成预览，请检查来源状态后手动重试。', 'The preview could not be generated. Check the source status, then retry manually.')
+  }
+})
+
+function clearPreview(): void {
+  previewGeneration += 1
+  previewReport.value = null
+}
+
+function readPreviewSessionSignature(): string {
+  try {
+    const session = readAuthSessionSignature()
+    if (session === 'invalid') return 'invalid'
+    // A focus refresh can replace the access snapshot without rotating the token.
+    return JSON.stringify([session, localStorage.getItem('user_permissions'), localStorage.getItem('user_roles')])
+  } catch {
+    return 'invalid'
+  }
+}
+
+function invalidatePreviewSession(): void {
+  previewSession = readPreviewSessionSignature()
+  accessRevision.value += 1
+  clearPreview()
+}
+const unsubscribePreviewSession = onAuthPrincipalChange(invalidatePreviewSession)
+function checkPreviewSession(): void {
+  if (previewSession !== readPreviewSessionSignature()) invalidatePreviewSession()
+}
+window.addEventListener('storage', checkPreviewSession)
+window.addEventListener('focus', checkPreviewSession)
+watch([projectNo, () => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], clearPreview, { flush: 'sync' })
+
+async function onPreview(): Promise<void> {
+  checkPreviewSession()
+  if (!canPreviewSubmit.value) return
+  clearPreview()
+  // Counts-only preview supersedes old run/restore UI without entering any project-target write flow.
+  resetRunState()
+  const generation = previewGeneration
+  const session = readPreviewSessionSignature()
+  const target = projectNo.value.trim()
+  const scope = { tenantId: props.scope.tenantId, workspaceId: props.scope.workspaceId }
+  busy.value = true
+  previewBusy.value = true
+  try {
+    const api = props.api ?? createStockPreparationProjectSyncApi(scope, undefined, { strictPreview: true })
+    const result = await runStockPreparationProjectPreview(api, target)
+    checkPreviewSession()
+    if (!previewMounted || generation !== previewGeneration || session === 'invalid'
+      || session !== readPreviewSessionSignature() || !canRun.value || target !== projectNo.value.trim()
+      || scope.tenantId !== props.scope.tenantId || scope.workspaceId !== props.scope.workspaceId) return
+    previewReport.value = result
+  } finally {
+    previewBusy.value = false
+    busy.value = false
+  }
+}
 
 // 项目备料页: follow the seed when the PARENT changes which project this panel is about. It never
 // runs anything on its own — the operator still presses 同步 — and it never fires while a run is in
@@ -904,6 +1018,7 @@ const afterRowsText = computed<string>(() => {
 
 async function onRun(): Promise<void> {
   if (!canSubmit.value) return
+  clearPreview()
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
   resetRunState()
@@ -1205,6 +1320,11 @@ function scheduleMissingComponentsCopyReset(): void {
 }
 
 onUnmounted(() => {
+  previewMounted = false
+  clearPreview()
+  unsubscribePreviewSession()
+  window.removeEventListener('storage', checkPreviewSession)
+  window.removeEventListener('focus', checkPreviewSession)
   if (missingComponentsCopyResetTimer !== null) clearTimeout(missingComponentsCopyResetTimer)
 })
 

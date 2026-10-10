@@ -1282,6 +1282,7 @@ jobs:
             --reporter=verbose
 
       - name: Install Chromium for owner YiDa real-DB acceptance
+        # Shared install also supplies the PLM source-plan browser host proof.
         id: stock-preparation-yida-owner-browser-install
         if: matrix.node-version == '20.x'
         run: pnpm exec playwright install --with-deps chromium
@@ -1301,6 +1302,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
+            tests/integration/stock-preparation-read-plan-host-realdb.test.ts \
             tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts \
             tests/integration/stock-preparation-yida-create-fence-realdb.test.ts \
             tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts \
@@ -1334,6 +1336,12 @@ jobs:
             scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs
           /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
             "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin"
+
+      - name: Run PLM validation source-revision unit contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/data-source-validation-revision.test.ts \
+            --reporter=dot
 
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'

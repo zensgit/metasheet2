@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
 
 // 项目接入 — the PANEL. The DOM half of the entry the owner asked for:
 //   「PLM系统接通后,在页面哪里可点击项目号,然后该项目号里的bom就自动导入到我们的多维表中」
@@ -21,7 +21,10 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   permissions: ['integration:admin'] as string[],
+  useStoredAccess: false,
+  fetch: vi.fn(),
 }))
+vi.mock('../src/utils/api', () => ({ apiFetch: h.fetch }))
 
 vi.mock('../src/composables/useLocale', () => ({
   useLocale: () => ({
@@ -31,25 +34,30 @@ vi.mock('../src/composables/useLocale', () => ({
   }),
 }))
 
-vi.mock('../src/composables/useAuth', () => ({
-  useAuth: () => ({
-    getToken: () => 'session-token',
-    clearToken: vi.fn(),
-    // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
-    // never the expanding probe), so this double has to carry them or every stock-prep predicate
-    // reads an empty principal.
-    getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: h.permissions }),
-    hasPermission: (permission: string) => h.permissions.includes(permission),
-  }),
-}))
+vi.mock('../src/composables/useAuth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/composables/useAuth')>()
+  return {
+    useAuth: () => h.useStoredAccess ? actual.useAuth() : ({
+      getToken: () => 'session-token',
+      clearToken: vi.fn(),
+      // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
+      // never the expanding probe), so this double has to carry them or every stock-prep predicate
+      // reads an empty principal.
+      getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: h.permissions }),
+      hasPermission: (permission: string) => h.permissions.includes(permission),
+    }),
+  }
+})
 
 import StockPreparationProjectSyncPanel from '../src/components/integration/stockPreparation/StockPreparationProjectSyncPanel.vue'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import {
   BATCH_ARCHIVE_DISABLED_CODE,
   StockPreparationProjectSyncCallError,
   type StockPreparationProjectSyncApi,
 } from '../src/services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../src/services/integration/stockPreparation/largeBomPull'
+import type { StockPrepProjectTargetState, StockPreparationProjectTargetApi } from '../src/services/integration/stockPreparation/projectTarget'
 
 const PROJECT_NO = 'P2026-001'
 const PLANTED_DRAWING = 'DWG-88472-A'
@@ -117,10 +125,14 @@ async function flushUi(cycles = 6): Promise<void> {
 describe('StockPreparationProjectSyncPanel', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  let panelVm: { run: () => Promise<void> }
 
   beforeEach(() => {
     h.locale = 'zh-CN'
     h.permissions = ['integration:admin']
+    h.useStoredAccess = false
+    h.fetch.mockReset()
+    localStorage.clear()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -131,11 +143,12 @@ describe('StockPreparationProjectSyncPanel', () => {
     app = null
     container = null
     vi.clearAllMocks()
+    localStorage.clear()
   })
 
   function mountPanel(props: Record<string, unknown> = {}): HTMLDivElement {
     app = createApp(StockPreparationProjectSyncPanel as Component, props)
-    app.mount(container!)
+    panelVm = app.mount(container!) as unknown as { run: () => Promise<void> }
     return container!
   }
 
@@ -147,6 +160,420 @@ describe('StockPreparationProjectSyncPanel', () => {
     ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
     await flushUi()
   }
+
+  async function runPreview(root: HTMLElement, project = PROJECT_NO): Promise<void> {
+    const input = root.querySelector('[data-testid="stock-prep-project-sync-project-no"]') as HTMLInputElement
+    input.value = project
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).click()
+    await flushUi()
+  }
+
+  function previewNode(root: HTMLElement): HTMLElement | null { return root.querySelector('[data-testid="stock-prep-project-preview"]') }
+  function deferredPlan() {
+    let resolve!: (value: Record<string, unknown>) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<Record<string, unknown>>((done, fail) => { resolve = done; reject = fail })
+    return { promise, resolve, reject }
+  }
+
+  const statuses = [
+    { status: 'ready', canApply: true, manual: 0, zh: '变更计划已生成', en: 'Change plan generated' },
+    { status: 'manual_confirm_required', canApply: true, manual: 2, zh: '待人工确认', en: 'manual confirmation' },
+    { status: 'not_found', canApply: false, manual: 0, zh: '未找到此项目', en: 'Project not found' },
+    { status: 'large_bom_bounded', canApply: false, manual: 0, zh: '没有启动后台任务', en: 'no background job was started' },
+    { status: 'failed', canApply: false, manual: 0, zh: '变更计划未通过检查', en: 'did not pass checks' },
+  ]
+
+  it.each(['zh-CN', 'en'].flatMap(locale => statuses.map(status => ({ ...status, locale }))))('previews only status and counts for $status in $locale', async ({ status, canApply, manual, zh, en, locale }) => {
+    h.locale = locale
+    const add = status === 'not_found' ? 0 : 3
+    const raw = { status, canApply, dryRunToken: 'PRIVATE_PREVIEW_TOKEN', revision: PLANTED_SECRET,
+      counts: { add, update: status === 'not_found' ? 0 : 2, skip: status === 'not_found' ? 0 : 7, inactive: 0, manual_confirm: manual },
+      evidence: { secret: PLANTED_SECRET }, error: { code: 'PRIVATE_POISON_CODE', message: PLANTED_NAME },
+      missingComponents: { items: [{ componentSourceId: PLANTED_DRAWING }] } }
+    h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, data: raw })))
+    const synced = vi.fn()
+    const jobs = largeBomJobApi()
+    const root = mountPanel({ scope: { tenantId: 'synthetic_tenant', workspaceId: 'synthetic_workspace' }, largeBomApi: jobs, onSynced: synced })
+    await runPreview(root, ` ${PROJECT_NO} `)
+    expect(previewNode(root)?.getAttribute('data-status')).toBe(status)
+    expect(previewNode(root)?.textContent).toContain(locale === 'zh-CN' ? zh : en)
+    const counts = root.querySelector('[data-testid="stock-prep-project-preview-counts"]')!
+    expect(counts.textContent).toContain(locale === 'zh-CN' ? `计划新增 ${add}` : `Planned additions ${add}`)
+    expect(counts.textContent).toContain(locale === 'zh-CN' ? '计划停用 0' : 'Planned inactive rows 0')
+    expect(root.querySelector('[data-testid="stock-prep-project-preview-note"]')?.textContent).toContain(locale === 'zh-CN' ? '服务端可能保留短期预览令牌' : 'server may retain an expiring preview token')
+    expect(root.querySelector('[data-testid="stock-prep-project-preview-note"]')?.textContent).toContain(locale === 'zh-CN' ? '重新试算' : 'fresh plan')
+    for (const poison of ['PRIVATE_PREVIEW_TOKEN', 'PRIVATE_POISON_CODE', PLANTED_SECRET, PLANTED_DRAWING, PLANTED_NAME, 'dryRunToken', 'revision', 'evidence']) expect(root.textContent).not.toContain(poison)
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+    expect(String(h.fetch.mock.calls[0][0])).toContain('/dry-run?')
+    expect(JSON.parse(h.fetch.mock.calls[0][1].body)).toEqual({ parameters: { projectNo: PROJECT_NO }, includeMissingComponents: true })
+    expect(synced).not.toHaveBeenCalled()
+    expect(jobs.startExpansion).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')).toBeNull()
+  })
+
+  it.each([
+    { counts: { add: -1, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
+    { counts: { add: '3', update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
+    { counts: { add: 3 } }, { status: 'PRIVATE_POISON_CODE' }, { status: 'failed', canApply: true },
+    { status: 'not_found', canApply: false },
+    { status: 'ready', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 1 } },
+    { canApply: 'true' },
+  ])('does not render invented counts or ready status for malformed data %#', async extra => {
+    const double = api({ dryRun: vi.fn().mockResolvedValue({ status: 'ready', canApply: true, dryRunToken: PLANTED_SECRET,
+      counts: { add: 3, update: 2, skip: 0, inactive: 0, manual_confirm: 0 }, ...extra }) })
+    const root = mountPanel({ api: double })
+    await runPreview(root)
+    expect(previewNode(root)?.getAttribute('data-status')).toBe('unavailable')
+    expect(previewNode(root)?.textContent).toContain('预览响应无法核实')
+    expect(root.querySelector('[data-testid="stock-prep-project-preview-counts"]')).toBeNull()
+    expect(root.textContent).not.toContain('PRIVATE_POISON_CODE')
+    expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  it('rejects ambiguous HTTP success and hides arbitrary error codes and messages', async () => {
+    h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { status: 'ready', canApply: true,
+      counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }, error: { code: 'PRIVATE_POISON_CODE', message: PLANTED_SECRET } })))
+    const root = mountPanel()
+    await runPreview(root)
+    expect(previewNode(root)?.textContent).toContain('预览响应无法核实')
+    expect(root.textContent).not.toContain('PRIVATE_POISON_CODE')
+    expect(root.textContent).not.toContain(PLANTED_SECRET)
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([new Error(PLANTED_SECRET), new StockPreparationProjectSyncCallError(400, '/dry-run', { code: 'PRIVATE_POISON_CODE' })])('renders fixed preview failure guidance only %#', async error => {
+    const double = api({ dryRun: vi.fn().mockRejectedValue(error) })
+    const root = mountPanel({ api: double })
+    await runPreview(root)
+    expect(previewNode(root)?.textContent).toContain('未能生成预览')
+    expect(root.textContent).not.toContain(PLANTED_SECRET)
+    expect(root.textContent).not.toContain('PRIVATE_POISON_CODE')
+    expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  function projectTargetApi(status: StockPrepProjectTargetState['status']): StockPreparationProjectTargetApi {
+    return {
+      get: vi.fn().mockResolvedValue({ status, sheetId: 'synthetic-project-sheet', viewId: 'synthetic-project-view',
+        todoViewId: null, rowCount: 0, activeRowCount: 0, rowCountBounded: false, lastPulledAt: null,
+        lastPullOutcome: null, archivedAt: status === 'archived' ? '2026-10-10T00:00:00Z' : null,
+        may: { create: true, archive: true, restore: true } } satisfies StockPrepProjectTargetState),
+      create: vi.fn(), list: vi.fn(), archive: vi.fn(), restore: vi.fn(),
+    }
+  }
+
+  it.each([
+    [409, 'STOCK_PREPARATION_PROJECT_ABSENT', '还没有备料表', '不会新建'],
+    [409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', '已归档', '不会恢复'],
+    [409, 'TABLE_ACTION_TARGET_TENANT_MISMATCH', '归属无法核实', '不会更换或修复'],
+    [409, 'TABLE_ACTION_TARGET_OWNER_UNKNOWN', '归属无法核实', '不会更换或修复'],
+    [409, 'TABLE_ACTION_TARGET_UNBOUND', '归属无法核实', '不会更换或修复'],
+  ])('shows fixed refusal guidance for %s/%s without entering project-target writes', async (status, code, guidance, action) => {
+    const targetApi = projectTargetApi('absent')
+    h.fetch.mockResolvedValue(new Response(JSON.stringify({ ok: false, error: { code, message: PLANTED_SECRET } }), { status }))
+    const synced = vi.fn()
+    const root = mountPanel({ targetApi, onSynced: synced })
+    await runPreview(root)
+    expect(previewNode(root)?.textContent).toContain(guidance)
+    expect(previewNode(root)?.textContent).toContain(action)
+    expect(root.querySelector('[data-testid="stock-prep-project-preview-counts"]')).toBeNull()
+    expect(root.textContent).not.toContain(code)
+    expect(root.textContent).not.toContain(PLANTED_SECRET)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-target-prompt"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-restore-prompt"]')).toBeNull()
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+    expect(String(h.fetch.mock.calls[0][0])).toContain('/dry-run')
+    for (const method of [targetApi.get, targetApi.create, targetApi.list, targetApi.archive, targetApi.restore]) expect(method).not.toHaveBeenCalled()
+    expect(synced).not.toHaveBeenCalled()
+  })
+
+  it('clears an old archived/restore prompt at preview start without restoring or writing the project', async () => {
+    const targetApi = projectTargetApi('archived')
+    const double = api()
+    const root = mountPanel({ api: double, targetApi })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-target-notice"]')?.getAttribute('data-notice')).toBe('archived')
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-restore"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-restore-prompt"]')).not.toBeNull()
+    await runPreview(root)
+    expect(previewNode(root)).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-target-notice"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-restore-prompt"]')).toBeNull()
+    expect(targetApi.get).toHaveBeenCalledTimes(1)
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+    for (const method of [targetApi.create, targetApi.archive, targetApi.restore, double.reconcile, double.apply, double.archive]) expect(method).not.toHaveBeenCalled()
+    await runSync(root)
+    expect(previewNode(root)).toBeNull()
+    expect(targetApi.get).toHaveBeenCalledTimes(2)
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the explicit project-sheet creation question and blocks preview while that question is live', async () => {
+    const targetApi = projectTargetApi('absent')
+    const double = api()
+    const root = mountPanel({ api: double, targetApi })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-target-prompt"]')?.getAttribute('data-prompt')).toBe('create')
+    await runPreview(root)
+    expect(double.dryRun).not.toHaveBeenCalled()
+    expect(targetApi.create).not.toHaveBeenCalled()
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-target-prompt-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    await runPreview(root)
+    expect(previewNode(root)).not.toBeNull()
+    expect(targetApi.get).toHaveBeenCalledTimes(1)
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+    for (const method of [targetApi.create, targetApi.archive, targetApi.restore, double.reconcile, double.apply, double.archive]) expect(method).not.toHaveBeenCalled()
+  })
+
+  it.each(['', '   ', 'P'.repeat(129), 'P\u0001SYN'])('does not request preview for invalid input %#', async project => {
+    const double = api()
+    const root = mountPanel({ api: double })
+    await runPreview(root, project)
+    expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(double.dryRun).not.toHaveBeenCalled()
+  })
+
+  it('uses the same pull/admin predicate without widening preview access', async () => {
+    for (const permissions of [
+      ['integration:read'], ['stock-prep:operate'], [], ['stock-prep:read', 'stock-prep:operate'],
+      ['stock-prep:read', 'stock-prep:pull'], ['stock-prep:operate', 'stock-prep:pull'],
+      ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'],
+    ]) {
+      h.permissions = permissions
+      const double = api()
+      const root = mountPanel({ api: double })
+      const allowed = permissions.includes('stock-prep:read') && permissions.includes('stock-prep:operate')
+        && permissions.includes('stock-prep:pull')
+      expect(Boolean(root.querySelector('[data-testid="stock-prep-project-preview-run"]'))).toBe(allowed)
+      expect(double.dryRun).not.toHaveBeenCalled()
+      app?.unmount(); app = null; root.innerHTML = ''
+    }
+  })
+
+  it('locks double clicks, Enter and exposed sync during preview until the promise settles', async () => {
+    const pending = deferredPlan()
+    const double = api({ dryRun: vi.fn().mockReturnValueOnce(pending.promise) })
+    const root = mountPanel({ api: double })
+    await runPreview(root)
+    ;(root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).click()
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
+    root.querySelector('input')!.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+    await panelVm.run()
+    notifyAuthPrincipalChange()
+    await flushUi()
+    expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+    pending.resolve({ status: 'ready', canApply: true, counts: { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(double.apply).not.toHaveBeenCalled()
+  })
+
+  it.each(['project', 'scope', 'session', 'unmount'].flatMap(change => ['success', 'error'].map(reply => ({ change, reply }))))('drops late preview $reply after $change without pretending IO ended', async ({ change, reply }) => {
+    const pending = deferredPlan()
+    const double = api({ dryRun: vi.fn().mockReturnValue(pending.promise) })
+    const scope = reactive({ tenantId: 'synthetic_tenant', workspaceId: 'synthetic_workspace' })
+    const synced = vi.fn()
+    const root = mountPanel({ api: double, scope, onSynced: synced })
+    await runPreview(root)
+    if (change === 'project') {
+      const input = root.querySelector('input')!
+      input.value = 'SYN-OTHER'
+      input.dispatchEvent(new Event('input'))
+    } else if (change === 'scope') scope.workspaceId = 'synthetic_other_workspace'
+    else if (change === 'session') { localStorage.setItem('auth_token', 'synthetic_other_session'); notifyAuthPrincipalChange() }
+    else { app?.unmount(); app = null }
+    await flushUi()
+    if (change !== 'unmount') expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(true)
+    if (reply === 'success') pending.resolve({ status: 'ready', canApply: true, counts: { add: 99, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    else pending.reject(new Error(PLANTED_SECRET))
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+    expect(double.apply).not.toHaveBeenCalled()
+    expect(synced).not.toHaveBeenCalled()
+  })
+
+  it('clears an already displayed preview on input, scope and session changes without reading again', async () => {
+    const double = api()
+    const scope = reactive({ tenantId: 'synthetic_tenant', workspaceId: 'synthetic_workspace' })
+    const root = mountPanel({ api: double, scope })
+    await runPreview(root)
+    expect(previewNode(root)).not.toBeNull()
+    scope.tenantId = 'synthetic_other_tenant'
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    await runPreview(root)
+    localStorage.setItem('auth_token', 'synthetic_other_session')
+    window.dispatchEvent(new Event('storage'))
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    await runPreview(root)
+    const input = root.querySelector('input')!
+    input.value = 'SYN-OTHER'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    expect(double.dryRun).toHaveBeenCalledTimes(3)
+  })
+
+  // Exercise the real useAuth snapshot reader and the real stock-prep predicate.
+  // The token intentionally carries no permissions: only the refreshed stored snapshot changes.
+  const storedAccessCases = [
+    { key: 'user_permissions', granted: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], revoked: ['stock-prep:read'] },
+    { key: 'user_roles', granted: ['admin'], revoked: [] },
+  ]
+
+  function seedStoredAccess(key: string, values: string[]): void {
+    h.useStoredAccess = true
+    localStorage.setItem('auth_token', 'synthetic_unchanged_session')
+    localStorage.setItem('user_permissions', '[]')
+    localStorage.setItem('user_roles', '[]')
+    localStorage.setItem(key, JSON.stringify(values))
+  }
+
+  function announceAccessChange(event: string, key: string): void {
+    if (event === 'storage') window.dispatchEvent(new StorageEvent('storage', { key }))
+    else if (event === 'focus') window.dispatchEvent(new Event('focus'))
+  }
+
+  it.each(storedAccessCases.flatMap(access => ['storage', 'focus'].map(event => ({ ...access, event }))))(
+    'enables a same-token $key grant on $event without automatically requesting a preview',
+    async ({ key, granted, revoked, event }) => {
+      seedStoredAccess(key, revoked)
+      const double = api()
+      const root = mountPanel({ api: double, projectNo: PROJECT_NO })
+      expect(root.querySelector('[data-testid="stock-prep-project-preview-run"]')).toBeNull()
+
+      localStorage.setItem(key, JSON.stringify(granted))
+      announceAccessChange(event, key)
+      await flushUi()
+
+      expect(localStorage.getItem('auth_token')).toBe('synthetic_unchanged_session')
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
+      expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(false)
+      expect(double.dryRun).not.toHaveBeenCalled()
+      await runPreview(root)
+      expect(previewNode(root)).not.toBeNull()
+      expect(double.dryRun).toHaveBeenCalledTimes(1)
+      expect(double.apply).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(storedAccessCases.flatMap(access => ['storage', 'focus'].map(event => ({ ...access, event }))))(
+    'clears a displayed preview and hides controls after same-token $key revocation on $event',
+    async ({ key, granted, revoked, event }) => {
+      seedStoredAccess(key, granted)
+      const double = api()
+      const root = mountPanel({ api: double })
+      await runPreview(root)
+      expect(previewNode(root)).not.toBeNull()
+
+      localStorage.setItem(key, JSON.stringify(revoked))
+      announceAccessChange(event, key)
+      await flushUi()
+
+      expect(localStorage.getItem('auth_token')).toBe('synthetic_unchanged_session')
+      expect(previewNode(root)).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-preview-run"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+      await panelVm.run()
+      expect(double.dryRun).toHaveBeenCalledTimes(1)
+      expect(double.apply).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(storedAccessCases.flatMap(access => ['storage', 'focus', 'no event'].flatMap(event =>
+    ['success', 'error'].map(reply => ({ ...access, event, reply })),
+  )))(
+    'drops in-flight preview $reply after same-token $key revocation with $event',
+    async ({ key, granted, revoked, event, reply }) => {
+      seedStoredAccess(key, granted)
+      const pending = deferredPlan()
+      const double = api({ dryRun: vi.fn().mockReturnValueOnce(pending.promise) })
+      const root = mountPanel({ api: double })
+      await runPreview(root)
+
+      localStorage.setItem(key, JSON.stringify(revoked))
+      announceAccessChange(event, key)
+      await flushUi()
+      expect((root.querySelector('input') as HTMLInputElement).disabled).toBe(true)
+      if (event !== 'no event') expect(root.querySelector('[data-testid="stock-prep-project-preview-run"]')).toBeNull()
+
+      if (reply === 'success') pending.resolve({ status: 'ready', canApply: true, counts: { add: 99, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+      else pending.reject(new Error(PLANTED_SECRET))
+      await flushUi()
+
+      expect(localStorage.getItem('auth_token')).toBe('synthetic_unchanged_session')
+      expect(previewNode(root)).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-preview-run"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+      expect((root.querySelector('input') as HTMLInputElement).disabled).toBe(false)
+      expect(double.dryRun).toHaveBeenCalledTimes(1)
+      expect(double.apply).not.toHaveBeenCalled()
+    },
+  )
+
+  it('discards a pending preview even when the changed same-token snapshot still allows preview', async () => {
+    seedStoredAccess('user_permissions', ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'])
+    const pending = deferredPlan()
+    const double = api({ dryRun: vi.fn().mockReturnValueOnce(pending.promise) })
+    const root = mountPanel({ api: double })
+    await runPreview(root)
+    localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull', 'stock-prep:admin']))
+    // No notification: the completion check must compare the entire captured snapshot.
+    pending.resolve({ status: 'ready', canApply: true, counts: { add: 99, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    await flushUi()
+    expect(previewNode(root)).toBeNull()
+    expect((root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(double.dryRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('a later sync plans freshly and uses its own token through the unchanged explicit path', async () => {
+    const double = api({ dryRun: vi.fn()
+      .mockResolvedValueOnce({ status: 'ready', canApply: true, dryRunToken: 'PRIVATE_PREVIEW_TOKEN', counts: { add: 9, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+      .mockResolvedValueOnce({ status: 'ready', canApply: true, dryRunToken: 'FRESH_SYNC_TOKEN', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }) })
+    const synced = vi.fn()
+    const root = mountPanel({ api: double, onSynced: synced })
+    await runPreview(root)
+    expect(double.apply).not.toHaveBeenCalled()
+    await runSync(root)
+    expect(previewNode(root)).toBeNull()
+    expect(double.dryRun).toHaveBeenCalledTimes(2)
+    expect(double.apply).toHaveBeenCalledWith(PROJECT_NO, 'FRESH_SYNC_TOKEN')
+    expect(double.archive).toHaveBeenCalledTimes(1)
+    expect(synced).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.textContent).toContain('导入完成')
+  })
+
+  it('clears a previous imported verdict at preview start and prevents preview during a sync', async () => {
+    const pending = deferredPlan()
+    const double = api()
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')).not.toBeNull()
+    vi.mocked(double.dryRun).mockReturnValueOnce(pending.promise)
+    await runPreview(root)
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')).toBeNull()
+    pending.resolve({ status: 'ready', canApply: true, counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    await flushUi()
+    const syncPending = deferredPlan()
+    vi.mocked(double.dryRun).mockReturnValueOnce(syncPending.promise)
+    await runSync(root)
+    ;(root.querySelector('[data-testid="stock-prep-project-preview-run"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(double.dryRun).toHaveBeenCalledTimes(3)
+    expect(previewNode(root)).toBeNull()
+    syncPending.resolve({ status: 'ready', canApply: true, dryRunToken: 'FRESH_SYNC_TOKEN', counts: { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })
+    await flushUi()
+  })
 
   // ---- P-01 --------------------------------------------------------------------------------
   it('P-01: a platform admin sees the sync control', () => {

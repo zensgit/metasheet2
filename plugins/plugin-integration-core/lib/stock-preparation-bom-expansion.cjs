@@ -16,6 +16,9 @@ const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
 const DEFAULT_MAX_DEPTH = 20
 const DEFAULT_MAX_ROWS = 10000
+// Server-owned evaluation generation, not source schema or authorization. Persisted
+// artifacts from older algorithms must not be silently relabelled with this value.
+const STOCK_PREPARATION_BOM_EVALUATION_VERSION = 'stock-preparation-bom.v2'
 const LARGE_BOM_BOUNDED_ERROR_TYPES = Object.freeze([
   'max_rows_exceeded',
   'read_page_limit_exceeded',
@@ -54,7 +57,7 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
 //
 // THE THREE THINGS THAT MAKE IT SAFE (each has a test that fails if it is removed):
 //
-//   1. THE THREE READS THAT DECIDE WHICH PROJECT'S DATA THIS IS are re-filtered CLIENT-SIDE with
+//   1. THE ROOT-DISCOVERY READS are re-filtered CLIENT-SIDE with
 //      `matchesByField`: the pathExAttr ENTRY read (whose rows seed both root segments), the
 //      pathInfo CHILD-NODE read, and the bomHead FIND-ROOTS read. `readAll` RECORDS `filtersApplied`
 //      and never ENFORCES it, and `bridge:legacy-sql-readonly` may legally answer
@@ -63,12 +66,10 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
 //      projects' BOM heads under this project's authorization. `visited` and `maxSubtreeDepth` do
 //      not help there: the breach happens on the first read, at depth 1, on nodes seen once each.
 //
-//      NOT re-filtered, and stated plainly rather than glossed: the two reads `expandChildren`
-//      issues per row (bomHead by part+version, bomDetail by bom id). Those are the ORDER path's
-//      own reads — both root segments call the same function — so their exposure to a lying source
-//      is pre-existing and shared, not something root discovery introduces. Closing it is a change
-//      to the order path with its own regressions, deferred to W4; the test file's "WHAT IS NOT
-//      PINNED" note says the same thing at the same altitude.
+//      The ORDER path also rechecks orderHead by path and orderDetail by order. Both root segments
+//      share `expandChildren`, which rechecks bomHead by part and the effective requested version,
+//      then bomDetail by BOM id. These checks never trust the metadata flag; raw return counts and
+//      source-read budgets remain unchanged. No version predicate is invented when none was sent.
 //   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
 //      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
 //      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
@@ -283,6 +284,18 @@ function isPlainObject(value) {
 
 function isBlank(value) {
   return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+}
+
+// Order BOM versions are scalar equality keys, never part-version rankings. Keeping the
+// type makes the declared numeric 0 distinct from the string '0'; trimming strings only
+// removes transport whitespace and does not collapse V02 into V2.
+function comparableBomVersion(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  return undefined
 }
 
 function trimString(value) {
@@ -511,6 +524,14 @@ function normalizeStockPreparationBomReadPlan(input = PLM_STOCK_PREPARATION_BOM_
     bomHead: normalizeObjectFields(plan.bomHead, 'readPlan.bomHead', ['object', 'parentPartField', 'bomIdField'], ['versionField', 'activeField']),
     bomDetail: normalizeObjectFields(plan.bomDetail, 'readPlan.bomDetail', ['object', 'bomParentField', 'componentIdField', 'quantityField'], ['sortField']),
   }
+  if (Object.prototype.hasOwnProperty.call(plan.orderDetail, 'versionField')) {
+    out.orderDetail.versionField = requiredString(plan.orderDetail.versionField, 'readPlan.orderDetail.versionField', { fieldName: true })
+    if (!out.bomHead.versionField) {
+      throw new StockPreparationBomExpansionError('readPlan.bomHead.versionField is required for orderDetail.versionField', {
+        field: 'readPlan.bomHead.versionField',
+      })
+    }
+  }
   // The DECLARED 备料 batch rule. The expansion itself never reads this — batch identity is minted
   // upstream of it (stock-preparation-batch-identity.cjs) — but the read plan is the deployment's
   // one configuration surface, so the declaration must SURVIVE normalization instead of being
@@ -689,13 +710,11 @@ async function readAll(adapter, object, filters, options, readStats) {
     for (const record of records) {
       if (isPlainObject(record)) rows.push(record)
     }
-    // COMPLETE-BATCH CHECK, opt-in. `done === false` with no `nextCursor` is the source saying the
-    // batch is unfinished and refusing to say where to resume — §9.1's 断游标. Gated on
-    // `requireCompleteBatch` so an unarmed deployment keeps the exact loop it had: the common fixture
-    // shape `{ records: [...] }` leaves `done` UNDEFINED and must keep terminating normally, which is
-    // why the test is `=== false` and not falsy.
-    if (options.requireCompleteBatch === true
-      && isPlainObject(result) && result.done === false && !result.nextCursor) {
+    // SA01D: an explicitly unfinished page without a continuation is a failed read for every
+    // caller, including dormant B2a deployments. Otherwise a partial BOM can mint an apply token
+    // and mark omitted target rows inactive. Keep the legacy single-page `{ records: [...] }`
+    // shape: absent `done` is not an explicit incompleteness claim, hence `=== false`, not falsy.
+    if (isPlainObject(result) && result.done === false && !result.nextCursor) {
       throw new StockPreparationBomExpansionError('PLM read stopped on a broken cursor', {
         code: READ_CURSOR_BROKEN_ERROR_TYPE,
         object,
@@ -748,15 +767,29 @@ function parseQuantity(value, context) {
 }
 
 function isActiveBomHead(row, activeField) {
+  // An undeclared role explicitly opts out. A declared-but-missing field is NOT
+  // SQL NULL: it cannot establish which BOM heads the source considers active.
   if (!activeField) return true
-  const value = readField(row, activeField)
-  if (value === undefined || value === null || value === '') return true
-  if (value === false || value === 0) return false
+  // State is authority-bearing: even an exact key cannot win over a conflicting
+  // case variant. Keep this stricter uniqueness rule local, not in readField.
+  const matches = isPlainObject(row)
+    ? Object.keys(row).filter((key) => key.toLowerCase() === activeField.toLowerCase())
+    : []
+  const value = matches.length === 1 ? readField(row, activeField) : undefined
+  if (value === null) return true
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value === 1
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase()
+    if (normalized === '1') return true
     if (['0', 'false', 'n', 'no', 'disabled', 'inactive'].includes(normalized)) return false
   }
-  return true
+  // Unknown is neither active nor inactive: filtering it away would let a bad
+  // mapping silently inactivate existing children. Both consumers interpret state
+  // only AFTER membership filtering and catch this as a global read_failed.
+  const error = new StockPreparationBomExpansionError('BOM_HEAD_ACTIVE_VALUE_INVALID', { field: activeField })
+  error.code = 'BOM_HEAD_ACTIVE_VALUE_INVALID'
+  throw error
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,8 +1613,7 @@ async function expandPlmProjectBom(input = {}) {
     maxElapsedMs: optionalPositiveInteger(input.maxElapsedMs, 'maxElapsedMs'),
     startedAtMs: Number.isFinite(input.startedAtMs) ? Number(input.startedAtMs) : Date.now(),
     now: typeof input.now === 'function' ? input.now : Date.now,
-    // Opt-in, and only the B2a seam opts in. Default `false` keeps every existing caller — every
-    // fixture, every demo, every dormant deployment — on the loop it already had.
+    // Retained for existing callers; this legacy option cannot waive an explicit broken cursor.
     requireCompleteBatch: input.requireCompleteBatch === true,
     // D-C. Configuration may move this within reach of the ceiling and no further — see
     // ROW_ERROR_LIMIT's header. The enforcement lives HERE, in the only place that reads the cap, so
@@ -1825,7 +1857,7 @@ async function expandPlmProjectBom(input = {}) {
     return row
   }
 
-  async function expandChildren(parentRow, pathTokens) {
+  async function expandChildren(parentRow, pathTokens, requestedBomVersion) {
     if (errors.length > 0) return
     const parentSourceId = parentRow.componentSourceId
     const nextDepth = parentRow.depth + 1
@@ -1840,15 +1872,41 @@ async function expandPlmProjectBom(input = {}) {
     // 而且它的子树会在胜出的那条兄弟下面原样展开一遍。
     const siblingKeys = new Set()
     const headFilters = { [plan.bomHead.parentPartField]: parentSourceId }
-    if (plan.bomHead.versionField && !isBlank(parentRow.sourceVersion)) {
+    if (requestedBomVersion !== undefined) {
+      headFilters[plan.bomHead.versionField] = requestedBomVersion
+    } else if (plan.bomHead.versionField && !isBlank(parentRow.sourceVersion)) {
       headFilters[plan.bomHead.versionField] = parentRow.sourceVersion
     }
     let heads
     try {
-      heads = (await read(plan.bomHead.object, headFilters)).filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+      const headRows = await read(plan.bomHead.object, headFilters)
+      heads = matchesByField(headRows, plan.bomHead.parentPartField, parentSourceId)
+      if (requestedBomVersion !== undefined) {
+        heads = heads.filter((head) =>
+          comparableBomVersion(readField(head, plan.bomHead.versionField)) === requestedBomVersion)
+      } else if (plan.bomHead.versionField && Object.prototype.hasOwnProperty.call(headFilters, plan.bomHead.versionField)) {
+        // Legacy/recursive reads use only the version actually sent for this parent, not the root's.
+        heads = matchesByField(heads, plan.bomHead.versionField, headFilters[plan.bomHead.versionField])
+      }
+      heads = heads.filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
     } catch (err) {
       addReadError(err, plan.bomHead.object)
       return
+    }
+    if (requestedBomVersion !== undefined) {
+      if (heads.length === 0) {
+        addGlobalError('order_bom_version_no_active_match', { field: plan.bomHead.versionField, depth: parentRow.depth })
+        return
+      }
+      const bomIds = new Set(heads.map((head) => toKey(readField(head, plan.bomHead.bomIdField))))
+      if (bomIds.has(null)) {
+        addGlobalError('order_bom_version_missing_bom_id', { field: plan.bomHead.bomIdField, depth: parentRow.depth })
+        return
+      }
+      if (bomIds.size > 1) {
+        addGlobalError('order_bom_version_ambiguous', { field: plan.bomHead.bomIdField, depth: parentRow.depth, count: bomIds.size })
+        return
+      }
     }
     if (nextDepth > options.maxDepth && heads.length > 0) {
       addGlobalError('max_depth_exceeded', { maxDepth: options.maxDepth, parentDepth: parentRow.depth })
@@ -1863,7 +1921,8 @@ async function expandPlmProjectBom(input = {}) {
       }
       let details
       try {
-        details = await read(plan.bomDetail.object, { [plan.bomDetail.bomParentField]: bomId })
+        const detailRows = await read(plan.bomDetail.object, { [plan.bomDetail.bomParentField]: bomId })
+        details = matchesByField(detailRows, plan.bomDetail.bomParentField, bomId)
       } catch (err) {
         addReadError(err, plan.bomDetail.object)
         return
@@ -1959,8 +2018,8 @@ async function expandPlmProjectBom(input = {}) {
    *   answering `filtersApplied: false` hands back the WHOLE table; without those filters the first
    *   hop would adopt every folder node in the catalog as this project's child and then read other
    *   projects' BOM heads under this project's authorization, with `dataScopeRef` still naming the
-   *   one project the request asked for. The reads `expandChildren` makes for each discovered root
-   *   are NOT re-filtered — see the banner: they are the order path's reads, shared verbatim.
+   *   one project the request asked for. The shared `expandChildren` function also rechecks each
+   *   discovered root's BOM heads and details, just as it does for order roots and their children.
    *
    *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
    *   and they get two different answers:
@@ -2071,6 +2130,7 @@ async function expandPlmProjectBom(input = {}) {
   // 现在都发生在第一次 bomHead 读之前。预算(maxReadCount/maxElapsedMs)仍由同一个 `read` 记账,
   // 超了仍是全局错误 -> status failed -> canApply false。
   const rootCandidates = []
+  const orderVersionsByComponent = plan.orderDetail.versionField ? new Map() : null
   try {
     for (const pathRow of pathMatches) {
       if (errors.length > 0) break
@@ -2089,7 +2149,8 @@ async function expandPlmProjectBom(input = {}) {
         addRowError({ type: 'missing_path', field: plan.pathInfo.idField, depth: 0 })
         continue
       }
-      const orderHeads = await read(plan.orderHead.object, { [plan.orderHead.pathIdField]: pathId })
+      const orderHeadRows = await read(plan.orderHead.object, { [plan.orderHead.pathIdField]: pathId })
+      const orderHeads = matchesByField(orderHeadRows, plan.orderHead.pathIdField, pathId)
       for (const orderHead of orderHeads) {
         if (errors.length > 0) break
         const orderId = readField(orderHead, plan.orderHead.idField)
@@ -2097,13 +2158,29 @@ async function expandPlmProjectBom(input = {}) {
           addRowError({ type: 'missing_order_id', field: plan.orderHead.idField, depth: 0 })
           continue
         }
-        const details = await read(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId })
+        const detailRows = await read(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId })
+        const details = matchesByField(detailRows, plan.orderDetail.orderIdField, orderId)
         for (const detail of details) {
           if (errors.length > 0) break
+          const requestedBomVersion = plan.orderDetail.versionField
+            ? comparableBomVersion(readField(detail, plan.orderDetail.versionField))
+            : undefined
+          if (plan.orderDetail.versionField && requestedBomVersion === undefined) {
+            addGlobalError('order_bom_version_invalid', { field: plan.orderDetail.versionField, depth: 0 })
+            continue
+          }
           const componentSourceId = toKey(readField(detail, plan.orderDetail.componentIdField))
           if (componentSourceId === null) {
             addRowError({ type: 'missing_component_source_id', field: plan.orderDetail.componentIdField, depth: 0 })
             continue
+          }
+          if (orderVersionsByComponent) {
+            if (orderVersionsByComponent.has(componentSourceId)
+              && orderVersionsByComponent.get(componentSourceId) !== requestedBomVersion) {
+              addGlobalError('order_bom_version_conflict', { field: plan.orderDetail.versionField, depth: 0 })
+              break
+            }
+            orderVersionsByComponent.set(componentSourceId, requestedBomVersion)
           }
           const qty = parseQuantity(readField(detail, plan.orderDetail.quantityField), {
             field: plan.orderDetail.quantityField,
@@ -2133,6 +2210,7 @@ async function expandPlmProjectBom(input = {}) {
             rawQuantity: qty.value,
             sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
             pathTokens,
+            ...(plan.orderDetail.versionField ? { requestedBomVersion } : {}),
           })
         }
       }
@@ -2145,6 +2223,13 @@ async function expandPlmProjectBom(input = {}) {
 
   // PHASE 2 — 老系统根选择。PURE: no read, no row, just which candidates survive.
   const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
+  if (plan.orderDetail.versionField && rootSelectionResult.droppedCount > 0) {
+    addGlobalError('order_bom_version_root_filtered', {
+      field: plan.orderDetail.versionField,
+      depth: 0,
+      count: rootSelectionResult.droppedCount,
+    })
+  }
   rootsFilteredOut = rootSelectionResult.droppedCount
   rootSelectionReport = rootSelectionResult.report
 
@@ -2169,6 +2254,7 @@ async function expandPlmProjectBom(input = {}) {
         continue
       }
       if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
+      if (plan.orderDetail.versionField) rowResult.row.orderBomVersion = candidate.requestedBomVersion
       if (!pushRow(rowResult.row)) break
       // The ONLY line the order loop gained, and it is a no-op unless the optional block is
       // configured. Counted HERE, where an order root is actually produced, rather than
@@ -2177,7 +2263,7 @@ async function expandPlmProjectBom(input = {}) {
       // roots for a run that produced several — the one number `rootQuantitySource` exists to
       // get right.
       if (subtreeCounters) subtreeCounters.rootQuantitySource.orderDetail += 1
-      await expandChildren(rowResult.row, candidate.pathTokens)
+      await expandChildren(rowResult.row, candidate.pathTokens, candidate.requestedBomVersion)
     }
   } catch (err) {
     const bounded = readLimitErrorDetails(err)
@@ -2487,6 +2573,7 @@ function summarizeBomExpansionForEvidence(result = {}) {
 }
 
 module.exports = {
+  STOCK_PREPARATION_BOM_EVALUATION_VERSION,
   DEFAULT_PAGE_LIMIT,
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_DEPTH,

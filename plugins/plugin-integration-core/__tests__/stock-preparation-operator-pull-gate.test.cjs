@@ -152,6 +152,8 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
     config: {},
   }
   const services = {
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
@@ -439,6 +441,7 @@ function mountWithSource({
     }
   }
   const services = {
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
     // WHOSE identity the read runs as, not about what the source returns.

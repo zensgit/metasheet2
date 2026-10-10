@@ -10,6 +10,7 @@ const path = require('node:path')
 
 const {
   MISSING_COMPONENT_DETAIL_LIMIT,
+  STOCK_PREPARATION_BOM_EVALUATION_VERSION,
   ROW_ERROR_LIMIT,
   ROW_ERROR_LIMIT_CEILING,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
@@ -17,6 +18,7 @@ const {
   normalizeStockPreparationBomReadPlan,
   normalizeRootSelection,
   expandPlmProjectBom,
+  isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
   summarizeMissingComponents,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
@@ -64,7 +66,9 @@ function createAdapter(data) {
         nextCursor: records.length >= limit && offset + records.length < matches.length ? String(offset + records.length) : null,
         done: offset + records.length >= matches.length,
         metadata: {
-          source: 'bridge:legacy-sql-readonly',
+          // This fixture implements offset pagination, like the SQL readonly adapter.
+          // A real Bridge cannot follow the nextCursor emitted above.
+          source: 'data-source:sql-readonly',
           filtersApplied: true,
           filterFields: Object.keys(input.filters || {}).sort(),
         },
@@ -90,6 +94,291 @@ function baseData(overrides = {}) {
   }
 }
 
+async function testBomHeadActiveStateContract() {
+  const absent = Symbol('absent')
+  const ambiguous = Symbol('ambiguous')
+  const exactAndAlias = Symbol('exact-and-alias')
+  const active = [null, 1, true, '1', ' 1 ']
+  const inactive = [false, 0, 2, -1, 0.5, '0', ' FALSE ', 'n', 'NO', 'disabled', 'inactive']
+  const invalid = [absent, undefined, ambiguous, exactAndAlias, '', ' ', 'SYN-UNKNOWN-STATE', '01', '1.0', 'true', [], {}, NaN, Infinity, -Infinity]
+  const run = async (value, field, mode, { noRole = false, foreignInvalid = false } = {}) => {
+    const readPlan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+    readPlan.bomHead.activeField = field
+    if (noRole) delete readPlan.bomHead.activeField
+    if (mode === 'versioned') readPlan.orderDetail.versionField = 'BomVersion'
+    const data = baseData()
+    data.DN_PDM_OrderDetailInfo[0].BomVersion = 'V1'
+    const rootHead = data.DN_PDM_BomHeadInfo[0]
+    delete rootHead.bom_able
+    rootHead[field] = true
+    let head = rootHead
+    if (mode === 'recursive') {
+      data.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-C', IdentityNo: 'C-001', SysVer: 'V1' })
+      head = { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', [field]: true }
+      data.DN_PDM_BomHeadInfo.push(head)
+      data.DN_PDM_BomDetailsInfo.push({ bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: 1 })
+    }
+    // Alternate source casing must use the same exact-or-unambiguous field lookup.
+    delete head[field]
+    if (value === exactAndAlias) {
+      head[field] = 1
+      head[field.toUpperCase()] = 0
+    } else if (value === ambiguous) {
+      head[field.toUpperCase()] = 1
+      head[field[0].toUpperCase() + field.slice(1)] = 1
+    } else if (value !== absent) head[field.toUpperCase()] = value
+    if (foreignInvalid) {
+      data.DN_PDM_BomHeadInfo.push(
+        { part_id: 'FOREIGN-PART', bom_id: 'BAD-PARENT', SysVer: 'V1', [field]: 'SYN-FOREIGN-BAD' },
+        { part_id: head.part_id, bom_id: 'BAD-VERSION', SysVer: 'V9', [field]: 'SYN-FOREIGN-BAD' },
+      )
+    }
+    const calls = []
+    const sourceAdapter = {
+      async read(input) {
+        calls.push(input)
+        const records = data[input.object] || []
+        // The heads facade ignores filters: the production consumer must apply membership first.
+        const matches = input.object === readPlan.bomHead.object ? records : records.filter((row) =>
+          Object.entries(input.filters).every(([key, expected]) => row[key] === expected))
+        return { records: matches.map((row) => ({ ...row })), done: true }
+      },
+    }
+    return { result: await expandPlmProjectBom({ sourceAdapter, projectNo: 'P-001', readPlan }), calls }
+  }
+  for (const field of ['bom_able', 'enabledFlag']) {
+    for (const mode of ['ordinary', 'versioned', 'recursive']) {
+      for (const value of invalid) {
+        const { result, calls } = await run(value, field, mode)
+        assert.equal(result.valid, false, `invalid active state is not complete: ${field}/${mode}/${String(value)}`)
+        assert.deepEqual(result.errors.map((error) => [error.type, error.causeClass]), [['read_failed', 'BOM_HEAD_ACTIVE_VALUE_INVALID']])
+        assert.deepEqual(result.rowErrors, [], 'unknown state is global, not a confirmable row defect')
+        assert.equal(isLargeBomBoundedExpansion(result), false)
+        const rejectedBom = mode === 'recursive' ? 'BOM-B' : 'BOM-A'
+        assert.equal(calls.some((input) => input.object === 'DN_PDM_BomDetailsInfo' && input.filters.bom_pid === rejectedBom), false)
+        assert.equal(JSON.stringify(result.errors).includes('SYN-UNKNOWN-STATE'), false)
+      }
+      for (const value of active) {
+        const { result } = await run(value, field, mode, { foreignInvalid: true })
+        assert.equal(result.valid, true, `active state remains usable: ${field}/${mode}/${String(value)}`)
+        assert.deepEqual(result.rows.map((row) => row.componentSourceId), mode === 'recursive' ? ['PART-A', 'PART-B', 'PART-C'] : ['PART-A', 'PART-B'])
+      }
+      for (const value of inactive) {
+        const { result } = await run(value, field, mode)
+        assert.equal(result.valid, mode !== 'versioned', `inactive state is deliberate, not unknown: ${field}/${mode}/${String(value)}`)
+        assert.deepEqual(result.errors.map((error) => error.type), mode === 'versioned' ? ['order_bom_version_no_active_match'] : [])
+        assert.deepEqual(result.rows.map((row) => row.componentSourceId), mode === 'recursive' ? ['PART-A', 'PART-B'] : ['PART-A'])
+      }
+      const { result } = await run('SYN-UNKNOWN-STATE', field, mode, { noRole: true })
+      assert.equal(result.valid, true, 'an undeclared active role explicitly disables this predicate')
+      assert.equal(result.rows.length, mode === 'recursive' ? 3 : 2)
+    }
+  }
+  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v2')
+}
+
+async function testOrderSpecifiedBomVersionOverridesOnlyRootRead() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.orderDetail.versionField = 'BomVersion'
+  const { adapter, calls } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: 'V1' }],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V2' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Subassembly', Material: 'Iron', SysVer: 'V3' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V3', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
+      { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4' },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', readPlan: plan })
+  assert.equal(result.valid, true)
+  assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A', 'PART-B', 'PART-C'])
+  assert.equal(result.rows[0].sourceVersion, 'V2')
+  assert.equal(result.rows[0].orderBomVersion, 'V1')
+  assert.equal(result.rows[2].totalQuantity, 24)
+  assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-A' && call.filters.SysVer === 'V1'))
+  assert.ok(calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-B' && call.filters.SysVer === 'V3'))
+}
+
+async function testOrderBomVersionFailsClosed() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.orderDetail.versionField = 'BomVersion'
+  assert.equal('versionField' in PLM_STOCK_PREPARATION_BOM_READ_PLAN.orderDetail, false)
+  assert.equal('versionField' in normalizeStockPreparationBomReadPlan(PLM_STOCK_PREPARATION_BOM_READ_PLAN).orderDetail, false)
+  assert.equal(normalizeStockPreparationBomReadPlan(plan).orderDetail.versionField, 'BomVersion')
+  for (const field of [undefined, null, '', '  ', 'bad;field']) {
+    assert.throws(() => normalizeStockPreparationBomReadPlan({
+      ...plan, orderDetail: { ...plan.orderDetail, versionField: field },
+    }), StockPreparationBomExpansionError)
+  }
+  assert.throws(() => normalizeStockPreparationBomReadPlan({
+    ...plan, bomHead: { ...plan.bomHead, versionField: undefined },
+  }), (error) => error.details.field === 'readPlan.bomHead.versionField')
+
+  const run = (data, adapter) => expandPlmProjectBom({
+    sourceAdapter: adapter || createAdapter(data).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  const detail = (value) => ({ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: value })
+  for (const value of [undefined, null, '', '  ', {}, true, false, Infinity, NaN]) {
+    const data = baseData({ DN_PDM_OrderDetailInfo: [detail(value)] })
+    const result = await run(data)
+    assert.equal(result.valid, false)
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.errors.map((error) => error.type), ['order_bom_version_invalid'])
+    assert.equal(result.rows.length, 0)
+    assert.equal(JSON.stringify(result.summary).includes('PART-A'), false)
+  }
+
+  const zero = baseData({
+    DN_PDM_OrderDetailInfo: [detail(0)],
+    DN_PDM_BomHeadInfo: [{ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 0, bom_able: true }],
+  })
+  const zeroResult = await run(zero)
+  assert.equal(zeroResult.valid, true, 'numeric zero is a real version')
+  assert.equal(zeroResult.rows[0].orderBomVersion, 0)
+
+  for (const heads of [
+    [],
+    [{ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: false }],
+    [{ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V02', bom_able: true }],
+  ]) {
+    const result = await run(baseData({ DN_PDM_OrderDetailInfo: [detail('V2')], DN_PDM_BomHeadInfo: heads }))
+    assert.deepEqual(result.errors.map((error) => error.type), ['order_bom_version_no_active_match'])
+  }
+
+  // The source may ignore equality filters. A foreign parent or the wrong version must
+  // be rechecked after the read, even when the adapter claims its filters were applied.
+  for (const head of [
+    { part_id: 'PART-Z', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+    { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V02', bom_able: true },
+  ]) {
+    const data = baseData({ DN_PDM_OrderDetailInfo: [detail('V1')] })
+    const normal = createAdapter(data).adapter
+    const adapter = { read: async (input) => input.object === 'DN_PDM_BomHeadInfo'
+      ? { records: [head], done: true, metadata: { filtersApplied: true } }
+      : normal.read(input) }
+    const result = await run(data, adapter)
+    assert.deepEqual(result.errors.map((error) => error.type), ['order_bom_version_no_active_match'])
+  }
+  const ambiguous = await run(baseData({
+    DN_PDM_OrderDetailInfo: [detail('V1')],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-OTHER', SysVer: 'V1', bom_able: true },
+    ],
+  }))
+  assert.deepEqual(ambiguous.errors.map((error) => error.type), ['order_bom_version_ambiguous'])
+  assert.equal(ambiguous.errors[0].count, 2)
+  const sameId = await run(baseData({
+    DN_PDM_OrderDetailInfo: [detail('V1')],
+    DN_PDM_BomHeadInfo: Array(2).fill({ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true }),
+  }))
+  assert.equal(sameId.valid, true, 'repeated active rows for one BOM id are not ambiguous')
+
+  const conflict = await run(baseData({ DN_PDM_OrderDetailInfo: [detail('V1'), detail('V2')] }))
+  assert.deepEqual(conflict.errors.map((error) => error.type), ['order_bom_version_conflict'])
+  assert.equal(conflict.rows.length, 0)
+  const conflictWithBadQuantity = await run(baseData({
+    DN_PDM_OrderDetailInfo: [detail('V1'), { ...detail('V2'), quantity: 'invalid' }],
+  }))
+  assert.deepEqual(conflictWithBadQuantity.errors.map((error) => error.type), ['order_bom_version_conflict'], 'ordinary quantity errors cannot hide a version conflict')
+  const conflictAfterBadQuantity = await run(baseData({
+    DN_PDM_OrderDetailInfo: [{ ...detail('V1'), quantity: 'invalid' }, detail('V2')],
+  }))
+  assert.deepEqual(conflictAfterBadQuantity.errors.map((error) => error.type), ['order_bom_version_conflict'], 'a bad first quantity cannot hide the later version conflict')
+  assert.ok(conflictAfterBadQuantity.rowErrors.some((error) => error.type === 'invalid_quantity'))
+  const conflictWithMissingPart = await run(baseData({
+    DN_PDM_OrderDetailInfo: [detail('V1'), detail('V2')],
+    DN_PDM_PartLibraryInfo: [],
+  }))
+  assert.deepEqual(conflictWithMissingPart.errors.map((error) => error.type), ['order_bom_version_conflict'], 'an absent part cannot hide the version conflict')
+  assert.ok(conflictWithMissingPart.rowErrors.some((error) => error.type === 'missing_component'))
+
+  const missingBomId = await run(baseData({
+    DN_PDM_OrderDetailInfo: [detail('V1')],
+    DN_PDM_BomHeadInfo: [{ part_id: 'PART-A', bom_id: null, SysVer: 'V1', bom_able: true }],
+  }))
+  assert.deepEqual(missingBomId.errors.map((error) => error.type), ['order_bom_version_missing_bom_id'])
+
+  const filteredData = baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', BomVersion: 'V1' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '1', BomVersion: 'V1' },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'J100-00', IdentityName: 'Main', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'X-001', IdentityName: 'Other', SysVer: 'V1' },
+    ],
+  })
+  const filtered = await run(filteredData)
+  assert.deepEqual(filtered.errors.map((error) => error.type), ['order_bom_version_root_filtered'])
+  assert.equal(filtered.rows.length, 0)
+  assert.equal(JSON.stringify(summarizeBomExpansionForEvidence(filtered)).includes('V1'), false)
+  const filteredConflict = await run({
+    ...filteredData,
+    DN_PDM_OrderDetailInfo: [
+      ...filteredData.DN_PDM_OrderDetailInfo,
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '1', BomVersion: 'V2' },
+    ],
+  })
+  assert.ok(filteredConflict.errors.some((error) => error.type === 'order_bom_version_conflict'), 'conflict is detected before selection can discard the candidate')
+}
+
+async function testDisabledHeadMatchingRequestedVersionIsRefused() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.orderDetail.versionField = 'BomVersion'
+  // Parent and requested version both match: only the active guard may reject this head.
+  const { adapter, calls } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: 'V2' }],
+    DN_PDM_BomHeadInfo: [{ part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V2', bom_able: false }],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', readPlan: plan })
+  assert.equal(result.valid, false)
+  assert.equal(result.status, 'failed')
+  assert.deepEqual(result.errors.map((error) => error.type), ['order_bom_version_no_active_match'])
+  assert.deepEqual(result.rows.map((row) => row.componentSourceId), ['PART-A'])
+  assert.equal(calls.some((call) => call.object === 'DN_PDM_BomDetailsInfo'), false)
+}
+
+async function testOrderBomVersionBindsRevisionEvenForIdenticalRows() {
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.orderDetail.versionField = 'BomVersion'
+  const data = baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', BomVersion: 'V1' }],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A1', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V2', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A1', part_id: 'PART-B', Bom_ExAttr1: '3' },
+      { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3' },
+    ],
+  })
+  const expansion = async (version) => expandPlmProjectBom({
+    sourceAdapter: createAdapter({ ...data, DN_PDM_OrderDetailInfo: [{ ...data.DN_PDM_OrderDetailInfo[0], BomVersion: version }] }).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  const first = await expansion('V1')
+  const second = await expansion('V2')
+  assert.equal(first.valid, true)
+  assert.equal(second.valid, true)
+  assert.deepEqual(first.rows.map((row) => row.componentSourceId), second.rows.map((row) => row.componentSourceId))
+  assert.equal(first.rows[0].sourceVersion, second.rows[0].sourceVersion)
+  const action = { ...REVISION_ACTION, source: { ...REVISION_ACTION.source, readPlan: plan } }
+  const revision = (value) => buildRevision({ action, parameters: { projectNo: 'P-001' }, expansion: value, existingRows: [], conflictPolicyReview: null, plan: null })
+  assert.notEqual(revision(first), revision(second), 'actual root version changes the revision even for an identical BOM shape')
+  assert.equal(JSON.stringify(summarizeBomExpansionForEvidence(first)).includes('V1'), false)
+}
+
 async function testSuccessfulExpansion() {
   const { adapter, calls } = createAdapter(baseData())
   const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: ' P-001 ', pageLimit: 1 })
@@ -98,6 +387,7 @@ async function testSuccessfulExpansion() {
   assert.equal(result.status, 'expanded')
   assert.equal(result.rows.length, 2, 'root + one child')
   assert.equal(result.rows[0].componentSourceId, 'PART-A')
+  assert.equal('orderBomVersion' in result.rows[0], false, 'unconfigured rows keep their original shape')
   assert.equal(result.rows[0].parentSourceId, null)
   assert.equal(result.rows[0].depth, 0)
   assert.equal(result.rows[0].rawQuantity, 2)
@@ -2133,6 +2423,7 @@ async function testSortColumnsLandInThePackColumns() {
 }
 
 async function main() {
+  await testBomHeadActiveStateContract()
   await testRowErrorCapBoundary()
   await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
   await testOverTheCapIsDeterministicAndDistinguishable()
@@ -2153,6 +2444,10 @@ async function main() {
   await testSpecAndCreateTimeAreDeclaredNotGuessed()
   await testDeclaredNativeSpecColumnReachesTheMainTableRow()
   await testSuccessfulExpansion()
+  await testOrderSpecifiedBomVersionOverridesOnlyRootRead()
+  await testOrderBomVersionFailsClosed()
+  await testDisabledHeadMatchingRequestedVersionIsRefused()
+  await testOrderBomVersionBindsRevisionEvenForIdenticalRows()
   await testReadFailureDiagnosticsAreValuesFree()
   await testNoHit()
   await testSourceRowsResolveCaseVariantFieldKeys()
