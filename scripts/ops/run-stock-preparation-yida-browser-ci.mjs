@@ -56,6 +56,11 @@ export function parseChildFailureFrame(raw) {
   if (!Buffer.isBuffer(raw) || raw.length > DIAGNOSTIC_BYTES) return { stage: 'UNKNOWN', reason: 'INVALID' }
   if (raw.length === 0) return { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN' }
   const text = raw.toString('utf8')
+  // Exact C-locale utility text is an observation only: no policy/root cause
+  // is inferred, and this refusal diagnostic cannot authorize success.
+  if (text === 'unshare: unshare failed: Operation not permitted\n') {
+    return { stage: 'NAMESPACE_CREATE', reason: 'PERMISSION_DENIED_OBSERVED' }
+  }
   const bootstrap = /^YIDA_BROWSER_CI_BOOTSTRAP_STAGE \{"stage":"([A-Z_]+)","reason":"BOOTSTRAP_FAILED"\}\nYIDA_BROWSER_CI_BOOTSTRAP_FAILED\n(?![\s\S])/u.exec(text)
   if (bootstrap && bootstrapStages.has(bootstrap[1])) return { stage: bootstrap[1], reason: 'BOOTSTRAP_FAILED' }
   const startup = /^YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED \{"stage":"([A-Z_]+)","reason":"([A-Z_]+)"\}\n(?![\s\S])/u.exec(text)

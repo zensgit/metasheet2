@@ -284,6 +284,7 @@ test('finite output and total deadline remain bounded', () => {
 })
 
 const sha = raw => createHash('sha256').update(raw).digest('hex')
+const unshareDenied = 'unshare: unshare failed: Operation not permitted\n'
 const bootstrapFrame = stage => Buffer.from('YIDA_BROWSER_CI_BOOTSTRAP_STAGE ' +
   JSON.stringify({ stage, reason: 'BOOTSTRAP_FAILED' }) + '\nYIDA_BROWSER_CI_BOOTSTRAP_FAILED\n')
 function diagnosticOwner() {
@@ -320,11 +321,17 @@ test('child protocol accepts only a complete bounded fixed frame, never secret t
   }
   assert.deepEqual(parseChildFailureFrame(Buffer.from('YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED {"stage":"OWNER","reason":"PATH_INVALID"}\n')),
     { stage: 'OWNER', reason: 'PATH_INVALID' })
+  assert.deepEqual(parseChildFailureFrame(Buffer.from(unshareDenied)),
+    { stage: 'NAMESPACE_CREATE', reason: 'PERMISSION_DENIED_OBSERVED' })
   assert.deepEqual(parseChildFailureFrame(Buffer.alloc(0)), { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN' })
   for (const raw of [bootstrapFrame('SYNTHETIC_SECRET'), Buffer.from('synthetic-secret\n' + bootstrapFrame('BOOTSTRAP_OWNER')),
     Buffer.from('YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED {"stage":"OWNER","reason":"SYNTHETIC_SECRET"}\n'),
     Buffer.alloc(1025), Buffer.from('unshare: synthetic-secret'), Buffer.from(bootstrapFrame('BOOTSTRAP_OWNER').toString().trim()),
-    Buffer.concat([bootstrapFrame('BOOTSTRAP_OWNER'), Buffer.from('\n')])]) {
+    Buffer.concat([bootstrapFrame('BOOTSTRAP_OWNER'), Buffer.from('\n')]),
+    ...['synthetic-secret\n' + unshareDenied, unshareDenied + 'synthetic-secret\n',
+      unshareDenied.trimEnd(), unshareDenied + '\n', unshareDenied.replace('\n', '\r\n'),
+      'unshare: unshare failed: Invalid argument\n', 'setpriv: synthetic-secret\n',
+      unshareDenied + 'x'.repeat(1025)].map(text => Buffer.from(text))]) {
     assert.deepEqual(parseChildFailureFrame(raw), { stage: 'UNKNOWN', reason: 'INVALID' })
   }
 })
@@ -375,6 +382,42 @@ test('production capture and outer caller publish bootstrap rejection before unc
       childExit: 1, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false })
     assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
   }, { stderr: bootstrapFrame('BOOTSTRAP_LO_UP').toString() })
+})
+
+test('production capture and outer caller classify only exact unshare denial and keep every variant refused', async () => {
+  for (const variant of ['exact', 'prefix', 'suffix', 'missing-newline', 'extra-newline', 'unknown',
+    'oversize', 'hash', 'hardlink', 'mode', 'source', 'stdout']) {
+    const stderr = variant === 'prefix' ? 'synthetic-secret\n' + unshareDenied
+      : variant === 'suffix' ? unshareDenied + 'synthetic-secret\n'
+        : variant === 'missing-newline' ? unshareDenied.trimEnd()
+          : variant === 'extra-newline' ? unshareDenied + '\n'
+            : variant === 'unknown' ? 'unshare: unshare failed: Invalid argument\n'
+              : variant === 'oversize' ? unshareDenied + 'x'.repeat(1025) : unshareDenied
+    await syntheticChild(async ({ terminal, sandbox }) => {
+      const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64), probe = path.join(sandbox, 'source-probe.mjs')
+      await fs.writeFile(probe, '// synthetic original source', { mode: 0o600 })
+      owner.hashes[probe] = fileHash(probe)
+      // Even an otherwise successful receipt cannot override the child exit.
+      await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
+        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+      const file = path.join(sandbox, 'namespace.stderr.log')
+      if (variant === 'hash') await fs.appendFile(file, 'synthetic-secret')
+      if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
+      if (variant === 'mode') await fs.chmod(file, 0o644)
+      if (variant === 'source') await fs.appendFile(probe, '\n// synthetic persistent drift')
+      const lines = []
+      assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false, variant)
+      const [stage, reason] = variant === 'exact' ? ['NAMESPACE_CREATE', 'PERMISSION_DENIED_OBSERVED']
+        : variant === 'source' ? ['SOURCE_INTEGRITY', 'POST_HASH_REJECTED'] : ['UNKNOWN', 'INVALID']
+      assert.deepEqual(JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)), {
+        protocol: 'YIDA_BROWSER_CI_FAILURE_V1', stage, reason, childExit: 1,
+        signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false }, variant)
+      assert.equal(lines.length, 2, variant)
+      assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}', variant)
+      assert.equal(lines.join('\n').includes('synthetic-secret'), false, variant)
+      assert.equal(process.exitCode, 1, variant)
+    }, { stderr, stdout: variant === 'stdout' ? 'synthetic-secret\n' : '' })
+  }
 })
 
 test('missing receipts, signals and nonprotocol child logs remain bounded fixed failures', async () => {
