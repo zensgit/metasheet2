@@ -71,4 +71,13 @@ jobs:
           tests/integration/task-m3-tree.db.test.ts
           tests/integration/task-m3-membership.db.test.ts
           tests/integration/task-m3-comments-deletion.db.test.ts
+          tests/integration/task-m4-schema.db.test.ts
+          tests/integration/task-m4-list-roles.db.test.ts
+          tests/integration/task-m4-paging-settings.db.test.ts
+          tests/integration/task-m4-dates.db.test.ts
+          tests/integration/task-m4-lists.db.test.ts
+          tests/integration/task-m4-list-members.db.test.ts
+          tests/integration/task-m4-list-items.db.test.ts
+          tests/integration/task-m4-groups.db.test.ts
+          tests/integration/task-m4-org-members.db.test.ts
           --reporter=verbose
