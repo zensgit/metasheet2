@@ -19425,9 +19425,14 @@ export interface components {
             branches: components["schemas"]["ApprovalConditionBranch"][];
             defaultEdgeKey?: string;
         };
+        /**
+         * @description Lock-1 OD-L1-7(a): `targetType: group` names member-group ids in `targetIds`; the template
+         *     keeps the group reference and the executor expands it into one user cc record per frozen
+         *     member at dispatch, so persisted cc records stay user/role.
+         */
         ApprovalCcNodeConfig: {
             /** @enum {string} */
-            targetType: "user" | "role";
+            targetType: "user" | "role" | "group";
             targetIds: string[];
         };
         /**
