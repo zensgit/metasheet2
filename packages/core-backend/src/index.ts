@@ -4231,6 +4231,17 @@ export class MetaSheetServer {
       this.logger.error('DataSourceManager initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // #6164 step 1: read-only trial decrypt of every encrypted store (counts only). Not awaited; never throws.
+    void import('./security/encrypted-store-probe')
+      .then(({ runEncryptedStoreProbeAtStartup }) => runEncryptedStoreProbeAtStartup({ resolvePool: () => poolManager.get() }))
+      .catch(() => {
+        try {
+          this.logger.warn('Encrypted store probe could not be loaded; startup continues without it')
+        } catch {
+          // a throwing logger must not turn into an unhandled rejection
+        }
+      })
+
     try {
       await startDirectorySyncScheduler()
       this.logger.info('Directory sync scheduler initialized')
