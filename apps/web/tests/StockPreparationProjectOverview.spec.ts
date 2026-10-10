@@ -541,10 +541,28 @@ describe('PO-COPY — the refresh result line', () => {
     expect(stockPrepProjectOverviewRefreshText({ projectCount: 7, unreadableCount: 0, truncated: false, countsAt: COUNTS_AT }))
       .toEqual({ zh: `已刷新 7 个项目（截至 ${clock}）。`, en: `Refreshed 7 project(s) (as of ${clock}).` })
     const both = stockPrepProjectOverviewRefreshText({ projectCount: 200, unreadableCount: 2, truncated: true, countsAt: COUNTS_AT })
-    expect(both.zh).toContain('其中 2 个项目的表这次没读到')
-    expect(both.zh).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.zh)
-    expect(both.en).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.en)
-    expect(stockPrepProjectOverviewRefreshText({ projectCount: 1, unreadableCount: null, truncated: false, countsAt: 'not a time' }).zh).toBe('已刷新 1 个项目。')
+    expect(both).toEqual({
+      zh: `已刷新 200 个项目（截至 ${clock}）;本次计数读取有 2 次未成功,请查看各项目的「截至」时间。${STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.zh}`,
+      en: `Refreshed 200 project(s) (as of ${clock}); 2 count read attempt(s) failed; check each project's "as of" time. ${STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.en}`,
+    })
+    expect(stockPrepProjectOverviewRefreshText({ projectCount: 1, unreadableCount: null, truncated: false, countsAt: 'not a time' }))
+      .toEqual({ zh: '已刷新 1 个项目。', en: 'Refreshed 1 project(s).' })
+  })
+
+  it('one project with two unreadable recounts reports two failed attempts, preserving the registered project count', () => {
+    const clock = stockPrepClockText(COUNTS_AT)
+    expect(stockPrepProjectOverviewRefreshText({ projectCount: 1, unreadableCount: 2, truncated: false, countsAt: COUNTS_AT })).toEqual({
+      zh: `已刷新 1 个项目（截至 ${clock}）;本次计数读取有 2 次未成功,请查看各项目的「截至」时间。`,
+      en: `Refreshed 1 project(s) (as of ${clock}); 2 count read attempt(s) failed; check each project's "as of" time.`,
+    })
+  })
+
+  it('one failed count read attempt may have healed later and does not assert that the final numbers stayed stale', () => {
+    const clock = stockPrepClockText(COUNTS_AT)
+    expect(stockPrepProjectOverviewRefreshText({ projectCount: 1, unreadableCount: 1, truncated: false, countsAt: COUNTS_AT })).toEqual({
+      zh: `已刷新 1 个项目（截至 ${clock}）;本次计数读取有 1 次未成功,请查看各项目的「截至」时间。`,
+      en: `Refreshed 1 project(s) (as of ${clock}); 1 count read attempt(s) failed; check each project's "as of" time.`,
+    })
   })
 })
 
