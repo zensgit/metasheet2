@@ -47,6 +47,16 @@ The follow-up adds both modules to `CALCULATION_PATH` (keeping the carve-out lis
 
 Receipts: `ci-guard-fix/final-receipt.json`, `ci-guard-fix/final-green.json`, and the independent `ci-guard-fix/independent-guard-fix-review-astra.json`. Final qualification still requires a fresh CI run on the follow-up head; the original failed head is not retroactively marked green.
 
+## Main alignment after the follow-up
+
+Main advanced to `e450de6909afb639f334b9c03dee36cb4024dc98` while the follow-up CI was running. Its single new commit, #6309, changes 13 approval frontend files; it does not change attendance code, backend code, migrations, package files or workflows. A normal merge into the Draft branch was conflict-free. All 13 incoming files match main byte-for-byte, and all 65 existing slice files other than this verification document match the prior head. The original #6300 base above remains the development starting point; `e450de6909afb639f334b9c03dee36cb4024dc98` is the new qualification base.
+
+On the merged source, eight whole frontend files passed 534/534 with zero failures, skips or todo. They cover the five changed approval specs and the attendance dashboard and two clock specs. The 26 recorded source paths did not change during the run, and the ten owned frontend source hashes match the original completion receipt. The three existing required-web targets now contain 19, 79 and 204 cases instead of 17, 75 and 181; the required scope remains 38 files and increases from 1393 to 1422 cases. Backend, attendance DB and attendance guard target counts remain 40/2377, 21/502 and 20/438 respectively. The unchanged backend source hashes preserve the applicability of the local backend evidence; they do not establish remote execution on the new head.
+
+`pnpm validate:all` on Node 20.20.2 / pnpm 10.33.0 exited 0 after the merge, including plugin validation, lint and type checks. The independent Astra alignment review passed. Evidence is under `artifacts/attendance-server-clock-20261010/main-align/`: `web-8-results.json`, `web-8-summary.json`, `web-main-source-provenance.json`, `web-owned-10-provenance.json`, `root-quality.json` and `independent-main-alignment-review-astra.json`.
+
+The follow-up head `f26257111acada8a815b0a302b91f38c696dd1c6` used the old `9bbbdb29e352527b93164490d17f759d321ddb68` base. Its completed CI facts are retained as historical evidence only; they cannot qualify the new merge head. Fresh CI must run against the new frozen head, tree and base before this Draft's CI gate can be reported complete.
+
 ## Product boundary and remaining gates
 
 Calendar `today` and punch `workDate` remain distinct: the former follows calibrated server time and the aligned attendance timezone; backend shift and overnight rules determine the latter. Existing resolution remains rotation shift, assignment shift, then default rule. No device-time fallback is claimed.
@@ -60,6 +70,7 @@ The owner stated that old attendance data can be discarded for future enablement
 | Local frontend, backend unit/integration, fresh-database migration/replay/regression, strict fixture and real-PG teardown | Complete for the source hashes and receipts listed above |
 | Local `validate:all`, feature-flag manifest, OpenAPI, retired-tool and source CI-wiring checks | Complete; no remote CI implication |
 | First-CI static registration repair, whole-file guard/neighbor checks and deletion controls | Local PASS: 3 files / 124; four deletion controls detected and exactly restored; independent review PASS |
+| Main alignment | Local PASS: 8 files / 534; 13 incoming blobs preserved; 38-file required-web scope recalibrated to 1422 cases; quality and independent review PASS |
 | Final independent Astra review | PASS for frontend/root and backend local source/evidence; remote CI remains separate |
 | Linked Draft PR head and remote exact-head CI | Pending; will be recorded separately |
 | Original 20-item QA and business acceptance | NOT_RUN |
