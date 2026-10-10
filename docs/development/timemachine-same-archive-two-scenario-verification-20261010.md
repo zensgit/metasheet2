@@ -67,6 +67,29 @@ are not added to the 132 distinct tests above. The initial focused command also
 contained a nonexistent additional neighbor filename; only the 12 collected
 files are counted. The actual whole-file neighbors were then run separately.
 
+## Database-admission follow-up
+
+The subsequent source audit found that `createOwnedDatabase` still rejected the
+new stale target before either scenario could execute. A test invoking that
+actual private function with a mocked database reproduced 3 FAIL / 5 PASS.
+The creator now admits exactly the current run's source and two target names,
+and records stale-target creation immediately after CREATE so that a later
+identity-read failure cannot leave the cleanup flag unset.
+
+The eight admission tests and four whole-file safety/cleanup/verdict neighbors
+passed 32/32 with zero skips. Acceptance-script typechecking exited 0. Opening
+the name guard caused 3 FAIL / 5 PASS; removing the creation flag caused
+2 FAIL / 6 PASS. Source bytes were restored after each mutation, and the restored
+eight tests passed. These are mocked checks; no database or native driver was
+started. Earlier 132-test results remain historical evidence for the previous
+commit and are not presented as rerun on this follow-up.
+
+`pnpm validate:all` and `git diff --check` also exited 0 for this follow-up.
+
+Private logs and the post-commit source receipt are under
+`artifacts/tm-stale-target-admission-repair-20261010/`. This fixes a local
+execution blocker; the remaining native and staging gates below are unchanged.
+
 ## Remaining gates
 
 | Gate | Verdict |

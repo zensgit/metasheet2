@@ -1116,13 +1116,14 @@ function runChecked(
 }
 
 async function createOwnedDatabase(admin: Pool, name: string, owner: string): Promise<void> {
-  assert.ok(name === names.source || name === names.target, 'RECOVERY_LOCAL_BACKUP_DATABASE_NAME_REFUSED')
+  assert.ok(name === names.source || name === names.target || name === names.staleTarget, 'RECOVERY_LOCAL_BACKUP_DATABASE_NAME_REFUSED')
   assert.equal(ownedDatabases.has(name), false, 'RECOVERY_LOCAL_BACKUP_DATABASE_ALREADY_REGISTERED')
   const cluster = await admin.query<{ system_identifier: string }>('SELECT system_identifier::text FROM pg_control_system()')
   assert.equal(cluster.rows.length, 1, 'RECOVERY_LOCAL_BACKUP_CLUSTER_IDENTITY_REFUSED')
   await admin.query(`CREATE DATABASE ${quoteIdentifier(name)} OWNER ${quoteIdentifier(owner)}`)
   if (name === names.source) sourceCreated = true
   if (name === names.target) targetCreated = true
+  if (name === names.staleTarget) staleTargetCreated = true
   const identity = await admin.query<OwnedDatabaseIdentity>(
     `SELECT d.datname AS name,d.oid::text AS oid,pg_catalog.pg_get_userbyid(d.datdba) AS owner,
       c.system_identifier::text AS system_identifier
