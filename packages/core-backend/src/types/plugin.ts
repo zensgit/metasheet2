@@ -384,6 +384,8 @@ export interface MultitableRepairTransactionSurface {
     baseId: string | null
     name: string
     description: string | null
+    /** Server-owned `meta_sheets.system_kind` (null when unset). See MultitableProvisioningAPI.findObjectSheet. */
+    systemKind: string | null
   } | null>
   resolveExistingObjectFieldIds(input: {
     projectId: string
@@ -457,6 +459,13 @@ export interface MultitableProvisioningAPI {
     baseId: string | null
     name: string
     description: string | null
+    /**
+     * S3: the server-owned `meta_sheets.system_kind` (null when unset, or on a database without the
+     * column). A plugin that relies on a host-owned stamp (the stock-preparation overview) reads it here
+     * and FAILS CLOSED when it is not the kind it asked for — e.g. a sheet created before the stamp
+     * existed keeps NULL forever, because the host never rewrites an existing row's kind.
+     */
+    systemKind: string | null
   } | null>
   resolveFieldIds(input: {
     projectId: string
@@ -523,6 +532,14 @@ export interface MultitableProvisioningAPI {
      * the columns it re-derives; prefer ensureMissingObjectFields for additive repair.
      */
     overwriteMode?: 'refuse' | 'overwrite' | 'observe' | 'preserve'
+    /**
+     * S3 (ADR adr-stock-prep-project-sheets-20261008 §5): a HOST-OWNED `meta_sheets.system_kind` stamp,
+     * written at INSERT only (an existing sheet's kind is never changed). Admitted for exactly one caller —
+     * plugin-integration-core provisioning its project overview object with the `stock_prep_overview` kind;
+     * the plugin-scope wrapper refuses every other combination with 403 MULTITABLE_SYSTEM_KIND_FORBIDDEN
+     * before any IO. Omit it (every other caller) for the unchanged behaviour.
+     */
+    systemKind?: string | null
   }): Promise<{
     baseId: string
     sheet: {
@@ -530,6 +547,8 @@ export interface MultitableProvisioningAPI {
       baseId: string | null
       name: string
       description: string | null
+      /** Server-owned `meta_sheets.system_kind` as stored (null when unset). See findObjectSheet. */
+      systemKind: string | null
     }
     fields: Array<{
       id: string
@@ -655,6 +674,34 @@ export interface MultitableProvisioningAPI {
     granted: string[]
     alreadyGranted: string[]
   }>
+  /**
+   * 一个项目一张备料表 S3 fix round 1 (R1) — G1 for the PROJECT OVERVIEW: grant the server-configured
+   * `stock-prep` roles `spreadsheet:read` (a literal — never write, never admin) on the overview sheet
+   * only: the objectId must be the overview's, the sheet id the one derived for (projectId, objectId), the
+   * registry must record it as this plugin's and this project's, and the host re-checks inside the write
+   * transaction that the sheet carries the `stock_prep_overview` kind. Role subjects only, add-only, a
+   * config-revision row per landed grant that changes the level. Handed to plugin-integration-core ONLY.
+   * OPTIONAL like `grantSheetRoleWrite`: an older host has no port and the plugin reports
+   * `api_unavailable` (an admin grants read by hand, G2).
+   */
+  grantOverviewRoleRead?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    roleIds: string[]
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    granted: string[]
+    alreadyGranted: string[]
+  }>
+  /**
+   * S3 fix round 1 (R8c): the host stamps a requested `systemKind` at INSERT, refuses to adopt an existing
+   * sheet whose kind differs, and reports `systemKind` on every sheet it returns. A plugin that relies on
+   * the stamp checks this declaration BEFORE any write and fails closed (503) when it is not `true` — an
+   * older host would otherwise create an ordinary, writable sheet where a read-only one was meant.
+   */
+  readonly supportsSystemKindStamp?: boolean
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {
     projectId: string
@@ -784,6 +831,48 @@ export interface MultitableRecordsAPI {
     input: StockPreparationPersistUnitOfWorkInput,
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
   ): Promise<T>
+  /**
+   * S3 fix round 2 (F3; register R-37): READ-ONLY probe — `true` iff a GENERIC record write to this sheet
+   * would be refused because it is a read-only system sheet (today: the stock-preparation project overview,
+   * `meta_sheets.system_kind = 'stock_prep_overview'`). A writer whose sheet id comes from configuration (the
+   * multitable target adapter) asks first and refuses with its own typed error. Absent on an older host. The
+   * host refuses the write itself either way; this only lets a caller fail earlier and clearer.
+   */
+  isReadOnlySystemSheet?(input: { sheetId: string }): Promise<boolean>
+  /**
+   * S3 fix round 2 (F3; register R-37): THE ONLY write path to the stock-preparation project overview,
+   * exposed only to `plugin-integration-core`. The caller names a PROJECT (its staging project id), never a
+   * sheet: the host derives the overview's sheet id for that project itself, checks the plugin owns it and
+   * that the host stamped it `stock_prep_overview`, and only then writes. The generic `createRecord` /
+   * `patchRecord` / `deleteRecord` (and the persist unit of work) refuse the overview for every plugin.
+   */
+  stockPreparationOverview?: StockPreparationOverviewRecordsPort
+}
+
+/** S3 fix round 2 (F3): see `MultitableRecordsAPI.stockPreparationOverview`. */
+export interface StockPreparationOverviewRecordsPort {
+  createRecord(input: { projectId: string; data: Record<string, unknown> }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  patchRecord(input: {
+    projectId: string
+    recordId: string
+    changes: Record<string, unknown>
+    expectedVersion?: number
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  deleteRecord(input: { projectId: string; recordId: string }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+  }>
 }
 
 export interface StockPreparationPersistUnitOfWorkInput {

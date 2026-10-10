@@ -3048,8 +3048,13 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // section D, items 11–13): the registry they read is keyed by the tenant this scope proves.
   // S4 (R-38) added TWO — ARCHIVE and RESTORE (section D, items 14–15): the row they flip is keyed by
   // the same proven tenant.
-  assert.equal(callSites, 15, 'G9: fifteen call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore']) {
+  // S3 (R-37) added THREE — the project-fields GET and PATCH (the only surfaces that carry the O2(a)
+  // free texts, keyed by the proven tenant's registry row) and the overview REFRESH (the staging
+  // project it creates the overview in and counts every project sheet through) — section D, items
+  // 16–18. S3 fix round 1 (R6) added ONE — the overview ENSURE (PULL), section D item 19: the proven
+  // tenant's staging project is where it creates the read-only overview.
+  assert.equal(callSites, 19, 'G9: nineteen call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

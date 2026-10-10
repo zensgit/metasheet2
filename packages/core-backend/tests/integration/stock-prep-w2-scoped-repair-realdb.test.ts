@@ -335,6 +335,22 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
 import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
+// S3 fix round 1 (R1): the overview's G1 READ port, against real PostgreSQL.
+import { grantStockPreparationOverviewRoleRead } from '../../src/services/stock-preparation-overview-grants'
+// S3 (ADR §5 「只读（Q5）」): the host half of the project overview — the stamp, the clamp, the delete guard and
+// the plugin records path, all against real PostgreSQL.
+import { assertPluginOwnsObject, type MultitableScopeHooks } from '../../src/multitable/plugin-scope'
+import { createRecord as createMultitableRecord, getRecord as getMultitableRecord } from '../../src/multitable/records'
+import { isSystemManagedSheet } from '../../src/multitable/sheet-delete-guard'
+import {
+  STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+  StockPreparationOverviewSystemKindError,
+  SheetSystemKindConflictError,
+  // S3 fix round 2 (F3): the stamp lookup index.ts wires as the wrapper's hook, and the generic-write refusal.
+  StockPreparationOverviewRecordsWriteError,
+  loadStockPreparationOverviewSheetIds,
+} from '../../src/multitable/stock-preparation-overview-contract'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const projectTargets = require(
@@ -369,6 +385,12 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
   let unclaimedObject = ''
   let otherPluginSheet = ''
   let otherPluginObject = ''
+  // S3: the overview sheet, its ordinary-sheet control twin, and the synthetic role / floor user the case
+  // grants. Cleaned up in afterAll with the rest.
+  let overviewSheet = ''
+  let overviewTwinSheet = ''
+  const ROLE_S3 = `stock-prep_s3test_${suffix}`
+  const S3_FLOOR_USER = `s3floor_${suffix}`
 
   const q = async (sql: string, params?: unknown[]) => {
     const r = await pool.query(sql, params as unknown[])
@@ -457,8 +479,11 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
   })
 
   afterAll(async () => {
-    const sheets = [sheetA, sheetB, unclaimedSheet, otherPluginSheet].filter(Boolean)
+    const sheets = [sheetA, sheetB, unclaimedSheet, otherPluginSheet, overviewSheet, overviewTwinSheet].filter(Boolean)
     if (sheets.length) {
+      // S3: the plugin-path record the overview case writes (and its revision rows) go first.
+      await pool.query('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
       await pool.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
       await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
       await pool.query('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
@@ -466,7 +491,9 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       await pool.query('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
       await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
     }
-    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN]]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [S3_FLOOR_USER]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [`${S3_FLOOR_USER}_read`]).catch(() => {})
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN, ROLE_S3, `${ROLE_S3}_read`]]).catch(() => {})
     await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
     await pool.end()
   })
@@ -590,6 +617,77 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     expect(Number((after.rows[0] as { n: number }).n)).toBe(1)
   })
 
+  // E5 (S3 host half, next to E4): THE ARCHIVE RACE against real PostgreSQL. Two concurrent archives of ONE
+  // fresh registry row through the REAL store over the plugin's REAL db helper: the tenant advisory lock +
+  // FOR UPDATE + compare-and-set (`status: 'active'` repeated in the update's where) let exactly one win; the
+  // loser re-reads the row as archived and answers the typed 409 ALREADY_ARCHIVED. `archived_at` /
+  // `archived_by` are the WINNER's — the loser wrote nothing, so the stamp is set once.
+  it('E5 concurrent archive (real DB): two concurrent archives of one row → one archived, the other 409 STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED, archived_at set once', async () => {
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    const projectNo = `S1E5-${suffix}`
+    const created = await store.create({ tenantId, projectNo, sheetId: `sheet_s1e5_${suffix}`, objectId: objectB, createdBy: 'u_e5_pull', maxPerTenant: 200 }) as { status: string; archivedAt: string | null }
+    expect(created.status).toBe('active')
+    expect(created.archivedAt).toBeNull()
+
+    const actors = ['u_e5_archiver_a', 'u_e5_archiver_b']
+    const results = await Promise.allSettled(actors.map((actorId) =>
+      store.archive({ tenantId, projectNo, actorId }) as Promise<{ status: string; archivedAt: string | null }>,
+    ))
+    const winners = results
+      .map((r, i) => ({ r, actorId: actors[i]! }))
+      .filter((x): x is { r: PromiseFulfilledResult<{ status: string; archivedAt: string | null }>; actorId: string } => x.r.status === 'fulfilled')
+    const losers = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(winners, JSON.stringify(results.map((r) => r.status))).toHaveLength(1)
+    expect(losers).toHaveLength(1)
+    expect(losers[0]!.reason).toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED' })
+    expect(winners[0]!.r.value.status).toBe('archived')
+
+    const rows = await pool.query(
+      'SELECT status, archived_at, archived_by FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2',
+      [tenantId, projectNo],
+    )
+    expect(rows.rowCount).toBe(1)
+    const row = rows.rows[0] as { status: string; archived_at: Date | null; archived_by: string | null }
+    expect(row.status).toBe('archived')
+    // Set ONCE: the stored stamp is the winner's, to the millisecond, and the archiver is the winner.
+    expect(row.archived_at).not.toBeNull()
+    expect(new Date(row.archived_at as Date).toISOString()).toBe(winners[0]!.r.value.archivedAt)
+    expect(row.archived_by).toBe(winners[0]!.actorId)
+    // And a third archive after the race is the same typed refusal, still writing nothing.
+    await expect(store.archive({ tenantId, projectNo, actorId: 'u_e5_late' })).rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED' })
+    const after = await pool.query('SELECT archived_at, archived_by FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])
+    expect(new Date((after.rows[0] as { archived_at: Date }).archived_at).toISOString()).toBe(winners[0]!.r.value.archivedAt)
+    expect((after.rows[0] as { archived_by: string }).archived_by).toBe(winners[0]!.actorId)
+  })
+
   // S4 (ADR §6 / §10 S4 「真库」, register R-38): ARCHIVE AND RESTORE against real PostgreSQL, through the
   // REAL store over the plugin's REAL db helper (advisory lock, FOR UPDATE, compare-and-set update):
   //   * archive flips ONLY the registry row — migration 087's CHECK accepts the write — and the sheet
@@ -706,5 +804,267 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     await expect(store.restore({ tenantId, projectNo: PROJECT_A, actorId: 'u_s4_pull' })).rejects.toMatchObject({ status: 409, code: 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED' })
     expect(await grid()).toEqual(gridBefore)
     expect(await permissionRows(sheetA)).toEqual(grantsBefore)
+  })
+
+  // S3 (ADR §5 「只读（Q5）」, owner ruling Q5 2026-10-08: 宿主级只读 + O1 + O2(a)): THE PROJECT OVERVIEW, HOST HALF,
+  // against real PostgreSQL:
+  //   * provisioned through the REAL scope wrapper for plugin-integration-core, with an ensureObjectInScope
+  //     hook that mirrors index.ts (assertPluginOwnsObject → ensureObject WITH systemKind →
+  //     claimPluginObjectScope): `meta_sheets.system_kind` IS the overview kind, the ensure result and
+  //     findObjectSheet carry it, and the registry records the sheet as the plugin's;
+  //   * a role holding `spreadsheet:write` ON the overview opens it (canRead) but gets no record write — and a
+  //     platform admin is clamped the same way; the SAME role on an ordinary twin keeps record writes (control);
+  //     the host never rewrites an existing sheet's kind (re-ensuring the twin WITH the kind leaves it NULL);
+  //   * the plugin records path — the function index.ts's plugin `createRecord` calls, inside a transaction as
+  //     index.ts runs it — still writes a row, and it reads back;
+  //   * the delete guard refuses the overview as system-managed (and not the twin);
+  //   * another plugin naming the overview kind, and this plugin naming it for another object, are refused
+  //     with nothing created.
+  it('S3 overview: the host stamps stock_prep_overview, clamps every person to read/export (admin included), refuses deletion, and the plugin records path still writes', async () => {
+    const KIND = STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND
+    expect(KIND).toBe('stock_prep_overview')
+    type TxQuery = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const inTx = async <T>(fn: (cq: TxQuery) => Promise<T>): Promise<T> => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const out = await fn(async (sql, params) => {
+          const r = await client.query(sql, params as unknown[])
+          return { rows: r.rows as unknown[], rowCount: r.rowCount }
+        })
+        await client.query('COMMIT')
+        return out
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw e
+      } finally {
+        client.release()
+      }
+    }
+    // Mirrors index.ts `ensureObjectInScope` — including that `systemKind` rides the destructure.
+    const ensureObjectInScope: NonNullable<MultitableScopeHooks['ensureObjectInScope']> = async ({ pluginName, projectId: pid, baseId, descriptor: d, overwriteMode, systemKind }) => {
+      return inTx(async (cq) => {
+        await assertPluginOwnsObject(cq, { pluginName, projectId: pid, objectId: d.id })
+        const result = await ensureObject({ query: cq, projectId: pid, baseId, descriptor: d, overwriteMode, systemKind })
+        await claimPluginObjectScope(cq, { pluginName, projectId: pid, objectId: d.id, sheetId: result.sheet.id })
+        return result
+      })
+    }
+    const scoped = (pluginName: string) => createPluginScopedMultitableApi(
+      { provisioning: { getObjectSheetId }, records: {} } as never,
+      pluginName,
+      { ensureObjectInScope },
+    )
+    const descriptor = {
+      id: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+      name: `S3 overview ${suffix}`,
+      fields: [
+        { id: 'projectNo', name: 'Project', type: 'string' as const },
+        { id: 'status', name: 'Status', type: 'string' as const },
+      ],
+    }
+    const twinDescriptor = { ...descriptor, id: `plm_s3_twin_${suffix}`, name: `S3 twin ${suffix}` }
+
+    // THE STAMP.
+    const ensured = await scoped(PLUGIN).provisioning.ensureObject({ projectId, baseId: null, descriptor, systemKind: KIND })
+    overviewSheet = ensured.sheet.id
+    expect(overviewSheet).toBe(getObjectSheetId(projectId, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID))
+    expect(ensured.sheet.systemKind).toBe(KIND)
+    const stamped = await pool.query('SELECT system_kind, deleted_at FROM meta_sheets WHERE id = $1', [overviewSheet])
+    expect(stamped.rows[0]).toEqual({ system_kind: KIND, deleted_at: null })
+    expect((await findObjectSheet(q as never, projectId, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID))?.systemKind).toBe(KIND)
+    await expect(assertPluginOwnsSheet(q as never, { pluginName: PLUGIN, sheetId: overviewSheet })).resolves.toBe(true)
+    // A re-ensure is idempotent and keeps the stamp.
+    const again = await scoped(PLUGIN).provisioning.ensureObject({ projectId, baseId: null, descriptor, systemKind: KIND })
+    expect(again.sheet).toMatchObject({ id: overviewSheet, systemKind: KIND })
+
+    // The ordinary twin (no kind), and NO LAUNDERING: re-ensuring it WITH the kind is REFUSED inside the
+    // provisioning transaction (fix round 1, R8c — SheetSystemKindConflictError, before any field write), and
+    // the row keeps NULL.
+    const twin = await inTx((cq) => ensureObject({ query: cq as never, projectId, baseId: null, descriptor: twinDescriptor }))
+    overviewTwinSheet = twin.sheet.id
+    expect(twin.sheet.systemKind).toBeNull()
+    const twinFieldsBefore = Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [overviewTwinSheet])).rows[0].n)
+    await expect(inTx((cq) => ensureObject({
+      query: cq as never,
+      projectId,
+      baseId: null,
+      descriptor: { ...twinDescriptor, fields: [...twinDescriptor.fields, { id: 'extra', name: 'Extra', type: 'string' as const }] },
+      systemKind: KIND,
+    }))).rejects.toBeInstanceOf(SheetSystemKindConflictError)
+    expect((await pool.query('SELECT system_kind FROM meta_sheets WHERE id = $1', [overviewTwinSheet])).rows[0]).toEqual({ system_kind: null })
+    expect(Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [overviewTwinSheet])).rows[0].n)).toBe(twinFieldsBefore)
+
+    // THE CLAMP. One role holds spreadsheet:write on BOTH sheets; a floor user holds that role and no global code.
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [ROLE_S3, 'S3 test role'])
+    for (const sheetId of [overviewSheet, overviewTwinSheet]) {
+      await pool.query(
+        `INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+         VALUES ($1, NULL, 'role', $2, 'spreadsheet:write')
+         ON CONFLICT (sheet_id, subject_type, subject_id, perm_code) DO NOTHING`,
+        [sheetId, ROLE_S3],
+      )
+    }
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [S3_FLOOR_USER, ROLE_S3])
+    const floor = { userId: S3_FLOOR_USER, permissions: [] as string[], isAdminRole: false }
+    const admin = { userId: `s3admin_${suffix}`, permissions: [] as string[], isAdminRole: true }
+    const capsOf = async (sheetId: string, access: typeof floor) =>
+      (await resolveSheetCapabilitiesForAccess(q as never, sheetId, access)).capabilities as unknown as Record<string, boolean>
+    // Control: on the twin both keep record writes — the grant is real and the admin is an admin.
+    for (const access of [floor, admin]) {
+      expect(await capsOf(overviewTwinSheet, access)).toMatchObject({ canRead: true, canCreateRecord: true, canEditRecord: true })
+    }
+    // On the overview: read stays, every write is gone — for the admin too. Access management is KEPT as
+    // resolved (fix round 1, R1): the admin may share the overview for reading; the write-grant floor never had it.
+    const WRITE_KEYS = ['canCreateRecord', 'canEditRecord', 'canDeleteRecord', 'canManageFields', 'canManageViews', 'canComment', 'canManageAutomation', 'canSendNotification', 'canSubmitApproval']
+    for (const access of [floor, admin]) {
+      const c = await capsOf(overviewSheet, access)
+      expect(c.canRead, `${access.userId} canRead`).toBe(true)
+      for (const key of WRITE_KEYS) expect(c[key], `${access.userId} ${key}`).toBe(false)
+    }
+    expect((await capsOf(overviewSheet, admin)).canManageSheetAccess).toBe(true)
+    expect((await capsOf(overviewSheet, floor)).canManageSheetAccess).toBe(false)
+
+    // THE G1 READ PORT (fix round 1, R1), real DB: a second role gets `spreadsheet:read` on the overview — one
+    // row, add-only, a history row; a reader holding only that role opens the overview and writes nothing; the
+    // port refuses the unstamped twin with nothing written.
+    const ROLE_S3_READ = `${ROLE_S3}_read`
+    const S3_READER = `${S3_FLOOR_USER}_read`
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [ROLE_S3_READ, 'S3 read role'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [S3_READER, ROLE_S3_READ])
+    const readGrant = await inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewSheet, roleIds: [ROLE_S3_READ], actorId: 'u_s3_puller' }))
+    expect(readGrant).toEqual({ sheetId: overviewSheet, granted: [ROLE_S3_READ], alreadyGranted: [] })
+    const readRows = await pool.query("SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2", [overviewSheet, ROLE_S3_READ])
+    expect(readRows.rows).toEqual([{ perm_code: 'spreadsheet:read' }])
+    const readGrantAgain = await inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewSheet, roleIds: [ROLE_S3_READ] }))
+    expect(readGrantAgain.alreadyGranted).toEqual([ROLE_S3_READ])
+    const reader = await capsOf(overviewSheet, { userId: S3_READER, permissions: [] as string[], isAdminRole: false })
+    expect(reader.canRead).toBe(true)
+    for (const key of WRITE_KEYS) expect(reader[key], `reader ${key}`).toBe(false)
+    await expect(inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewTwinSheet, roleIds: [ROLE_S3_READ] })))
+      .rejects.toMatchObject({ status: 409, code: 'STOCK_PREP_OVERVIEW_GRANT_NOT_OVERVIEW' })
+    const twinReadRows = await pool.query("SELECT 1 FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2", [overviewTwinSheet, ROLE_S3_READ])
+    expect(twinReadRows.rowCount).toBe(0)
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [S3_READER]).catch(() => {})
+    expect((await capsOf(overviewSheet, admin)).canExport).toBe(true)
+    expect((await capsOf(overviewSheet, floor)).canExport).toBe((await capsOf(overviewTwinSheet, floor)).canExport)
+
+    // THE PLUGIN RECORDS PATH still writes (records.ts createRecord, in a transaction, exactly as index.ts runs it).
+    const projectField = ensured.fields.find((f) => f.name === 'Project')!.id
+    const value = `S3-P-${suffix}`
+    const created = await inTx((cq) => createMultitableRecord({ query: cq as never, sheetId: overviewSheet, data: { [projectField]: value } }))
+    expect(created.sheetId).toBe(overviewSheet)
+    const readBack = await getMultitableRecord({ query: q as never, sheetId: overviewSheet, recordId: created.id })
+    expect(readBack.data[projectField]).toBe(value)
+
+    // THE DELETE GUARD.
+    await expect(isSystemManagedSheet(q as never, overviewSheet)).resolves.toBe(true)
+    await expect(isSystemManagedSheet(q as never, overviewTwinSheet)).resolves.toBe(false)
+
+    // THE GATE, on the real wrapper: another plugin, and this plugin on another object — refused, nothing created.
+    const otherProject = `${tenantId}:other-s3test`
+    const otherObject = `plm_s3_other_${suffix}`
+    await expect(scoped('plugin-other-s3test').provisioning.ensureObject({ projectId: otherProject, baseId: null, descriptor, systemKind: KIND }))
+      .rejects.toBeInstanceOf(StockPreparationOverviewSystemKindError)
+    await expect(scoped(PLUGIN).provisioning.ensureObject({ projectId, baseId: null, descriptor: { ...descriptor, id: otherObject }, systemKind: KIND }))
+      .rejects.toMatchObject({ status: 403, code: 'MULTITABLE_SYSTEM_KIND_FORBIDDEN' })
+    const leaked = await pool.query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[])', [[
+      getObjectSheetId(otherProject, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID),
+      getObjectSheetId(projectId, otherObject),
+    ]])
+    expect(leaked.rowCount).toBe(0)
+  })
+
+  // S3 fix round 2 (F3 / F4), against real PostgreSQL — runs after the S3 case above (it needs the stamped overview):
+  //   * F4: the overview lock is `pg_try_advisory_xact_lock` through the plugin's REAL db helper and the REAL store —
+  //     while one transaction holds it, a second answers `{ acquired: false }` AT ONCE (it does not wait for the
+  //     holder), and once the holder commits the lock is free again;
+  //   * F3: through the REAL plugin-scope wrapper with index.ts's stamp hook (the contract's lookup on this database),
+  //     a GENERIC plugin createRecord to the stamped overview is refused (StockPreparationOverviewRecordsWriteError,
+  //     no row), while the overview PORT — given only the project id — writes it; an ordinary plugin-owned sheet of
+  //     the same id shape still takes a generic write.
+  it('S3 fix round 2 (real DB): the overview lock never waits; generic plugin record writes refuse the stamped overview while its port writes it', async () => {
+    expect(overviewSheet, 'the S3 case above provisioned the overview').not.toBe('')
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) }) as {
+      tryWithOverviewLock: <T>(input: { tenantId: string }, fn: () => Promise<T>) => Promise<{ acquired: boolean; value?: T }>
+    }
+    // F4 — THE TRY-LOCK.
+    let signalHeld!: () => void
+    const held = new Promise<void>((resolve) => { signalHeld = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const holder = store.tryWithOverviewLock({ tenantId }, async () => { signalHeld(); await gate; return 'held' })
+    await held
+    const started = Date.now()
+    let secondRan = false
+    await expect(store.tryWithOverviewLock({ tenantId }, async () => { secondRan = true; return 'second' })).resolves.toEqual({ acquired: false })
+    expect(secondRan).toBe(false)
+    expect(Date.now() - started, 'the busy try answered without waiting for the holder').toBeLessThan(3000)
+    // Another tenant's overview lock is independent.
+    await expect(store.tryWithOverviewLock({ tenantId: `${tenantId}_other` }, async () => 'other')).resolves.toEqual({ acquired: true, value: 'other' })
+    release()
+    await expect(holder).resolves.toEqual({ acquired: true, value: 'held' })
+    await expect(store.tryWithOverviewLock({ tenantId }, async () => 'again')).resolves.toEqual({ acquired: true, value: 'again' })
+
+    // F3 — THE WRAPPER, index.ts-shaped hooks over this database.
+    const inTx = async <T>(fn: (cq: Q) => Promise<T>): Promise<T> => database.transaction((trx) => fn(trx.query))
+    const raw = {
+      provisioning: { getObjectSheetId },
+      records: {
+        createRecord: (input: { sheetId: string; data: Record<string, unknown> }) => inTx((cq) => createMultitableRecord({ query: cq as never, sheetId: input.sheetId, data: input.data })),
+      },
+    }
+    const wrapper = createPluginScopedMultitableApi(raw as never, PLUGIN, {
+      assertSheetScope: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+        return { registered: true }
+      },
+      assertSheetOwnedByPlugin: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+      },
+      isStockPreparationOverviewSheet: async ({ sheetId }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId),
+    })
+    const overviewRowCount = async () => Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [overviewSheet])).rows[0].n)
+    const before = await overviewRowCount()
+    const generic = await wrapper.records.createRecord({ sheetId: overviewSheet, data: {} }).then(() => null, (e: unknown) => e)
+    expect(generic).toBeInstanceOf(StockPreparationOverviewRecordsWriteError)
+    expect(generic).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'generic_write' } })
+    expect(await overviewRowCount(), 'the generic write left no row').toBe(before)
+    const viaPort = await wrapper.records.stockPreparationOverview!.createRecord({ projectId, data: {} })
+    expect(viaPort.sheetId).toBe(overviewSheet)
+    expect(await overviewRowCount(), 'the port wrote exactly one row').toBe(before + 1)
+    // Control: an ordinary sheet of the same id shape, registered to the plugin, still takes a generic write.
+    const ordinary = await wrapper.records.createRecord({ sheetId: sheetA, data: {} })
+    expect(ordinary.sheetId).toBe(sheetA)
   })
 })

@@ -206,6 +206,12 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_MANAGE_SCHEMA_PERMISSION_CODE', // permission code constant
   'MULTITABLE_WRITE_PERMISSION', // permission code constant
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
+  // 一个项目一张备料表 S3 (R-37): the plugin-scope wrapper's typed 403 when a plugin asks `ensureObject` for a
+  // `systemKind` stamp it may not have (multitable/stock-preparation-overview-contract.ts
+  // `StockPreparationOverviewSystemKindError.code`). An ERROR CODE, not a flag: nothing reads it from
+  // process.env, and the gate it names has no switch — the stamp is admitted for exactly one (plugin, kind,
+  // object) triple, always. Listed here (not registered) for the same reason as the scope codes around it.
+  'MULTITABLE_SYSTEM_KIND_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
   // 客户反馈 2026-09-24 #4a (managed-table zh relabel, multitable/object-display-name-relabel.ts): four
