@@ -1157,6 +1157,8 @@ export default defineConfig({
       'tests/integration/attendance-plugin.test.ts',
       // Real HTTP/PG rollback and raw-event immutability; runs in the required attendance DB lane.
       'tests/integration/attendance-live-punch-order.db.test.ts',
+      'tests/integration/attendance-online-punch-server-time.db.test.ts',
+      'tests/integration/attendance-online-punch-replay.db.test.ts',
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',

@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W7-4 (#4556) — READ-SIDE TRACE LABELING: the design-lock §4.4 slice that makes
  * group-derived evidence distinguishable from legacy-derived evidence on the
@@ -104,7 +105,10 @@ const { buildAttendanceGroupFixedScheduleProducerKey } = requireCjs(
 const TRACE_CATEGORIES = ['today_status', 'late_early', 'missing_punch'] as const
 
 type HttpResponse = { status: number; body?: any; raw: string }
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<HttpResponse> {

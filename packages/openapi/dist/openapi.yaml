@@ -12324,6 +12324,12 @@ paths:
     x-plugin: plugin-attendance
     post:
       summary: Punch attendance (check in/out)
+      description: >-
+        Ordinary online punches use one server-generated instant. Supplying
+        occurredAt or occurred_at, including null, returns 400
+        PUNCH_CLIENT_TIMESTAMP_FORBIDDEN with message "The server determines
+        online punch time". Historical timestamps require the separately
+        governed import or correction workflow.
       security:
         - bearerAuth: []
       requestBody:
@@ -12332,20 +12338,18 @@ paths:
           application/json:
             schema:
               type: object
+              not:
+                anyOf:
+                  - required:
+                      - occurredAt
+                  - required:
+                      - occurred_at
               properties:
                 eventType:
                   type: string
                   enum:
                     - check_in
                     - check_out
-                occurredAt:
-                  type: string
-                  format: date-time
-                  description: Preferred punch timestamp in ISO 8601 format.
-                occurred_at:
-                  type: string
-                  format: date-time
-                  description: Compatibility alias for occurredAt.
                 timezone:
                   type: string
                 source:

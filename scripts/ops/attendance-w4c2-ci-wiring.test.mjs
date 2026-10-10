@@ -2200,6 +2200,8 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-notification-deliveries.test.ts',
   'tests/integration/attendance-notification-redelivery-route.db.test.ts',
   'tests/integration/attendance-notification-redelivery.db.test.ts',
+  'tests/integration/attendance-online-punch-replay.db.test.ts',
+  'tests/integration/attendance-online-punch-server-time.db.test.ts',
   'tests/integration/attendance-org-resolution-shadow.db.test.ts',
   'tests/integration/attendance-outdoor-punch.test.ts',
   'tests/integration/attendance-plugin.test.ts',

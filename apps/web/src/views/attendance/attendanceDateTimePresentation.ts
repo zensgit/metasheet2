@@ -25,12 +25,13 @@ function dateParts(date: Date, timeZone: string): Record<string, string> {
 }
 
 export function formatAttendanceDateKey(
-  date: Date,
+  date: Date | null | undefined,
   timeZone: string | null | undefined,
 ): string | null {
+  const instant = parseInstant(date)
   const normalized = normalizeAttendanceTimeZone(timeZone)
-  if (!normalized) return null
-  const parts = dateParts(date, normalized)
+  if (!instant || !normalized) return null
+  const parts = dateParts(instant, normalized)
   if (parts.year && parts.month && parts.day) {
     return `${parts.year}-${parts.month}-${parts.day}`
   }
@@ -73,12 +74,13 @@ export function formatAttendanceDateTime(
 }
 
 export function formatAttendanceWeekday(
-  date: Date,
+  date: Date | null | undefined,
   locale: string,
   timeZone: string | null | undefined,
 ): string | null {
   const normalized = normalizeAttendanceTimeZone(timeZone)
-  return normalized
-    ? new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: normalized }).format(date)
+  const instant = parseInstant(date)
+  return normalized && instant
+    ? new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: normalized }).format(instant)
     : null
 }

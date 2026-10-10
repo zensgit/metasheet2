@@ -33,6 +33,7 @@ const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-gro
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const { hasReversedLivePunchOrder } = require('./lib/attendance-live-punch-order.cjs')
+const { CLIENT_TIMESTAMP_CODE, CLIENT_TIMESTAMP_MESSAGE, hasClientPunchTimestamp, getOnlinePunchServerInstant } = require('./lib/attendance-online-punch-clock.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -25637,6 +25638,8 @@ module.exports = {
       && w4IssueFrozenContextV1
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
+              executeOnlineOutdoorInTransaction: (client, input) =>
+                w4RequestOperationBoundary.executeInExternalTransaction({ ...input, client }),
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
               // Gate D2 (#4556/#4844): the split event-INSERT seam the AUTHORITATIVE live-punch
               // branch uses. Injected ALONGSIDE `applyLivePunchLegacy` (never as a flag on it) so
@@ -25669,6 +25672,7 @@ module.exports = {
     // (closed codes only; the raw caller value is never echoed). Returns true when handled.
     const W4_ERROR_NAMES = new Set([
       'AttendanceW4OperationError',
+      'OnlinePunchConnectionUncertainError',
       'AttendanceW4RegistryError',
       'AttendanceW4CommandError',
       'AttendanceW4AuthorizationError',
@@ -26933,8 +26937,6 @@ module.exports = {
       // response-loss retry with the same key and congruent payload replays the stored
       // response. Absent (every pre-W4 client) => the legacy null-ID command contract.
       operationId: z.string().uuid().optional(),
-      occurredAt: z.string().optional(),
-      occurred_at: z.string().optional(),
       timezone: z.string().optional(),
       source: z.string().optional(),
       location: z.record(z.unknown()).optional(),
@@ -30214,6 +30216,10 @@ module.exports = {
       'POST',
       '/api/attendance/punch',
       withPermission('attendance:write', async (req, res) => {
+        if (hasClientPunchTimestamp(req.body)) {
+          res.status(400).json({ ok: false, error: { code: CLIENT_TIMESTAMP_CODE, message: CLIENT_TIMESTAMP_MESSAGE } })
+          return
+        }
         const parsed = punchSchema.safeParse(req.body)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -30264,14 +30270,40 @@ module.exports = {
             logger,
           ).catch(() => {})
         }
-        const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
-        const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
-        if (rawOccurredAt && !occurredAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'occurredAt must be a valid date-time' } })
-          return
+        const rawOccurredAt = null
+        const occurredAt = getOnlinePunchServerInstant()
+        const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
+        // Snapshot the complete client frame before any derived branch defaults or async preparation.
+        const onlineInput = operationId === null ? null : {
+          orgId, userId, tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId, operationId,
+          client: JSON.parse(JSON.stringify({ eventType: parsed.data.eventType,
+            timezone: parsed.data.timezone ?? null, source: parsed.data.source ?? null,
+            location: parsed.data.location ?? null, meta: parsed.data.meta ?? null,
+            photoFileId: typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() || null : null,
+            requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
+          })),
+        }
+        async function refusePreparedPunch(status, body) {
+          if (onlineInput) {
+            const refusal = new HttpError(status, body.error.code, body.error.message)
+            try {
+              const replay = await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'refusal', error: refusal })
+              res.status(replay.receipt.status).json(replay.receipt.body)
+              return
+            } catch (error) { if (error !== refusal) throw error }
+          }
+          res.status(status).json(body)
         }
 
         try {
+          if (onlineInput) {
+            if (!w4LiveScheduledBoundary || typeof w4LiveScheduledBoundary.probeOnlinePunchReplay !== 'function') {
+              res.status(503).json({ ok: false, error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' } })
+              return
+            }
+            const replay = await w4LiveScheduledBoundary.probeOnlinePunchReplay(onlineInput)
+            if (replay) { res.status(replay.status).json(replay.body); return }
+          }
           const settings = await getSettings(db)
           const { outsideGeofence } = await enforcePunchConstraints({
             db,
@@ -30329,7 +30361,7 @@ module.exports = {
           })
           // Actionable ambiguity: never silently pick calendar date or row order (R5 / OD-4556-8).
           if (punchWorkDate.resolution?.kind === 'ambiguous') {
-            res.status(422).json({
+            await refusePreparedPunch(422, {
               ok: false,
               error: {
                 code: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
@@ -30516,7 +30548,7 @@ module.exports = {
             punchPolicySettings?.punchPolicy?.unscheduled?.mode === 'block'
             && !(await isUserScheduledForDate(db, orgId, userId, workDate))
           ) {
-            res.status(422).json({
+            await refusePreparedPunch(422, {
               ok: false,
               error: {
                 code: 'PUNCH_UNSCHEDULED_BLOCKED',
@@ -30549,7 +30581,7 @@ module.exports = {
             const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
             try {
               const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
-              const outcome = await w4RequestOperationBoundary.execute({
+              const requestInput = {
                 kind: 'request_create',
                 operationId,
                 correlationId: requestCorrelationId(req, operationId, 'outdoor-create'),
@@ -30576,11 +30608,15 @@ module.exports = {
                   },
                   requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
                 },
-              })
+              }
+              const outcome = onlineInput
+                ? await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'outdoor', input: requestInput })
+                : await w4RequestOperationBoundary.execute(requestInput)
               if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
                 emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
               }
-              res.status(202).json(outcome.response)
+              if (onlineInput) res.status(outcome.receipt.status).json(outcome.receipt.body)
+              else res.status(202).json(outcome.response)
               return
             } catch (error) {
               if (error instanceof HttpError) {
@@ -30631,7 +30667,7 @@ module.exports = {
               w7MirrorEffectiveState: w7MirrorArmSelection ? w7MirrorArmSelection.effectiveState : null,
             })
           }
-          const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
+          const liveInput = {
             orgId,
             userId,
             operationId: typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null,
@@ -30666,7 +30702,10 @@ module.exports = {
             outerSourceDefinitionFingerprint,
             isWorkday: context.isWorkingDay,
             holidayKind: null,
-          })
+          }
+          const boundaryOutcome = onlineInput
+            ? await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'normal', input: liveInput })
+            : await w4LiveScheduledBoundary.executeLivePunch(liveInput)
           if (boundaryOutcome.kind === 'legacy' || boundaryOutcome.kind === 'legacy_compat') {
             // Lock §12.3 legacy-posture leg: the same synchronous best-effort emit as before.
             // Shadow results deliver durably through the outbox row instead; a replay emits
@@ -30680,8 +30719,17 @@ module.exports = {
               timezone,
             })
           }
-          res.json({ ok: true, data: boundaryOutcome.response })
+          if (onlineInput) res.status(boundaryOutcome.receipt.status).json(boundaryOutcome.receipt.body)
+          else res.json({ ok: true, data: boundaryOutcome.response })
         } catch (error) {
+          // Mutable preparation failures must not mask a concurrently completed same-key receipt.
+          if (onlineInput && error instanceof HttpError) {
+            try {
+              const replay = await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'refusal', error })
+              res.status(replay.receipt.status).json(replay.receipt.body)
+              return
+            } catch (fencedError) { error = fencedError }
+          }
           if (respondIfW4BoundaryError(res, error)) {
             return
           }

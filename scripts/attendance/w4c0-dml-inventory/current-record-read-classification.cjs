@@ -23,7 +23,7 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   // to the punching actor as the acknowledgement of their own write; it is not an ordinary
   // listing/report surface (all of which stay on the view — see the §7.5 reader trace in the
   // boundary's own placeholder docblock).
-  entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'executeLivePunch', 1, 'write_response_echo'),
+  entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'executeLivePunchInTransaction', 1, 'write_response_echo'),
   // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-result-write CORE locks the exact base
   // parent row FOR UPDATE before moving its pointer/visibility — it MUST read the base table (not
   // the current view) to serialize the pointer move and to read the true projection_owner /

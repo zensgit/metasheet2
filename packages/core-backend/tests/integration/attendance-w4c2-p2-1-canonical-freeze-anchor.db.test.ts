@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §8.2 steps 4/5/7, §5.2/§5.3) — #4612 gate3 P2-1
  * remediation: canonical/shadow live-punch freeze-step anchor correctness
@@ -154,7 +155,10 @@ const describeDb = dbUrl ? describe : describe.skip
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(

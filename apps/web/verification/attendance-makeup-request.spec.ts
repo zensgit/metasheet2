@@ -3,10 +3,12 @@ import { expect, test, type Page } from '@playwright/test'
 const cardSelector = '[data-attendance-makeup-request-card]'
 const proof = 'https://example.com/synthetic-proof.png'
 
-async function mockAttendance(page: Page, withLeave = false) {
+async function mockAttendance(page: Page, withLeave = false, clock: { serverAt?: string; browserAt?: string; timezone?: string; unavailable?: boolean } = {}) {
   const posts: Record<string, unknown>[] = []
   const unexpected: string[] = []
-  await page.clock.setFixedTime(new Date('2026-04-15T10:00:00+08:00'))
+  const rulesRequests: string[] = []
+  const serverAt = clock.serverAt ?? '2026-04-15T02:00:00.000Z'
+  await page.clock.setFixedTime(new Date(clock.browserAt ?? '2026-04-15T10:00:00+08:00'))
   await page.addInitScript(() => {
     localStorage.setItem('auth_token', 'synthetic-browser-test-token')
     localStorage.setItem('tenantId', 'synthetic-org')
@@ -59,10 +61,13 @@ async function mockAttendance(page: Page, withLeave = false) {
       return reply({ ok: true, data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' } })
     }
     if (path === '/api/attendance/rules/me') {
+      rulesRequests.push(new URL(request.url()).search)
       return reply({ ok: true, data: {
-        userId: 'synthetic-employee', orgId: 'synthetic-org', resolvedForDate: '2026-04-15',
+        userId: 'synthetic-employee', orgId: 'synthetic-org',
+        resolvedForDate: new URL(request.url()).searchParams.get('asOf') ?? serverAt.slice(0, 10),
+        resolvedAt: clock.unavailable ? undefined : serverAt,
         assignment: { attendanceGroups: [], scheduleGroups: [] },
-        runtimeRule: { timezone: 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
+        runtimeRule: { timezone: clock.timezone ?? 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
       } })
     }
     if (path === '/api/attendance/effective-calendar') {
@@ -74,7 +79,7 @@ async function mockAttendance(page: Page, withLeave = false) {
     unexpected.push(`${request.method()} ${path}`)
     return route.abort()
   })
-  return { posts, unexpected }
+  return { posts, unexpected, rulesRequests }
 }
 
 async function assertFits(page: Page, selector = cardSelector) {
@@ -212,5 +217,48 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     expect(posts).toHaveLength(2)
     expect(unexpected).toEqual([])
     expect(errors).toEqual([])
+  })
+}
+
+// Synthetic browser acceptance: server fixtures are independent from device wall time.
+for (const scenario of [
+  { name: 'available-shanghai', width: 1440, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', expectedTime: /^10:00:/ },
+  { name: 'available-singapore-correction', width: 390, serverAt: '2026-04-14T16:30:00.000Z', timezone: 'Asia/Singapore', expectedTime: /^00:30:/ },
+  { name: 'unavailable-sample', width: 1440, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', unavailable: true },
+  { name: 'unavailable-bfcache-recovery', width: 390, serverAt: '2026-04-15T02:00:00.000Z', timezone: 'Asia/Shanghai', recovery: true },
+]) {
+  test(`server clock: ${scenario.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 390 ? 844 : 900 })
+    const fixture = await mockAttendance(page, false, { ...scenario, browserAt: '2026-04-20T20:00:00Z' })
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.goto('/verification/attendance-makeup-request-harness.html')
+    const hero = page.locator('[data-testid="attendance-hero-punch"]')
+    const time = hero.locator('[data-testid="attendance-hero-time"]')
+    if (scenario.recovery) {
+      await expect(time).toHaveText(/^10:00:/)
+      // Freeze the monotonic input and fail the new sample: old calibration cannot survive recovery.
+      await page.route('**/api/attendance/rules/me*', route => route.fulfill({ status: 503, json: { ok: false, error: { code: 'SYNTHETIC_UNAVAILABLE' } } }))
+      await page.evaluate(() => {
+        const frozen = performance.now()
+        Object.defineProperty(performance, 'now', { value: () => frozen })
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+      })
+    }
+    if (scenario.unavailable || scenario.recovery) {
+      await expect(time).toHaveText('服务器时间不可用')
+      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText('考勤时区不可用')
+      await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('服务器日期不可用')
+    } else {
+      await expect(time).toHaveText(scenario.expectedTime!)
+      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText(`考勤时区：${scenario.timezone}`)
+      await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('2026-04-15')
+      expect(fixture.rulesRequests).toEqual(scenario.timezone === 'Asia/Singapore' ? ['', '?asOf=2026-04-15'] : [''])
+    }
+    for (const button of await hero.locator('.attendance__hero-actions button').all()) await expect(button).toBeEnabled()
+    await assertFits(page, '[data-testid="attendance-hero-punch"]')
+    await page.locator('[data-attendance-overview-primary]').screenshot({ path: testInfo.outputPath(`${scenario.name}.png`) })
+    expect(errors).toEqual([])
+    expect(fixture.unexpected).toEqual([])
   })
 }

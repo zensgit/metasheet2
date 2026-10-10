@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture, executeHistoricalPunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §12.3) — three-posture matrix for legacy-only business time,
  * V2 attribution FREEZE, and the env-gated outbox drain worker (real DB, real
@@ -63,7 +64,10 @@ const requireCjs = createRequire(import.meta.url)
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -261,7 +265,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
 
   it('matrix leg 1 — legacy posture: offset-less business time keeps the exact legacy response with ZERO W4 rows', async () => {
     const token = await mintToken(legacyUser)
-    const res = await punch(token, { eventType: 'check_in', occurredAt: OFFSETLESS, orgId: legacyOrg })
+    const res = await executeHistoricalPunchFixture(pool, { orgId: legacyOrg, userId: legacyUser, occurredAtRaw: OFFSETLESS, operationId: null })
     expect(res.status).toBe(200)
     expect(res.body?.ok).toBe(true)
     // P1-1 remediation (#4612 gate MK-2): recursive key-path pin + deterministic
@@ -292,7 +296,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
   it('matrix leg 2 — effective shadow: legacy projection preserved PLUS exactly one zero-segment legacy_time_ingress review (raw + parser provenance), sealed + outboxed', async () => {
     const token = await mintToken(shadowUser)
     const operationId = randomUUID()
-    const res = await punch(token, { eventType: 'check_in', occurredAt: OFFSETLESS, orgId: shadowOrg, operationId })
+    const res = await executeHistoricalPunchFixture(pool, { orgId: shadowOrg, userId: shadowUser, occurredAtRaw: OFFSETLESS, operationId: operationId })
 
     // Shadow preserves the legacy response/projection ("rejecting the shadow
     // legacy write fails independently" — this half fails alone if shadow
@@ -410,7 +414,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     // Rejection leg: identical shape but a legacy-only business time.
     const token = await mintToken(eligibleRejectUser)
     const operationId = randomUUID()
-    const res = await punch(token, { eventType: 'check_in', occurredAt: OFFSETLESS, orgId: eligibleOrg, operationId })
+    const res = await executeHistoricalPunchFixture(pool, { orgId: eligibleOrg, userId: eligibleRejectUser, occurredAtRaw: OFFSETLESS, operationId: operationId })
     expect(res.status).toBe(422)
     expect(res.body?.error?.code).toBe('W4_ATTRIBUTION_UNSUPPORTED')
     // Values-free: the closed code is the whole message; the raw value is never echoed.
