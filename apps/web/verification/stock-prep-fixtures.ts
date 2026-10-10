@@ -760,6 +760,14 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
   },
   {
+    // S5b (R-39): the workbench-admin shell reads the members page once on first render to decide whether
+    // the 「成员与权限」 rail item exists. The acceptance deployment keeps STOCK_PREP_MEMBERS_PAGE_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO and the item stays hidden.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({

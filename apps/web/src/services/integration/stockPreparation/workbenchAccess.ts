@@ -334,6 +334,38 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     control: 'stock-prep-confirmation-reconcile',
   }),
+  // S5b (R-39) — 「成员与权限」: byte-equal to the plugin manifest's four members rows. WORKBENCH_ADMIN at
+  // the plugin gate; the host's members port then admits only a platform admin or the admitted
+  // stock-prep delegated admin. The controls live on StockPreparationMembersView.vue, never on the
+  // confirmation-queue view; StockPreparationMembers.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'members.read',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    control: 'stock-prep-members-page',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleCreate',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles',
+    control: 'stock-prep-members-custom-role-create',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleUpdate',
+    code: STOCK_PREP_ADMIN,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId',
+    control: 'stock-prep-members-custom-role-save',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleProjectTargets',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets',
+    control: 'stock-prep-members-custom-role-add-tables',
+  }),
 ])
 
 // ---------------------------------------------------------------------------
@@ -660,6 +692,9 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
       Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      // 成员与权限 (S5b, R-39). Permission half only — the shell also requires the members read to
+      // have answered (switch on, caller admitted), so with the switch off the item never renders.
+      Object.freeze({ key: 'members', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
@@ -715,6 +750,16 @@ export function canOpenStockPrepGettingStarted(snapshot: StockPrepAccessSnapshot
  * its own 「这一格看不了」 line rather than a page-level error.
  */
 export function canOpenStockPrepOpsPanel(snapshot: StockPrepAccessSnapshot): boolean {
+  return canOpenStockPrepInstallView(snapshot)
+}
+
+/**
+ * 成员与权限 (S5b, R-39) — the PERMISSION half of the rail item: the workbench ceiling, like the rest
+ * of 【部署与接入】. It is necessary, not sufficient: the shell renders the item only after
+ * GET …/members answered (the default-OFF switch on, and the host port admitting this caller as a
+ * platform admin or the stock-prep delegated admin), so a switch-off deployment never shows it.
+ */
+export function canOpenStockPrepMembersPage(snapshot: StockPrepAccessSnapshot): boolean {
   return canOpenStockPrepInstallView(snapshot)
 }
 
