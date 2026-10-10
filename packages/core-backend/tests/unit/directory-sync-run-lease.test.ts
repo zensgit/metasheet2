@@ -396,8 +396,9 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       // ...with the lease release ordered first, so even a mid-transaction crash
       // under a non-transactional driver would still have freed the lease.
       expect(runRelease).toBeLessThan(integrationMark)
-      expect(txCalls[runRelease].params).toEqual([RUN_ID, 'dingtalk exploded'])
-      expect(txCalls[integrationMark].params).toEqual(['dir-1', 'dingtalk exploded'])
+      // R-41: the persisted text is the classified one; an untyped error's own text goes to the log only.
+      expect(txCalls[runRelease].params).toEqual([RUN_ID, 'Directory sync failed'])
+      expect(txCalls[integrationMark].params).toEqual(['dir-1', 'Directory sync failed'])
 
       // ...and neither goes out as a bare, non-transactional statement. (The reclaim
       // sweep also flips rows to 'failed' outside a transaction — that one is a single

@@ -761,6 +761,19 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Opt-in UI gate for multitable rectangular copy and fill. Default OFF; enabled only by the exact build-time string true.',
     source: 'apps/web/src/multitable/utils/grid-range-fill-flags.ts#isGridRangeFillEnabled',
   },
+  {
+    key: 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    // PROPOSED, pending the owner's choice (reviewer finding F3, 2026-10-08): medium because ON lets an
+    // employee start a cancellation that, once approved, cancels the leave and returns its balance.
+    danger: 'medium',
+    purpose:
+      "Leave cancel-round product entry (approval change-request lock C v5.9, entry addendum P-1…P-11): the LAUNCH gate of POST /api/attendance/requests/:id/cancel-round, read by the attendance plugin (not by packages/core-backend/src). Default OFF; exact literal 'true' only (no trim, no case folding; '1' / 'yes' / 'TRUE' stay OFF — unlike the plugin's older env flags, it does NOT go through parseBoolean). Off: the launch answers the same 404 body as a never-existing request id, before any read or write. It gates ONLY the launch: the summary read (which reports this flag's state as entryEnabled), the approver decision, the requester's withdraw and the attendance-side pending list are not flag-gated, so a round launched while ON can still be read, decided and withdrawn after it is switched OFF. Read on every call, never cached at module load. danger=medium (PROPOSED, owner to confirm): ON lets an employee start a cancellation of their own approved leave; once the original approvers approve it, the leave is cancelled and its leave balance returned.",
+    source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

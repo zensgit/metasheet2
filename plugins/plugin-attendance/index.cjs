@@ -16568,12 +16568,12 @@ function isAttendanceReportFieldCatalogSeedEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
 }
 
-// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the
-// launch endpoint `POST /api/attendance/requests/:id/cancel-round` stays OFF until phase D acceptance
-// passes. Default OFF; gates ONLY the launch — every other cancel-round route is unaffected. Read at
-// call time, never at module load, so both branches are exercisable in a single process.
+// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): gates ONLY the
+// launch `POST /api/attendance/requests/:id/cancel-round`; every other cancel-round route is unaffected. Default
+// OFF; ON only for the exact literal 'true' (AGENTS.md; no trim, no case folding, no '1' / 'yes', so NOT parseBoolean);
+// registered in scripts/ops/global-history-flag-manifest.mjs. Read at call time, never at module load.
 function isAttendanceCancelRoundEntryEnabled() {
-  return parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)
+  return process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED === 'true'
 }
 
 function confidenceRank(value) {
@@ -19790,6 +19790,37 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun, trigger
 // ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED / isAttendanceReportSyncScheduledTriggerRuntimeEnabled).
 function isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED, false)
+}
+
+// A1 status hints (read-only, values-free). The two scheduled features below each have an org-side switch (saved in
+// settings) AND process-level env gates owned by ops. The admin UI shows both halves so a saved switch is never read
+// as "running". This snapshot reports ONLY the env half, read at call time from the process that serves the request,
+// with the SAME readers the features themselves use:
+//   - ATTENDANCE_REPORT_DIGEST_ENABLED (digestProducer) / ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+//     (accrualTrigger): parseBoolean (isAttendanceReportDigestRuntimeEnabled /
+//     isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled)
+//   - ATTENDANCE_SCHEDULER_ENABLED (scheduler): exact 'true' (startAttendanceScheduler, AttendanceScheduler.ts)
+//   - ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED (deliveryWorker): exact 'true'
+//     (resolveAttendanceNotificationDeliveryJob, AttendanceScheduler.ts)
+// The response carries symbolic gate ids and booleans ONLY - no env variable name, no value, no channel credential, no
+// org id (same hygiene as the onboarding lock's notify-readiness port, §4.5: no `ATTENDANCE_` strings in a response).
+// `gatesOpen` means "not blocked by these gates", NOT "running": the org-side policy, the engine prerequisites and the
+// channel configuration are separate, and channel env is deliberately not folded in.
+function buildAttendanceRuntimeGateSnapshot() {
+  const gate = {
+    digestProducer: isAttendanceReportDigestRuntimeEnabled(),
+    accrualTrigger: isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled(),
+    scheduler: process.env.ATTENDANCE_SCHEDULER_ENABLED === 'true',
+    deliveryWorker: process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED === 'true',
+  }
+  const entry = (ids) => {
+    const closedGates = ids.filter((id) => gate[id] !== true)
+    return { gatesOpen: closedGates.length === 0, closedGates }
+  }
+  return {
+    reportDigest: entry(['digestProducer', 'scheduler', 'deliveryWorker']),
+    annualLeaveAccrualScheduled: entry(['accrualTrigger', 'scheduler']),
+  }
 }
 
 // G4 org fan-out throttle. Not exposed as an org-configurable setting (unlike reportSync's
@@ -24932,6 +24963,7 @@ module.exports = {
     runAnnualLeaveAccrual,
     ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN,
     isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled,
+    buildAttendanceRuntimeGateSnapshot,
     resolveAnnualLeaveAccrualScheduledTriggerPeriod,
     isAnnualLeaveAccrualScheduledTriggerDue,
     loadAnnualLeaveAccrualLatestRealRunCreatedAt,
@@ -50982,7 +51014,9 @@ module.exports = {
       withPermission('attendance:admin', async (_req, res) => {
         try {
           const settings = await getSettings(db)
-          res.json({ ok: true, data: settings })
+          // A1: `runtimeGates` is a read-only sibling of `data` (never part of the persisted settings document and
+          // never on the PUT response). It reports the env half of the two scheduled features' double gate.
+          res.json({ ok: true, data: settings, runtimeGates: buildAttendanceRuntimeGateSnapshot() })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
