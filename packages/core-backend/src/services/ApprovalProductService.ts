@@ -7712,6 +7712,7 @@ export class ApprovalProductService {
     requireComplete: boolean,
   ): Promise<Record<string, string[]>> {
     if (!pool) throw new Error('Database not available')
+    // The user-facing messages below are shared by approval AND handler carriers (W1-1d) — keep them node-type-agnostic.
     // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
     // values-free 422 (the offending VALUE is never echoed — only the node key).
     const normalized = new Map<string, string[]>()
@@ -7770,7 +7771,7 @@ export class ApprovalProductService {
           `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
         )
         throw new ServiceError(
-          'Could not verify the chosen approvers for this approval template. Please retry.',
+          'Could not verify the chosen users for this approval template. Please retry.',
           503,
           'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
         )
@@ -7784,7 +7785,7 @@ export class ApprovalProductService {
           // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
           // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
           throw new ServiceError(
-            `A requester choice is required for this approval node`,
+            `A requester choice is required for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_REQUIRED',
             { nodeKey },
@@ -7797,8 +7798,8 @@ export class ApprovalProductService {
         if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
           throw new ServiceError(
             source.mode === 'single'
-              ? `This approval node requires exactly one chosen approver`
-              : `This approval node requires at least one chosen approver`,
+              ? `This node requires exactly one chosen user`
+              : `This node requires at least one chosen user`,
             422,
             'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
             { nodeKey, mode: source.mode },
@@ -7806,7 +7807,7 @@ export class ApprovalProductService {
         }
         const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
           throw new ServiceError(
-            `A chosen approver is outside the scope configured for this approval node`,
+            `A chosen user is outside the scope configured for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
             { nodeKey, scopeType },
@@ -7833,7 +7834,7 @@ export class ApprovalProductService {
               `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
             )
             throw new ServiceError(
-              'Could not verify the chosen approvers for this approval template. Please retry.',
+              'Could not verify the chosen users for this approval template. Please retry.',
               503,
               'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
             )
