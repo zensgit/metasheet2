@@ -132,6 +132,22 @@ function isStockPreparationProjectSheetObjectId(value) {
   return typeof value === 'string' && STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN.test(value)
 }
 
+const STOCK_PREPARATION_PROJECT_SHEET_DIGEST_LENGTH = 24
+
+/**
+ * THE per-project objectId: the prefix + the first 24 hex of sha256(`${tenantId}:${projectNo}`), both
+ * trimmed. Pure; `null` for a blank input (the caller decides how to refuse). Moved here in S2 fix
+ * round 1 so the customer-pack module can BIND a re-placed pack to one (tenant, project) without a
+ * load cycle — project-targets.cjs delegates to it, so there is one derivation, not two.
+ */
+function deriveStockPreparationProjectSheetObjectId(tenantId, projectNo) {
+  const tenant = typeof tenantId === 'string' ? tenantId.trim() : ''
+  const project = typeof projectNo === 'string' ? projectNo.trim() : ''
+  if (!tenant || !project) return null
+  const digest = crypto.createHash('sha256').update(`${tenant}:${project}`, 'utf8').digest('hex')
+  return `${STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX}${digest.slice(0, STOCK_PREPARATION_PROJECT_SHEET_DIGEST_LENGTH)}`
+}
+
 const OWN_BASE_SOURCES = Object.freeze(['disabled', 'explicit', 'anchor', 'api_unavailable', 'derived'])
 
 // `StockPreparationTargetProvisioningError` lives in the target-provisioning module, which
@@ -286,6 +302,7 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX,
   STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN,
   isStockPreparationProjectSheetObjectId,
+  deriveStockPreparationProjectSheetObjectId,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,

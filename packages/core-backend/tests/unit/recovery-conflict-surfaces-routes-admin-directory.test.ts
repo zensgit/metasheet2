@@ -80,6 +80,8 @@ vi.mock('../../src/db/pg', () => ({
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+// The REAL class (the directory-sync mock above spreads the actual module), so the route's instanceof sees it.
+import { DirectoryNotFoundError } from '../../src/directory/directory-sync'
 import {
   RECOVERY_CONFLICT_HTTP_CODE,
   RECOVERY_CONFLICT_HTTP_MESSAGE,
@@ -268,7 +270,10 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     census.record('admin-directory:sync')
   })
 
-  it('synchronous sync: non-conflict failure keeps the ORIGINAL DIRECTORY_SYNC_FAILED 500, exactly', async () => {
+  // #6163 S6 changed the non-conflict path on purpose (these two legs used to pin that the recovery-conflict
+  // branch left it untouched): an untyped failure answers the route's FIXED sentence, and a typed
+  // directory-sync failure answers by its type — never by a regex over the text.
+  it('synchronous sync: an untyped non-conflict failure answers 500 DIRECTORY_SYNC_FAILED with the fixed sentence, not its text', async () => {
     directorySyncMocks.syncDirectoryIntegration.mockRejectedValue(new Error('provider exploded'))
     const res = await invokeRoute('post', '/integrations/:integrationId/sync', {
       params: { integrationId: 'dir-1' },
@@ -279,10 +284,11 @@ describe('recovery conflict boundary — remaining admin-directory write surface
       ok: false,
       error: {
         code: 'DIRECTORY_SYNC_FAILED',
-        message: 'provider exploded',
+        message: 'Failed to sync directory integration',
         details: undefined,
       },
     })
+    expect(JSON.stringify(res.body)).not.toContain('provider exploded')
   })
 
   it('[recovery-census:admin-directory:sync-async] async sync: named conflict BEFORE the run row exists → exact uniform retryable 409', async () => {
@@ -310,18 +316,33 @@ describe('recovery conflict boundary — remaining admin-directory write surface
     census.record('admin-directory:bind')
   })
 
-  it('bind: non-conflict failure keeps the ORIGINAL DIRECTORY_BIND_FAILED mapping, exactly', async () => {
-    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new Error('Local user not found'))
-    const res = await invokeRoute('post', '/accounts/:accountId/bind', {
+  it('bind: a non-conflict failure maps by TYPE: typed not-found → 404 with its sentence; the same text untyped → the fixed 500', async () => {
+    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new DirectoryNotFoundError('Local user not found'))
+    const typed = await invokeRoute('post', '/accounts/:accountId/bind', {
       params: { accountId: 'account-1' },
       body: { localUserRef: 'user-1' },
     })
-    expect(res.statusCode).toBe(404)
-    expect(res.body).toEqual({
+    expect(typed.statusCode).toBe(404)
+    expect(typed.body).toEqual({
       ok: false,
       error: {
         code: 'DIRECTORY_BIND_FAILED',
         message: 'Local user not found',
+        details: undefined,
+      },
+    })
+
+    directorySyncMocks.bindDirectoryAccount.mockRejectedValue(new Error('Local user not found'))
+    const untyped = await invokeRoute('post', '/accounts/:accountId/bind', {
+      params: { accountId: 'account-1' },
+      body: { localUserRef: 'user-1' },
+    })
+    expect(untyped.statusCode).toBe(500)
+    expect(untyped.body).toEqual({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_BIND_FAILED',
+        message: 'Failed to bind directory account',
         details: undefined,
       },
     })
