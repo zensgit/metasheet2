@@ -377,6 +377,14 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'projectOverview.refresh': () => ({ body: {} }),
   // S3 fix round 1 (R6): the PULL-tier overview ensure — an empty body, like the create.
   'projectOverview.ensure': () => ({ body: {} }),
+  // S5b (R-39) 「成员与权限」. The shared mount() leaves STOCK_PREP_MEMBERS_PAGE_ENABLED unset and injects no
+  // members port, so a 'pass' actor lands PAST the gate on 404 STOCK_PREP_MEMBERS_PAGE_DISABLED — a refusal
+  // by CONFIG after the WORKBENCH_ADMIN gate, exactly the "gate let it through, something else happened"
+  // case M-01 measures. Switch on, tier by tier, in stock-preparation-members-routes.test.cjs.
+  'members.read': () => ({ query: {} }),
+  'members.customRoleCreate': () => ({ body: { name: 'syn-role', permissionCodes: [STOCK_PREP_READ] } }),
+  'members.customRoleUpdate': () => ({ params: { roleId: 'stock-prep_c_0a1b2c3d' }, body: { name: 'syn-role' } }),
+  'members.customRoleProjectTargets': () => ({ params: { roleId: 'stock-prep_c_0a1b2c3d' }, body: { projectNos: [PROJECT_NO] } }),
 })
 
 async function callCapability(routes, capability, user, extra = {}) {
@@ -423,6 +431,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -445,6 +457,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -467,6 +483,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -489,6 +509,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -511,6 +535,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -533,6 +561,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -555,6 +587,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
     'projectOverview.ensure': 'pass',
+    'members.read': 'pass',
+    'members.customRoleCreate': 'pass',
+    'members.customRoleUpdate': 'pass',
+    'members.customRoleProjectTargets': 'pass',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -577,6 +613,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
     'projectOverview.ensure': 'pass',
+    'members.read': 'pass',
+    'members.customRoleCreate': 'pass',
+    'members.customRoleUpdate': 'pass',
+    'members.customRoleProjectTargets': 'pass',
     'confirmationQueue.ensure': 'pass',
     'confirmationQueue.reconcile': 'pass',
   }),
@@ -602,6 +642,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
     'projectOverview.ensure': 'pass',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -624,6 +668,10 @@ const MATRIX = Object.freeze({
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
     'projectOverview.ensure': 'gate',
+    'members.read': 'gate',
+    'members.customRoleCreate': 'gate',
+    'members.customRoleUpdate': 'gate',
+    'members.customRoleProjectTargets': 'gate',
     'confirmationQueue.ensure': 'gate',
     'confirmationQueue.reconcile': 'gate',
   }),
@@ -1188,12 +1236,21 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_PULL', 'STOCK_PREP_READ'],
     'M-08: exactly the admin, operate, pull and read constants are used as gate expressions',
   )
+  // S5b (R-39) added exactly the four 「成员与权限」 handlers, each a manifest member (members.*) whose
+  // plugin gate is necessary and never sufficient: the host's narrow members port re-derives the caller
+  // (platform admin or the admitted stock-prep delegated admin) before anything is read or written.
   assert.deepEqual(
     stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
       /requireAccess\(req,\s*STOCK_PREP_ADMIN\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
-    )),
-    ['stockPreparationManagedTableRelabel'],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler',
+    )).sort(),
+    [
+      'stockPreparationManagedTableRelabel',
+      'stockPreparationMembersCustomRoleCreate',
+      'stockPreparationMembersCustomRoleProjectTargets',
+      'stockPreparationMembersCustomRoleUpdate',
+      'stockPreparationMembersRead',
+    ],
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler and the four members handlers',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1581,6 +1638,13 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
+  // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
+  // operator scope like the project-target routes above. None runs a shared tenant helper.
+  'members.read',
+  'members.customRoleCreate',
+  'members.customRoleUpdate',
+  'members.customRoleProjectTargets',
 ])
 
 function outcomeOf(res) {

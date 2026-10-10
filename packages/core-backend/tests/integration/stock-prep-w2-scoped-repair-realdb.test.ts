@@ -349,6 +349,8 @@ import {
   SheetSystemKindConflictError,
   // S3 fix round 2 (F3): the stamp lookup index.ts wires as the wrapper's hook, and the generic-write refusal.
   StockPreparationOverviewRecordsWriteError,
+  // S3 follow-up E: the plugin-scope refusal of a structural write to the overview.
+  StockPreparationOverviewStructureWriteError,
   loadStockPreparationOverviewSheetIds,
 } from '../../src/multitable/stock-preparation-overview-contract'
 
@@ -1066,5 +1068,801 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     // Control: an ordinary sheet of the same id shape, registered to the plugin, still takes a generic write.
     const ordinary = await wrapper.records.createRecord({ sheetId: sheetA, data: {} })
     expect(ordinary.sheetId).toBe(sheetA)
+    // S3 follow-up E — the REAL stamp lookup (index.ts's hook over this database) decides an unmarked ensureView:
+    // refused on the stamped overview, admitted on an ordinary derived-shape sheet; the overview module's own marked
+    // call reaches the host without the marker.
+    const viewDescriptor = { id: 'overview-active', objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'Active', type: 'grid' }
+    const hostEnsureView = vi.fn(async (input: { sheetId: string }) => ({ id: 'view_e', sheetId: input.sheetId }))
+    const structural = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, PLUGIN, {
+      assertSheetScope: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+        return { registered: true }
+      },
+      isStockPreparationOverviewSheet: async ({ sheetId }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId),
+    })
+    const unmarked = await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+    expect(unmarked).toBeInstanceOf(StockPreparationOverviewStructureWriteError)
+    expect(unmarked).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'structure_write' } })
+    expect(hostEnsureView).not.toHaveBeenCalled()
+    await structural.provisioning.ensureView({ projectId, sheetId: sheetA, descriptor: viewDescriptor } as never)
+    await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND } as never)
+    expect(hostEnsureView.mock.calls.map((call) => (call[0] as { sheetId: string }).sheetId)).toEqual([sheetA, overviewSheet])
+    expect(hostEnsureView.mock.calls[1][0]).not.toHaveProperty('systemKind')
+    // S3 follow-ups, fix round 1 (no ordering oracle) — a FOREIGN plugin's unmarked ensureView meets the REAL owner
+    // check (the registry rows of this database) before anything else: the overview and an ordinary integration-core
+    // sheet answer the same scope refusal, and the stamp lookup is never asked.
+    const foreignLookup = vi.fn(async ({ sheetId }: { sheetId: string }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId))
+    const foreign = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, 'plugin-after-sales', {
+      assertSheetScope: async ({ pluginName, sheetId }) => ({ registered: await assertPluginOwnsSheet(q as never, { pluginName, sheetId }) }),
+      isStockPreparationOverviewSheet: foreignLookup,
+    })
+    const probeForeign = async (sheetId: string) => {
+      const error = await foreign.provisioning.ensureView({ projectId: `${tenantId}:after-sales`, sheetId, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(MultitableSheetScopeError)
+      const e = error as MultitableSheetScopeError
+      return { name: e.name, code: e.code, message: e.message.split(sheetId).join('<sheet>') }
+    }
+    expect(await probeForeign(overviewSheet)).toStrictEqual(await probeForeign(sheetA))
+    expect(foreignLookup).not.toHaveBeenCalled()
+    expect(hostEnsureView).toHaveBeenCalledTimes(2)
+  })
+})
+
+// S3 follow-up B (register R-37), against real PostgreSQL: the CROSS-PROCESS refresh BUSY at the ROUTE. Another
+// database session (a plain pool client — nothing shared with the plugin's in-process writer state, exactly what
+// another app process is) holds the tenant's overview advisory lock in an open transaction. The OPERATE refresh
+// route, over the REAL registry store and the plugin's REAL db helper:
+//   * answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once (it does not wait for the holder), with no
+//     overview write and no audit row;
+//   * CLEARS its cooldown — so once the other session commits, the very next click refreshes for real (200
+//     `fresh: true`) instead of answering the 60-second cooldown (`fresh: false`).
+// The multitable host is a minimal stamped fake: the lock, the registry reads and the route are what this pins.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuHttpRoutes = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'http-routes.cjs'),
+)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuHarness = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', '__tests__', 'support', 'stock-preparation-project-sheet-harness.cjs'),
+)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuAccess = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-workbench-access.cjs'),
+)
+
+describeDb('S3 follow-up B: cross-process overview refresh BUSY at the route (real registry store, real advisory lock, real DB)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10)
+  const tenantId = `s3fub_${suffix}`
+  const stagingProjectId = `${tenantId}:integration-core`
+  const OVERVIEW_SHEET = `sheet_s3fub_overview_${suffix}`
+  const SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+  const LOCK_KEY = `stock-prep-project-overview:${tenantId}`
+  const FLOOR = { id: `s3fub_floor_${suffix}`, tenantId, permissions: [s3fuAccess.STOCK_PREP_READ, s3fuAccess.STOCK_PREP_OPERATE] }
+  let pool: Pool
+  let previousSwitch: string | undefined
+
+  beforeAll(() => {
+    pool = new Pool({ connectionString: dbUrl })
+    previousSwitch = process.env[SWITCH]
+    process.env[SWITCH] = 'true'
+  })
+
+  afterAll(async () => {
+    if (previousSwitch === undefined) delete process.env[SWITCH]
+    else process.env[SWITCH] = previousSwitch
+    await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+    await pool.end()
+  })
+
+  it('another session holds the overview lock: 409 BUSY at once, nothing written or audited, cooldown CLEARED — the first click after it commits refreshes (fresh: true)', async () => {
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    // The stamped host (minimal): the overview exists and is stamped; every overview write goes through the port.
+    const portWrites: string[] = []
+    const provisioning = {
+      supportsSystemKindStamp: true,
+      findObjectSheet: async (input: { projectId: string; objectId: string }) => (
+        input.projectId === stagingProjectId && input.objectId === STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID
+          ? { id: OVERVIEW_SHEET, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND }
+          : null
+      ),
+      ensureObject: async () => { throw new Error('the refresh never provisions') },
+      resolveFieldIds: async (input: { objectId: string; fieldIds: string[] }) => Object.fromEntries(input.fieldIds.map((id) => [id, `fld_${id}`])),
+      getFieldId: (_projectId: string, _objectId: string, fieldId: string) => `fld_${fieldId}`,
+      getObjectViewId: (_projectId: string, objectId: string, viewId: string) => `view_${objectId.slice(-6)}_${viewId}`,
+    }
+    const records = {
+      queryRecords: async () => [],
+      createRecord: async () => { throw new Error('generic write') },
+      patchRecord: async () => { throw new Error('generic write') },
+      deleteRecord: async () => { throw new Error('generic write') },
+      stockPreparationOverview: {
+        createRecord: async () => { portWrites.push('create'); return { id: 'rec_x', version: 1, data: {} } },
+        patchRecord: async () => { portWrites.push('patch'); return { id: 'rec_x', version: 2, data: {} } },
+        deleteRecord: async () => { portWrites.push('delete'); return { id: 'rec_x', version: 1 } },
+      },
+    }
+    const audits: Array<{ action: string; mode: string }> = []
+    const routes = new Map<string, unknown>()
+    s3fuHttpRoutes.registerIntegrationRoutes({
+      context: {
+        api: { http: { addRoute(method: string, routePath: string, handler: unknown) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } },
+        storage: new Map(),
+        config: {},
+      },
+      services: {
+        ...Object.fromEntries(['externalSystemRegistry', 'adapterRegistry', 'pipelineRegistry', 'pipelineRunner', 'deadLetterStore', 'stagingInstaller', 'templateRegistry', 'readSourceConfigStore', 'readSourceCompositionConfigStore', 'bridgeAgentChecklistStore']
+          .map((name) => [name, new Proxy({}, { get: (_target, method) => async () => { throw new Error(`unexpected ${name}.${String(method)}`) } })])),
+        stockPreparationAuditStore: {
+          append: async (entry: { action: string; mode: string }) => { audits.push({ action: entry.action, mode: entry.mode }); return { ok: true } },
+          supportsAction: async () => ({ supported: true }),
+        },
+        stockPreparationProjectTargetStore: store,
+        tenantPrincipalDirectory: { verifyTenantMembership: async () => ({ member: true }) },
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })
+    const refresh = () => s3fuHarness.call(routes, 'POST', '/api/integration/stock-preparation/project-overview/refresh', { user: FLOOR, body: {} }) as Promise<{ statusCode: number; body: { ok: boolean; data?: { fresh?: boolean }; error?: { code: string } } }>
+
+    // ANOTHER SESSION takes the tenant's overview lock (the same key derivation the plugin's db helper uses) and holds it.
+    const other = await pool.connect()
+    try {
+      await other.query('BEGIN')
+      const taken = await other.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [LOCK_KEY])
+      expect(taken.rows[0].locked, 'the other session holds the overview lock').toBe(true)
+      const started = Date.now()
+      const busy = await refresh()
+      expect(Date.now() - started, 'the busy refresh did not wait for the other session').toBeLessThan(3000)
+      expect(busy.statusCode, JSON.stringify(busy.body)).toBe(409)
+      expect(busy.body.ok).toBe(false)
+      expect(busy.body.error?.code).toBe('STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
+      expect(portWrites, 'nothing was written').toEqual([])
+      expect(audits, 'nothing was audited').toEqual([])
+      await other.query('COMMIT')
+    } finally {
+      other.release()
+    }
+    // The lock is free. NO clock step: the BUSY answer must have cleared the cooldown, so this is a real refresh.
+    const next = await refresh()
+    expect(next.statusCode, JSON.stringify(next.body)).toBe(200)
+    expect(next.body.data?.fresh, 'the BUSY click left no cooldown behind').toBe(true)
+    expect(audits).toEqual([{ action: 'project_overview_refresh', mode: 'refreshed' }])
+    // …and a click right after a refresh that DID run is the cooldown (the control: the cooldown itself works).
+    const cooled = await refresh()
+    expect(cooled.statusCode).toBe(200)
+    expect(cooled.body.data?.fresh).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// 备料「成员与权限」S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, register R-39) — the
+// host's narrow members port through its REAL wiring (`createStockPrepMembersHostPort`: db/pg, the
+// rbac service, namespace admission, the grid's readability resolver, the audit writer), against
+// real PostgreSQL:
+//   * RD-01 a platform admin's create lands a server-generated stock-prep_c_ role, exactly the codes,
+//     and an audit_logs row in the delegation shape;
+//   * RD-02 a platform code in the body is 400 with ZERO rows written;
+//   * RD-03 the admitted, scoped stock-prep_admin reads the page: the scope SQL runs on the real
+//     delegation tables (member group), the out-of-scope member is a count only, the audit section
+//     reads audit_logs;
+//   * RD-04 the same admin may not change what a role grants while it has an out-of-scope member; once
+//     every member is in scope the change lands (DELETE/INSERT on role_permissions, audit `update`);
+//   * RD-05 without an effective admission the role holder is 403 and nothing is written;
+//   * RD-06 project-sheet scope: a sheet the delegated admin cannot write refuses the whole call with no
+//     grant row; the platform admin's call lands a role-only `spreadsheet:write` row through the real
+//     G1 grant service, and an audit `grant` row.
+// Synthetic ids, random per run; everything this block creates is removed afterwards (audit_logs rows
+// stay — the CI database is throwaway).
+// ---------------------------------------------------------------------------------------------
+import { createStockPrepMembersHostPort } from '../../src/services/stock-preparation-members-host'
+
+describeDb('S5b members port (real host wiring, real DB)', () => {
+  const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10)
+  const ADMIN = `s5b_admin_${suffix}`
+  const DELEGATED = `s5b_deleg_${suffix}`
+  const IN_SCOPE = `s5b_in_${suffix}`
+  const OUT_SCOPE = `s5b_out_${suffix}`
+  const USERS = [ADMIN, DELEGATED, IN_SCOPE, OUT_SCOPE]
+  const MAIN = 'stock-prep_admin'
+  const BASE = `s5b_base_${suffix}`
+  const SHEET = `s5b_sheet_${suffix}`
+  let pool: Pool
+  let previousEnv: string | undefined
+  let createdAdminRole = false
+  let createdMainRole = false
+  let createdMainCode = false
+  let groupId = ''
+  const createdRoleIds: string[] = []
+  let port: ReturnType<typeof createStockPrepMembersHostPort>
+
+  const roleCodes = async (roleId: string) => (await pool.query(
+    'SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code', [roleId],
+  )).rows.map((row: { permission_code: string }) => row.permission_code)
+  const auditRows = async (roleId: string) => (await pool.query(
+    "SELECT action, resource_type, resource_id, action_details FROM audit_logs WHERE resource_type = 'role' AND resource_id = $1 ORDER BY id",
+    [roleId],
+  )).rows as Array<{ action: string; resource_type: string; resource_id: string; action_details: Record<string, unknown> }>
+  const refusal = async (promise: Promise<unknown>) => {
+    try {
+      await promise
+    } catch (error) {
+      return error as { status: number; code: string }
+    }
+    throw new Error('expected a refusal')
+  }
+
+  beforeAll(async () => {
+    previousEnv = process.env[ENV]
+    process.env[ENV] = 'true'
+    pool = new Pool({ connectionString: dbUrl })
+    for (const id of USERS) {
+      await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S5b ${id.split('_')[1]}`, id])
+    }
+    createdAdminRole = (await pool.query("INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING RETURNING id")).rows.length > 0
+    // S5a seeds the main administrator; on a database that has not run it yet, this block brings its own.
+    createdMainRole = (await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id', [MAIN, 'S5b test main admin'])).rows.length > 0
+    createdMainCode = (await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin') ON CONFLICT DO NOTHING RETURNING role_id", [MAIN])).rows.length > 0
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ADMIN])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MAIN])
+    await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin')", [DELEGATED])
+    groupId = (await pool.query('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', [`s5b group ${suffix}`])).rows[0].id
+    await pool.query('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1, $2)', [groupId, IN_SCOPE])
+    await pool.query("INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id) VALUES ($1, 'stock-prep', $2)", [DELEGATED, groupId])
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [BASE, 's5b base'])
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [SHEET, BASE, 's5b sheet'])
+    port = createStockPrepMembersHostPort()
+  })
+
+  afterAll(async () => {
+    if (previousEnv === undefined) delete process.env[ENV]
+    else process.env[ENV] = previousEnv
+    await pool.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await pool.query('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
+    await pool.query('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    if (createdRoleIds.length) {
+      await pool.query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+      await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+      await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    }
+    if (createdMainCode) await pool.query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'stock-prep:admin'", [MAIN]).catch(() => {})
+    if (createdMainRole) await pool.query('DELETE FROM roles WHERE id = $1', [MAIN]).catch(() => {})
+    if (createdAdminRole) await pool.query("DELETE FROM roles WHERE id = 'admin'").catch(() => {})
+    await pool.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = $1', [DELEGATED]).catch(() => {})
+    if (groupId) {
+      await pool.query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId]).catch(() => {})
+      await pool.query('DELETE FROM platform_member_groups WHERE id = $1', [groupId]).catch(() => {})
+    }
+    await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.end()
+  })
+
+  it('RD-01 a platform admin creates a server-generated custom role with exactly its codes and an audit row', async () => {
+    const created = await port.createCustomRole({ actorId: ADMIN, name: 'S5b 采购只读', permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }) as { roleId: string }
+    createdRoleIds.push(created.roleId)
+    expect(created.roleId).toMatch(/^stock-prep_c_[0-9a-f]{8}$/)
+    expect((await pool.query('SELECT name FROM roles WHERE id = $1', [created.roleId])).rows[0].name).toBe('S5b 采购只读')
+    expect(await roleCodes(created.roleId)).toEqual(['stock-prep:operate', 'stock-prep:read'])
+    const audit = await auditRows(created.roleId)
+    expect(audit.map((row) => row.action)).toEqual(['create'])
+    expect(audit[0].action_details).toMatchObject({ adminUserId: ADMIN, delegated: false, roleId: created.roleId, permissions: ['stock-prep:read', 'stock-prep:operate'] })
+  })
+
+  it('RD-02 a platform code in the body is 400 and writes no role', async () => {
+    const before = Number((await pool.query("SELECT COUNT(*)::int AS n FROM roles WHERE id LIKE 'stock-prep\\_c\\_%' ESCAPE '\\'")).rows[0].n)
+    for (const code of ['multitable:read', 'roles:write', '*:*']) {
+      const error = await refusal(port.createCustomRole({ actorId: ADMIN, name: 'x', permissionCodes: [code] }))
+      expect([error.status, error.code]).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN'])
+    }
+    expect(Number((await pool.query("SELECT COUNT(*)::int AS n FROM roles WHERE id LIKE 'stock-prep\\_c\\_%' ESCAPE '\\'")).rows[0].n)).toBe(before)
+  })
+
+  it('RD-03 the admitted, scoped main administrator reads the page; out-of-scope members are a count', async () => {
+    const roleId = createdRoleIds[0]
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $2)', [IN_SCOPE, roleId, OUT_SCOPE])
+    const view = await port.describe({ actorId: DELEGATED }) as Record<string, any>
+    expect(view.actor).toMatchObject({ isPlatformAdmin: false, delegated: true })
+    expect(view.grantableCodes).toEqual(['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'])
+    const custom = view.customRoles.find((role: any) => role.id === roleId)
+    expect(custom.members.map((member: any) => member.userId)).toEqual([IN_SCOPE])
+    expect(custom.outOfScopeMemberCount).toBe(1)
+    expect(JSON.stringify(view)).not.toContain(OUT_SCOPE)
+    expect(view.builtInRoles.find((role: any) => role.id === MAIN)).toMatchObject({ installed: true, appointable: false })
+    expect(view.audit.available).toBe(true)
+  })
+
+  it('RD-04 a role with an out-of-scope member cannot be changed by the delegated admin; with every member in scope it can', async () => {
+    const roleId = createdRoleIds[0]
+    const error = await refusal(port.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read'] }))
+    expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
+    expect(await roleCodes(roleId)).toEqual(['stock-prep:operate', 'stock-prep:read'])
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [OUT_SCOPE, roleId])
+    await port.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:pull'] })
+    expect(await roleCodes(roleId)).toEqual(['stock-prep:pull', 'stock-prep:read'])
+    const audit = await auditRows(roleId)
+    expect(audit.map((row) => row.action)).toEqual(['create', 'update'])
+    expect(audit[1].action_details).toMatchObject({ adminUserId: DELEGATED, delegated: true, delegableNamespaces: ['stock-prep'], permissionsAdded: ['stock-prep:pull'], permissionsRemoved: ['stock-prep:operate'] })
+  })
+
+  it('RD-05 without an effective admission the main-administrator role grants nothing', async () => {
+    await pool.query("UPDATE user_namespace_admissions SET enabled = false WHERE user_id = $1 AND namespace = 'stock-prep'", [DELEGATED])
+    try {
+      const error = await refusal(port.createCustomRole({ actorId: DELEGATED, name: 'x', permissionCodes: ['stock-prep:read'] }))
+      expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+    } finally {
+      await pool.query("UPDATE user_namespace_admissions SET enabled = true WHERE user_id = $1 AND namespace = 'stock-prep'", [DELEGATED])
+    }
+  })
+
+  it('RD-06 project-sheet scope: not writable for the grantor refuses with no row; the platform admin lands a role-only write row through G1', async () => {
+    const roleId = createdRoleIds[0]
+    const grantThroughG1 = async () => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const cq = async (sql: string, params?: unknown[]) => {
+          const r = await client.query(sql, params as unknown[])
+          return { rows: r.rows as unknown[], rowCount: r.rowCount }
+        }
+        const result = await grantStockPreparationProjectSheetRoleWrite(cq, { sheetId: SHEET, roleIds: [roleId], actorId: 'actor' })
+        await client.query('COMMIT')
+        return { granted: result.granted.length > 0 }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    const refused = await refusal(port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: grantThroughG1 }] }))
+    expect([refused.status, refused.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+    expect((await pool.query('SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET])).rows[0].n).toBe(0)
+    const result = await port.grantCustomRoleProjectSheets({ actorId: ADMIN, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: grantThroughG1 }] })
+    expect(result).toEqual({ roleId, sheets: [{ sheetId: SHEET, granted: true }] })
+    const rows = (await pool.query('SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET])).rows
+    expect(rows).toEqual([{ subject_type: 'role', subject_id: roleId, perm_code: 'spreadsheet:write', user_id: null }])
+    const audit = await auditRows(roleId)
+    expect(audit.map((row) => row.action)).toEqual(['create', 'update', 'grant'])
+    expect(audit[2].action_details).toMatchObject({ adminUserId: ADMIN, sheetId: SHEET, permission: 'spreadsheet:write', granted: true })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// S5b fix round 1 — the members port's new guards through the REAL host wiring on real PostgreSQL:
+//   * RF-01 (S2) the project-sheet bound is WRITE: a delegated admin holding only `spreadsheet:read`
+//     (or `spreadsheet:write-own`) on a sheet is refused with no row written; `spreadsheet:write' lands;
+//   * RF-02 (S2, S3) a global record-write code without `multitable:manage-schema` is not enough to
+//     hand out `spreadsheet:write`; the sheet decision reads FRESH codes: a code revoked in the
+//     database while still in the 60 s permission memo is not honoured;
+//   * RF-03 (S4) the caller tier is exactly `stock-prep_admin`: another admitted, scoped `_admin`
+//     role of the namespace is 403;
+//   * RF-04 (S4) the platform-admin decision is the DB `admin` role only: legacy `users.is_admin` /
+//     `users.role = 'admin'` without it is 403;
+//   * RF-05 (S1) a custom-shaped role carrying a platform code is locked: shown, not appointable or
+//     editable, every port write 409, nothing changes;
+//   * RF-06 (S5) 98 custom roles + 6 parallel creates → exactly 2 land, the cap holds at 100;
+//     RF-06b the same at 99 with a barrier that holds the first in-lock count open: one lands;
+//   * RF-07 (S5) an out-of-scope member appointed after the fast scan is seen by the scan under the
+//     locks (refused); one appointed DURING the locked transaction waits for its commit;
+//   * RF-08 (S5) the grantor's admission revoked after the fast check is seen under the locks
+//     (refused); one revoked DURING the locked transaction waits for its commit.
+// Synthetic ids, random per run; everything this block creates is removed afterwards.
+// ---------------------------------------------------------------------------------------------
+import { createStockPrepMembersHostDeps } from '../../src/services/stock-preparation-members-host'
+import { createStockPrepMembersPort, type StockPrepMembersQueryFn } from '../../src/services/stock-preparation-members'
+import { listUserPermissions as rbacListUserPermissions } from '../../src/rbac/service'
+
+describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)', () => {
+  const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
+  const sfx = randomUUID().replace(/-/g, '').slice(0, 10)
+  const ADMIN = `s5bf_admin_${sfx}`
+  const DELEGATED = `s5bf_deleg_${sfx}`
+  const IN_SCOPE = `s5bf_in_${sfx}`
+  const OUT_SCOPE = `s5bf_out_${sfx}`
+  const LEGACY_ADMIN = `s5bf_legacy_${sfx}`
+  const SUB_ADMIN = `s5bf_sub_${sfx}`
+  const USERS = [ADMIN, DELEGATED, IN_SCOPE, OUT_SCOPE, LEGACY_ADMIN, SUB_ADMIN]
+  const MAIN = 'stock-prep_admin'
+  const SUB_ROLE = `stock-prep_x${sfx}_admin`
+  const MTW_ROLE = `s5bf_mtw_${sfx}`
+  const LOCKED = `stock-prep_c_${sfx.slice(0, 8)}`
+  const BASE = `s5bf_base_${sfx}`
+  const SHEET = `s5bf_sheet_${sfx}`
+  const SHEET_GLOBAL = `s5bf_sheet_g_${sfx}`
+  let pool: Pool
+  let previousEnv: string | undefined
+  let createdAdminRole = false
+  let createdMainRole = false
+  let createdMainCode = false
+  let groupId = ''
+  const createdRoleIds: string[] = [SUB_ROLE, MTW_ROLE, LOCKED]
+  const port = () => createStockPrepMembersPort(createStockPrepMembersHostDeps())
+
+  const roleCodes = async (roleId: string) => (await pool.query(
+    'SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code', [roleId],
+  )).rows.map((row: { permission_code: string }) => row.permission_code)
+  const refusal = async (promise: Promise<unknown>) => {
+    try {
+      await promise
+    } catch (error) {
+      return error as { status: number; code: string }
+    }
+    throw new Error('expected a refusal')
+  }
+  const customRoleCount = async () => Number((await pool.query("SELECT COUNT(*)::int AS n FROM roles WHERE id LIKE 'stock-prep\\_c\\_%' ESCAPE '\\'")).rows[0].n)
+  const g1 = (roleId: string, sheetId: string, calls: string[]) => async () => {
+    calls.push(sheetId)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const cq = async (sql: string, params?: unknown[]) => {
+        const r = await client.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }
+      const result = await grantStockPreparationProjectSheetRoleWrite(cq, { sheetId, roleIds: [roleId], actorId: 'actor' })
+      await client.query('COMMIT')
+      return { granted: result.granted.length > 0 }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+  const roleRowsOn = async (sheetId: string, roleId: string) => Number((await pool.query(
+    "SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2", [sheetId, roleId],
+  )).rows[0].n)
+  const setUserSheetGrant = async (code: string | null) => {
+    await pool.query("DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [SHEET, DELEGATED])
+    if (code) await pool.query("INSERT INTO spreadsheet_permissions (sheet_id, user_id, perm_code, subject_type, subject_id) VALUES ($1, $2, $3, 'user', $2)", [SHEET, DELEGATED, code])
+  }
+  const createRole = async (name: string, codes: string[]) => {
+    const created = await port().createCustomRole({ actorId: ADMIN, name, permissionCodes: codes }) as { roleId: string }
+    createdRoleIds.push(created.roleId)
+    return created.roleId
+  }
+  /**
+   * The real host wiring with two seams: `afterPool` runs after a POOL statement (the fast checks run
+   * there) and `aroundTx` after / before a TRANSACTION statement — where "someone else" acts.
+   */
+  const hookedPort = (hooks: {
+    afterPool?: (sql: string) => Promise<void>
+    afterTx?: (sql: string) => Promise<void> | void
+    beforeTx?: (sql: string) => Promise<void> | void
+  }) => {
+    const deps = createStockPrepMembersHostDeps()
+    const base = deps.query
+    return createStockPrepMembersPort({
+      ...deps,
+      query: async (sql, params) => {
+        const result = await base(sql, params)
+        if (hooks.afterPool) await hooks.afterPool(sql)
+        return result
+      },
+      transaction: (fn) => deps.transaction((txQuery) => fn((async (sql: string, params?: unknown[]) => {
+        if (hooks.beforeTx) await hooks.beforeTx(sql)
+        const result = await txQuery(sql, params)
+        if (hooks.afterTx) await hooks.afterTx(sql)
+        return result
+      }) as StockPrepMembersQueryFn)),
+    })
+  }
+  /** A statement on its own connection that may have to WAIT; resolves to 'ok' or the SQLSTATE. */
+  const concurrently = (sql: string, params: unknown[]) => {
+    let settled = false
+    const promise = (async () => {
+      const client = await pool.connect()
+      try {
+        await client.query("SET lock_timeout = '15s'")
+        await client.query(sql, params)
+        return 'ok'
+      } catch (error) {
+        return String((error as { code?: unknown }).code ?? 'error')
+      } finally {
+        await client.query('RESET lock_timeout').catch(() => {})
+        client.release()
+        settled = true
+      }
+    })()
+    return { promise, settled: () => settled }
+  }
+  const waitSettled = async (probe: { settled: () => boolean }, ms: number) => {
+    const until = Date.now() + ms
+    while (Date.now() < until && !probe.settled()) await new Promise((done) => setTimeout(done, 20))
+    return probe.settled() ? 'settled' : 'pending'
+  }
+  const isMemberScan = (sql: string) => sql.startsWith('SELECT user_id FROM user_roles WHERE role_id')
+
+  beforeAll(async () => {
+    previousEnv = process.env[ENV]
+    process.env[ENV] = 'true'
+    pool = new Pool({ connectionString: dbUrl })
+    for (const id of USERS) {
+      await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S5bf ${id.split('_')[1]}`, id])
+    }
+    createdAdminRole = (await pool.query("INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING RETURNING id")).rows.length > 0
+    createdMainRole = (await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id', [MAIN, 'S5bf test main admin'])).rows.length > 0
+    createdMainCode = (await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin') ON CONFLICT DO NOTHING RETURNING role_id", [MAIN])).rows.length > 0
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ADMIN])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MAIN])
+    // Another `_admin` role inside the namespace, carrying the main code, admitted and scoped (RF-03).
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $1)', [SUB_ROLE])
+    await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin')", [SUB_ROLE])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [SUB_ADMIN, SUB_ROLE])
+    // The legacy platform-admin columns, without the DB admin role (RF-04).
+    await pool.query("UPDATE users SET is_admin = true, role = 'admin' WHERE id = $1", [LEGACY_ADMIN])
+    for (const userId of [DELEGATED, SUB_ADMIN]) {
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin')", [userId])
+    }
+    groupId = (await pool.query('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', [`s5bf group ${sfx}`])).rows[0].id
+    await pool.query('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1, $2)', [groupId, IN_SCOPE])
+    for (const userId of [DELEGATED, SUB_ADMIN]) {
+      await pool.query("INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id) VALUES ($1, 'stock-prep', $2)", [userId, groupId])
+    }
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $1)', [MTW_ROLE])
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [BASE, 's5bf base'])
+    for (const sheetId of [SHEET, SHEET_GLOBAL]) {
+      await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [sheetId, BASE, sheetId])
+    }
+  })
+
+  afterAll(async () => {
+    if (previousEnv === undefined) delete process.env[ENV]
+    else process.env[ENV] = previousEnv
+    for (const sheetId of [SHEET, SHEET_GLOBAL]) {
+      await pool.query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+      await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    }
+    await pool.query('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds]).catch(() => {})
+    if (createdMainCode) await pool.query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'stock-prep:admin'", [MAIN]).catch(() => {})
+    if (createdMainRole) await pool.query('DELETE FROM roles WHERE id = $1', [MAIN]).catch(() => {})
+    if (createdAdminRole) await pool.query("DELETE FROM roles WHERE id = 'admin'").catch(() => {})
+    await pool.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    if (groupId) {
+      await pool.query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId]).catch(() => {})
+      await pool.query('DELETE FROM platform_member_groups WHERE id = $1', [groupId]).catch(() => {})
+    }
+    await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [USERS]).catch(() => {})
+    await pool.end()
+  })
+
+  it('RF-01 (S2) a delegated admin who can only READ (or write-own) a sheet cannot grant it; write can', async () => {
+    const roleId = await createRole('S5bf 甲', ['stock-prep:read'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [IN_SCOPE, roleId])
+    for (const code of [null, 'spreadsheet:read', 'spreadsheet:write-own']) {
+      await setUserSheetGrant(code)
+      const calls: string[] = []
+      const error = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: g1(roleId, SHEET, calls) }] }))
+      expect([error.status, error.code], String(code)).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+      expect(calls, String(code)).toEqual([])
+      expect(await roleRowsOn(SHEET, roleId)).toBe(0)
+    }
+    await setUserSheetGrant('spreadsheet:write')
+    const calls: string[] = []
+    const result = await port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: g1(roleId, SHEET, calls) }] })
+    expect(result).toEqual({ roleId, sheets: [{ sheetId: SHEET, granted: true }] })
+    expect(await roleRowsOn(SHEET, roleId)).toBe(1)
+  })
+
+  it('RF-02 (S2, S3) record write without schema management is not enough; a global write code revoked in the database is not honoured from the permission memo', async () => {
+    const roleId = createdRoleIds[createdRoleIds.length - 1]
+    await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:write')", [MTW_ROLE])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MTW_ROLE])
+    // S2: the global record-write code alone — no `multitable:manage-schema` — may not hand out
+    // `spreadsheet:write`, which carries field / view management on the sheet.
+    const recordOnly: string[] = []
+    const refusedRecordOnly = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, recordOnly) }] }))
+    expect([refusedRecordOnly.status, refusedRecordOnly.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+    expect(recordOnly).toEqual([])
+    await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:manage-schema')", [MTW_ROLE])
+    // Positive control: write + schema management make the assignment-free sheet writable.
+    const ok: string[] = []
+    await expect(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, ok) }] }))
+      .resolves.toMatchObject({ sheets: [{ sheetId: SHEET_GLOBAL, granted: true }] })
+    // Prime the memo WITH the code, then revoke it in the database only.
+    expect(await rbacListUserPermissions(DELEGATED)).toContain('multitable:write')
+    await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [MTW_ROLE])
+    expect(await rbacListUserPermissions(DELEGATED), 'the memo still holds the revoked code').toContain('multitable:write')
+    const calls: string[] = []
+    const error = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, calls) }] }))
+    expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+    expect(calls).toEqual([])
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [DELEGATED, MTW_ROLE])
+  })
+
+  it('RF-03 (S4) another admitted, scoped _admin role of the namespace is not the main administrator', async () => {
+    for (const run of [() => port().describe({ actorId: SUB_ADMIN }), () => port().createCustomRole({ actorId: SUB_ADMIN, name: 'S5bf x', permissionCodes: [] })]) {
+      const error = await refusal(run())
+      expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+    }
+  })
+
+  it('RF-04 (S4) the legacy users.is_admin / users.role columns do not make a platform administrator', async () => {
+    const before = await customRoleCount()
+    for (const run of [() => port().describe({ actorId: LEGACY_ADMIN }), () => port().createCustomRole({ actorId: LEGACY_ADMIN, name: 'S5bf y', permissionCodes: [] })]) {
+      const error = await refusal(run())
+      expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+    }
+    expect(await customRoleCount()).toBe(before)
+  })
+
+  it('RF-05 (S1) a custom-shaped role carrying a platform code is locked: never appointable or editable, every write 409', async () => {
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [LOCKED, 'S5bf 看似自定义'])
+    await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:read'), ($1, 'multitable:write')", [LOCKED])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [IN_SCOPE, LOCKED])
+    for (const actorId of [ADMIN, DELEGATED]) {
+      const view = await port().describe({ actorId }) as Record<string, any>
+      expect(view.customRoles.find((role: any) => role.id === LOCKED), actorId).toMatchObject({ locked: true, foreignCodeCount: 1, otherCodeCount: 1, editable: false, appointable: false })
+      const writes = [
+        () => port().updateCustomRole({ actorId, roleId: LOCKED, name: 'S5bf 改名' }),
+        () => port().updateCustomRole({ actorId, roleId: LOCKED, permissionCodes: ['stock-prep:read'] }),
+      ]
+      for (const run of writes) {
+        const error = await refusal(run())
+        expect([error.status, error.code], actorId).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES'])
+      }
+      const calls: string[] = []
+      const grant = await refusal(port().grantCustomRoleProjectSheets({ actorId, roleId: LOCKED, resolveTargets: async () => [{ sheetId: SHEET, grant: g1(LOCKED, SHEET, calls) }] }))
+      expect([grant.status, grant.code]).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES'])
+      expect(calls).toEqual([])
+    }
+    expect((await pool.query('SELECT name FROM roles WHERE id = $1', [LOCKED])).rows[0].name).toBe('S5bf 看似自定义')
+    expect(await roleCodes(LOCKED)).toEqual(['multitable:write', 'stock-prep:read'])
+    expect(await roleRowsOn(SHEET, LOCKED)).toBe(0)
+  })
+
+  it('RF-06 (S5) the 100-role cap holds under 6 parallel creates', async () => {
+    const before = await customRoleCount()
+    expect(before).toBeLessThanOrEqual(98)
+    const fillers = Array.from({ length: 98 - before }, () => `stock-prep_c_${randomUUID().replace(/-/g, '').slice(0, 8)}`)
+    createdRoleIds.push(...fillers)
+    if (fillers.length) await pool.query('INSERT INTO roles (id, name) SELECT x, x FROM unnest($1::text[]) x', [fillers])
+    expect(await customRoleCount()).toBe(98)
+    const outcomes = await Promise.all(Array.from({ length: 6 }, (_, i) => port().createCustomRole({ actorId: ADMIN, name: `S5bf cap ${i}`, permissionCodes: [] })
+      .then((created) => { createdRoleIds.push((created as { roleId: string }).roleId); return 'created' }, (error: { code?: string }) => error.code ?? 'error')))
+    expect(outcomes.filter((outcome) => outcome === 'created')).toHaveLength(2)
+    expect(outcomes.filter((outcome) => outcome === 'STOCK_PREP_CUSTOM_ROLE_LIMIT')).toHaveLength(4)
+    expect(await customRoleCount()).toBe(100)
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [fillers])
+  })
+
+  it('RF-06b (S5) at 99 roles, a create that counted waits for no second count: the advisory lock serialises count → insert', async () => {
+    // Deterministic: the first transaction to COUNT (inside its locks) holds there for up to 600 ms,
+    // waiting for a second transaction to count too. Under the per-namespace lock the second cannot
+    // count until the first commits, so it sees 100 and is refused; without the lock both see 99.
+    const before = await customRoleCount()
+    const fillers = Array.from({ length: 99 - before }, () => `stock-prep_c_${randomUUID().replace(/-/g, '').slice(0, 8)}`)
+    createdRoleIds.push(...fillers)
+    if (fillers.length) await pool.query('INSERT INTO roles (id, name) SELECT x, x FROM unnest($1::text[]) x', [fillers])
+    expect(await customRoleCount()).toBe(99)
+    let counted = 0
+    const isCount = (sql: string) => sql.startsWith('SELECT COUNT(*)::int AS c FROM roles WHERE id LIKE')
+    const racer = () => hookedPort({
+      afterTx: async (sql) => {
+        if (!isCount(sql)) return
+        counted += 1
+        if (counted !== 1) return
+        const until = Date.now() + 600
+        while (Date.now() < until && counted < 2) await new Promise((done) => setTimeout(done, 20))
+      },
+    })
+    const outcomes = await Promise.all([0, 1].map((i) => racer().createCustomRole({ actorId: ADMIN, name: `S5bf barrier ${i}`, permissionCodes: [] })
+      .then((created) => { createdRoleIds.push((created as { roleId: string }).roleId); return 'created' }, (error: { code?: string }) => error.code ?? 'error')))
+    expect(outcomes.sort()).toEqual(['STOCK_PREP_CUSTOM_ROLE_LIMIT', 'created'])
+    expect(await customRoleCount()).toBe(100)
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [fillers])
+  })
+
+  it('RF-07 (S5) an appointment after the fast scan is seen under the locks; one during the locked transaction waits for its commit', async () => {
+    const roleId = await createRole('S5bf 乙', ['stock-prep:read'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [IN_SCOPE, roleId])
+    // (a) between the fast scan and the transaction: the scan under the locks sees the new member.
+    let fired = false
+    const racedBefore = hookedPort({
+      afterPool: async (sql) => {
+        if (fired || !isMemberScan(sql)) return
+        fired = true
+        await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [OUT_SCOPE, roleId])
+      },
+    })
+    const error = await refusal(racedBefore.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+    expect(fired).toBe(true)
+    expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
+    expect(await roleCodes(roleId)).toEqual(['stock-prep:read'])
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [OUT_SCOPE, roleId])
+    // (b) during the locked transaction: the appointment cannot commit before this one does.
+    let appointment: ReturnType<typeof concurrently> | null = null
+    let observed = ''
+    const racedDuring = hookedPort({
+      afterTx: (sql) => {
+        if (appointment || !isMemberScan(sql)) return
+        appointment = concurrently('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [OUT_SCOPE, roleId])
+      },
+      beforeTx: async (sql) => {
+        if (!appointment || observed || !sql.startsWith('UPDATE roles SET name')) return
+        observed = await waitSettled(appointment, 400)
+      },
+    })
+    await expect(racedDuring.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })).resolves.toMatchObject({ added: ['stock-prep:operate'] })
+    expect(observed, 'the appointment waited for the locked transaction').toBe('pending')
+    expect(await appointment!.promise).toBe('ok')
+    expect(await roleCodes(roleId)).toEqual(['stock-prep:operate', 'stock-prep:read'])
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [OUT_SCOPE, roleId])
+  })
+
+  it('RF-08 (S5) the grantor\'s admission revoked after the fast check is seen under the locks; one revoked during the transaction waits for its commit', async () => {
+    const roleId = createdRoleIds[createdRoleIds.length - 1]
+    const revokeSql = "UPDATE user_namespace_admissions SET enabled = $2 WHERE user_id = $1 AND namespace = 'stock-prep'"
+    try {
+      // (a) between the fast checks and the transaction.
+      let fired = false
+      const racedBefore = hookedPort({
+        afterPool: async (sql) => {
+          if (fired || !isMemberScan(sql)) return
+          fired = true
+          await pool.query(revokeSql, [DELEGATED, false])
+        },
+      })
+      const error = await refusal(racedBefore.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read'] }))
+      expect(fired).toBe(true)
+      expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+      expect(await roleCodes(roleId)).toEqual(['stock-prep:operate', 'stock-prep:read'])
+      await pool.query(revokeSql, [DELEGATED, true])
+      // (b) during the locked transaction.
+      let revoke: ReturnType<typeof concurrently> | null = null
+      let observed = ''
+      const racedDuring = hookedPort({
+        afterTx: (sql) => {
+          if (revoke || !isMemberScan(sql)) return
+          revoke = concurrently(revokeSql, [DELEGATED, false])
+        },
+        beforeTx: async (sql) => {
+          if (!revoke || observed || !sql.startsWith('UPDATE roles SET name')) return
+          observed = await waitSettled(revoke, 400)
+        },
+      })
+      await expect(racedDuring.updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read'] })).resolves.toMatchObject({ removed: ['stock-prep:operate'] })
+      expect(observed, 'the revoke waited for the locked transaction').toBe('pending')
+      expect(await revoke!.promise).toBe('ok')
+    } finally {
+      await pool.query(revokeSql, [DELEGATED, true])
+    }
   })
 })

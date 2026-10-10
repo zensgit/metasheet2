@@ -86,6 +86,9 @@ const STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS = Object.freeze(TEMPLATE.fiel
 const MAX_PROJECT_OVERVIEW_ROWS = MAX_PROJECT_TARGETS_PER_TENANT
 // Reading the overview back (to decide create vs patch, and which rows are duplicates / orphans) is
 // bounded: two pages of the host's page size cover 200 rows with room for the duplicates a race left.
+// S3 follow-up D: EVERY page is read BEFORE anything is deleted — deleting while paging by offset shifts
+// the rows after the deleted ones forward, so the next page skips them (and a skipped project then looks
+// rowless and gets a duplicate created).
 const OVERVIEW_READ_PAGE_LIMIT = 500
 const OVERVIEW_READ_MAX_PAGES = 2
 // The per-event update reads only ONE project's rows; more than this many is not a race residue.
@@ -368,7 +371,14 @@ async function ensureProjectOverviewSheet({ provisioning, projectId, tenantId, l
   const views = { created: 0, skipped: typeof api.ensureView === 'function' ? null : 'api_unavailable' }
   if (typeof api.ensureView === 'function') {
     for (const view of STOCK_PREPARATION_PROJECT_OVERVIEW_VIEWS) {
-      await api.ensureView({ projectId: scopedProjectId, sheetId, descriptor: buildProjectOverviewViewDescriptor({ provisioning: api, projectId: scopedProjectId, view, locale }) })
+      // S3 follow-up E: the overview's own provisioning marker — the host's plugin-scope admits a view on the
+      // stamped overview only with it (and strips it before the host's ensureView).
+      await api.ensureView({
+        projectId: scopedProjectId,
+        sheetId,
+        descriptor: buildProjectOverviewViewDescriptor({ provisioning: api, projectId: scopedProjectId, view, locale }),
+        systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+      })
       views.created += 1
     }
   }
@@ -695,11 +705,55 @@ function emptySummary(projectCount = 0) {
 // ACROSS PROCESSES the database try-lock is the only coordination: a writer that loses it to another process
 // leaves its projects dirty here — reconciled by this process's next overview writer — and the next refresh
 // rebuilds everything (register R-37 states this limit).
+//
+// S3 follow-ups, fix round 1 — A FAILED PROJECT IS RETRIED BOUNDED, NOT BY EVERY EVENT. A project whose write
+// failed is put back into the dirty set as a RETRY mark (`retry: true` + the in-process `Date.now()` of the
+// failure). A PER-EVENT writer runs inside a request handler (create / dry-run / apply / confirm / archive /
+// restore / project fields), so it drains every FRESH mark (its own project, and the projects of in-process
+// events deferred into it — the F4 contract above) but at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS retry marks per
+// call, and none whose failure is younger than OVERVIEW_EVENT_RETRY_BACKOFF_MS; the rest stay dirty, in order,
+// for a later writer. Without this a persistent failure (up to the registry's 200 projects, each a multi-page
+// recount + a registry write + the failing write) would be re-run inline by EVERY event of the tenant. A fresh
+// mark for a project (an event on it) clears its retry mark — the event's own project is always attempted. The
+// REFRESH is the full pass: it drains every dirty project, retry marks included, with no bound and no backoff.
 
 const BUSY_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY'
+// S3 follow-ups, fix round 1: the per-event writer's retry bound and per-project backoff (in-process, per tenant).
+const OVERVIEW_EVENT_RETRY_MAX_PROJECTS = 5
+const OVERVIEW_EVENT_RETRY_BACKOFF_MS = 30 * 1000
+const OVERVIEW_EVENT_RETRY_POLICY = Object.freeze({ maxProjects: OVERVIEW_EVENT_RETRY_MAX_PROJECTS, backoffMs: OVERVIEW_EVENT_RETRY_BACKOFF_MS })
 
 function overviewBusyError() {
   return new StockPreparationProjectOverviewError(409, BUSY_CODE, 'another update of this tenant\'s project overview is running; nothing was done — try again in a moment', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
+}
+
+// S3 follow-up C: a refresh during which some project's overview write FAILED (in the full pass or in the drain
+// of the projects events marked dirty while it ran) is not a fresh overview. It answers this typed, values-free
+// 503 — the counts of what failed, never a value or a host message — instead of `fresh: true`; the projects that
+// failed stay DIRTY (see `runOverviewWriter`) so this process's next overview writer retries them. The rows that
+// were written stay written. `summary` (the run's counts, for the route's `incomplete` audit) and `cause` (the
+// first failure, whose CODE alone the route may log) are non-enumerable: they never reach a response body.
+const REFRESH_INCOMPLETE_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE'
+
+function overviewRefreshIncompleteError({ failedProjectCount, summary, cause }) {
+  const error = new StockPreparationProjectOverviewError(
+    503,
+    REFRESH_INCOMPLETE_CODE,
+    'the project overview refresh could not bring every project up to date; the rows it wrote stand, the projects it could not write stay marked for the next update — refresh again in a moment',
+    {
+      objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+      failedProjectCount,
+      projectCount: summary && Number.isInteger(summary.projectCount) ? summary.projectCount : 0,
+    },
+  )
+  Object.defineProperty(error, 'summary', { value: summary || null, enumerable: false })
+  Object.defineProperty(error, 'cause', { value: cause || null, enumerable: false })
+  return error
+}
+
+/** How many projects (or project-less rows) of one writer run are still failed when it stops. */
+function drainFailedCount(drain) {
+  return drain.failed.size + drain.unkeyedFailureCount
 }
 
 const overviewWriterStatesByStore = new WeakMap()
@@ -719,28 +773,86 @@ function overviewWriterState(store, tenant) {
   return state
 }
 
+/** A FRESH mark (an event, or the refresh's past-the-bound re-projection): never a retry — it clears one. */
 function markOverviewProjectDirty(state, projectNo, { recount = false } = {}) {
   const previous = state.dirty.get(projectNo)
   state.dirty.set(projectNo, { recount: recount === true || Boolean(previous && previous.recount === true) })
 }
 
 /**
+ * S3 follow-ups, fix round 1: a RETRY mark — the project's write failed at `failedAtMs` (in-process clock). A fresh
+ * mark already pending for it (an event after the failure) stays fresh: the event's project is always attempted.
+ */
+function markOverviewProjectRetry(state, projectNo, { recount = false } = {}, failedAtMs) {
+  const previous = state.dirty.get(projectNo)
+  const mergedRecount = recount === true || Boolean(previous && previous.recount === true)
+  if (previous && previous.retry !== true) {
+    state.dirty.set(projectNo, { recount: mergedRecount })
+    return
+  }
+  state.dirty.set(projectNo, { recount: mergedRecount, retry: true, failedAtMs })
+}
+
+/**
+ * Whether a writer under `budget` may drain the mark now. `budget === null` is the refresh: everything. Otherwise a
+ * fresh mark always; a retry mark only while the run's retry budget lasts and once its backoff has passed (a clock
+ * that moved backwards, or a missing stamp, counts as passed — never a project stranded until the clock catches up).
+ */
+function overviewMarkDrainable(flags, budget, nowMs) {
+  if (budget === null || !flags || flags.retry !== true) return true
+  if (budget.remaining <= 0) return false
+  const age = nowMs - flags.failedAtMs
+  return !(Number.isFinite(age) && age >= 0 && age < budget.backoffMs)
+}
+
+/** Take (remove from the dirty set) the marks this writer drains now, in mark order; retry marks spend the budget. */
+function takeDrainableOverviewMarks(state, budget) {
+  const nowMs = Date.now()
+  const batch = []
+  for (const [projectNo, flags] of state.dirty) {
+    if (!overviewMarkDrainable(flags, budget, nowMs)) continue
+    if (budget !== null && flags && flags.retry === true) budget.remaining -= 1
+    batch.push([projectNo, flags])
+  }
+  for (const [projectNo] of batch) state.dirty.delete(projectNo)
+  return batch
+}
+
+function hasDrainableOverviewMarks(state, budget) {
+  const nowMs = Date.now()
+  for (const flags of state.dirty.values()) {
+    if (overviewMarkDrainable(flags, budget, nowMs)) return true
+  }
+  return false
+}
+
+/**
  * Run ONE writer for the tenant: take the try-lock, run `firstPass` (the refresh's rebuild; none for an event),
- * drain the dirty set inside the lock, release, and go round again while the set is not empty. Returns
+ * drain the dirty set inside the lock, release, and go round again while something drainable is left. Returns
  * `{ busy: true }` when the FIRST try-lock is busy (another process); a later busy try stops the loop and leaves
  * what is still dirty for the next writer here. The caller set nothing on `state.running`; this does.
+ *
+ * S3 follow-up C: `failed` (the drain's projectNo → flags of every project whose LAST attempt in this run failed)
+ * is put BACK into the dirty set when the run stops — not while it runs (the drain loop would retry a persistent
+ * failure forever) and not dropped (taking a batch already removed it): the next overview writer of this tenant in
+ * this process retries it. Done in `finally`, before `running` flips, in the same turn.
+ *
+ * Fix round 1: `retryPolicy` (the per-event writer's `OVERVIEW_EVENT_RETRY_POLICY`; null for the refresh) bounds the
+ * RETRY marks this run drains — at most `maxProjects`, none within `backoffMs` of its failure. Fresh marks are never
+ * bounded. The marks left are not drainable by this run, so they never keep its loop going.
  */
-async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne }) {
+async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne, failed = null, retryPolicy = null }) {
+  const budget = retryPolicy ? { remaining: retryPolicy.maxProjects, backoffMs: retryPolicy.backoffMs } : null
   state.running = true
   try {
     let value
     for (let pass = 0; ; pass += 1) {
-      if (pass > 0 && state.dirty.size === 0) break
+      if (pass > 0 && !hasDrainableOverviewMarks(state, budget)) break
       const attempt = await registry.tryWithOverviewLock({ tenantId: tenant }, async () => {
         const out = pass === 0 && typeof firstPass === 'function' ? await firstPass() : undefined
-        while (state.dirty.size > 0) {
-          const batch = [...state.dirty.entries()]
-          state.dirty.clear()
+        for (;;) {
+          const batch = takeDrainableOverviewMarks(state, budget)
+          if (batch.length === 0) break
           for (const [projectNo, flags] of batch) await drainOne(projectNo, flags)
         }
         return out
@@ -753,6 +865,10 @@ async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne 
     }
     return { busy: false, value }
   } finally {
+    if (failed && failed.size > 0) {
+      const failedAtMs = Date.now()
+      for (const [projectNo, flags] of failed) markOverviewProjectRetry(state, projectNo, flags, failedAtMs)
+    }
     state.running = false
   }
 }
@@ -762,6 +878,11 @@ async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne 
  * read, duplicates deleted, and the row created / patched only when its projection changed; a project that is
  * no longer registered has its rows removed. Failures are collected (the first is kept) so one project cannot
  * stop the others; the caller decides whether to surface it.
+ *
+ * S3 follow-up C: `failed` holds every project whose LAST attempt in this run failed (a later success in the same
+ * run — an event re-marked it — takes it out again); `runOverviewWriter` puts them back into the dirty set when it
+ * stops, and the refresh answers REFRESH_INCOMPLETE while any is left. `unkeyedFailureCount` counts failed deletes
+ * of overview rows that carry no project number (nothing to re-mark; the next refresh retries them).
  */
 function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId, sheet, locale, now }) {
   let scopedPromise = null
@@ -769,6 +890,17 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
     summary: emptySummary(0),
     firstError: null,
     outcome: null,
+    failed: new Map(),
+    unkeyedFailureCount: 0,
+    recordFailure(no, flags, error) {
+      if (!ctx.firstError) ctx.firstError = error
+      if (!no) {
+        ctx.unkeyedFailureCount += 1
+        return
+      }
+      const previous = ctx.failed.get(no)
+      ctx.failed.set(no, { recount: (flags && flags.recount === true) || Boolean(previous && previous.recount === true) })
+    },
     async drainOne(no, flags = {}) {
       try {
         if (!scopedPromise) {
@@ -787,6 +919,7 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
             await deleteOverviewRow(writer, sheet.sheetId, record)
             ctx.summary.rowsRemovedOrphan += 1
           }
+          ctx.failed.delete(no)
           ctx.outcome = ctx.outcome || 'removed'
           return
         }
@@ -816,9 +949,10 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
           now,
           summary: ctx.summary,
         })
+        ctx.failed.delete(no)
         ctx.outcome = 'updated'
       } catch (error) {
-        if (!ctx.firstError) ctx.firstError = error
+        ctx.recordFailure(no, flags, error)
       }
     },
   }
@@ -836,9 +970,13 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
  *   4. per registry row: count the project sheet (bounded), stamp the registry only when the counts
  *      changed, create or patch the overview row only when its projection (minus 「截至」) changed;
  *   5. (F4) the projects events marked dirty while the refresh ran are re-projected before the lock is
- *      released — from the registry as it stands after those events.
+ *      released — from the registry as it stands after those events; so is every project an earlier writer
+ *      left failed (fix round 1: the refresh is the full pass — no retry bound, no backoff).
  * Every overview write goes through the host's overview port (F3). Returns a values-free summary. The caller
  * audits it (`project_overview_refresh`).
+ * S3 follow-ups: (D) step 3 reads EVERY page before it deletes anything; (C) a project whose write fails in
+ * step 3 / 4 / 5 does not stop the others, stays DIRTY for the next writer, and the refresh then throws the
+ * typed 503 REFRESH_INCOMPLETE (counts only) instead of returning a summary the caller would call fresh.
  */
 async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, now = () => new Date() } = {}) {
   const api = requireProvisioning(provisioning)
@@ -861,6 +999,7 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
     tenant,
     state,
     drainOne: drain.drainOne,
+    failed: drain.failed,
     firstPass: async () => {
       // The refresh's own clock — 「截至」 of the facts this run looked at (a row keeps the clock of its
       // last CHANGED measurement, R7; this is when the overview was last checked against the registry).
@@ -878,7 +1017,12 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
       }
       const scoped = await createTargetScopedRecordsApi(writer, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
       const summary = emptySummary(rows.length)
-      const byProjectNo = new Map()
+      // S3 follow-up D: READ EVERY PAGE FIRST (bounded: OVERVIEW_READ_MAX_PAGES × OVERVIEW_READ_PAGE_LIMIT, the
+      // registry's 200-row cap plus room for race residue), THEN delete. Offset paging over a sheet this loop is
+      // deleting from would skip the rows the deletes moved forward. A row seen twice (a host whose order moved
+      // between pages) is taken once.
+      const seenRecords = []
+      const seenRecordIds = new Set()
       let overflow = false
       for (let page = 0; page < OVERVIEW_READ_MAX_PAGES; page += 1) {
         const batch = await scoped.queryRecords({ filters: {}, limit: OVERVIEW_READ_PAGE_LIMIT, offset: page * OVERVIEW_READ_PAGE_LIMIT })
@@ -886,37 +1030,65 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
           throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
         }
         for (const record of batch) {
-          const no = optionalString(readLogicalCell(record, 'projectNo'))
-          if (!no || !registeredNos.has(no)) {
-            await deleteOverviewRow(writer, sheet.sheetId, record)
-            summary.rowsRemovedOrphan += 1
-            continue
+          const recordId = isPlainObject(record) && record.id !== undefined && record.id !== null ? String(record.id) : null
+          if (recordId !== null) {
+            if (seenRecordIds.has(recordId)) continue
+            seenRecordIds.add(recordId)
           }
-          if (!byProjectNo.has(no)) byProjectNo.set(no, [])
-          byProjectNo.get(no).push(record)
+          seenRecords.push(record)
         }
         if (batch.length < OVERVIEW_READ_PAGE_LIMIT) break
         if (page === OVERVIEW_READ_MAX_PAGES - 1) overflow = true
       }
+      const byProjectNo = new Map()
+      for (const record of seenRecords) {
+        const no = optionalString(readLogicalCell(record, 'projectNo'))
+        if (!no || !registeredNos.has(no)) {
+          // S3 follow-up C: one row that cannot be deleted does not stop the rest; its project (if it names
+          // one) stays dirty — the drain deletes an unregistered project's rows by number.
+          try {
+            await deleteOverviewRow(writer, sheet.sheetId, record)
+            summary.rowsRemovedOrphan += 1
+          } catch (error) {
+            drain.recordFailure(no, { recount: false }, error)
+          }
+          continue
+        }
+        if (!byProjectNo.has(no)) byProjectNo.set(no, [])
+        byProjectNo.get(no).push(record)
+      }
       for (const target of rows) {
-        await writeProjectRow({
-          api,
-          recordsApi,
-          writer,
-          scoped,
-          store: registry,
-          tenant,
-          projectId: scopedProjectId,
-          overviewSheetId: sheet.sheetId,
-          target,
-          fields: fieldsByProjectNo.get(target.projectNo) || null,
-          pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
-          existingRecords: byProjectNo.get(target.projectNo) || [],
-          recount: true,
-          locale,
-          now,
-          summary,
-        })
+        const existingRecords = byProjectNo.get(target.projectNo) || []
+        if (overflow && existingRecords.length === 0) {
+          // Past the read bound this project's row may exist unseen: never create blind. The drain below (same
+          // lock) reads THIS project's rows by its number and creates or patches exactly one.
+          markOverviewProjectDirty(state, target.projectNo, { recount: true })
+          continue
+        }
+        // S3 follow-up C: one project's failure does not stop the others; it is collected, the project stays
+        // dirty, and the refresh answers REFRESH_INCOMPLETE instead of `fresh: true`.
+        try {
+          await writeProjectRow({
+            api,
+            recordsApi,
+            writer,
+            scoped,
+            store: registry,
+            tenant,
+            projectId: scopedProjectId,
+            overviewSheetId: sheet.sheetId,
+            target,
+            fields: fieldsByProjectNo.get(target.projectNo) || null,
+            pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
+            existingRecords,
+            recount: true,
+            locale,
+            now,
+            summary,
+          })
+        } catch (error) {
+          drain.recordFailure(target.projectNo, { recount: true }, error)
+        }
       }
       return {
         sheetId: sheet.sheetId,
@@ -931,6 +1103,12 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
     },
   })
   if (run.busy) throw overviewBusyError()
+  // S3 follow-up C: a project of this run (the full pass OR the drain of the events it absorbed) is still failed
+  // → not fresh. Never swallowed into a success.
+  const failedProjectCount = drainFailedCount(drain)
+  if (failedProjectCount > 0) {
+    throw overviewRefreshIncompleteError({ failedProjectCount, summary: run.value, cause: drain.firstError })
+  }
   return run.value
 }
 
@@ -941,7 +1119,8 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
  * if this tenant's overview writer is already running in this process the call returns `deferred` at once (that
  * writer re-projects it before it stops, no connection taken here); otherwise this call becomes the writer:
  * try-lock (another process holds it → `busy`, the project stays dirty for this process's next writer), drain
- * every dirty project, release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
+ * every FRESH dirty project and at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS earlier failures past their backoff (fix
+ * round 1), release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
  * rows; the others do not). BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's
  * outcome. The first failure of the drain is rethrown for that log.
  */
@@ -958,9 +1137,13 @@ async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenan
   markOverviewProjectDirty(state, no, { recount })
   if (state.running) return { outcome: 'deferred', sheetId: sheet.sheetId }
   const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
-  const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne })
+  // S3 follow-up C: a project whose write failed is put back into the dirty set when the writer stops (it was taken
+  // out by the drain) — the next overview writer of this tenant here retries it instead of it being dropped.
+  // Fix round 1: this writer runs inside a request handler, so it retries at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS
+  // earlier failures, none within OVERVIEW_EVENT_RETRY_BACKOFF_MS of its failure; its own project is a fresh mark.
+  const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne, failed: drain.failed, retryPolicy: OVERVIEW_EVENT_RETRY_POLICY })
   if (run.busy) return { outcome: 'busy', sheetId: sheet.sheetId }
-  if (drain.firstError) throw drain.firstError
+  if (drainFailedCount(drain) > 0) throw drain.firstError
   return { outcome: drain.outcome || 'updated', sheetId: sheet.sheetId, ...drain.summary }
 }
 
@@ -970,6 +1153,7 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS,
   MAX_PROJECT_OVERVIEW_ROWS,
   PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE: REFRESH_INCOMPLETE_CODE,
   StockPreparationProjectOverviewError,
   projectOverviewPosture,
   buildProjectOverviewDeepLink,
@@ -1001,5 +1185,12 @@ module.exports = {
     requireOverviewWritePort,
     overviewWriteRecordsApi,
     overviewWriterState,
+    // S3 follow-ups (C / D).
+    REFRESH_INCOMPLETE_CODE,
+    OVERVIEW_READ_PAGE_LIMIT,
+    OVERVIEW_READ_MAX_PAGES,
+    // S3 follow-ups, fix round 1: the per-event writer's retry bound + backoff.
+    OVERVIEW_EVENT_RETRY_MAX_PROJECTS,
+    OVERVIEW_EVENT_RETRY_BACKOFF_MS,
   },
 }

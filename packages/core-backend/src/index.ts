@@ -65,6 +65,7 @@ import { StockPreparationFieldPermissionsService } from './services/stock-prepar
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
 import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
+import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -3431,6 +3432,15 @@ export class MetaSheetServer {
         stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
           ? new StockPreparationFieldPermissionsService()
           : undefined,
+        // 备料「成员与权限」(S5b, register R-39): the narrow members port for plugin-integration-core
+        // ONLY — create / update server-generated `stock-prep_c_…` roles (never `_admin`, never a
+        // built-in, never outside the namespace), `stock-prep:*` codes only and within the grantor's own,
+        // project-sheet scope through the plugin's G1 call and within what the grantor can write, every
+        // change audited. Platform admin or the `stock-prep` delegated admin only; behind the default-OFF
+        // STOCK_PREP_MEMBERS_PAGE_ENABLED. Absent for every other plugin.
+        stockPreparationMembers: manifest.name === 'plugin-integration-core'
+          ? createStockPrepMembersHostPort()
+          : undefined,
         // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
         // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
         // title, body })`; this wraps the EXISTING group-destination machinery
@@ -4220,6 +4230,17 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('DataSourceManager initialization failed; continuing in degraded mode', e as Error)
     }
+
+    // #6164 step 1: read-only trial decrypt of every encrypted store (counts only). Not awaited; never throws.
+    void import('./security/encrypted-store-probe')
+      .then(({ runEncryptedStoreProbeAtStartup }) => runEncryptedStoreProbeAtStartup({ resolvePool: () => poolManager.get() }))
+      .catch(() => {
+        try {
+          this.logger.warn('Encrypted store probe could not be loaded; startup continues without it')
+        } catch {
+          // a throwing logger must not turn into an unhandled rejection
+        }
+      })
 
     try {
       await startDirectorySyncScheduler()

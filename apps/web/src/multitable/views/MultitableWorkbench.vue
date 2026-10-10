@@ -412,6 +412,8 @@
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
           :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
+          :commit-range="grid.patchRange"
+          :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
           :group-fields="grid.groupFields.value"

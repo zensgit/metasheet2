@@ -13,10 +13,10 @@
  * would otherwise land in browser devtools, proxy/CDN access logs, pasted screenshots and any ops
  * dashboard that renders `error` verbatim.
  *
- * Coverage: ALL THIRTEEN read-side GETs in admin-routes.ts that have a 500 branch —
+ * Coverage: ALL FOURTEEN read-side GETs in admin-routes.ts that have a 500 branch —
  *   /plugins, /plugins/:id, /plugins/:id/config, /slo/status, /dlq, /shards, /shards/:name,
  *   /queues, /ratelimits, /ratelimits/:key, /health/detailed, /health/summary,
- *   /health/subsystem/:name
+ *   /health/subsystem/:name, and /security/encrypted-stores (#6164 step 1, added with its route)
  * The write-side (POST/PUT/DELETE) echoes were OUT OF SCOPE for #5903 and were pinned as residuals
  * by the sweep at the bottom of this file; the follow-up that redacted them (and the two sub-routers)
  * tightened that sweep to every method — see admin-tree-5xx-values-free.test.ts for that coverage.
@@ -219,6 +219,17 @@ const READ_ROUTES: Array<{ label: string; path: string; arm: () => void }> = [
     path: '/api/admin/health/subsystem/database',
     arm: () => {
       vi.spyOn(getHealthAggregator(), 'checkHealth').mockRejectedValue(leakyError())
+    },
+  },
+  {
+    label: 'GET /api/admin/security/encrypted-stores',
+    path: '/api/admin/security/encrypted-stores',
+    // The probe reports an unreadable STORE inside its 200 report; the route's 500 branch is a
+    // failure before the probe starts — the pool lookup itself throwing.
+    arm: () => {
+      vi.spyOn(poolManager, 'get').mockImplementation(() => {
+        throw leakyError()
+      })
     },
   },
 ]
