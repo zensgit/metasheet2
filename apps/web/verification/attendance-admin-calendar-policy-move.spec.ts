@@ -62,7 +62,7 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
 
   test('1440: Holidays hosts the override form', async ({ page }) => {
     test.setTimeout(180_000)
-    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.setViewportSize({ width: 1440, height: 1200 })
     const errs: string[] = []
     page.on('pageerror', (error) => errs.push(String(error)))
     await stubAttendanceApis(page)
@@ -74,8 +74,19 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
     await expect(holidays.locator('[data-attendance-calendar-policy-host="holidays"]')).toBeVisible()
     await expect(holidays.locator('[data-attendance-calendar-policy-quick-add]')).toBeVisible()
     await expect(holidays.locator('h5').filter({ hasText: '有效日历覆盖规则' })).toBeVisible()
+    await expect(overrides.locator('.attendance__form-card').first()).toBeVisible()
     await expect(page.locator('[data-admin-current-section="true"]')).toContainText('节假日')
     await expect(page.locator('#attendance-admin-settings [data-attendance-calendar-policy-quick-add]')).toHaveCount(0)
+    const quickGrid = holidays.locator('[data-attendance-calendar-policy-quick-add] .attendance__admin-grid')
+    await expect(quickGrid).toBeVisible()
+    const quickColumns = await quickGrid.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length)
+    expect(quickColumns, 'quick add uses a two-column form').toBe(2)
+    const inputFill = await page.locator('[data-calendar-policy-quick-holiday]').evaluate((node) => {
+      const field = node.closest('.attendance__field')
+      if (!(field instanceof HTMLElement)) return 0
+      return node.getBoundingClientRect().width / field.getBoundingClientRect().width
+    })
+    expect(inputFill, 'quick-add input fills its field').toBeGreaterThan(0.85)
     await scrollBelowSticky(page, '#attendance-effective-calendar-overrides')
     const name = 'attendance-admin-holidays-calendar-overrides-1440.png'
     await page.screenshot({ path: `${OUT}/${name}`, fullPage: false })
@@ -85,7 +96,7 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
 
   test('1440: Settings keeps the jump note and not the form', async ({ page }) => {
     test.setTimeout(180_000)
-    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.setViewportSize({ width: 1440, height: 1200 })
     const errs: string[] = []
     page.on('pageerror', (error) => errs.push(String(error)))
     await stubAttendanceApis(page)
@@ -101,7 +112,18 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
     await expect(settings.locator('#attendance-effective-calendar-overrides')).toHaveCount(0)
     await expect(page.locator('#attendance-admin-holidays')).toBeHidden()
     await expect(page.locator('[data-admin-current-section="true"]')).toContainText('设置')
-    await scrollBelowSticky(page, '[data-attendance-calendar-policy-jump]')
+    await expect(jump).toHaveClass(/attendance__form-callout/)
+    await expect(settings.locator('.attendance__form-card').first()).toBeVisible()
+    const thirds = settings.locator('.attendance__admin-grid--thirds').first()
+    const thirdColumns = await thirds.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length)
+    expect(thirdColumns, 'short settings groups use three columns').toBe(3)
+    const inputFill = await page.locator('#attendance-auto-absence-run-at').evaluate((node) => {
+      const field = node.closest('.attendance__field')
+      if (!(field instanceof HTMLElement)) return 0
+      return node.getBoundingClientRect().width / field.getBoundingClientRect().width
+    })
+    expect(inputFill, 'settings input fills its field').toBeGreaterThan(0.85)
+    await scrollBelowSticky(page, '#attendance-admin-settings h4')
     const name = 'attendance-admin-settings-jump-note-1440.png'
     await page.screenshot({ path: `${OUT}/${name}`, fullPage: false })
     publish(name)
