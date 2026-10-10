@@ -13,7 +13,11 @@
  *     processes by the row lock (the second re-reads the first's committed row);
  *   - every refusal (non-owner, nonexistent, CREDENTIALS_REQUIRED, stale, gone, not re-sealable)
  *     leaves the row byte-identical (same xmin, same row_to_json), and the non-owner / nonexistent
- *     refusals issue NO statement at all.
+ *     refusals issue NO statement at all;
+ *   - (#6164 step 1, last case) the encrypted-store probe's own SELECTs run on real tables in a
+ *     READ ONLY session: a credential sealed under the current material opens, one sealed under the
+ *     previous material is counted undecryptable, a missing table / column is classified by the real
+ *     SQLSTATE, and no row changes.
  *
  * Isolation: every table lives in a throwaway schema (search_path), created from the real
  * migrations and dropped afterwards. Real-DB gate: runs only where DATABASE_URL is configured (the
@@ -57,6 +61,7 @@ import { up as addConnectionBinding } from '../../src/db/migrations/zzzz20260902
 import { up as addLiveIdBindingLock } from '../../src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock'
 import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from '../../src/routes/data-sources'
 import { decryptStoredSecretValue, encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
+import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -507,5 +512,80 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       expect(denied.headers['content-length'], current.label).toBe(missing.headers['content-length'])
     }
     expect(await rowFingerprint('rdb-deny01')).toBe(before)
+  })
+
+  // #6164 step 1: the encrypted-store probe's own SQL against real tables. Own schema (so the rows of
+  // the cases above do not count), a session forced READ ONLY (any write would fail with 25006 and show
+  // up as read_failed), and real SQLSTATEs for the missing table / missing column classification.
+  it('encrypted-store probe: real SELECTs count one current-sealed and one previous-sealed credential; missing table / column by real SQLSTATE; nothing written', async () => {
+    const probeSchema = `${SCHEMA}_probe`
+    await admin.query(`CREATE SCHEMA ${probeSchema}`)
+    const setupPool = new Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${probeSchema}`, max: 2 })
+    const readOnlyPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      options: `-c search_path=${probeSchema} -c default_transaction_read_only=on`,
+      max: 2,
+    })
+    const setupDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: setupPool }) })
+    try {
+      // The same data_sources migrations beforeAll runs (tenant_id / scope_kind come from the second).
+      await createDataSourcesTable(setupDb)
+      await addConnectionBinding(setupDb)
+      await addLiveIdBindingLock(setupDb)
+      // webhook_url only: the probe's `secret` read must meet a real 42703.
+      await setupPool.query(`CREATE TABLE dingtalk_group_destinations (id text PRIMARY KEY, webhook_url text NOT NULL)`)
+      const currentSealed = encryptStoredSecretValue(SECRET.newPassword) // the file runs under CURRENT
+      const seed = async (id: string, password: string, active = true, deleted = false) => {
+        await setupPool.query(
+          `INSERT INTO data_sources (id, name, type, config, owner_id, workspace_id, tenant_id, scope_kind, is_active, auto_connect, deleted_at, created_at, updated_at)
+           VALUES ($1, $1, 'postgres', $2::jsonb, $3, 'ws-realdb', 'tenant-realdb', 'private', $4, false, $5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+          [id, JSON.stringify({ connection: CONNECTION, credentials: { username: SECRET.username, password } }), OWNER_ID, active, deleted ? '2026-01-02T00:00:00Z' : null],
+        )
+      }
+      await seed('probe-current', currentSealed)
+      await seed('probe-previous', oldPasswordSealed)
+      await seed('probe-plaintext', SECRET.secondPassword)
+      // Rows the data-source loader never reads are not counted either.
+      await seed('probe-inactive', oldPasswordSealed, false)
+      await seed('probe-deleted', oldPasswordSealed, true, true)
+      await setupPool.query(`INSERT INTO dingtalk_group_destinations (id, webhook_url) VALUES ('probe-robot', $1)`, [oldApiKeySealed])
+      const fingerprint = async () =>
+        (await setupPool.query(`SELECT string_agg(xmin::text || ':' || row_to_json(d)::text, '|' ORDER BY id) AS f FROM data_sources d`)).rows[0].f +
+        (await setupPool.query(`SELECT string_agg(xmin::text || ':' || row_to_json(g)::text, '|' ORDER BY id) AS f FROM dingtalk_group_destinations g`)).rows[0].f
+      const before = await fingerprint()
+
+      const statements: string[] = []
+      const report = await probeEncryptedStores({
+        query: (sql, params) => {
+          statements.push(sql)
+          return readOnlyPool.query(sql, params)
+        },
+        env: { NODE_ENV: 'test', ENCRYPTION_KEY: CURRENT.key, ENCRYPTION_SALT: CURRENT.salt },
+      })
+
+      const byField = Object.fromEntries(report.stores.map((s) => [`${s.store}.${s.field}`, s]))
+      expect(byField['data_sources.config.credentials.password']).toMatchObject({ status: 'ok', rows: 3, encrypted: 2, undecryptable: 1, plaintext: 1 })
+      expect(byField['data_sources.config.credentials.apiKey']).toMatchObject({ status: 'ok', rows: 0 })
+      expect(byField['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', rows: 1, encrypted: 1, undecryptable: 1 })
+      expect(byField['dingtalk_group_destinations.secret']).toMatchObject({ status: 'column_missing', sqlState: '42703' })
+      for (const missing of ['directory_integrations', 'integration_external_systems', 'attendance_integrations', 'system_configs']) {
+        for (const store of report.stores.filter((s) => s.store === missing)) {
+          expect({ store: `${store.store}.${store.field}`, status: store.status, sqlState: store.sqlState })
+            .toEqual({ store: `${store.store}.${store.field}`, status: 'table_missing', sqlState: '42P01' })
+        }
+      }
+      expect(report.totals).toMatchObject({ encrypted: 3, undecryptable: 2, plaintext: 1, unreadable: 0 })
+      expect(statements).toHaveLength(report.stores.length)
+      expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
+      expect(await fingerprint()).toBe(before)
+      const serialized = JSON.stringify(report)
+      for (const secret of [SECRET.newPassword, SECRET.secondPassword, SECRET.oldPassword, SECRET.oldApiKey, currentSealed, oldPasswordSealed]) {
+        expect(serialized).not.toContain(secret)
+      }
+    } finally {
+      await setupDb.destroy().catch(() => {})
+      await readOnlyPool.end().catch(() => {})
+      await admin.query(`DROP SCHEMA IF EXISTS ${probeSchema} CASCADE`)
+    }
   })
 })
