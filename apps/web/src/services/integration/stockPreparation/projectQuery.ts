@@ -54,7 +54,7 @@ export type StockPrepProjectQueryStatusKey = StockPrepHomeFilterKey
  * 二级筛选「来源」 — which store answered for this project.
  *
  * `both` is a SUBSET of `mvp` and of `pull_target`, not a fourth disjoint bucket: a row the archive
- * and the pull target both know satisfies 「归档过」 and 「自助拉取过」 and 「两者都有」. Stated here
+ * and the pull target both know satisfies 「平台登记」 (Q8: formerly 「归档过」) and 「自助拉取过」 and 「两者都有」. Stated here
  * because the alternative reading (mvp = archive-ONLY) is equally defensible and silently produces a
  * different list; whichever one ships has to be written down where the predicate lives.
  */

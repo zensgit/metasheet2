@@ -19,6 +19,20 @@
 //        count, then the insert — every statement on the transaction handle — and the cap is enforced
 //        under the lock. Mutation: drop the `advisoryXactLock` call, or move the count / insert onto
 //        the autocommit db, and the recorded call sequence reds.
+//   S-08 (S4) `archive` is ONE transaction under the SAME tenant lock: lock → row FOR UPDATE →
+//        compare-and-set update whose `where` repeats `status: 'active'`; it stamps status, the
+//        archive outcome columns and `updated_at` and NOTHING else (sheet id, object id, creator,
+//        counts untouched); 087's CHECK pairing holds after it.
+//   S-09 (S4) `restore` mirrors it: archived → active, `archived_at` cleared in the same statement,
+//        `restored_at` / `restored_by` stamped, `archived_by` kept as a fact.
+//   S-10 (S4) the preconditions: archive of an archived row → 409 ALREADY_ARCHIVED, restore of an
+//        active row → 409 NOT_ARCHIVED, a missing row → 409 ABSENT — each WITHOUT an update
+//        statement, and another tenant's row with the same project number is never read or moved.
+//   S-11 (S4) the compare-and-set backstop: a row whose status moved between the read and the write
+//        (an update matching nothing) is the same typed 409, never a silent success.
+//   S-12 (S4 fix round 1) `withActiveRowLocked` — the create replay's guard: lock → row FOR UPDATE →
+//        active check → the callback, all inside ONE transaction; an archived row is 409 ARCHIVED
+//        and a missing one 409 ABSENT, the callback never called; a callback's throw propagates.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -62,6 +76,16 @@ function makeMemoryDb({ failInsertWith } = {}) {
       assert.equal(table, PROJECT_TARGET_TABLE)
       return rows.filter((row) => matches(row, where || {})).length
     },
+    async selectOneForUpdate(table, where) {
+      assert.equal(table, PROJECT_TARGET_TABLE)
+      return rows.find((row) => matches(row, where)) || null
+    },
+    async updateRow(table, set, where) {
+      assert.equal(table, PROJECT_TARGET_TABLE)
+      const hit = rows.filter((row) => matches(row, where))
+      for (const row of hit) Object.assign(row, set)
+      return hit.map((row) => ({ ...row }))
+    },
     async insertOne(table, row) {
       assert.equal(table, PROJECT_TARGET_TABLE)
       if (failInsertWith) throw failInsertWith
@@ -89,6 +113,8 @@ function makeMemoryDb({ failInsertWith } = {}) {
     async select(table, options) { calls.push([`${prefix}select`, table]); return impl.select(table, options) },
     async countRows(table, where) { calls.push([`${prefix}countRows`, table]); return impl.countRows(table, where) },
     async insertOne(table, row) { calls.push([`${prefix}insertOne`, table]); return impl.insertOne(table, row) },
+    async selectOneForUpdate(table, where) { calls.push([`${prefix}selectOneForUpdate`, table, { ...where }]); return impl.selectOneForUpdate(table, where) },
+    async updateRow(table, set, where) { calls.push([`${prefix}updateRow`, table, { ...where }, Object.keys(set).sort()]); return impl.updateRow(table, set, where) },
   })
   const api = {
     rows,
@@ -105,9 +131,19 @@ function makeMemoryDb({ failInsertWith } = {}) {
   return api
 }
 
+const CLOCK = new Date('2026-10-09T08:00:00Z')
+
 function makeStore(db) {
   let n = 0
-  return createStockPreparationProjectTargetStore({ db, idGenerator: () => `pt-${(n += 1)}` })
+  return createStockPreparationProjectTargetStore({ db, idGenerator: () => `pt-${(n += 1)}`, now: () => CLOCK })
+}
+
+/** 087's CHECK, asserted over every row the fake holds: archived ⇔ archived_at set. */
+function assertArchivedCheckHolds(db) {
+  for (const row of db.rows) {
+    assert.equal(row.status === 'archived', row.archived_at !== null && row.archived_at !== undefined, `087 CHECK: status ${row.status} with archived_at ${row.archived_at}`)
+    assert.ok(['active', 'archived'].includes(row.status), `087 CHECK: status ${row.status}`)
+  }
 }
 
 async function expectStoreError(promise, status, code) {
@@ -256,6 +292,144 @@ test('S-07 (E1) create serializes count + insert per tenant: ONE transaction, th
   // A db without `transaction` cannot build the store at all (a lock in autocommit would guard nothing).
   const { transaction: _omitted, ...autocommitOnly } = makeMemoryDb()
   assert.throws(() => createStockPreparationProjectTargetStore({ db: autocommitOnly }), /transaction/)
+})
+
+const LIFECYCLE_BASE = Object.freeze({ tenantId: 'tenant-s4-store', objectId: 'plm_stock_preparation_sandbox_p_abcdefabcdefabcdefabcdef' })
+
+test('S-08 (S4) archive: ONE transaction, the tenant lock, the row FOR UPDATE, a compare-and-set update that stamps the archive columns and nothing else', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ ...LIFECYCLE_BASE, projectNo: 'P-ARC', sheetId: 'sheet_s4_arc', createdBy: 'u_creator', maxPerTenant: 200 })
+  const before = { ...db.rows[0] }
+  db.calls.length = 0
+  const archived = await store.archive({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: ' P-ARC ', actorId: 'u_puller' })
+  const key = { tenant_id: LIFECYCLE_BASE.tenantId, project_no: 'P-ARC' }
+  assert.deepEqual(db.calls, [
+    ['transaction'],
+    ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${LIFECYCLE_BASE.tenantId}`],
+    ['trx.selectOneForUpdate', PROJECT_TARGET_TABLE, key],
+    ['trx.updateRow', PROJECT_TARGET_TABLE, { ...key, status: 'active' }, ['archived_at', 'archived_by', 'status', 'updated_at']],
+  ], 'lock → FOR UPDATE → compare-and-set, every statement on the transaction handle; the SAME lock key as create')
+  assert.equal(archived.status, 'archived')
+  assert.equal(archived.archivedAt, CLOCK.toISOString())
+  assert.equal(archived.sheetId, 'sheet_s4_arc')
+  const after = db.rows[0]
+  assert.equal(after.status, 'archived')
+  assert.equal(after.archived_by, 'u_puller')
+  assert.equal(after.archived_at, CLOCK)
+  assert.equal(after.updated_at, CLOCK)
+  // Nothing else on the row moved: the sheet is not re-pointed, the creator is not rewritten.
+  for (const column of Object.keys(before)) {
+    if (['status', 'archived_at', 'archived_by', 'updated_at'].includes(column)) continue
+    assert.deepEqual(after[column], before[column], `archive leaves ${column} untouched`)
+  }
+  assertArchivedCheckHolds(db)
+  // The cap still counts it: an archived sheet is a live sheet.
+  assert.equal(await store.count({ tenantId: LIFECYCLE_BASE.tenantId }), 1)
+})
+
+test('S-09 (S4) restore: archived → active, archived_at cleared in the same statement, restored_* stamped, archived_by kept', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ ...LIFECYCLE_BASE, projectNo: 'P-RES', sheetId: 'sheet_s4_res' })
+  await store.archive({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-RES', actorId: 'u_archiver' })
+  db.calls.length = 0
+  const restored = await store.restore({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-RES', actorId: 'u_restorer' })
+  const key = { tenant_id: LIFECYCLE_BASE.tenantId, project_no: 'P-RES' }
+  assert.deepEqual(db.calls, [
+    ['transaction'],
+    ['trx.advisoryXactLock', `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${LIFECYCLE_BASE.tenantId}`],
+    ['trx.selectOneForUpdate', PROJECT_TARGET_TABLE, key],
+    ['trx.updateRow', PROJECT_TARGET_TABLE, { ...key, status: 'archived' }, ['archived_at', 'restored_at', 'restored_by', 'status', 'updated_at']],
+  ], 'no count: the cap is NOT re-checked on restore (the row was counted while archived)')
+  assert.equal(restored.status, 'active')
+  assert.equal(restored.archivedAt, null)
+  assert.equal(restored.restoredAt, CLOCK.toISOString())
+  const row = db.rows[0]
+  assert.equal(row.archived_at, null)
+  assert.equal(row.restored_by, 'u_restorer')
+  assert.equal(row.archived_by, 'u_archiver', 'the last archiver stays as a fact')
+  assertArchivedCheckHolds(db)
+  // ...and the row can be archived again: the lifecycle is a cycle, not a one-way door.
+  assert.equal((await store.archive({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-RES', actorId: 'u_archiver' })).status, 'archived')
+  assertArchivedCheckHolds(db)
+})
+
+test('S-10 (S4) preconditions: ALREADY_ARCHIVED / NOT_ARCHIVED / ABSENT are typed 409s with no update statement; another tenant is never touched', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ ...LIFECYCLE_BASE, projectNo: 'P-PRE', sheetId: 'sheet_s4_pre' })
+  await store.create({ ...LIFECYCLE_BASE, tenantId: 'tenant-s4-foreign', projectNo: 'P-FOREIGN', sheetId: 'sheet_s4_foreign' })
+  const scope = { tenantId: LIFECYCLE_BASE.tenantId, actorId: 'u_puller' }
+
+  db.calls.length = 0
+  await expectStoreError(store.restore({ ...scope, projectNo: 'P-PRE' }), 409, 'STOCK_PREPARATION_PROJECT_NOT_ARCHIVED')
+  assert.ok(!db.calls.some((call) => call[0] === 'trx.updateRow'), 'restoring an ACTIVE row issues no update')
+  assert.equal(db.rows[0].status, 'active')
+
+  await store.archive({ ...scope, projectNo: 'P-PRE' })
+  db.calls.length = 0
+  await expectStoreError(store.archive({ ...scope, projectNo: 'P-PRE' }), 409, 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED')
+  assert.ok(!db.calls.some((call) => call[0] === 'trx.updateRow'), 'archiving an ARCHIVED row issues no update')
+  assert.equal(db.rows[0].archived_at, CLOCK, 'the first archive stamp is not rewritten')
+
+  for (const transition of ['archive', 'restore']) {
+    db.calls.length = 0
+    const absent = await expectStoreError(store[transition]({ ...scope, projectNo: 'P-NOPE' }), 409, 'STOCK_PREPARATION_PROJECT_ABSENT')
+    assert.deepEqual(absent.details, { field: 'projectNo' }, 'values-free: the field, never the number')
+    assert.ok(!db.calls.some((call) => call[0] === 'trx.updateRow'), `${transition} of a missing row issues no update`)
+    // Another tenant's project number is ABSENT for this tenant — never found, never moved.
+    await expectStoreError(store[transition]({ ...scope, projectNo: 'P-FOREIGN' }), 409, 'STOCK_PREPARATION_PROJECT_ABSENT')
+  }
+  assert.equal(db.rows.find((row) => row.tenant_id === 'tenant-s4-foreign').status, 'active', 'the foreign row is untouched')
+  // Scope validation precedes any db call.
+  db.calls.length = 0
+  for (const transition of ['archive', 'restore']) {
+    await expectStoreError(store[transition]({ tenantId: '', projectNo: 'P-PRE' }), 422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID')
+    await expectStoreError(store[transition]({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: '  ' }), 422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID')
+  }
+  assert.deepEqual(db.calls, [])
+  assertArchivedCheckHolds(db)
+})
+
+test('S-11 (S4) the compare-and-set backstop: an update that matches nothing is the typed 409, never a silent success', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ ...LIFECYCLE_BASE, projectNo: 'P-CAS', sheetId: 'sheet_s4_cas' })
+  // A read that answers "active" while the row has already moved (what a missing lock would allow):
+  // the update's own `status: 'active'` predicate matches nothing.
+  const stale = { ...db.rows[0] }
+  db.rows[0].status = 'archived'
+  db.rows[0].archived_at = CLOCK
+  const original = db.transaction
+  db.transaction = async (fn) => original.call(db, (trx) => fn({ ...trx, selectOneForUpdate: async () => stale }))
+  await expectStoreError(store.archive({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-CAS', actorId: 'u_late' }), 409, 'STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED')
+  assert.equal(db.rows[0].archived_by, null, 'the row was not re-stamped by the late transition')
+})
+
+test('S-12 (S4 fix round 1) withActiveRowLocked: lock → FOR UPDATE → active check → callback; archived / absent refuse without calling it', async () => {
+  const db = makeMemoryDb()
+  const store = makeStore(db)
+  await store.create({ ...LIFECYCLE_BASE, projectNo: 'P-LOCK', sheetId: 'sheet_s4_lock' })
+  db.calls.length = 0
+  const seen = []
+  const out = await store.withActiveRowLocked({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK' }, async (row) => {
+    seen.push([...db.calls.map((call) => call[0])])
+    return { status: row.status, sheetId: row.sheetId }
+  })
+  assert.deepEqual(out, { status: 'active', sheetId: 'sheet_s4_lock' })
+  assert.deepEqual(seen, [['transaction', 'trx.advisoryXactLock', 'trx.selectOneForUpdate']], 'the callback runs AFTER the lock and the FOR UPDATE read, inside the transaction')
+  assert.equal(db.calls[1][1], `${PROJECT_TARGET_CREATE_LOCK_PREFIX}${LIFECYCLE_BASE.tenantId}`, 'the SAME lock key create / archive / restore take')
+
+  await store.archive({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK', actorId: 'u_archiver' })
+  let called = 0
+  const archived = await expectStoreError(store.withActiveRowLocked({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK' }, async () => { called += 1 }), 409, 'STOCK_PREPARATION_PROJECT_ARCHIVED')
+  assert.deepEqual(archived.details, { field: 'projectNo' })
+  await expectStoreError(store.withActiveRowLocked({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-NONE' }, async () => { called += 1 }), 409, 'STOCK_PREPARATION_PROJECT_ABSENT')
+  assert.equal(called, 0, 'the callback never runs for an archived or missing row')
+
+  await store.restore({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK', actorId: 'u_restorer' })
+  await assert.rejects(store.withActiveRowLocked({ tenantId: LIFECYCLE_BASE.tenantId, projectNo: 'P-LOCK' }, async () => { throw new Error('heal failed') }), /heal failed/)
 })
 
 test('S-06 migration 087: two unique indexes, the CHECKs, the integration_ prefix, no value column, no DROP', () => {
