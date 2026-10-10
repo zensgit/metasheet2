@@ -172,8 +172,8 @@ const rejectWith = (fn: ReturnType<typeof vi.fn>) => (error: unknown) => {
 const helper = (code: string, fallback: string): Outcome => ({ kind: 'helper', code, fallback })
 const fixed500 = (code: string, message: string): Outcome => ({ kind: 'fixed', status: 500, code, message, logged: false })
 
-const INTEGRATION = { integrationId: 'dir-1' }
-const ACCOUNT = { accountId: 'account-1' }
+const INTEGRATION = { integrationId: 'd1000000-0000-4000-8000-000000000001' }
+const ACCOUNT = { accountId: 'ac000000-0000-4000-8000-000000000001' }
 
 /** Every `catch (x)` clause of routes/admin-directory.ts, in source order. */
 const CATCH_SITES: Site[] = [
@@ -352,13 +352,13 @@ const CATCH_SITES: Site[] = [
   },
   {
     owner: 'POST /accounts/batch-bind',
-    calls: [{ method: 'post', path: '/accounts/batch-bind', body: { bindings: [{ accountId: 'account-1', localUserRef: 'user-1' }] } }],
+    calls: [{ method: 'post', path: '/accounts/batch-bind', body: { bindings: [{ accountId: 'ac000000-0000-4000-8000-000000000001', localUserRef: 'user-1' }] } }],
     fail: rejectWith(syncMocks.batchBindDirectoryAccounts),
     outcome: helper('DIRECTORY_BATCH_BIND_FAILED', 'Failed to batch bind directory accounts'),
   },
   {
     owner: 'POST /accounts/batch-admit-users',
-    calls: [{ method: 'post', path: '/accounts/batch-admit-users', body: { accountIds: ['account-1'] } }],
+    calls: [{ method: 'post', path: '/accounts/batch-admit-users', body: { accountIds: ['ac000000-0000-4000-8000-000000000001'] } }],
     fail: rejectWith(syncMocks.batchAdmitDirectoryAccountUsers),
     outcome: helper('DIRECTORY_BATCH_ADMISSION_FAILED', 'Failed to batch create and bind local users for directory accounts'),
   },
@@ -370,13 +370,13 @@ const CATCH_SITES: Site[] = [
   },
   {
     owner: 'POST /accounts/batch-unbind',
-    calls: [{ method: 'post', path: '/accounts/batch-unbind', body: { accountIds: ['account-1'] } }],
+    calls: [{ method: 'post', path: '/accounts/batch-unbind', body: { accountIds: ['ac000000-0000-4000-8000-000000000001'] } }],
     fail: rejectWith(syncMocks.batchUnbindDirectoryAccounts),
     outcome: helper('DIRECTORY_BATCH_UNBIND_FAILED', 'Failed to batch unbind directory accounts'),
   },
   {
     owner: 'POST /alerts/:alertId/ack',
-    calls: [{ method: 'post', path: '/alerts/:alertId/ack', params: { alertId: 'alert-1' } }],
+    calls: [{ method: 'post', path: '/alerts/:alertId/ack', params: { alertId: 'a1000000-0000-4000-8000-000000000001' } }],
     fail: rejectWith(syncMocks.acknowledgeDirectorySyncAlert),
     outcome: helper('DIRECTORY_ALERT_ACK_FAILED', 'Failed to acknowledge directory alert'),
   },
@@ -447,7 +447,7 @@ const NOTHING_COMMITTED: NothingCommitted[] = [
     resolve: (failure, failureText) => {
       syncMocks.batchBindDirectoryAccounts.mockResolvedValue({
         succeeded: [],
-        failed: [{ accountId: 'account-1', error: failureText }],
+        failed: [{ accountId: 'ac000000-0000-4000-8000-000000000001', error: failureText }],
         failedErrors: [failure],
       })
     },
@@ -459,7 +459,7 @@ const NOTHING_COMMITTED: NothingCommitted[] = [
     resolve: (failure, failureText) => {
       syncMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
         succeeded: [],
-        failed: [{ accountId: 'account-1', error: failureText }],
+        failed: [{ accountId: 'ac000000-0000-4000-8000-000000000001', error: failureText }],
         failedErrors: [failure],
       })
     },
@@ -471,7 +471,7 @@ const NOTHING_COMMITTED: NothingCommitted[] = [
     resolve: (failure, failureText) => {
       syncMocks.batchUnbindDirectoryAccounts.mockResolvedValue({
         succeeded: [],
-        failed: [{ accountId: 'account-1', error: failureText }],
+        failed: [{ accountId: 'ac000000-0000-4000-8000-000000000001', error: failureText }],
         failedErrors: [failure],
       })
     },

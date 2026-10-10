@@ -1,14 +1,31 @@
 # 考勤 QA 问题修复验证 — 2026-10-10
 
+本文件的本轮状态冻结于提交、推送之前；新 head 的远端 CI 实跑结果由 PR 描述及后续收尾回执单独记录，保留此处的失败与待验事实。
+
 ## 当前结论
 
-2026-10-10 已获得公开 Draft PR 与 CI 的明确授权；[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布。首轮远端 CI 在两个源域清单登记处失败，登记已补齐、定向回归通过；最终提交上的远端 CI 尚未完成。此前各轮“待发布授权”记录保留为当次冻结状态。PR 合并、部署与真实数据操作继续 HOLD。
+2026-10-10 已获得公开 Draft PR 与 CI 持续运行的明确授权；[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布。首轮远端 CI 在两个源域清单登记处失败，登记已补齐、定向回归通过。上一轮 head `58d52892b80d5083ecafa15f9dcefe14990ebd04`、基线 `00caf5f639050700cb4590448d9261f0fef2b101` 的 13 项 required checks 全绿；本轮已正常合并新固定 main `d6638148a528a7451fc9d4e8da8b7c13836c6941`。纯合并树 `e10d52fc2b39ed55f399c2de60c596e65d75e762` 的定向本地门通过；Node 20 完整 checkpoint 在本机文件系统上 FAIL，新 PR head 尚未 commit/push。此前各轮授权与验证仍按其冻结状态记录。PR Ready/合并、部署与真实数据操作继续 HOLD。
 
-冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支当前正常对齐固定 main 快照 `00caf5f639`；历次 main 合并均无冲突，测试链并集无丢项，本地检查结果及各批冻结身份见下文。
+冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。上一轮对齐固定 main `00caf5f639` 的回执与本轮新 main 树分开：纯合并树的定向本地门已通过，但 Node 20 完整 checkpoint 在本机文件系统上 FAIL；需在新 head 的 Linux CI 原生支持文件系统上完成全量 checkpoint。新 PR head 尚未 commit/push，对应远端 CI 尚未运行。当前证据及待完成项见下文“新 main 收尾状态”。
 
-本轮独立审阅发现并修复一个 P2：跨午夜的旧刷新，以及审批后迟到的历史请求，均可能覆盖新一天的本人签到状态。两个入口已补齐开始时刻/最终规则时区保护；反例在修复前失败、修复后通过，完整前端回归与 Astra 最终复核通过。原 QA 环境、真实历史、性能与远端 CI 尚未验证，不能声称附件 20 项全部解决。
+本轮独立审阅发现并修复一个 P2：跨午夜的旧刷新，以及审批后迟到的历史请求，均可能覆盖新一天的本人签到状态。两个入口已补齐开始时刻/最终规则时区保护；反例在修复前失败、修复后通过，完整前端回归与 Astra 最终复核通过。原 QA 环境、真实历史与性能仍未验证；上一轮固定基线的远端 required checks 已通过，新 main 树上的远端 CI 尚未验证，不能声称附件 20 项全部解决。
 
 首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，早期正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。该批合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，对应回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。各批证据保留自己的冻结代码身份；当前代码见下一节。
+
+
+## 新 main 收尾状态
+
+固定 main `d6638148a528a7451fc9d4e8da8b7c13836c6941` 已常规 `--no-ff --no-commit` 合并，无冲突；以下本地门证据只针对纯合并源码树 `e10d52fc2b39ed55f399c2de60c596e65d75e762`，其中包含 #6266 task M4 迁移/Vitest/flags、#6298 admin-directory 和 #6299 AttendanceView 样式。Node 20.20.2 / pnpm 10.33.0 下 frozen-lockfile force restore 已完成；workspace 与 lockfile 字节均与 index 一致，没有依赖变更。早先 Node 24 / pnpm 12 shim 意外触发依赖安装并中断，恢复后的文件与 index 一致；这次失败日志保留在 ignored artifacts，不计作通过。
+
+纯合并树上的前端聚焦回归整跑 6 个文件、304 通过、0 失败/跳过；后端聚焦回归整跑 7 个文件、370 通过、0 失败/跳过；四个 ops 文件共 238 通过、0 失败/跳过。`validate:all` exit 0，含 13 个 plugin manifest、9 个既有 warning、lint 与完整 Web/Backend 类型链；Vite build exit 0，仍有 large-chunk warning。隔离 PostgreSQL 验证完成 436 项 migration、replay 0、M4 migration 确认；strict self-service fixture PASS；attendance order 7、swap 12、M4 schema 59 项均通过，数据库及服务清理 PASS。独立 backend-drain 验证 3/3 通过，三个 timer 用例耗时 1575/500/10060 ms，隔离资源清理 PASS。Provenance candidate tree verified，包含 63 个 pinned file digest。Astra 对该纯 merge tree 的独立只读审阅结论为无新增可操作发现。
+
+Node 20 完整 checkpoint 在本机 exit 1：相邻 real-DB 文件 47 项中 46 通过、1 失败，错误为 `RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED`；runner 确认其自有数据库、连接和合成 cluster 均已清理。Astra/root 实测本机 APFS filesystem type 26；现有 file-store 与 custody-store 的 Darwin allowlist 仅接受 type 25，源码与固定 main `d6638148a528a7451fc9d4e8da8b7c13836c6941` 一致，设置 canonical `TMPDIR` 也不能改变挂载类型。这是本机文件系统不满足既有 storage guard 的要求，不是本次考勤改动引入；该本地失败保留为 FAIL，不改记 PASS，也不通过改 guard 或 mock 绕过。
+
+因此完整 checkpoint 状态为 **PENDING**：须在新 head 的 Linux CI、原生受支持文件系统上运行完整 checkpoint，并满足 exit 0、fourCLEAN 全部成立及 values-free scan 为 0。该 remote supported-filesystem gate 尚未运行；当前新 PR head 尚未 commit/push。前述定向前端、后端、ops、隔离 DB、drain、provenance 与 Astra review 门仍各自保持 PASS，但不代表完整本地 checkpoint 或最终文档/source tree 通过。可公开摘要见 [`verification.json`](../../artifacts/attendance-qa-closeout-20261010/verification.json)；完整本地日志保留在同目录的 ignored 文件中。
+
+上一轮冻结身份仍有效但范围有限：head `58d52892b80d5083ecafa15f9dcefe14990ebd04` / tree `66cfcb232f9c0ed278580716e11920d2dfb3869d`，基线 `00caf5f639050700cb4590448d9261f0fef2b101`。该轮 13 项 required checks 全绿，整条 PR checks 为 55 项成功、1 项跳过；唯一跳过项是可选 Strict E2E check，不是失败日志输出步骤。FE 双点实跑 9/19/19/102 项、零跳过；Chromium 6 项挂载真实 AttendanceView，但 HTTP 仍为 mock。DB order 7 项及 ops 两文件 7 项全通过、零跳过。strict-RBAC 合成夹具结果为 `rbacBypass=false`、`tokenClaimsTrusted=false`、`adminReadDenied=true`，双次 seed、请假/加班/换班各提交并持久化核验 1 次后取消，取消共 3 次。以上均是上一轮冻结结果，不能替代新树本地复验或 CI。
+
+本地 ops 批次 14 项的组成是 history 4 + import 3 + 既有 advanced-import/strict/OpenAPI 7；上一轮 CI 中两个独立 ops 文件为 history 4 + import 3，共 7 项。两种统计范围不同，不应混称为同一批次。原始 20 项矩阵继续保留每项 `original_qa_acceptance: not_run`；本地与 CI 合成证据不等于原 QA 环境闭环。
 
 ## 首轮远端 CI 与源域清单登记
 
@@ -102,7 +119,7 @@ head `63f14abd7f1cf2f9930f7f870eb2682bfc2a13b5` 的 [Node 20 作业](https://git
 | 换班 API 邻近测试 | 12 通过，0 失败 | `neighbor-swap-api.log` |
 | 选定的打卡 API 邻近测试 | 4 通过、162 跳过、0 失败 | `neighbor-punch-api.log`；仅选定测试 |
 | Strict-RBAC self-service 夹具 | 幂等种子运行 2 次；1 个请假类型、1 条加班规则、2 条已发布手工换班排班；请假/加班/换班均已提交、持久化、核对并取消；管理员读取返回 403 | 仅一次性合成数据库；`selfservice-fixture.log`；无 RBAC bypass，不信任 token claims |
-| 运维范围/历史契约 | 14 通过，0 失败 | `ops-node-contracts-final.log` |
+| 本地运维契约批次 | 14 通过，0 失败：历史 4、导入范围 3、既有 advanced-import/strict/OpenAPI 7 | `ops-node-contracts-final.log`；本地批次，不等于远端新增作业 |
 | CI wiring 契约 | 264 通过，0 失败 | `ci-wiring-final.log`；本地源码契约，不等于远端执行 |
 | 夹具 runner 契约 | 198 通过，0 失败 | `fixture-runner-contracts.log` |
 | 合成历史 adverse checks | 4 通过，0 失败 | `backend-review-history-final.log` |
@@ -164,7 +181,7 @@ Astra 在冻结代码 `62d6801c5f` 的独立临时副本复现：新一天的本
 
 冻结回执记载当时为 `DRAFT_HOLD`、无已发布 PR、远端 CI 未运行、未合并、未部署、生产未变化、真实历史未修复。上述为冻结回执状态；本轮 main merge 状态已在前文单列。本轮 CI guard、unit guard 与 wiring 检查是本地证据，不能替代最终提交上的远端 required CI。
 
-Draft PR #6300 已发布；尚未完成最终 head 上的 fresh required CI，以及另行验收的原 QA 环境构建/组织/用户/日期范围识别、历史调查、延迟测量和业务验收。2026-10-10 的发布/CI 授权见当前结论；PR 合并、部署与真实历史仍保持 HOLD。未获得真实历史范围时，不使用附件凭证代替授权。
+Draft PR #6300 已发布。上一轮 head 的 13 项 required checks 全绿；新 main 纯合并树的定向本地门已通过，但 Node 20 完整 checkpoint 在本机 filesystem gate FAIL；须由新 head 的 Linux CI 在原生受支持文件系统完成 exit 0、fourCLEAN 与 values-free scan 0。该 gate PENDING，新 PR head 尚未 commit/push，fresh required CI 尚未运行。原 QA 环境构建/组织/用户/日期范围识别、历史调查、延迟测量和业务验收仍未完成。2026-10-10 的 Draft/CI 授权见当前结论；Ready/合并、部署与真实历史仍保持 HOLD。未获得真实历史范围时，不使用附件凭证代替授权。
 
 ## 重现命令
 

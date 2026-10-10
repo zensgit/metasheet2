@@ -5,12 +5,17 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { completeTask, createTask, getTask, listPending, listTasks, reopenTask } from '../../src/services/task-records'
 import { computeDueAt } from '../../src/tasks/task-dates'
 import { taskStructureLockKey } from '../../src/tasks/task-lock-keys'
+import { orgMemberSeeds } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-p0a.db.test.ts requires EXPECT_DB=1')
 }
 
 const ORG_PREFIX = 'org_tasks_p0a_'
+
+// RULED(2026-10-07): [N2] an assignee other than the creator must be an active member of the
+// org (design §4.6), so a cell that names one seeds it here; afterAll drops exactly those rows.
+const orgMembers = orgMemberSeeds()
 
 function ids(label: string): { orgId: string; userA: string; userB: string; outsider: string } {
   const stamp = randomUUID()
@@ -43,6 +48,7 @@ async function assigneeRows(taskId: string): Promise<Array<{ user_id: string; co
 describe('tasks P0-A real db', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', [`${ORG_PREFIX}%`])
+    await orgMembers.drop()
   })
 
   it('creates a task with a tev_ event and lists it for the creator', async () => {
@@ -107,6 +113,7 @@ describe('tasks P0-A real db', () => {
 
   it('reopen clears only the actor and does not bump version until status changes', async () => {
     const { orgId, userA, userB } = ids('reopen')
+    await orgMembers.seed(orgId, [userB])
     const created = await createTask({
       orgId,
       creatorId: userA,
@@ -146,6 +153,7 @@ describe('tasks P0-A real db', () => {
 
   it('serializes two completes that start while the structure lock is held', async () => {
     const { orgId, userA, userB } = ids('race')
+    await orgMembers.seed(orgId, [userB])
     const created = await createTask({
       orgId,
       creatorId: userA,
@@ -238,6 +246,7 @@ describe('tasks P0-A real db', () => {
 
   it('does not bump version when reopen leaves the task open', async () => {
     const { orgId, userA, userB } = ids('noop')
+    await orgMembers.seed(orgId, [userB])
     const created = await createTask({
       orgId,
       creatorId: userA,
@@ -256,6 +265,7 @@ describe('tasks P0-A real db', () => {
 
   it('queues complete before reopen so an all-mode task stays open', async () => {
     const { orgId, userA, userB } = ids('reopen-race')
+    await orgMembers.seed(orgId, [userB])
     const created = await createTask({
       orgId,
       creatorId: userA,
@@ -299,6 +309,7 @@ describe('tasks P0-A real db', () => {
 
   it('queues complete before reopen-all so both assignee rows are cleared', async () => {
     const { orgId, userA, userB } = ids('reopen-all')
+    await orgMembers.seed(orgId, [userB])
     const created = await createTask({
       orgId,
       creatorId: userA,
@@ -414,6 +425,7 @@ describe('tasks P0-A real db', () => {
 
   it('shows a non-creator assignee and a follower the same detail, without complete for the follower', async () => {
     const { orgId, userA, userB, outsider } = ids('detail')
+    await orgMembers.seed(orgId, [userB])
     const follower = `usrF_detail_${randomUUID()}`
     const created = await createTask({
       orgId,
@@ -449,14 +461,25 @@ describe('tasks P0-A real db', () => {
       parentId: null,
       depth: 0,
       children: [],
+      // M4 PR-3a additions (task-m4-pr3a-backend-design-20260930.md §5.5).
+      description: null,
+      startDate: null,
+      startTime: null,
+      remindAt: null,
+      // S7 (§5.5): the task is in no list.
+      listIds: [],
+      // [own-53] (§5.5): assignee and follower changes take a direct role; the assignee has one.
+      canManageMembers: true,
     })
     const asCreator = await getTask({ orgId, actorId: userA, taskId: created.id })
     expect(asCreator.canComplete).toBe(true)
     expect(asCreator.canReopen).toBe(true)
+    expect(asCreator.canManageMembers).toBe(true)
     expect(asCreator.assignees).toEqual([{ userId: userB, completedAt: null }])
     const asFollower = await getTask({ orgId, actorId: follower, taskId: created.id })
     expect(asFollower.canComplete).toBe(false)
     expect(asFollower.canReopen).toBe(false)
+    expect(asFollower.canManageMembers).toBe(false)
     expect(asFollower.assignees).toEqual([{ userId: userB, completedAt: null }])
     await expect(getTask({ orgId, actorId: outsider, taskId: created.id })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
   })
