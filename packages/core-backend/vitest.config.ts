@@ -1807,7 +1807,8 @@ export default defineConfig({
       // E-learning L0 canonical role-template migration gate. Requires real
       // PostgreSQL (exact grants, idempotent repair, assignment-safe rollback).
       // Excluded from the no-DB job and wired as a WHOLE FILE into the same
-      // post-migrate schema/service step in plugin-tests.yml.
+      // post-migrate schema/service step in plugin-tests.yml. Also carries the
+      // S5a stock-prep role-template + legacy-role move cases (R-39).
       'tests/integration/elearning-role-templates.db.test.ts',
       // E-learning L0 plugin-owned jobs claim-lease gate. Requires real
       // PostgreSQL (UNIQUE identity, FOR UPDATE SKIP LOCKED, fenced finalize).
