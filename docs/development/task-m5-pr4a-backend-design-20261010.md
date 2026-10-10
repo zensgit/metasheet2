@@ -238,7 +238,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 | `TaskAttachmentRowForDownload` | `orgId` / `uploaderId` / `status` / `boundAt` / `scanState` | `org_id` / `uploader_id` / `status` / `bound_at` / `scan_state` |
 | `TaskAttachmentRowForRemoval` | `id` / `taskId` / `uploaderId` / `status` / `bindKind` / `boundAt` | 同名列；`taskId` 为空 ⇔ `bound_at` 为空，与 §2.7 的 CHECK 一致 |
 
-唯一需要服务层换算的是序号：`planSpawn` 要当前实例在系列里的 1 起序号，本迁移**不存序号列**。服务层在结构锁内数「系列第一期本身 + 同系列、`created_at` 不晚于当前实例的各期」（含已软删的期；经 `idx_tsk_recurrence_series`，查询条件经 §4.7 的系列 builder），派生总在上一期完成之后、在另一个事务里插入，所以 `created_at` 的先后就是链的先后（`[a-16]`）。锚点（系列第一期的 `due_date`）在同一锁内按 id 读出，第一期可能已软删，所以同样经 §4.7 的任意状态 builder；锚点为空时不派生（§3.2 第 3 步）。任务 E §7 问题 1 若取 (c) 或 (iii) 的备选，要存锚点或计数起点，那是本迁移之外的新列——见 §7.2。
+唯一需要服务层换算的是序号：`planSpawn` 要当前实例在系列里的 1 起序号，本迁移**不存序号列**。服务层在结构锁内数「系列第一期本身 + 同系列、`created_at` 不晚于当前实例的各期」（含已软删的期；经 `idx_tsk_recurrence_series`，查询条件经 §4.7 的系列 builder），派生总在上一期完成之后、在另一个事务里插入，所以 `created_at` 的先后就是链的先后（`[a-16]`）。锚点（系列第一期的 `due_date`）在同一锁内按 id 读出，第一期可能已软删，所以经既有的 `buildTaskByIdAnyStateCondition`（§4.7）；锚点为空时不派生（§3.2 第 3 步）。任务 E §7 问题 1 若取 (c) 或 (iii) 的备选，要存锚点或计数起点，那是本迁移之外的新列——见 §7.2。
 
 ### 2.11 `up()` 与 `down()`
 
@@ -307,7 +307,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 
 1. `shouldSpawnOnFlip` 为假 ⇒ 不派生。
 2. 本期 `due_date` 为空 ⇒ 不派生（结果记 `no_due_date`），**不调用 `planSpawn`**。截止日与时区一起被清空（`planTaskDates` 在不剩任何日期时接受空时区，P0-A 的 `tasks_time_zone_when_dated_chk` 也允许）必然落在这一步，因为有日期就一定有时区。
-3. 读锚点：系列第一期的当前 `due_date`（本期没有 `seriesId` 时就是本期，第 2 步已保证非空）；第一期可能已软删，按 id 经 §4.7 的任意状态 builder 读。锚点为空（有人清空了第一期的截止日）⇒ 不派生（结果记 `no_due_date`，`[a-33]`）。
+3. 读锚点：系列第一期的当前 `due_date`（本期没有 `seriesId` 时就是本期，第 2 步已保证非空）；第一期可能已软删，按 id 经既有的 `buildTaskByIdAnyStateCondition` 读（§4.7）。锚点为空（有人清空了第一期的截止日）⇒ 不派生（结果记 `no_due_date`，`[a-33]`）。
 4. 数序号（§2.10），调用 `planSpawn`。下一期截止日越过民用日期上限（`9999-12-31`）⇒ 按 `series_ended` 处理、不派生；这要 #6249 的 `planSpawn` 把越界当作 `series_ended` 返回，而不是让 `nextOccurrenceDueDate` 抛 `RangeError`（§4.1、§7.2）。
 
 「不派生」在三个调用点与 G1 路径上都不影响翻转本身：完成照常 200、照常写 `completed` 等事件。任务 E 现行的 `planSpawn` 先校验时区与锚点、后判 `no_due_date`，第 2、3 步的情形若直接交给它会抛 `TypeError`、整次完成 500 并回滚——第 2、3 步就是为了不把这两种状态交给它。
@@ -379,7 +379,7 @@ write；行级 = 任务 `can(roles,'edit')` **且** 该字段绑在包含此任�
 
 系列删除的执行（结构锁内，冻结）：
 
-1. 装载整个系列，含已软删的期：第一期按 id，其余按 `recurrence_series_id`（经 `idx_tsk_recurrence_series`）；两处的 org 条件都经 §4.7 的系列 builder。
+1. 装载整个系列，含已软删的期：第一期按 id（经 `buildTaskByIdAnyStateCondition`），其余按 `recurrence_series_id`（经 `idx_tsk_recurrence_series` 与 `buildTaskSeriesMembersCondition`）；见 §4.7。
 2. 对将要软删的每一行——目标，以及链上更晚、未软删且未完成的各期——**按 id 升序**取 M3 删除路径的同一个有界 `FOR UPDATE`（M3 的行锁 helper；超时 ⇒ 409 `TASK_BUSY`，整体回滚）。这样持 `FOR KEY SHARE` 的评论写不会在同一次删除里落到任何一期上：M3 单删已有的保证扩到整条链。完成态只在结构锁内改，所以这个集合在锁内不会变。
 3. 调用 `planSeriesDelete`，写软删与事件：每一期一条 `deleted`，最晚未删一期若被清规则再加一条 `recurrence_cleared`。
 4. 照 PR-3b 的写法，把这次写出的全部事件同事务交给 `enqueueTaskEventNotifications`：`deleted` 在可通知闭集里，所以每一期的关注人都收到删除通知，与逐期单删一致；`recurrence_cleared` 不在闭集里，由 producer 自行滤掉。
@@ -406,7 +406,7 @@ write；行级 = 任务 `can(roles,'edit')` **且** 该字段绑在包含此任�
 | 层 | 文件 | 内容 |
 |---|---|---|
 | 纯函数 | `src/tasks/task-completion.ts`（改） | 新增 `applyCompleteForAll`：创建人以外的调用者抛错；`wasDone` 为真 ⇒ 空操作；`all` 模式填满空行并给一条 `completed`；其余模式委托 `applyComplete` |
-| 纯函数 | `src/tasks/task-access.ts`（改） | 新增 `canCompleteForAll({ actorId, createdBy })`；新增 §4.7 的三个 SQL 条件 builder，并在同一 PR 改写 `[own-3b-17]` 的注释 |
+| 纯函数 | `src/tasks/task-access.ts`（改） | 新增 `canCompleteForAll({ actorId, createdBy })`；新增 §4.7 的三个 SQL 条件 builder（另复用既有的 `buildTaskByIdAnyStateCondition`），并在同一 PR 改写 `[own-3b-17]` 的注释 |
 | 纯函数 | `src/tasks/task-recurrence.ts`（#6249 的文件，改一处） | `planSpawn`：下一期截止日越过 `9999-12-31` 时返回 `series_ended`，不抛 `RangeError`（§3.2 第 4 步；若 #6249 先行修改则此行作废） |
 | 纯函数 | `src/tasks/task-ids.ts`（改） | `TASK_ID_PREFIXES` 加 `field: 'tfld'`、`attachment: 'tatt'` |
 | 纯函数 | `src/tasks/task-projection.ts`（#6249 的文件，改一处） | 字段 id 前缀改从 `TASK_ID_PREFIXES.field` 派生 |
@@ -457,15 +457,16 @@ PR-4a 合并后，详情与列表读 `tasks.is_milestone` 等新列：凡 `TASKS
 
 ### 4.7 新读的 SQL 条件 builder
 
-M3 有两处按 org 读任务的条件是手写的（`services/task-structure.ts:176`、`:277`），门 1 的单字面量变异看不到它们。PR-4a 新增的按 org 或按系列的读不再手写，一律经 `src/tasks/task-access.ts` 的 builder，org 条件只经那里的单一 org 子句：
+M3 有两处按 org 读任务的条件是手写的（`services/task-structure.ts:176`、`:277`），门 1 的单字面量变异看不到它们。PR-4a 新增的按 org 或按系列的读不再手写，一律经 `src/tasks/task-access.ts` 的 builder（一个既有、三个新增），org 条件只经那里的单一 org 子句：
 
 | builder | 选出 | 使用处 |
 |---|---|---|
-| `buildTaskSeriesMembersCondition` | 一个 org 内某系列的第一期与各期，**含已软删** | §2.10 序号计数、§3.2 第 3 步的锚点、§3.8 系列删除的装载 |
+| `buildTaskByIdAnyStateCondition`（既有，PR-3b） | 一个 org 内按 id 的一个任务，**含已软删** | §3.2 第 3 步的锚点（第一期）、§3.8 系列删除装载第一期 |
+| `buildTaskSeriesMembersCondition`（新） | 一个 org 内 `recurrence_series_id` 等于给定第一期 id 的各期，**含已软删** | §2.10 序号计数、§3.8 系列删除装载其余各期 |
 | `buildOrgDependencyEdgesCondition` | 一个 org 内两端都未软删的边 | §3.4 加边判环、候选的成环排除 |
 | `buildDependencyCandidateTasksCondition` | 一个 org 内未软删的任务（可编辑性仍由纯函数逐行判定） | §3.4 候选 |
 
-`[own-3b-17]` 今天写的是「只有投递 worker 读可能已软删的任务」。系列读是第二个这样的读者，PR-4a 在同一 PR 改写那条注释，把两个读者与各自的理由都列上。本节不改 M3 那两处手写条件，它们归 M3 的后续。
+`[own-3b-17]` 今天写的是「只有投递 worker 读可能已软删的任务」。系列读（锚点、序号、系列删除）是第二个这样的读者，PR-4a 在同一 PR 改写那条注释，把两个读者与各自的理由都列上。本节不改 M3 那两处手写条件，它们归 M3 的后续。
 
 ---
 
@@ -595,7 +596,7 @@ M5-b（附件）、M5-e（夹钳）、M5-f（导出）归 PR-4b / 4c。
 
 ### 8.1 第 1 轮（2026-10-10，冻结稿 v1 → v2）
 
-收到的意见清单在交付时被截断：确认项读到两条 P2，次要项读到第 (d) 条中途为止。下表只处置读到的部分；截断之后若还有条目，下一轮补处置。
+收到的意见清单在交付时被截断：确认项读到两条 P2，次要项读到第 (d) 条中途为止。下表只处置读到的部分；截断之后若还有条目，本轮没有看到、没有处置，下一轮补处置。
 
 | # | 级别 | 意见 | 处置 |
 |---|---|---|---|
@@ -609,7 +610,7 @@ M5-b（附件）、M5-e（夹钳）、M5-f（导出）归 PR-4b / 4c。
 | 8 | NIT | 约束名未冻结；`down()` 不是严格逆序 | 采纳：§2.1 定命名规则、§2.2–§2.9 逐条写名；§2.11 写出 `up()` 顺序与严格逆序的 `down()` |
 | 9 | NIT | 投影映射键列没有 id CHECK；投影开启的推导方式未写 | 采纳：§2.9 加两条四合取 CHECK，并写明开启状态按 S04 推导、PR-4c 不加列 |
 | 10 | NIT | 系列自引用外键 `NO ACTION` 约束以后的保留期作业 | 采纳：§2.2 写明整链删除的要求 |
-| 11 | NIT | 基线漂移：PR-3b 已在 main，返回形状与翻转行号已变 | 采纳：头部补记新 ref 与行号，§1.3、§4.4、§4.6 改为 PR-3b 已在 main。拒绝其中「现在就 rebase」的部分：本轮只在分支上追加提交，rebase 按 owner 2026-10-09 第 6 项在实现开工时做 |
+| 11 | NIT | 基线漂移：PR-3b 已在 main，返回形状与翻转行号已变 | 采纳：头部补记新 ref 与行号，§1.3、§4.4、§4.6 改为 PR-3b 已在 main。拒绝其中「现在就 rebase」的部分：本轮只在分支上追加提交、不移动分支；头部已写明实现开工时按当时 main 重核 |
 | 12 | P3 | 新的按 org / 按系列 / 含软删的读没有点名 builder；`[own-3b-17]` 需要改写 | 采纳：新增 §4.7 的三个 builder 与同 PR 改写 `[own-3b-17]`；M5-c 加两 org 用户的候选格。M3 既有的两处手写条件不在本 PR 改（§4.7 末句） |
 | 13 | P3 | `nextOccurrenceId` 不按 `view` 过滤 | 采纳：§3.8 改为不能 `view` 时为 `null`，`[a-17]` 改写；`seriesId` / `previousOccurrenceId` 照 `parentId` 先例不过滤，登记为 `[a-35]` |
 | 14 | P3 | 系列删除没有扩展 M3 的行锁协议，也没有为每一期入队 `deleted` | 采纳：§3.8 冻结四步执行（按 id 升序的有界 `FOR UPDATE`、经 producer 入队）；M5-a 加格 |
