@@ -1577,7 +1577,7 @@ import {
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
-  ApprovalAssigneeType,
+  ApprovalCcTargetType,
   ApprovalGraph,
   ApprovalMode,
   ApprovalNode,
@@ -2082,7 +2082,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     // H2: CC still has no directory picker — targetIds remain the only carrier. Show type only
     // so ordinary DOM does not dump raw assignee IDs; the editable picker still holds the values.
     return [
-      `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
+      `抄送类型：${ccTargetTypeLabel(cfg.targetType)}`,
       `抄送对象：${(cfg.targetIds ?? []).length ? `已选 ${(cfg.targetIds ?? []).length} 个` : '（无）'}`,
     ]
   }
@@ -2342,12 +2342,20 @@ function parallelJoinModeLabel(mode: ParallelJoinMode): string {
 // ── G-4 cc editor (targetType + targetIds; the cc node's edges/position are preserved topology) ──
 // Editable model on `draft.ccEdits[nodeKey]`, seeded 1:1 from the preserved cc nodes. The controls
 // mutate ONLY targetType/targetIds; `buildApprovalGraph` re-applies onto a COPY (every non-cc node +
-// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role}, non-empty targetIds).
+// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role,group}, non-empty
+// targetIds — Lock-1 OD-L1-7(a) added 'group', the "`user_group` (cc) | 用户组" registry row).
 function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
   return draft.value.ccEdits?.[nodeKey]
 }
-function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
-  return targetType === 'role' ? '角色' : '用户'
+function ccTargetTypeLabel(targetType: ApprovalCcTargetType): string {
+  switch (targetType) {
+    case 'role': return '角色'
+    case 'group': return '用户组'
+    case 'user': return '用户'
+    default:
+      // G-16: an off-enum persisted value is shown as-is (never relabelled as a known kind).
+      return String(targetType)
+  }
 }
 
 // ── G-5 approval-node editor (approver SOURCE only; the node's mode/policy + edges are preserved) ──
@@ -3560,6 +3568,10 @@ function syncCcOptions(nodeKey: string): void {
   if (!edit) return
   if (edit.targetType === 'user') {
     for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
+  } else if (edit.targetType === 'group') {
+    // Lock-1 OD-L1-7(a): a persisted bound-group id stays visible as a chip even when the bound
+    // list no longer carries it (unbound after save) — no silent drop; publish is the arbiter.
+    for (const id of edit.targetIds) directory.ensureMemberGroupOptionVisible(id)
   } else {
     for (const id of edit.targetIds) directory.ensureRoleOptionVisible(id)
   }

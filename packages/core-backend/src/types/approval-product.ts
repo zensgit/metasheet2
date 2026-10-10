@@ -16,6 +16,20 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 // admission set in ApprovalProductService.ts) or the type is unpublishable.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
+/**
+ * Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc node's OWN target vocabulary: the two legacy kinds
+ * plus `'group'` (用户组). Deliberately a SEPARATE alias from `ApprovalAssigneeType` above: that
+ * alias also types the legacy approver `assigneeType`, and OD-L1-7 widens the cc half ONLY ("cc is
+ * a second contract, not a rider"). The widening is enumerated, not permissive (G-4): the authoring
+ * choke (`normalizeApprovalGraph` case 'cc') and both executor cc arms accept EXACTLY this set and
+ * still throw for anything else.
+ */
+export const APPROVAL_CC_TARGET_TYPES = ['user', 'role', 'group'] as const
+export type ApprovalCcTargetType = typeof APPROVAL_CC_TARGET_TYPES[number]
+const APPROVAL_CC_TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(APPROVAL_CC_TARGET_TYPES)
+export function isApprovalCcTargetType(value: unknown): value is ApprovalCcTargetType {
+  return typeof value === 'string' && APPROVAL_CC_TARGET_TYPE_SET.has(value)
+}
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 
@@ -571,8 +585,9 @@ export type ApprovalAssigneeSource =
    * (RATIFIED OD-L1-2(a) curated per-org binding table, `approval_usable_member_groups`), is a
    * DIFFERENT case — rejected at PUBLISH (`assertUserGroupSourcesBoundToOrg`), never at dispatch.
    * Fingerprint: `user_group:<sorted groupIds joined by ','>` (§2.4). Cc-as-recipient (OD-L1-7,
-   * widening `CcNodeConfig.targetType`) is a SEPARATE contract/registry row and is NOT part of
-   * this shape — deferred to its own slice (§K1 "cc is a second contract, not a rider").
+   * widening `CcNodeConfig.targetType` to `'group'`) is a SEPARATE contract/registry row and is
+   * NOT part of this shape (§K1 "cc is a second contract, not a rider") — it landed as its own
+   * slice and shares only the `groupMemberIds` snapshot map and the publish-time binding gate.
    */
   | { kind: 'user_group'; groupIds: string[] }
   /**
@@ -701,7 +716,16 @@ export interface ConditionRule {
 }
 
 export interface CcNodeConfig {
-  targetType: ApprovalAssigneeType
+  /**
+   * Lock-1 OD-L1-7(a): `'group'` names `platform_member_groups` ids in `targetIds`. The TEMPLATE
+   * keeps the group reference (authoring round-trips byte-for-byte); the EXECUTOR expands it at
+   * dispatch into one `targetType:'user'` cc event per FROZEN member (`requesterSnapshot
+   * .groupMemberIds` — the same create-time freeze the approver `user_group` source reads), so the
+   * persisted `approval_records` cc row shape stays `user` / `role` and every cc reader is
+   * unchanged. Publish applies the K1 org-binding gate (`assertUserGroupSourcesBoundToOrg`) to cc
+   * group targets exactly as to approver `user_group` sources.
+   */
+  targetType: ApprovalCcTargetType
   targetIds: string[]
 }
 
@@ -902,7 +926,8 @@ export interface ApprovalRequesterSnapshot {
    * Lock-1 §K1 (user_group, RATIFIED OD-L1-1(a) EAGER_EXPANSION) — the FROZEN member list of every
    * `user_group` group id the published runtime graph references, keyed by group id (ordered local
    * user ids, as read from `platform_member_group_members` at create). OPT-IN: populated only when
-   * the graph actually uses a `user_group` source (`collectApprovalGraphMemberGroupIds`, mirroring
+   * the graph actually uses a `user_group` source or a `'group'` cc target
+   * (`collectApprovalGraphMemberGroupIds`, mirroring
    * `includeManagerChain`'s posture — unrelated approvals pay nothing). The resolver reads ONLY
    * this map — no live `platform_member_group_members` read at dispatch/return/admin-jump/timeout —
    * so a membership change after create never reaches an in-flight instance; a group deleted after
