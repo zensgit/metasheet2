@@ -3392,7 +3392,7 @@ export class MetaSheetServer {
         // 备料「成员与权限」(S5b, register R-39): the narrow members port for plugin-integration-core
         // ONLY — create / update server-generated `stock-prep_c_…` roles (never `_admin`, never a
         // built-in, never outside the namespace), `stock-prep:*` codes only and within the grantor's own,
-        // project-sheet scope through the plugin's G1 call and within what the grantor can read, every
+        // project-sheet scope through the plugin's G1 call and within what the grantor can write, every
         // change audited. Platform admin or the `stock-prep` delegated admin only; behind the default-OFF
         // STOCK_PREP_MEMBERS_PAGE_ENABLED. Absent for every other plugin.
         stockPreparationMembers: manifest.name === 'plugin-integration-core'

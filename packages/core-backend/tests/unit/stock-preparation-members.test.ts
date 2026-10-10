@@ -12,7 +12,8 @@
  *   SM-04 INVARIANT 2: any code outside `stock-prep:*` is 400 before any IO — multitable / workflow /
  *         roles / integration / `*:*` each named; `stock-prep:*` and `stock-prep:admin` too.
  *   SM-05 INVARIANT 1 (codes): a code the grantor does not currently hold (ladder, read fresh) is 403.
- *   SM-06 INVARIANT 1 (tables): a sheet the grantor cannot read refuses the whole call; no grant runs.
+ *   SM-06 INVARIANT 1 (tables): a sheet the grantor cannot WRITE (read-only included) refuses the
+ *         whole call; no grant runs.
  *   SM-07 THE ROLE-ID FENCE: outside namespace / `_admin` / built-in / not-custom, each its own code,
  *         before any IO; the generated id runs the same fence.
  *   SM-08..10 the writes: create / update / grant, their statements and results.
@@ -22,6 +23,17 @@
  *   SM-14 the scope SQL keeps admin-users.ts's load-bearing clauses.
  *   SM-15 a recovery-authority conflict is the uniform retryable 409.
  *   SM-16 index.ts hands the port to plugin-integration-core only.
+ *   SM-17 no cross-scope effect; SM-18 the 100 cap; SM-19 the delegation routes' audit pins.
+ *   Fix round 1:
+ *   SM-20 (S1) a role carrying a code outside the selectable list is LOCKED: not appointable, not
+ *         editable, every port write 409 STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES (built-ins too).
+ *   SM-21 (S4) a rename-only update writes its audit row; removing codes drops the members' memo.
+ *   SM-22 (S5) every write takes its locks first, in order, and decides again under them: the caller,
+ *         the grantor's codes, every member's scope, the cap; a lock wait past the bound is 409 BUSY.
+ *   SM-23 (S6) more than 16 permissionCodes entries is 400 before any IO.
+ *   SM-24 (S7) the audit section shows no unreadable sheet and no actor beyond the role views.
+ *   SM-25 (S8) a custom role may not take a built-in's display name, however it is spelled.
+ *   SM-26 (S4) the caller tier's role check is an exact equality on `stock-prep_admin`.
  */
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -34,10 +46,17 @@ import { censusFile } from './lib/recovery-census-recorder'
 import {
   STOCK_PREP_BUILTIN_ROLE_IDS,
   STOCK_PREP_CUSTOM_ROLE_ID_PATTERN,
+  STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY,
+  STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL,
+  STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL,
+  STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL,
+  STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL,
+  STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL,
   STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
   STOCK_PREP_MEMBERS_PERMISSION_CODES,
   STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL,
   STOCK_PREP_MEMBERS_SCOPED_USERS_SQL,
+  STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL,
   StockPrepMembersError,
   createStockPrepMembersPort,
   stockPrepCodeEffective,
@@ -63,8 +82,12 @@ const PLAIN = 'u_plain'
 const MEMBER_IN = 'u_member_in'
 const MEMBER_OUT = 'u_member_out'
 const CUSTOM = 'stock-prep_c_0a1b2c3d'
+/** A custom-shaped role someone put a platform code on through the platform role editor (S1). */
+const LOCKED = 'stock-prep_c_0badc0de'
 const SHEET_A = 'sheet_proj_a'
 const SHEET_B = 'sheet_proj_b'
+/** Readable by the delegated admin but not writable (a `spreadsheet:read` grant) — lens-A's S2 case. */
+const SHEET_READ_ONLY = 'sheet_proj_read_only'
 
 interface World {
   platformAdmins: Set<string>
@@ -78,6 +101,7 @@ interface World {
   users: Map<string, { name: string; email: string; username: string }>
   sheetGrants: Array<{ role_id: string; sheet_id: string }>
   readable: Map<string, Set<string> | 'all'>
+  writable: Map<string, Set<string> | 'all'>
   effective: Map<string, string[]>
   auditRows: Array<Record<string, unknown>>
   admissions: Map<string, boolean>
@@ -112,7 +136,6 @@ function baseWorld(): World {
       { role_id: 'stock-prep_frontline', permission_code: 'stock-prep:operate' },
       { role_id: 'stock-prep_developer', permission_code: 'stock-prep:read' },
       { role_id: CUSTOM, permission_code: 'stock-prep:read' },
-      { role_id: CUSTOM, permission_code: 'comments:read' },
       { role_id: 'wb_role', permission_code: 'stock-prep:admin' },
     ],
     catalog: new Set([...STOCK_PREP_MEMBERS_PERMISSION_CODES, 'comments:read']),
@@ -128,6 +151,10 @@ function baseWorld(): World {
     ]),
     sheetGrants: [{ role_id: CUSTOM, sheet_id: SHEET_A }, { role_id: CUSTOM, sheet_id: 'sheet_foreign' }],
     readable: new Map<string, Set<string> | 'all'>([
+      [PLATFORM_ADMIN, 'all'],
+      [DELEGATED, new Set([SHEET_A, SHEET_B, SHEET_READ_ONLY])],
+    ]),
+    writable: new Map<string, Set<string> | 'all'>([
       [PLATFORM_ADMIN, 'all'],
       [DELEGATED, new Set([SHEET_A, SHEET_B])],
     ]),
@@ -154,21 +181,45 @@ interface Harness {
   world: World
   calls: Record<string, number>
   statements: string[]
+  /** The statements run on the TRANSACTION's query, in order. */
+  txStatements: string[]
   audits: Array<Record<string, unknown>>
   invalidated: string[]
   depCallCount: () => number
 }
 
-function harness(options: { env?: Record<string, string>; world?: World; randomSuffix?: () => string; transactionThrows?: unknown } = {}): Harness {
+const LOCK_STATEMENTS = new Set([
+  norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL),
+  norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL),
+  norm(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL),
+  ...STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm),
+])
+
+interface HarnessOptions {
+  env?: Record<string, string>
+  world?: World
+  randomSuffix?: () => string
+  transactionThrows?: unknown
+  /** Runs before a TRANSACTION statement is answered — the "someone else committed meanwhile" seam. */
+  onTxStatement?: (text: string, world: World) => void
+}
+
+function harness(options: HarnessOptions = {}): Harness {
   const world = options.world ?? baseWorld()
-  const calls: Record<string, number> = { query: 0, transaction: 0, isPlatformAdmin: 0, listEffectivePermissions: 0, hasEffectiveNamespaceAdmission: 0, resolveReadableSheetIds: 0, auditLog: 0, invalidateUserPerms: 0 }
+  const calls: Record<string, number> = { query: 0, transaction: 0, isPlatformAdmin: 0, listEffectivePermissions: 0, hasEffectiveNamespaceAdmission: 0, resolveReadableSheetIds: 0, resolveWritableSheetIds: 0, auditLog: 0, invalidateUserPerms: 0 }
   const statements: string[] = []
+  const txStatements: string[] = []
   const audits: Array<Record<string, unknown>> = []
   const invalidated: string[] = []
   const query = async (sql: string, params: unknown[] = []) => {
     calls.query += 1
     const text = norm(sql)
     statements.push(text)
+    if (LOCK_STATEMENTS.has(text)) return { rows: [] }
+    if (text.startsWith(norm(STOCK_PREP_MEMBERS_CUSTOM_ROLE_STATE_SQL))) {
+      const role = world.roles.get(params[0] as string)
+      return { rows: role ? [{ ...role, permissions: world.rolePermissions.filter((row) => row.role_id === role.id).map((row) => row.permission_code).sort() }] : [] }
+    }
     if (text === norm(STOCK_PREP_MEMBERS_SCOPE_CONFIGURED_SQL)) {
       const set = world.scopeConfigured.get(params[0] as string)
       return { rows: [{ configured: Boolean(set && set.has(params[1] as string)) }] }
@@ -177,7 +228,7 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
       const scoped = world.scopedUsers.get(params[0] as string) ?? new Set<string>()
       return { rows: (params[2] as string[]).filter((id) => scoped.has(id)).map((user_id) => ({ user_id })) }
     }
-    if (text.startsWith('SELECT 1 AS held FROM user_roles')) {
+    if (text === norm(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL)) {
       return { rows: world.userRoles.filter((row) => row.user_id === params[0] && row.role_id === params[1]).slice(0, 1).map(() => ({ held: 1 })) }
     }
     if (text.startsWith('SELECT code FROM permissions')) {
@@ -196,13 +247,6 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
       }
       return { rows: [] }
     }
-    if (text.startsWith('SELECT id, name FROM roles WHERE id = $1 FOR UPDATE')) {
-      const role = world.roles.get(params[0] as string)
-      return { rows: role ? [{ ...role }] : [] }
-    }
-    if (text.startsWith('SELECT permission_code FROM role_permissions')) {
-      return { rows: world.rolePermissions.filter((row) => row.role_id === params[0]).map((row) => ({ permission_code: row.permission_code })) }
-    }
     if (text.startsWith('DELETE FROM role_permissions')) {
       const [roleId, codes] = params as [string, string[]]
       world.rolePermissions = world.rolePermissions.filter((row) => !(row.role_id === roleId && codes.includes(row.permission_code)))
@@ -219,9 +263,6 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
     }
     if (text.startsWith('SELECT COUNT(*)::int AS c FROM roles WHERE id LIKE $1')) {
       return { rows: [{ c: Array.from(world.roles.keys()).filter((id) => id.startsWith('stock-prep_c_')).length }] }
-    }
-    if (text.startsWith('SELECT id FROM roles WHERE id = $1')) {
-      return { rows: world.roles.has(params[0] as string) ? [{ id: params[0] }] : [] }
     }
     if (text.includes('FROM roles r')) {
       const rows = Array.from(world.roles.values())
@@ -247,6 +288,17 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
     }
     throw new Error(`unexpected statement: ${text.slice(0, 80)}`)
   }
+  const txQuery = async (sql: string, params: unknown[] = []) => {
+    const text = norm(sql)
+    txStatements.push(text)
+    options.onTxStatement?.(text, world)
+    return query(sql, params)
+  }
+  const sheetSet = (map: Map<string, Set<string> | 'all'>, userId: string, sheetIds: string[]) => {
+    const allowed = map.get(userId)
+    if (allowed === 'all') return new Set(sheetIds)
+    return new Set(sheetIds.filter((id) => allowed?.has(id)))
+  }
   const deps: StockPrepMembersDeps = {
     query,
     transaction: async (fn) => {
@@ -254,7 +306,7 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
       if (options.transactionThrows) throw options.transactionThrows
       const snapshot = { roles: new Map(Array.from(world.roles.entries()).map(([k, v]) => [k, { ...v }])), rolePermissions: world.rolePermissions.map((row) => ({ ...row })) }
       try {
-        return await fn(query)
+        return await fn(txQuery)
       } catch (error) {
         world.roles = snapshot.roles
         world.rolePermissions = snapshot.rolePermissions
@@ -266,9 +318,11 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
     hasEffectiveNamespaceAdmission: async (userId, namespace) => { calls.hasEffectiveNamespaceAdmission += 1; return namespace === 'stock-prep' && world.admitted.has(userId) },
     resolveReadableSheetIds: async (userId, sheetIds) => {
       calls.resolveReadableSheetIds += 1
-      const readable = world.readable.get(userId)
-      if (readable === 'all') return new Set(sheetIds)
-      return new Set(sheetIds.filter((id) => readable?.has(id)))
+      return sheetSet(world.readable, userId, sheetIds)
+    },
+    resolveWritableSheetIds: async (userId, sheetIds) => {
+      calls.resolveWritableSheetIds += 1
+      return sheetSet(world.writable, userId, sheetIds)
     },
     auditLog: async (entry) => { calls.auditLog += 1; audits.push(entry as unknown as Record<string, unknown>) },
     invalidateUserPerms: (userId) => { calls.invalidateUserPerms += 1; invalidated.push(userId) },
@@ -280,6 +334,7 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
     world,
     calls,
     statements,
+    txStatements,
     audits,
     invalidated,
     depCallCount: () => Object.values(calls).reduce((sum, value) => sum + value, 0),
@@ -415,13 +470,18 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(h.calls.listEffectivePermissions).toBeGreaterThanOrEqual(4)
   })
 
-  it('SM-06: invariant 1 (tables) — a sheet the grantor cannot read refuses the whole call; no grant runs', async () => {
+  it('SM-06: invariant 1 (tables) — a sheet the grantor cannot WRITE refuses the whole call (read-only too); no grant runs', async () => {
     const h = harness()
-    const t = targets([SHEET_A, 'sheet_unreadable'])
-    const error = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
-    expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE'])
-    expect(error.details).toEqual({ unreadableCount: 1 })
-    expect(t.granted).toEqual([])
+    for (const sheet of ['sheet_unreadable', SHEET_READ_ONLY]) {
+      const t = targets([SHEET_A, sheet])
+      const error = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+      expect([error.status, error.code], sheet).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+      expect(error.details).toEqual({ notWritableCount: 1 })
+      expect(t.granted).toEqual([])
+    }
+    // The decision is the WRITE resolver's; readability is not consulted for a grant.
+    expect(h.calls.resolveReadableSheetIds).toBe(0)
+    expect(h.calls.transaction).toBe(0)
     expect(h.audits).toEqual([])
     // Readable sheets go through, one grant each.
     const ok = targets([SHEET_A, SHEET_B])
@@ -487,17 +547,22 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(Array.from(noCatalog.world.roles.keys()).filter((id) => STOCK_PREP_CUSTOM_ROLE_ID_PATTERN.test(id))).toEqual([CUSTOM])
   })
 
-  it('SM-09: update — only the role\'s stock-prep:* rows move; other rows are left; members re-read; 404 when absent', async () => {
+  it('SM-09: update — the role\'s stock-prep:* rows move; members re-read on an add AND on a removal; 404 when absent', async () => {
     const h = harness()
     const result = await h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '改名', permissionCodes: ['stock-prep:operate', 'stock-prep:read', 'stock-prep:pull'] })
     expect(result).toMatchObject({ roleId: CUSTOM, name: '改名', added: ['stock-prep:operate', 'stock-prep:pull'], removed: [] })
     expect(h.world.rolePermissions.filter((row) => row.role_id === CUSTOM).map((row) => row.permission_code).sort())
-      .toEqual(['comments:read', 'stock-prep:operate', 'stock-prep:pull', 'stock-prep:read'])
+      .toEqual(['stock-prep:operate', 'stock-prep:pull', 'stock-prep:read'])
     expect(h.invalidated).toEqual([MEMBER_IN])
     const narrowed = await h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: [] })
-    expect(narrowed).toMatchObject({ removed: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'], added: [] })
-    // The foreign row stays: this port is never the writer of a non-stock-prep code.
-    expect(h.world.rolePermissions.filter((row) => row.role_id === CUSTOM).map((row) => row.permission_code)).toEqual(['comments:read'])
+    expect(narrowed).toMatchObject({ removed: ['stock-prep:operate', 'stock-prep:pull', 'stock-prep:read'], added: [] })
+    expect(h.world.rolePermissions.filter((row) => row.role_id === CUSTOM)).toEqual([])
+    // S4: a removal-only change drops the members' memo too (a narrowed member must not keep the
+    // removed code from the 60 s cache) …
+    expect(h.invalidated).toEqual([MEMBER_IN, MEMBER_IN])
+    // … and a rename alone changes nobody's codes, so it drops nothing.
+    await h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '再改名' })
+    expect(h.invalidated).toEqual([MEMBER_IN, MEMBER_IN])
     const missing = await refusal(h.port.updateCustomRole({ actorId: DELEGATED, roleId: 'stock-prep_c_99999999', name: 'x' }))
     expect([missing.status, missing.code]).toEqual([404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND'])
     const empty = await refusal(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM }))
@@ -575,7 +640,7 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(frontline.outOfScopeMemberCount).toBe(1)
     expect(JSON.stringify(view)).not.toContain(MEMBER_OUT)
     expect(view.customRoles).toHaveLength(1)
-    expect(view.customRoles[0]).toMatchObject({ id: CUSTOM, editable: true, permissionCodes: ['stock-prep:read'], otherCodeCount: 1, sheetIds: [SHEET_A], otherSheetCount: 1 })
+    expect(view.customRoles[0]).toMatchObject({ id: CUSTOM, editable: true, appointable: true, locked: false, foreignCodeCount: 0, permissionCodes: ['stock-prep:read'], otherCodeCount: 0, sheetIds: [SHEET_A], otherSheetCount: 1 })
     expect(view.otherRoles.map((role: any) => [role.id, role.appointable, role.editable])).toEqual([['stock-prep_viewer', false, false]])
     expect(view.audit.available).toBe(true)
     expect(view.audit.entries.map((entry: any) => [entry.action, entry.resourceType, entry.userId, entry.roleId])).toEqual([
@@ -698,5 +763,228 @@ describe('stock-prep members port (S5b, R-39)', () => {
     for (const body of [admission, roles]) {
       expect(body).toContain("jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED'")
     }
+  })
+
+  // ── fix round 1 ─────────────────────────────────────────────────────────────────────────────────
+
+  it('SM-20 (S1): a role carrying a code outside the selectable list is locked — never appointable or editable, every port write 409', async () => {
+    const ADMIN_CODED = 'stock-prep_c_0adc0de0'
+    const lockedWorld = (): World => {
+      const w = baseWorld()
+      // Custom-shaped ids someone authored on the platform role editor (`roles:write`): one with a
+      // platform code, one with the main-administrator code.
+      w.roles.set(LOCKED, { id: LOCKED, name: '看似自定义' })
+      w.rolePermissions.push({ role_id: LOCKED, permission_code: 'stock-prep:read' }, { role_id: LOCKED, permission_code: 'users:write' })
+      w.userRoles.push({ user_id: MEMBER_IN, role_id: LOCKED })
+      w.roles.set(ADMIN_CODED, { id: ADMIN_CODED, name: '第二主管' })
+      w.rolePermissions.push({ role_id: ADMIN_CODED, permission_code: 'stock-prep:admin' })
+      // A built-in widened on the platform editor is locked the same way.
+      w.rolePermissions.push({ role_id: 'stock-prep_frontline', permission_code: 'multitable:write' })
+      return w
+    }
+    for (const actorId of [DELEGATED, PLATFORM_ADMIN]) {
+      const h = harness({ world: lockedWorld() })
+      const view = await h.port.describe({ actorId }) as Record<string, any>
+      const byId = (list: any[], id: string) => list.find((role: any) => role.id === id)
+      expect(byId(view.customRoles, LOCKED), actorId).toMatchObject({ locked: true, foreignCodeCount: 1, otherCodeCount: 1, editable: false, appointable: false, permissionCodes: ['stock-prep:read'] })
+      expect(byId(view.customRoles, ADMIN_CODED)).toMatchObject({ locked: true, foreignCodeCount: 1, otherCodeCount: 0, editable: false, appointable: false })
+      expect(byId(view.customRoles, CUSTOM)).toMatchObject({ locked: false, editable: true, appointable: true })
+      expect(byId(view.builtInRoles, 'stock-prep_frontline')).toMatchObject({ locked: true, appointable: false, editable: false })
+      expect(byId(view.builtInRoles, 'stock-prep_puller')).toMatchObject({ locked: false, appointable: true })
+      expect(byId(view.builtInRoles, 'stock-prep_admin')).toMatchObject({ locked: false, appointable: false })
+      const writes: Array<[string, () => Promise<unknown>]> = [
+        ['rename', () => h.port.updateCustomRole({ actorId, roleId: LOCKED, name: '改名' })],
+        ['codes', () => h.port.updateCustomRole({ actorId, roleId: LOCKED, permissionCodes: ['stock-prep:read'] })],
+        ['admin-coded rename', () => h.port.updateCustomRole({ actorId, roleId: ADMIN_CODED, name: '改名' })],
+      ]
+      for (const [what, run] of writes) {
+        const error = await refusal(run())
+        expect([error.status, error.code, error.details], `${actorId} ${what}`).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES', { foreignCodeCount: 1 }])
+      }
+      let resolved = 0
+      const grant = await refusal(h.port.grantCustomRoleProjectSheets({ actorId, roleId: LOCKED, resolveTargets: async () => { resolved += 1; return targets([SHEET_A]).list } }))
+      expect([grant.status, grant.code]).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES'])
+      expect(resolved, 'refused before the registry is read').toBe(0)
+      expect(h.world.roles.get(LOCKED)?.name).toBe('看似自定义')
+      expect(h.world.rolePermissions.filter((row) => row.role_id === LOCKED).map((row) => row.permission_code).sort()).toEqual(['stock-prep:read', 'users:write'])
+      expect(h.audits).toEqual([])
+    }
+  })
+
+  it('SM-21 (S4): a rename-only update writes exactly one audit row', async () => {
+    const h = harness()
+    await h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '仅改名' })
+    expect(h.audits).toEqual([{
+      actorId: DELEGATED,
+      actorType: 'user',
+      action: 'update',
+      resourceType: 'role',
+      resourceId: CUSTOM,
+      meta: { adminUserId: DELEGATED, delegated: true, delegableNamespaces: ['stock-prep'], source: 'stock-prep-members', roleId: CUSTOM, name: '仅改名' },
+    }])
+  })
+
+  it('SM-22 (S5): every write takes its locks first, in order, then decides again under them', async () => {
+    expect(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL).toBe("SELECT set_config('lock_timeout', $1, true)")
+    expect(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL).toBe('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))')
+    expect([...STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY]).toEqual(['stock-prep', 'members-port'])
+    expect(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL).toBe('LOCK TABLE user_roles IN SHARE MODE')
+    for (const sql of STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL) expect(sql).toMatch(/ = \$1\)? FOR SHARE$/)
+    const prefix = [STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL, STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL, STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL, ...STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL].map(norm)
+    const writes: Array<[string, (h: Harness) => Promise<unknown>]> = [
+      ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] })],
+      ['update', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })],
+      ['rename', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '乙' })],
+      ['grant', (h) => h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list })],
+    ]
+    for (const [name, run] of writes) {
+      const h = harness()
+      await run(h)
+      expect(h.txStatements.slice(0, prefix.length), `${name}: the locks open the transaction, in order`).toEqual(prefix)
+      expect(h.calls.transaction, name).toBe(1)
+    }
+
+    // The window between the fast checks and the locks: someone else commits there. `at` = the
+    // moment the transaction asks for the user_roles lock (the change committed just before it).
+    const at = (change: (world: World) => void) => (text: string, world: World) => {
+      if (text === norm(STOCK_PREP_MEMBERS_USER_ROLES_LOCK_SQL)) change(world)
+    }
+    // (a) the grantor's codes are decided again
+    {
+      const revoke = at((world) => { world.effective.set(DELEGATED, ['stock-prep:read']) })
+      const c = harness({ onTxStatement: revoke })
+      const created = await refusal(c.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      expect([created.status, created.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR'])
+      expect(Array.from(c.world.roles.keys()).filter((id) => STOCK_PREP_CUSTOM_ROLE_ID_PATTERN.test(id))).toEqual([CUSTOM])
+      const u = harness({ onTxStatement: revoke })
+      const updated = await refusal(u.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      expect([updated.status, updated.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR'])
+      expect(u.world.rolePermissions.filter((row) => row.role_id === CUSTOM).map((row) => row.permission_code)).toEqual(['stock-prep:read'])
+      expect([...c.audits, ...u.audits]).toEqual([])
+    }
+    // (b) the caller is decided again: the main-administrator role revoked meanwhile
+    {
+      const drop = at((world) => { world.userRoles = world.userRoles.filter((row) => !(row.user_id === DELEGATED && row.role_id === 'stock-prep_admin')) })
+      for (const [name, run] of writes) {
+        const h = harness({ onTxStatement: drop })
+        const t = targets([SHEET_A])
+        const error = await refusal(name === 'grant' ? h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }) : run(h))
+        expect([error.status, error.code], name).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
+        expect(t.granted).toEqual([])
+        expect(h.audits).toEqual([])
+        expect(h.world.roles.get(CUSTOM)?.name, name).toBe('仓库只填两张表')
+      }
+    }
+    // (c) every member's scope is decided again: an out-of-scope member appointed meanwhile
+    {
+      const appoint = at((world) => { if (!world.userRoles.some((row) => row.user_id === MEMBER_OUT && row.role_id === CUSTOM)) world.userRoles.push({ user_id: MEMBER_OUT, role_id: CUSTOM }) })
+      const u = harness({ onTxStatement: appoint })
+      const updated = await refusal(u.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      expect([updated.status, updated.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
+      expect(u.world.rolePermissions.filter((row) => row.role_id === CUSTOM).map((row) => row.permission_code)).toEqual(['stock-prep:read'])
+      const g = harness({ onTxStatement: appoint })
+      const t = targets([SHEET_A])
+      const granted = await refusal(g.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+      expect([granted.status, granted.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
+      expect(t.granted).toEqual([])
+      expect([...u.audits, ...g.audits]).toEqual([])
+    }
+    // (d) the cap is counted again: creates that landed meanwhile
+    {
+      const fill = at((world) => {
+        for (let i = 1; i < 100; i += 1) {
+          const id = `stock-prep_c_${i.toString(16).padStart(8, '0')}`
+          world.roles.set(id, { id, name: id })
+        }
+      })
+      const h = harness({ onTxStatement: fill, randomSuffix: () => 'feedface' })
+      const error = await refusal(h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] }))
+      expect([error.status, error.code]).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_LIMIT'])
+      expect(h.world.roles.has('stock-prep_c_feedface')).toBe(false)
+    }
+    // (e) the sheets are decided again: the grantor's write on one of them revoked meanwhile
+    {
+      const h = harness({ onTxStatement: at((world) => { world.writable.set(DELEGATED, new Set([SHEET_B])) }) })
+      const t = targets([SHEET_A])
+      const error = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+      expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+      expect(t.granted).toEqual([])
+    }
+    // (f) a lock wait past the bound (or a deadlock the server broke) is a retryable 409; nothing written
+    for (const code of ['55P03', '40P01']) {
+      const h = harness({ transactionThrows: Object.assign(new Error('canceling statement due to lock timeout'), { code }) })
+      const error = await refusal(h.port.updateCustomRole({ actorId: PLATFORM_ADMIN, roleId: CUSTOM, name: '丙' }))
+      expect([error.status, error.code, error.details], code).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', { retryable: true }])
+      expect(error.message).not.toContain('canceling')
+      expect(h.audits).toEqual([])
+    }
+  })
+
+  it('SM-23 (S6): more than 16 permissionCodes entries is 400 before any IO (duplicates count)', async () => {
+    const h = harness()
+    for (const codes of [Array(17).fill('stock-prep:read'), Array(100_000).fill('stock-prep:read'), Array.from({ length: 17 }, (_, i) => `x:${i}`)]) {
+      const create = await refusal(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name: '甲', permissionCodes: codes }))
+      expect([create.status, create.code, create.details], `create ×${codes.length}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_CODES_INVALID', { field: 'permissionCodes', max: 16 }])
+      const update = await refusal(h.port.updateCustomRole({ actorId: PLATFORM_ADMIN, roleId: CUSTOM, permissionCodes: codes }))
+      expect([update.status, update.code], `update ×${codes.length}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_CODES_INVALID'])
+    }
+    expect(h.depCallCount(), 'zero IO').toBe(0)
+    // Sixteen (duplicates included) is still a request, de-duplicated.
+    await expect(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name: '甲', permissionCodes: Array(16).fill('stock-prep:read') })).resolves.toMatchObject({ permissionCodes: ['stock-prep:read'] })
+  })
+
+  it('SM-24 (S7): the audit section shows no unreadable sheet and no actor beyond what the role views show', async () => {
+    const world = baseWorld()
+    world.auditRows.push(
+      { id: 4, created_at: '2026-10-09T02:00:00.000Z', action: 'grant', resource_type: 'role', resource_id: CUSTOM, action_details: { adminUserId: PLATFORM_ADMIN, roleId: CUSTOM, sheetId: 'sheet_foreign', delegated: false } },
+      { id: 5, created_at: '2026-10-09T02:01:00.000Z', action: 'grant', resource_type: 'role', resource_id: CUSTOM, action_details: { adminUserId: DELEGATED, roleId: CUSTOM, sheetId: SHEET_A, delegated: true } },
+      { id: 6, created_at: '2026-10-09T02:02:00.000Z', action: 'grant', resource_type: 'user-role', resource_id: `${MEMBER_IN}:${CUSTOM}`, action_details: { adminUserId: 'u_other_admin', userId: MEMBER_IN, roleId: CUSTOM } },
+      { id: 7, created_at: '2026-10-09T02:03:00.000Z', action: 'update', resource_type: 'role', resource_id: CUSTOM, action_details: { adminUserId: MEMBER_IN, roleId: CUSTOM } },
+    )
+    const view = await harness({ world }).port.describe({ actorId: DELEGATED }) as Record<string, any>
+    const entries = view.audit.entries as Array<Record<string, unknown>>
+    const pick = (id: number) => entries.find((entry) => entry.at === `2026-10-09T02:0${id - 4}:00.000Z`)
+    expect(pick(4)).toMatchObject({ action: 'grant', roleId: CUSTOM, sheetId: null, actorId: null })
+    expect(pick(5)).toMatchObject({ sheetId: SHEET_A, actorId: DELEGATED })
+    expect(pick(6)).toMatchObject({ userId: MEMBER_IN, actorId: null })
+    expect(pick(7)).toMatchObject({ actorId: MEMBER_IN }) // a member the role views already show
+    const text = JSON.stringify(view.audit)
+    for (const hidden of ['sheet_foreign', PLATFORM_ADMIN, 'u_other_admin', MEMBER_OUT]) expect(text, hidden).not.toContain(hidden)
+    // The platform administrator sees every actor and every sheet.
+    const admin = await harness({ world: (() => { const w = baseWorld(); w.auditRows.push(world.auditRows[3]); return w })() }).port.describe({ actorId: PLATFORM_ADMIN }) as Record<string, any>
+    expect(admin.audit.entries.find((entry: any) => entry.sheetId === 'sheet_foreign')).toMatchObject({ actorId: PLATFORM_ADMIN })
+  })
+
+  it('SM-25 (S8): a custom role may not take a built-in display name, however it is spelled', async () => {
+    const reserved = [
+      '备料主管理员', ' 备料主管理员 ', '数据管理员（拉取人员）', '数据管理员(拉取人员)', '数据管理员 （ 拉取人员 ）',
+      '开发成员（内置）', '开发成员(内置)', '开发成员 【内置】', '一线填写「内置」', '一线​填写',
+      'ＤＥＶＥＬＯＰＥＲ', 'developer', 'Floor  Operator', 'Main administrator (built-in)', 'Data Manager (Puller)',
+      'stock-prep_admin', 'Stock-Prep_Frontline', '（内置）', '​',
+    ]
+    const h = harness()
+    for (const name of reserved) {
+      const create = await refusal(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name, permissionCodes: [] }))
+      expect([create.status, create.code], `create ${JSON.stringify(name)}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED'])
+      const rename = await refusal(h.port.updateCustomRole({ actorId: PLATFORM_ADMIN, roleId: CUSTOM, name }))
+      expect([rename.status, rename.code], `rename ${JSON.stringify(name)}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED'])
+    }
+    expect(h.depCallCount(), 'zero IO').toBe(0)
+    for (const name of ['开发成员甲', '一线填写组', '备料主管理员助理', 'Developers']) {
+      await expect(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name, permissionCodes: [] }), name).resolves.toMatchObject({ name })
+    }
+  })
+
+  it('SM-26 (S4): the caller tier asks for exactly the role stock-prep_admin, by equality', async () => {
+    expect(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL).toBe('SELECT 1 AS held FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1')
+    const world = baseWorld()
+    // Another delegated-admin role inside the namespace (a derived namespace's admin), admitted and scoped.
+    world.userRoles.push({ user_id: 'u_sub_admin', role_id: 'stock-prep_x_admin' })
+    world.admitted.add('u_sub_admin')
+    world.scopeConfigured.set('u_sub_admin', new Set(['stock-prep']))
+    world.effective.set('u_sub_admin', ['stock-prep:admin'])
+    const h = harness({ world })
+    const error = await refusal(h.port.describe({ actorId: 'u_sub_admin' }))
+    expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_MEMBERS_FORBIDDEN'])
   })
 })

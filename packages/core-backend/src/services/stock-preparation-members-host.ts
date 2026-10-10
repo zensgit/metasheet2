@@ -6,22 +6,35 @@
  * index.ts hands the result to `plugin-integration-core` ONLY (the field-permissions / G1 posture).
  *
  *   query / transaction           → db/pg (the pool; one transaction per write)
- *   isPlatformAdmin               → rbac/service.ts isAdmin (the DB `admin` role)
+ *   isPlatformAdmin               → rbac/service.ts isAdmin (the DB `admin` role ONLY — not the legacy
+ *                                   `users.is_admin` / `users.role` columns, not a token claim)
  *   listEffectivePermissions      → rbac/service.ts listUserPermissions, after dropping the actor's
  *                                   memo so the grantor bound reads CURRENT codes (invariant 1)
  *   hasEffectiveNamespaceAdmission→ rbac/namespace-admission.ts userHasEffectiveNamespaceAccess
  *   resolveReadableSheetIds       → multitable/permission-service.ts resolveReadableSheetIds, with an
- *                                   access snapshot built from the same two rbac reads
+ *                                   access snapshot built from the same two rbac reads — after
+ *                                   dropping the actor's memo (fix round 1, S3)
+ *   resolveWritableSheetIds       → multitable/permission-service.ts resolveSheetCapabilitiesForAccess
+ *                                   per sheet (the grid's own capability resolver): a live sheet on
+ *                                   which the actor may create, edit and delete ANY record (not
+ *                                   write-own only) — the bound for handing out `spreadsheet:write`
+ *                                   (fix round 1, S2); same fresh access snapshot (S3)
  *   auditLog                      → audit/audit.ts auditLog (the admin-users.ts writer)
  */
 
 import { auditLog } from '../audit/audit'
 import { query as poolQuery, transaction as poolTransaction } from '../db/pg'
-import { resolveReadableSheetIds } from '../multitable/permission-service'
+import type { ResolvedRequestAccess } from '../multitable/access'
+import {
+  requiresOwnWriteRowPolicy,
+  resolveReadableSheetIds,
+  resolveSheetCapabilitiesForAccess,
+} from '../multitable/permission-service'
 import { userHasEffectiveNamespaceAccess } from '../rbac/namespace-admission'
 import { invalidateUserPerms, isAdmin, listUserPermissions } from '../rbac/service'
 import {
   createStockPrepMembersPort,
+  type StockPrepMembersDeps,
   type StockPrepMembersPort,
   type StockPrepMembersQueryFn,
 } from './stock-preparation-members'
@@ -32,9 +45,19 @@ function shapeResult(result: unknown): { rows: unknown[]; rowCount: number | nul
   return { rows, rowCount }
 }
 
-export function createStockPrepMembersHostPort(): StockPrepMembersPort {
+/**
+ * The actor's access snapshot for a sheet decision, read FRESH: the permission memo is dropped first,
+ * so a code revoked a moment ago is not still honoured from the 60 s cache.
+ */
+async function freshSheetAccess(userId: string): Promise<ResolvedRequestAccess> {
+  invalidateUserPerms(userId)
+  const [permissions, isAdminRole] = await Promise.all([listUserPermissions(userId), isAdmin(userId)])
+  return { userId, permissions, isAdminRole }
+}
+
+export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
   const query: StockPrepMembersQueryFn = async (sql, params) => shapeResult(await poolQuery(sql, params))
-  return createStockPrepMembersPort({
+  return {
     query,
     transaction: (fn) => poolTransaction(async (client) => fn(async (sql, params) => shapeResult(await client.query(sql, params)))),
     isPlatformAdmin: (userId) => isAdmin(userId),
@@ -44,10 +67,33 @@ export function createStockPrepMembersHostPort(): StockPrepMembersPort {
     },
     hasEffectiveNamespaceAdmission: (userId, namespace) => userHasEffectiveNamespaceAccess(userId, namespace),
     resolveReadableSheetIds: async (userId, sheetIds) => {
-      const [permissions, isAdminRole] = await Promise.all([listUserPermissions(userId), isAdmin(userId)])
-      return resolveReadableSheetIds(undefined, query, sheetIds, { userId, permissions, isAdminRole })
+      const access = await freshSheetAccess(userId)
+      return resolveReadableSheetIds(undefined, query, sheetIds, access)
+    },
+    resolveWritableSheetIds: async (userId, sheetIds) => {
+      const access = await freshSheetAccess(userId)
+      const writable = new Set<string>()
+      for (const sheetId of Array.from(new Set(sheetIds))) {
+        const resolved = await resolveSheetCapabilitiesForAccess(query, sheetId, access)
+        const { capabilities } = resolved
+        if (
+          resolved.sheetLiveness === 'live'
+          && capabilities.canRead
+          && capabilities.canCreateRecord
+          && capabilities.canEditRecord
+          && capabilities.canDeleteRecord
+          && !requiresOwnWriteRowPolicy(resolved.sheetScope, access.isAdminRole)
+        ) {
+          writable.add(sheetId)
+        }
+      }
+      return writable
     },
     auditLog,
     invalidateUserPerms,
-  })
+  }
+}
+
+export function createStockPrepMembersHostPort(): StockPrepMembersPort {
+  return createStockPrepMembersPort(createStockPrepMembersHostDeps())
 }
