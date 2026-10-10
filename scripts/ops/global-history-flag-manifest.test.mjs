@@ -277,7 +277,9 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage])].sort()
+  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
