@@ -243,6 +243,8 @@ interface ApiImplementationOptions {
   paginatedPageSize?: number
   /** W1-6: org ids GET /api/auth/session-orgs returns, or 'fail' for a 503. Default: one org. */
   sessionOrgs?: string[] | 'fail'
+  /** W1-6: the currentOrgId GET /api/auth/session-orgs reports (the token's org). Default: null. */
+  sessionCurrentOrgId?: string | null
 }
 
 function createApiImplementation(
@@ -432,7 +434,7 @@ function createApiImplementation(
       }
       return createJsonResponse({
         success: true,
-        data: { orgs: options.sessionOrgs ?? ['org-alpha'], currentOrgId: null },
+        data: { orgs: options.sessionOrgs ?? ['org-alpha'], currentOrgId: options.sessionCurrentOrgId ?? null },
       })
     }
 
@@ -1872,9 +1874,32 @@ describe('UserManagementView', () => {
       expect(body).not.toHaveProperty('attendanceOrgId')
     })
 
+    // Gate r1 P2-2: "never silently default" must hold for every option count, and also when the
+    // session reports a current org (a single-org install's admin token carries one).
+    for (const [label, sessionOrgs, sessionCurrentOrgId] of [
+      ['two options, no current org', ['org-alpha', 'org-beta'], null],
+      ['one option that is also the current org', ['org-alpha'], 'org-alpha'],
+      ['several options, the current org listed second', ['org-alpha', 'org-beta', 'org-gamma'], 'org-beta'],
+    ] as const) {
+      it(`does not pre-select or send an org without a choice (${label})`, async () => {
+        mountWith({ sessionOrgs: [...sessionOrgs], sessionCurrentOrgId })
+        await flushUi(20)
+
+        const select = orgSelect()
+        expect(Array.from(select.options).map((option) => option.value)).toEqual(['', ...sessionOrgs])
+        expect(select.value).toBe('')
+        expect(select.selectedIndex).toBe(0)
+        expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+        const body = await fillRequiredAndSubmit()
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+    }
+
     it('sends attendanceOrgId only when an org is chosen, and the clear button drops it again', async () => {
-      mountWith({ sessionOrgs: ['org-alpha', 'org-beta'] })
+      mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta' })
       await flushUi(20)
+      expect(orgSelect().value).toBe('')
 
       await setSelectValue(orgSelect(), 'org-beta')
       const clear = container!.querySelector<HTMLButtonElement>('[data-create-user-org-clear]')

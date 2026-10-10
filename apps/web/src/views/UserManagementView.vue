@@ -2082,10 +2082,7 @@ async function loadAttendanceOrgOptions(): Promise<void> {
     attendanceOrgOptions.value = []
     attendanceOrgOptionsFailed.value = true
   } finally {
-    // A previously chosen org that is no longer offered is cleared, never swapped for another.
-    if (createForm.value.attendanceOrgId && !attendanceOrgOptions.value.includes(createForm.value.attendanceOrgId)) {
-      createForm.value.attendanceOrgId = ''
-    }
+    // Loaded once at mount; the response's currentOrgId is deliberately ignored (never a default).
     attendanceOrgOptionsLoading.value = false
   }
 }
