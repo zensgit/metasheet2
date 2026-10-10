@@ -550,6 +550,8 @@ const {
   grantProjectOverviewRoles,
   updateProjectOverviewRow,
   PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+  // S3 follow-up C: the typed 503 of a refresh that could not write every project (audited `incomplete`).
+  STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
 } = require('./stock-preparation-project-overview.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
 // yet" condition and names the literal fix for each. It reuses the inspection functions the four
@@ -1836,6 +1838,23 @@ const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJE
 // records counts only.
 const STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION = 'project_fields_update'
 const STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION = 'project_overview_refresh'
+
+/** The `project_overview_refresh` audit detail of one run's summary: counts and booleans only (`refreshed` and `incomplete`). */
+function projectOverviewRefreshAuditDetail(summary) {
+  return {
+    projectCount: summary.projectCount,
+    countedCount: summary.countedCount,
+    unreadableCount: summary.unreadableCount,
+    boundedCount: summary.boundedCount,
+    rowsCreated: summary.rowsCreated,
+    rowsUpdated: summary.rowsUpdated,
+    rowsUnchanged: summary.rowsUnchanged,
+    rowsRemovedDuplicate: summary.rowsRemovedDuplicate,
+    rowsRemovedOrphan: summary.rowsRemovedOrphan,
+    truncated: summary.truncated,
+    ledgerReady: summary.ledgerReady,
+  }
+}
 
 /**
  * S3 fix round 1 (E2): the S3 handlers answer only TYPED refusals. Anything else that escapes them — a
@@ -9678,12 +9697,12 @@ function requireStockPreparationAudit() {
         })
       }
       projectOverviewRefreshStartedAt.set(tenantId, nowMs)
+      const actor = user.id || user.email
       try {
         const store = requireStockPreparationProjectOverview()
         await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION, '088', tenantId)
         // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
         const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
-        const actor = user.id || user.email
         const result = await refreshProjectOverview({
           provisioning: getMultitableProvisioning(),
           recordsApi: getMultitableRecordsApi(),
@@ -9697,24 +9716,33 @@ function requireStockPreparationAudit() {
           subjectId: result.sheetId,
           mode: 'refreshed',
           actor,
-          detail: {
-            projectCount: result.projectCount,
-            countedCount: result.countedCount,
-            unreadableCount: result.unreadableCount,
-            boundedCount: result.boundedCount,
-            rowsCreated: result.rowsCreated,
-            rowsUpdated: result.rowsUpdated,
-            rowsUnchanged: result.rowsUnchanged,
-            rowsRemovedDuplicate: result.rowsRemovedDuplicate,
-            rowsRemovedOrphan: result.rowsRemovedOrphan,
-            truncated: result.truncated,
-            ledgerReady: result.ledgerReady,
-          },
+          detail: projectOverviewRefreshAuditDetail(result),
         })
         return sendOk(res, { fresh: true, ...result })
       } catch (error) {
-        // A refresh that did not complete is not "fresh": the next click may try again at once.
+        // A refresh that did not complete is not "fresh": the next click may try again at once — BUSY (another
+        // writer held the lock, here or in another process) and REFRESH_INCOMPLETE included.
         projectOverviewRefreshStartedAt.delete(tenantId)
+        // S3 follow-up C: some projects could not be written. The run is audited as `incomplete` with its counts
+        // and the failed count (never a value), one values-free warn names the first failure's CODE, and the
+        // typed 503 is the answer — never `fresh: true`.
+        if (error && error.code === STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE && error.summary) {
+          const failedProjectCount = error.details && Number.isInteger(error.details.failedProjectCount) ? error.details.failedProjectCount : 0
+          await audit.append({
+            tenantId,
+            action: STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION,
+            subjectId: error.summary.sheetId,
+            mode: 'incomplete',
+            actor,
+            detail: { ...projectOverviewRefreshAuditDetail(error.summary), failedProjectCount },
+          })
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            routeLogger.warn('[plugin-integration-core] stock-prep project overview refresh could not write every project; those stay marked for the next update', {
+              code: loggableOverviewUpdateCode(error.cause),
+              failedProjectCount,
+            })
+          }
+        }
         throw error
       }
     },

@@ -563,6 +563,13 @@ export interface MultitableProvisioningAPI {
     projectId: string
     sheetId: string
     descriptor: MultitableProvisioningViewDescriptor
+    /**
+     * S3 follow-up E (register R-37): the overview module's marker on the views it provisions for the read-only
+     * stock-preparation project overview. The plugin-scope wrapper admits a view on the STAMPED overview only with
+     * it (plugin-integration-core, the `stock_prep_overview` kind, this project's derived overview sheet), refuses
+     * a misused one, and never forwards it to the host. Omit it (every other caller) for the unchanged behaviour.
+     */
+    systemKind?: string | null
   }): Promise<{
     id: string
     sheetId: string
