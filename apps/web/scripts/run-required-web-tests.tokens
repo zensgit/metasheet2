@@ -358,6 +358,10 @@ multitable-phase7
 multitable-phase8
 multitable-phase9
 multitable-qrcode-field
+multitable-range-fill-flag
+multitable-range-fill-interaction
+multitable-range-fill-planner
+multitable-range-fill-writer
 multitable-record-approval-panel
 multitable-record-approval-progress
 multitable-record-approval-submit
@@ -461,6 +465,7 @@ StockPreparationLargeBomPull.spec.ts
 StockPreparationLargeBomPullPanel.spec.ts
 StockPreparationManagedTableRelabelPanel
 StockPreparationMappingConfirmView
+StockPreparationMembers
 StockPreparationMissingComponents
 StockPreparationOnboardingReadiness
 StockPreparationOperatorHome
@@ -470,6 +475,7 @@ StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
 StockPreparationProjectArchive
 StockPreparationProjectBoard
+StockPreparationProjectOverview
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts

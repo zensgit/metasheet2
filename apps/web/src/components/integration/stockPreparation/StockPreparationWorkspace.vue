@@ -163,6 +163,15 @@
         v-else-if="effectiveKey === 'ops'"
         :scope="scope"
       />
+      <!-- 成员与权限 (S5b, R-39). Reachable only once the members read answered (switch on, caller
+           admitted by the host port) — `visibleViews` folds `?tab=members` back to the landing until
+           then, so with the switch off this branch can never render. -->
+      <StockPreparationMembersView
+        v-else-if="effectiveKey === 'members'"
+        :scope="scope"
+        :initial-outcome="membersOutcome"
+        @outcome="handleMembersOutcome"
+      />
       <!-- 帮助 — 「怎么用这个页面」(static) plus 「错误码对照」(the existing self-contained drawer).
            Two sections, one rail item: the drawer is a collapsed `<details>` of its own, so giving it
            a separate key would have been a second tab addressing one click. -->
@@ -274,6 +283,7 @@ import StockPreparationProjectBoardView from './StockPreparationProjectBoardView
 import StockPreparationProjectQueryView from './StockPreparationProjectQueryView.vue'
 import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import StockPreparationOpsPanel from './StockPreparationOpsPanel.vue'
+import StockPreparationMembersView from './StockPreparationMembersView.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
 import StockPreparationHelpCard from './StockPreparationHelpCard.vue'
 import StockPreparationRail from './StockPreparationRail.vue'
@@ -283,6 +293,7 @@ import {
   STOCK_PREP_RAIL_GROUPS,
   canOpenStockPrepHelp,
   canOpenStockPrepInstallView,
+  canOpenStockPrepMembersPage,
   canOpenStockPrepProjectBoard,
   canOpenStockPrepProjectQuery,
   canUseLegacyMvpTabs,
@@ -290,6 +301,7 @@ import {
   stockPrepLandingKey,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { readStockPreparationPreflight } from '../../../services/integration/stockPreparation/installPlan'
+import { readStockPrepMembers, type StockPrepMembersReadOutcome } from '../../../services/integration/stockPreparation/members'
 import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
 import { createStockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
@@ -317,6 +329,8 @@ type StockPreparationViewKey =
   | 'home'
   | 'getting-started'
   | 'ops'
+  // S5b (R-39) 成员与权限 — behind its server switch; see `membersPage` below.
+  | 'members'
   | 'help'
   | 'project-board'
   | 'project-query'
@@ -383,6 +397,13 @@ interface StockPreparationViewTab {
    * value, so there is nothing behind it that can 403.
    */
   helpOnly?: boolean
+  /**
+   * 成员与权限 (S5b, R-39). Two halves, BOTH required: the workbench-admin permission
+   * (`canOpenStockPrepMembersPage`) and the server having answered the members read — which it does
+   * only with STOCK_PREP_MEMBERS_PAGE_ENABLED on and the caller admitted by the host port (platform
+   * admin or the stock-prep delegated admin). Switch off ⇒ 404 ⇒ the tab does not exist.
+   */
+  membersPage?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -490,6 +511,20 @@ const views: StockPreparationViewTab[] = [
     en: 'Records & Diagnostics',
     zhDesc: '上面是这套部署现在好不好 —— 没检查过的项会明说「未检查」,不涂绿也不涂红;下面按项目号查谁在什么时候动过它,那份记录涵盖哪几类动作,面板上写着。',
     enDesc: 'The top half says whether this deployment is healthy right now — anything never checked says so rather than being painted green or red. The bottom half looks up who touched a project and when, and states which kinds of action that record covers.',
+    endpoint: '',
+    noEndpointBadge: true,
+  },
+  // 成员与权限 (ADR adr-stock-prep-project-sheets-20261008 §11.6, S5b, R-39) — the app's own roles and
+  // members, managed by its main administrator. Last in 【部署与接入】 per the rail manifest. It writes
+  // (roles, appointments, admissions) through servers that decide every case themselves, so it carries
+  // no endpoint badge of its own; the panel says what it changes in words.
+  {
+    key: 'members',
+    membersPage: true,
+    zh: '成员与权限',
+    en: 'Members & access',
+    zhDesc: '本应用的成员和角色：任命、撤销、开通插件使用，以及按需建自定义角色。内置角色只读；主管理员由平台管理员任命。',
+    enDesc: 'This app\'s members and roles: appoint, revoke, turn on plugin access, and create custom roles where needed. Built-in roles are read-only; the main administrator is appointed by a platform administrator.',
     endpoint: '',
     noEndpointBadge: true,
   },
@@ -616,6 +651,8 @@ const visibleViews = computed(() => {
   return views.filter((view) => {
     if (view.legacyMvp) return canUseLegacyMvpTabs(principal)
     if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(principal)
+    // S5b: the permission half AND the server's answer — see `membersOutcome`.
+    if (view.membersPage) return canOpenStockPrepMembersPage(principal) && membersPageAvailable.value
     // 项目查询 rides its OWN named predicate rather than the board's, even though the two are one
     // expression today: the rail manifest gates it on its own token, and a shell that consulted a
     // different predicate than the manifest names is precisely the drift F-09 exists to catch.
@@ -774,6 +811,35 @@ async function readDeploymentPosture(): Promise<void> {
   } finally {
     deploymentPending.value = false
   }
+}
+
+// ---------------------------------------------------------------------------
+// S5b (R-39) — 成员与权限: is the page there at all?
+// ---------------------------------------------------------------------------
+//
+// ONE READ, for the workbench-admin tier only, and its answer is the whole decision: the server's
+// members read answers 200 (switch on, caller admitted by the host port — platform admin or the
+// stock-prep delegated admin) or 403 ROLE_DELEGATION_SCOPE_REQUIRED (the delegated admin nobody has
+// scoped yet — the page then shows only that notice); everything else (404 switch-off, 403 not the
+// delegated admin, a network failure) leaves the item hidden. Nobody below the tier issues it.
+// `null` while unknown — hidden, so a switch-off deployment never flashes the item.
+const membersOutcome = ref<StockPrepMembersReadOutcome | null>(null)
+const membersPageAvailable = computed<boolean>(() => (
+  membersOutcome.value !== null && membersOutcome.value.kind !== 'disabled'
+))
+
+async function readMembersPosture(): Promise<void> {
+  if (!canOpenStockPrepMembersPage(auth.getAccessSnapshot())) return
+  try {
+    membersOutcome.value = await readStockPrepMembers()
+  } catch {
+    // Values-free and silent, like the D2 preload: an unreadable page is a hidden page.
+    membersOutcome.value = null
+  }
+}
+
+function handleMembersOutcome(next: StockPrepMembersReadOutcome): void {
+  membersOutcome.value = next
 }
 
 // `null` means "the operator has not chosen a tab yet", which is what lets the landing above stay
@@ -955,6 +1021,8 @@ activeKey.value = tabFromQuery()
 // D2's one read, fired during setup for the same reason: the landing hold is shortest when the
 // request starts before the first paint rather than in `onMounted` after it.
 void readDeploymentPosture()
+// S5b: the members page's existence read, fired alongside it (workbench-admin tier only).
+void readMembersPosture()
 
 /**
  * P0-8's handle onto the mounted queue instance — the shell's only way to tell it "reload now" after

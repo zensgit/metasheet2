@@ -16,7 +16,11 @@ import type {
   ParallelNodeConfig,
   RuntimeGraph,
 } from '../types/approval-product'
+import { isApprovalCcTargetType } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('ApprovalGraphExecutor')
 import {
   approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
@@ -44,8 +48,13 @@ export type ApprovalGraphAssignmentResolver = (input: ApprovalGraphAssignmentRes
 
 export interface ApprovalCcEvent {
   nodeKey: string
+  /** The PERSISTED cc row shape — a `'group'` cc target (OD-L1-7(a)) never reaches here: the cc
+   *  arm expands it into one `'user'` event per frozen member. */
   targetType: 'user' | 'role'
   targetId: string
+  /** Lock-1 OD-L1-7(a): set on every per-member event expanded from a `'group'` target — the
+   *  expanding group id, for audit ("why was I cc'd"; the template-authored id is §2.6-permitted). */
+  groupId?: string
 }
 
 export interface ApprovalGraphAutoApprovalEvent {
@@ -154,6 +163,27 @@ function isConditionBranch(value: unknown): value is ConditionBranch {
     && Array.isArray(value.rules)
 }
 
+/**
+ * Lock-1 OD-L1-7(a) — read the frozen `groupMemberIds` map out of a stored requester snapshot
+ * (`approval_instances.requester_snapshot`, untyped at the dispatch-side construction sites) into
+ * the shape the executor's cc arm consumes: ONLY string-keyed arrays of non-empty strings survive;
+ * an absent map, a legacy snapshot that never baked one, or a malformed entry reads as `{}` / `[]`
+ * — the same tolerance `ApprovalAssigneeResolver` case 'user_group' applies inline. Pure.
+ */
+export function readGroupMemberIdsSnapshot(requesterSnapshot: unknown): Record<string, string[]> {
+  if (!isRecord(requesterSnapshot)) return {}
+  const raw = requesterSnapshot.groupMemberIds
+  if (!isRecord(raw)) return {}
+  const out: Record<string, string[]> = {}
+  for (const [groupId, members] of Object.entries(raw)) {
+    if (!Array.isArray(members)) continue
+    out[groupId] = members
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0)
+  }
+  return out
+}
+
 function isNonEmptyStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
 }
@@ -169,7 +199,8 @@ function isParallelNodeConfig(config: unknown): config is ParallelNodeConfig {
 
 // Lock-3 §1.1 — a normalized handler config always carries an `assigneeSources` array (empty arrays
 // are rejected at authoring, so a runtime handler node always has ≥1 source). Structural only: the
-// normalize choke (ApprovalProductService) owns the seven-member registry + prohibition gates.
+// normalize choke (ApprovalProductService) owns the handler registry (HANDLER_ASSIGNEE_SOURCE_KINDS)
+// + prohibition gates.
 function isHandlerNodeConfig(config: unknown): config is HandlerNodeConfig {
   return isRecord(config) && Array.isArray(config.assigneeSources)
 }
@@ -918,6 +949,18 @@ export class ApprovalGraphExecutor {
       assignmentResolver?: ApprovalGraphAssignmentResolver
       designatedFallbackResolver?: ApprovalGraphAssignmentResolver
       requesterContext?: RequesterFormulaContext | null
+      /**
+       * Lock-1 OD-L1-7(a) — the FROZEN `requesterSnapshot.groupMemberIds` map (group id → ordered
+       * local user ids), read by the cc arms to expand a `'group'` cc target into one `'user'`
+       * event per member. It is the SAME create-time freeze the approver `user_group` source reads
+       * (`ApprovalAssigneeResolver` case 'user_group' / `fetchMemberGroupSnapshot`) — never a live
+       * read here, so a membership change after create does not reach an in-flight cc. A graph
+       * whose cc nodes are all user/role never touches it. Every construction site whose walk can
+       * reach a cc arm supplies it (as `{}` when the snapshot carries none): a `'group'` target
+       * with the option ABSENT throws (a wiring error, never a silent drop); a group id absent
+       * from a SUPPLIED map, or frozen as `[]`, yields zero events (cc is informational — debug log).
+       */
+      groupMemberIds?: Record<string, string[]>
     } = {},
   ) {
     for (const node of runtimeGraph.nodes) {
@@ -1300,19 +1343,7 @@ export class ApprovalGraphExecutor {
       }
 
       if (node.type === 'cc') {
-        const ccConfig = node.config as unknown as Record<string, unknown>
-        const targetIds = ccConfig.targetIds
-        const targetType = ccConfig.targetType
-        if (!isNonEmptyStringArray(targetIds) || (targetType !== 'user' && targetType !== 'role')) {
-          throw new Error(`CC node ${node.key} has invalid config`)
-        }
-        for (const targetId of targetIds) {
-          ccEvents.push({
-            nodeKey: node.key,
-            targetType,
-            targetId,
-          })
-        }
+        this.collectCcEvents(node, ccEvents)
         currentKey = this.firstTargetForNode(node.key)
         continue
       }
@@ -1567,6 +1598,55 @@ export class ApprovalGraphExecutor {
     }
   }
 
+  /**
+   * The ONE cc arm shared by `resolveFromNode` and `resolveBranchAdvance` (Lock-1 G-4: both
+   * executor cc branches accept exactly the ratified set, APPROVAL_CC_TARGET_TYPES, and still throw
+   * for anything else — the widening is enumerated, not permissive). `user` / `role` targets become
+   * one event each, byte-identical to the pre-OD-L1-7 behaviour. A `group` target (OD-L1-7(a))
+   * expands into one `targetType:'user'` event per FROZEN member read from
+   * `options.groupMemberIds`, each carrying `groupId` for audit; a member listed by two of the
+   * node's groups is cc'd ONCE (first group wins), mirroring the resolver's per-node `seen` dedup
+   * for approver seats. An empty / unknown group contributes nothing — cc is informational, so
+   * "nobody to cc" is a values-free debug log, never a dispatch failure (contrast the approver
+   * half, where an empty group falls to `emptyAssigneePolicy`).
+   */
+  private collectCcEvents(node: ApprovalNode, ccEvents: ApprovalCcEvent[]): void {
+    const ccConfig = node.config as unknown as Record<string, unknown>
+    const targetIds = ccConfig.targetIds
+    const targetType = ccConfig.targetType
+    if (!isNonEmptyStringArray(targetIds) || !isApprovalCcTargetType(targetType)) {
+      throw new Error(`CC node ${node.key} has invalid config`)
+    }
+    if (targetType !== 'group') {
+      for (const targetId of targetIds) {
+        ccEvents.push({ nodeKey: node.key, targetType, targetId })
+      }
+      return
+    }
+    const groupMemberIds = this.options.groupMemberIds
+    if (groupMemberIds === undefined) {
+      throw new Error(`CC node ${node.key} has a group target but no group member snapshot was supplied`)
+    }
+    const seen = new Set<string>()
+    for (const groupId of targetIds) {
+      const rawMembers = groupMemberIds[groupId]
+      const members = Array.isArray(rawMembers)
+        ? rawMembers
+            .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+            .filter((entry) => entry.length > 0)
+        : []
+      if (members.length === 0) {
+        logger.debug('cc group target resolved to no members', { nodeKey: node.key, groupId })
+        continue
+      }
+      for (const memberId of members) {
+        if (seen.has(memberId)) continue
+        seen.add(memberId)
+        ccEvents.push({ nodeKey: node.key, targetType: 'user', targetId: memberId, groupId })
+      }
+    }
+  }
+
   private resolveConditionTarget(node: ApprovalNode): string | null {
     const config = node.config as unknown as Record<string, unknown>
     const rawBranches = config.branches
@@ -1675,19 +1755,7 @@ export class ApprovalGraphExecutor {
       }
 
       if (node.type === 'cc') {
-        const ccConfig = node.config as unknown as Record<string, unknown>
-        const targetIds = ccConfig.targetIds
-        const targetType = ccConfig.targetType
-        if (!isNonEmptyStringArray(targetIds) || (targetType !== 'user' && targetType !== 'role')) {
-          throw new Error(`CC node ${node.key} has invalid config`)
-        }
-        for (const targetId of targetIds) {
-          ccEvents.push({
-            nodeKey: node.key,
-            targetType,
-            targetId,
-          })
-        }
+        this.collectCcEvents(node, ccEvents)
         currentKey = this.firstTargetForNode(node.key)
         continue
       }

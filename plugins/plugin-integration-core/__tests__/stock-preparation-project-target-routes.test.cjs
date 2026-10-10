@@ -548,6 +548,9 @@ test('R-02 CREATE: floor refused before IO; puller 201 + registry + audit + G1 w
       // so there is nothing to carry over — the counts say so (the pack suite drives the other case).
       customerPacks: { planned: 0, installed: 0, reinstalled: 0, alreadyInstalled: 0, notInCatalog: 0 },
       todoView: { created: true, skipped: null },
+      // S3 fix round 1 (R6): this substrate is an OLDER host (no stamp declaration), so the create's
+      // best-effort overview leg refuses before any IO and says so with its closed code — the create stands.
+      overview: { ensured: false, created: false, code: 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED' },
     })
     assert.equal(h.provisioning.calls.filter((c) => c[0] === 'ensureObject').length, 1, 'ONE sheet provisioned')
     assert.equal(h.provisioning.calls.find((c) => c[0] === 'ensureObject')[1], objectId)
@@ -687,7 +690,13 @@ test('R-07 LIST: this tenant\'s rows only, handles and enums', async () => {
     assert.equal(res.body.data.count, 2)
     assert.equal(res.body.data.limit, MAX_PROJECT_TARGETS_PER_TENANT)
     assert.deepEqual(res.body.data.items.map((i) => [i.projectNo, i.status]), [['PRJ-S1-L1', 'active'], ['PRJ-S1-L2', 'archived']])
-    assert.deepEqual(Object.keys(res.body.data.items[0]).sort(), ['activeRowCount', 'archivedAt', 'countsAt', 'countsBounded', 'createdAt', 'lastPullAt', 'lastPullOutcome', 'objectId', 'projectNo', 'rowCount', 'sheetId', 'status'])
+    // S3 (R-37): the three remaining bounded counts and the last pull's closed code join the item;
+    // the response carries the overview's handles (null sheet id until the first refresh created it).
+    assert.deepEqual(Object.keys(res.body.data.items[0]).sort(), ['activeRowCount', 'archivedAt', 'countsAt', 'countsBounded', 'createdAt', 'lastPullAt', 'lastPullCode', 'lastPullOutcome', 'missingComponentsCount', 'objectId', 'procurementOpenCount', 'projectNo', 'rowCount', 'sheetId', 'status', 'warehouseOpenCount'])
+    // Fix round 1 (R8b): a handle only for a STAMPED overview, and `status` says why there is none —
+    // this substrate is an older host, so the lookup refuses before any IO: 'unavailable'.
+    assert.deepEqual(Object.keys(res.body.data.overview).sort(), ['activeViewId', 'archivedViewId', 'sheetId', 'status'])
+    assert.deepEqual(res.body.data.overview, { status: 'unavailable', sheetId: null, activeViewId: null, archivedViewId: null })
     assert.equal((await listTargets(h.routes, READ_ONLY)).statusCode, 403)
   } finally { h.restore() }
 })

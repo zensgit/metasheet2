@@ -18,6 +18,13 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
+/**
+ * Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc node's OWN target vocabulary. Byte-mirrors backend
+ * `ApprovalCcTargetType` (packages/core-backend/src/types/approval-product.ts): the two legacy kinds
+ * plus `'group'` (用户组). A SEPARATE alias from `ApprovalAssigneeType`, which also types the legacy
+ * approver `assigneeType` — OD-L1-7 widens the cc half only ("cc is a second contract, not a rider").
+ */
+export type ApprovalCcTargetType = 'user' | 'role' | 'group'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 // P1-C + Lock-1 K6: threshold (N-of-M / 门槛会签) and sequential (依次审批) are the fourth and
 // fifth shipped engine modes. This union byte-mirrors backend
@@ -76,10 +83,11 @@ export interface NodeTimeoutConfig {
   unit?: 'business'
 }
 
-// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
-// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
-// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
-// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry. Byte-mirrors backend
+// HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler node
+// (M4 per-node-type fail-closed registry); `continuous_managers` (OD-L3-6(a)), `prior_node_approver`
+// (K3) and `continuous_dept_heads` (K4) are absent — §1.5 names the latter two "do NOT". G-13 pins
+// this exact set (apps/web/tests/approval-handler-node-authoring.spec.ts).
 export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'static_user',
   'static_role',
@@ -90,10 +98,18 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'manager_at_level',
   // Lock-2 §2.4 (RATIFIED 2026-08-17): the two contact-derived rows are ratified for node types
   // `approval` AND `handler` (corpus C-6; Lock-2 resolves the between-locks gap Lock-3 §1.5 left —
-  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grows the
+  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grew the
   // exact set 7→9 in the SAME slice as the kinds, with the G-13 exact-set tests updated together.
   'form_field_user_manager',
   'form_field_user_dept_head',
+  // Lock-3 §1.5 forward rows (RATIFIED; W1-1d, 2026-10-10), quoted: "Forward rows, conditional on
+  // Lock-1 landing: `user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b)
+  // ADMIT". 9→12, strictly these three. The canvas sub-forms are keyed by KIND inside the shared
+  // approval/handler section (ApprovalGraphNodeConfigEditor.vue), so no new form is needed; the
+  // submit page's requester_choice chooser (ApprovalNewView.vue) reads handler nodes too.
+  'user_group',
+  'requester_choice',
+  'dept_head_at_level',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 // Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
@@ -338,7 +354,9 @@ export type ApprovalAssigneeSource =
    * authoring picker is a TYPED multi-select restricted to groups bound to the template's org
    * (`/api/approval-templates/directory/member-groups?orgId=`) — never a free-text/raw-id input; a
    * group outside the binding fails publish (values-free 400), never at dispatch. Cc-as-recipient
-   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
+   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape — it landed as
+   * `CcNodeConfig.targetType: 'group'` (the "`user_group` (cc)" registry row), sharing only the
+   * bound-group picker and the backend's snapshot map + publish gate.
    */
   | { kind: 'user_group'; groupIds: string[] }
   /**
@@ -387,7 +405,14 @@ export interface ConditionRule {
 }
 
 export interface CcNodeConfig {
-  targetType: ApprovalAssigneeType
+  /**
+   * Lock-1 OD-L1-7(a): `'group'` names bound member-group ids in `targetIds` (picked from the same
+   * org-scoped bound-group list the approver `user_group` picker uses). The template keeps the
+   * group reference; the backend executor expands it per member at dispatch, so persisted cc
+   * records stay user/role. An off-enum persisted value is carried VERBATIM by the editor (G-16 —
+   * never coerced) and flagged by `validateCcEdits`; the backend remains the sole arbiter.
+   */
+  targetType: ApprovalCcTargetType
   targetIds: string[]
 }
 

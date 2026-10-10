@@ -110,6 +110,50 @@ test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+function hasVerifiedViteFlagSource(spec) {
+  if (!/^VITE_[A-Z0-9_]+$/.test(spec.key)) return false
+  const match = /^apps\/web\/src\/[A-Za-z0-9_./-]+\.ts#([A-Za-z_$][\w$]*)$/.exec(spec.source)
+  if (!match) return false
+
+  const webSourceRoot = path.join(REPO_ROOT, 'apps/web/src')
+  const sourcePath = path.resolve(REPO_ROOT, spec.source.split('#')[0])
+  const relativeSourcePath = path.relative(webSourceRoot, sourcePath)
+  if (
+    relativeSourcePath === '..'
+    || relativeSourcePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativeSourcePath)
+  ) return false
+  let source
+  try {
+    source = readFileSync(sourcePath, 'utf8')
+  } catch {
+    return false
+  }
+  return source.includes(`export function ${match[1]}(`)
+    && source.includes(`import.meta.env.${spec.key}`)
+}
+
+test('VITE manifest entries require an exact frontend source binding', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.VITE_MULTITABLE_RANGE_FILL_ENABLED
+  assert.ok(spec)
+  assert.equal(hasVerifiedViteFlagSource(spec), true)
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, key: 'VITE_UNREGISTERED_EXAMPLE' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, source: 'packages/core-backend/src/example.ts#isEnabled' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({
+      ...spec,
+      source: 'apps/web/src/../../packages/core-backend/src/example.ts#isEnabled',
+    }),
+    false,
+  )
+})
+
 // Non-boolean e-learning env reads that belong in the manifest, by exact name. A suffix rule such
 // as *_MS would also catch source constants (ELEARNING_MEDIA_FFPROBE_TIMEOUT_MS and friends are
 // not env reads). #6175: the audience catalog scan timeout.
@@ -206,6 +250,12 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_MANAGE_SCHEMA_PERMISSION_CODE', // permission code constant
   'MULTITABLE_WRITE_PERMISSION', // permission code constant
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
+  // 一个项目一张备料表 S3 (R-37): the plugin-scope wrapper's typed 403 when a plugin asks `ensureObject` for a
+  // `systemKind` stamp it may not have (multitable/stock-preparation-overview-contract.ts
+  // `StockPreparationOverviewSystemKindError.code`). An ERROR CODE, not a flag: nothing reads it from
+  // process.env, and the gate it names has no switch — the stamp is admitted for exactly one (plugin, kind,
+  // object) triple, always. Listed here (not registered) for the same reason as the scope codes around it.
+  'MULTITABLE_SYSTEM_KIND_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
   // 客户反馈 2026-09-24 #4a (managed-table zh relabel, multitable/object-display-name-relabel.ts): four
@@ -265,7 +315,13 @@ function globalHistoryFlagsInSource() {
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
   const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
     .filter((t) => !t.endsWith('_'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets])].sort()
+  // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
+  // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
+  const stockPrepMembersPage = [
+    ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
+    ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
+  ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
@@ -296,7 +352,9 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
     `source reads Global-History flags MISSING from the manifest — add each to global-history-flag-manifest.mjs (or, if genuinely out of scope, to NON_GH_PREFIXES/NON_GH_EXACT with a reason): ${missing.join(', ')}`,
   )
   const sourceSet = new Set(sourceGH)
-  const phantom = GLOBAL_HISTORY_FLAG_KEYS.filter((k) => !sourceSet.has(k))
+  const phantom = GLOBAL_HISTORY_FLAG_MANIFEST
+    .filter((spec) => !sourceSet.has(spec.key) && !hasVerifiedViteFlagSource(spec))
+    .map((spec) => spec.key)
   assert.deepEqual(
     phantom,
     [],
@@ -652,4 +710,27 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
     spec.source,
     'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   )
+})
+
+test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_MEMBERS_PAGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled')
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+  assert.equal(isActivated(spec, '1'), false)
+  assert.equal(isActivated(spec, undefined), false)
+  // Both readers spell the exact-literal comparison against the same env name.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs'), 'utf8')
+  assert.match(plugin, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
+  assert.match(plugin, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/stock-preparation-members.ts'), 'utf8')
+  assert.match(host, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
+  assert.match(host, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
 })

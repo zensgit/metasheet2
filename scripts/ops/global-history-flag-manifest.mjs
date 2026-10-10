@@ -739,6 +739,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "Test report 2026-10-08 T6 (a requester gets no prompt when their request is rejected). Default OFF; exact literal 'true' only (no trim, no case folding). On: the approval center's 我发起的 tab shows a new-outcome badge and a per-row dot, from GET /api/approvals/mine-outcomes/unseen-count and the list's per-row outcomeUnseen, both built on one predicate: the viewer's own request is in a terminal status, the newest audit row that moved it into that status was written by someone else, and the viewer has no approval_reads row at or after that row. Self-decided outcomes (own withdrawal, own rejection or approval) are never badged. Off: that endpoint answers 404 APPROVAL_MINE_OUTCOME_BADGE_DISABLED before any query, the list issues no extra query and its rows carry no new key, and the web (session feature approvalMineOutcomeBadge) issues no count request. No DDL, no new realtime event (a requester receives no frame when someone else decides; the badge refreshes on the next load or tab switch), nothing added to the pending/todo counts or their socket events (todo-center lock B). Rollout effect, an owner choice at enablement: historical outcomes count by the same rule, so on the first load every finished request whose outcome its requester never opened afterwards counts as new. danger=low: read-only; one count query per approval-center load or tab switch and one id-scoped query per 我发起的 page.",
     source: 'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
   },
+  {
+    key: 'STOCK_PREP_MEMBERS_PAGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "备料「成员与权限」(ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, slice S5b, register R-39): the operator switch for the /stock-prep workbench's members page. Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the four plugin routes (…/stock-preparation/members, …/members/custom-roles, …/members/custom-roles/:roleId, …/members/custom-roles/:roleId/project-targets) AND by the host's narrow members port (packages/core-backend/src/services/stock-preparation-members.ts#stockPrepMembersPageEnabled), each of which answers 404 STOCK_PREP_MEMBERS_PAGE_DISABLED before any IO while it is off — after the plugin's WORKBENCH_ADMIN gate. Off, the web hides the 「成员与权限」 rail item and guards its ?tab=members deep link (both follow the read's answer), so the page is invisible. On: a platform admin or the ADMITTED stock-prep delegated admin (role stock-prep_admin with a stock-prep department / member-group scope; otherwise 403, or 403 ROLE_DELEGATION_SCOPE_REQUIRED) may create and edit server-generated stock-prep_c_<8 hex> roles carrying only stock-prep:read / :operate / :pull (any other code 400; never stock-prep:admin; never an _admin id or a built-in), within the grantor's own current codes (and, for a delegated admin, only while every member of the role is inside their delegated scope; at most 100 custom roles), and add project sheets of their own tenant to such a role through the G1 grant port (add-only, spreadsheet:write, only sheets the grantor can fully write; the project-sheet add also needs MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, not modeled as dependsOn because the other three routes do not need it). Every change writes an audit row in the admin-users delegation shape. Appoint / revoke / admission use the existing /api/admin/role-delegation routes regardless of this switch. Danger=high: authorization writes (roles, role_permissions, sheet grants) by a non-platform administrator. Side effect while ON: every custom-role write takes LOCK TABLE user_roles IN SHARE MODE for its whole transaction (including up to 50 G1 sheet grants), stalling every user_roles INSERT/DELETE platform-wide for that duration — must be narrowed (row-level FOR SHARE) or explicitly accepted by the owner before the switch is turned on.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled',
+  },
+  {
+    key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Opt-in UI gate for multitable rectangular copy and fill. Default OFF; enabled only by the exact build-time string true.',
+    source: 'apps/web/src/multitable/utils/grid-range-fill-flags.ts#isGridRangeFillEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

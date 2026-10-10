@@ -32,6 +32,8 @@ export default defineConfig({
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
+      // Range fill: real JWT + PostgreSQL atomicity, run whole-file in the post-migrate multitable gate.
+      'tests/integration/multitable-range-fill-realdb.test.ts',
       'tests/integration/admin-users.api.test.ts',
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',
@@ -125,12 +127,12 @@ export default defineConfig({
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-history-authz-guard.db.test.ts',
-      // approvals:read permission-catalogue registration (zzzz20260920130000): grant-and-gate
-      // real-DB acceptance for the finding that no migration had ever inserted this code into
-      // `permissions`, making it ungrantable through the product grant endpoint
-      // (routes/permissions.ts:156-164 400s on an unregistered code). approvals:write/act are
-      // deliberately out of scope for this migration (see the migration's own file header).
-      // Requires real PostgreSQL and the real HTTP register/grant/pending-count round trip.
+      // approval-product permission-catalogue registration (zzzz20260920130000: approvals:read;
+      // zzzz20261010120000: approvals:write, approvals:act, approval-templates:manage): grant-and-gate
+      // real-DB acceptance for the finding that no migration had ever inserted these codes into
+      // `permissions`, making them ungrantable through the product grant endpoints
+      // (routes/permissions.ts:156-164 and routes/roles.ts assertCodesInCatalog 400 on an unregistered
+      // code). Requires real PostgreSQL and the real HTTP register/grant/gate round trips.
       // Excluded here so `describeIfDatabase` cannot
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-permission-catalogue.yml lane, which arms EXPECT_DB=1.
@@ -1805,7 +1807,8 @@ export default defineConfig({
       // E-learning L0 canonical role-template migration gate. Requires real
       // PostgreSQL (exact grants, idempotent repair, assignment-safe rollback).
       // Excluded from the no-DB job and wired as a WHOLE FILE into the same
-      // post-migrate schema/service step in plugin-tests.yml.
+      // post-migrate schema/service step in plugin-tests.yml. Also carries the
+      // S5a stock-prep role-template + legacy-role move cases (R-39).
       'tests/integration/elearning-role-templates.db.test.ts',
       // E-learning L0 plugin-owned jobs claim-lease gate. Requires real
       // PostgreSQL (UNIQUE identity, FOR UPDATE SKIP LOCKED, fenced finalize).
