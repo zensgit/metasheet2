@@ -2092,6 +2092,71 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }
     expect(saved.edges).toEqual(graph.edges)
   })
+
+  // The canvas flag is the Canvas-first surface: entering 流程 PROMOTES a linear draft onto the
+  // canvas model (`promoteLinearDraftToGraphAuthoring` → `approvalNodeEditsFromGraph`), so a linear
+  // template is authored through THIS inspector, not the step cards. A sourceless auto_approve node
+  // only stays editable here because this slice seeds it into the edit model.
+  const f4aLinearGraph = (config: Record<string, unknown>) => ({
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): a sourceless auto_approve template loaded through the API is promoted onto the canvas on entering 流程, stays editable with 自动通过 checked, and saves byte-for-byte', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear' })
+    const graph = f4aLinearGraph({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(0)
+
+    clickCanvasNode('approval_1')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-node-editor"]')).not.toBeNull()
+    expect((inspector.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+    expect(inspector.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify((updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph)).toBe(JSON.stringify(graph))
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): choosing 自动通过 on a promoted manual node saves approvalType with NO assigneeSources', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear_choose' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: f4aLinearGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }) as any,
+    }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+    // Content, not key order: a key the author ADDS on the canvas is appended by the spread-and-set
+    // rebuild (as every newly authored canvas key is) and the backend re-normalizes the order on save.
+    // The byte-for-byte pin is for an UNTOUCHED loaded template (the test above).
+    expect(config).toEqual({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────
