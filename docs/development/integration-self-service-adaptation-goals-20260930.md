@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前验收（2026-10-10）**：本地候选 `frozen-ea599226-16da-4413-9e20-108bada0033f`，manifest SHA256 `8aea214606f988c4c3bf8a89c085fd33574da5b12fedb0f37613a3b184bb5c37`，八阶段本地验收通过（新增 core unit 215 项、plugin 29 项，并覆盖原始类型检查、迁移、provenance、前端及接线测试）。原始整站 manual 九阶段已通过，包含 465 个迁移；该摘要 SHA256 为 `53f19a2836407f15d19c8292975dbf1ac9008b4bc7c84433e4b1e0e4c11de5b4`。Automation 整套真实临时 PG 测试仍在运行，interval 尚未执行，不能将 manual 通过扩写为全部 Automation 或完整 iPaaS 已交付。988 冻结的 manual 失败及此前阶段记录保留为历史，不代表当前 manual 结果。
+> **当前验收（2026-10-10）**：本地候选 `frozen-ea599226-16da-4413-9e20-108bada0033f`，manifest SHA256 `8aea214606f988c4c3bf8a89c085fd33574da5b12fedb0f37613a3b184bb5c37`，八阶段本地验收通过（新增 core unit 215 项、plugin 29 项，并覆盖原始类型检查、迁移、provenance、前端及接线测试）。原始整站 manual 九阶段已通过，包含 465 个迁移；该摘要 SHA256 为 `53f19a2836407f15d19c8292975dbf1ac9008b4bc7c84433e4b1e0e4c11de5b4`。Automation 整套真实临时 PG 测试已实际结束：126 项中 117 通过、9 失败、零跳过，摘要 SHA256 `bf64964502a044e6904172bd4dbdccef9b1599cb9b42e7bd4981435063dfc05f`；临时 PG 已停止并清理，完整原始失败证据保留。失败含优化后仍使用旧 native-read 数量的断言，以及时钟窗口、测试清理锁和 recovery 迁移前置，后者尚待定位或补齐，不能统称假红。interval 尚未执行，不能将 manual 通过扩写为全部 Automation 或完整 iPaaS 已交付。宜搭独立提取树的类型/CI 接线问题正在另行修复并重验，不用累计树的绿灯替代它。988 冻结的 manual 失败及此前阶段记录保留为历史，不代表当前 manual 结果。
 >
 > **发布授权与基线**：用户已明确授权在相应切片验收通过后，按“宜搭 → K3 只读 → 备料读取计划 → Automation 只读”拆分提交、推送并开 PR；不包含合并、部署、真实客户读取、真实 token 或宜搭发送。sender 仍 OFF，K3 永不写回，可信 tenant / 当前 owner 与原时间预算、授权重验不变。本设计文档分支基于 `93214d2ea63400b2d1fd77ce8bc45c4fe18bae7d`；上述实现候选仅已对齐固定 main `36aabbbedb0233bffc0d6fc34e2f6be23a0e2e87`，不宣称已完成最新 main 对齐。以下实施正文与旧验收均按各自时间点保留。
 
