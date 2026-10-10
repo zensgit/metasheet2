@@ -1,5 +1,5 @@
 import { apiFetch } from '../../utils/api'
-import { isIntegrationScopedProjectId } from './workbench'
+import { isIntegrationScopedProjectId, parseIntegrationResponse } from './workbench'
 
 export type IntegrationSystemStatus = 'active' | 'inactive' | 'error'
 export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
@@ -1356,8 +1356,8 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       'Pipeline 真实执行',
       form.allowLivePipelineRun ? 'warning' : 'ready',
       form.allowLivePipelineRun
-        ? '已允许真实执行；实体机测试前需确认客户账套、回滚人与审批策略'
-        : '默认只允许 dry-run；真实执行需显式勾选',
+        ? '配置里开着真实执行，但 K3 目标永久只读，运行时仍会拒绝；请改用 dry-run + 导出'
+        : '只允许 dry-run；K3 目标永久只读，页面不提供真实执行',
       'allowLivePipelineRun',
     ),
   ]
@@ -2235,19 +2235,15 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
   return next
 }
 
-async function parseIntegrationResponse<T>(response: Response): Promise<T> {
-  let payload: IntegrationApiEnvelope<T> | null = null
-  try {
-    payload = await response.json() as IntegrationApiEnvelope<T>
-  } catch {
-    payload = null
-  }
-  if (!response.ok || payload?.ok === false) {
-    const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    throw new Error(message || 'Integration API request failed')
-  }
-  return payload?.data as T
-}
+// This module used to ship its OWN copy of `parseIntegrationResponse`, byte-identical to the one in
+// workbench.ts except that it threw a bare `Error` — so every K3 preset-page call discarded the
+// envelope's error code and no failure on this page could ever be humanized, no matter what the view
+// did at its catch. The duplicate is gone; there is now one parser, and both surfaces get the
+// code-carrying Error it throws (`IntegrationApiError` = `Error & { code?, status?, details? }` —
+// a plain Error with optional machine-readable fields, including the F01 details.code fallback).
+//
+// Imported under the same local name so the ~40 call sites below are untouched; workbench.ts is now the
+// single definition, and this module deliberately does NOT re-export it.
 
 export async function listIntegrationSystems(
   kind: string,
