@@ -6359,6 +6359,17 @@ class HttpError extends Error {
   }
 }
 
+function attendanceHttpErrorBody(error) {
+  return {
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+    },
+  }
+}
+
 // Attendance import upload path containment (post-closeout P3 defense-in-depth, 2026-07-11).
 // Output-side containment mirroring core StorageService.resolveWithinBase, layered behind the existing
 // isUuidLike(fileId) + sanitizeImportUploadOrgId(orgId) input gates: even if a future caller builds a path
@@ -6496,10 +6507,46 @@ function getOrgId(req) {
 
 function getAuthenticatedOrgId(req) {
   const user = req.user
-  const raw = user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId
-  if (typeof raw === 'string' && raw.trim().length > 0) return raw
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  // Blank claims are absent. `??` would keep `user.orgId === ''` and hide
+  // `authenticatedTenantId`, and getOrgId would then fall through to 'default'.
+  const candidates = [user?.orgId, user?.workspaceId, req.authenticatedTenantId]
+  for (const raw of candidates) {
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  }
   return null
+}
+
+function attendanceImportOrgSelectorValues(req) {
+  return [req.body?.orgId, req.query?.orgId, req.headers?.['x-org-id']]
+    .flatMap((value) => Array.isArray(value) ? value : [value])
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map((value) => String(value).trim())
+}
+
+function attendanceImportOrgSelectorMismatches(req, orgId) {
+  return attendanceImportOrgSelectorValues(req).some((value) => value !== orgId)
+}
+
+function rejectUnauthenticatedAttendanceImportOrg(res) {
+  res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+}
+
+function rejectMismatchedAttendanceImportOrg(res) {
+  res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } })
+}
+
+function resolveAuthenticatedAttendanceOrg(req, res) {
+  const orgId = getAuthenticatedOrgId(req)
+  if (!orgId) {
+    rejectUnauthenticatedAttendanceImportOrg(res)
+    return null
+  }
+  if (attendanceImportOrgSelectorMismatches(req, orgId)) {
+    rejectMismatchedAttendanceImportOrg(res)
+    return null
+  }
+  return orgId
 }
 
 function getAuthenticatedUserId(req) {
@@ -9537,8 +9584,124 @@ async function ensureAttendanceGroups(db, orgId, groupNames, options) {
   return { map, created }
 }
 
-async function insertAttendanceGroupMembers(db, orgId, members) {
+const ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING = 'Target user is not an active member of this org'
+
+function shouldAssignAttendanceImportGroupMember({
+  groupSync,
+  groupKey,
+  rowUserId,
+  groupIdMap,
+  groupNames,
+  prepareOnly,
+}) {
+  if (!groupSync?.autoAssignMembers || !groupKey || !rowUserId) return false
+  if (prepareOnly) {
+    return Boolean(groupIdMap?.has(groupKey) || (groupSync.autoCreate && groupNames?.has(groupKey)))
+  }
+  return Boolean(groupIdMap?.has(groupKey))
+}
+
+// Rows that commit would turn into attendance_group_members writes. Invalid and
+// duplicate rows are not assigned, so they are not part of this batch.
+function collectImportGroupMemberAssignmentRows({
+  rows,
+  fallbackUserId,
+  userMap,
+  userMapKeyField,
+  userMapSourceFields,
+  requiredFields,
+  punchRequiredFields,
+  groupSync,
+  groupIdMap,
+  groupNames,
+  prepareOnly,
+}) {
+  const assignments = []
+  const seen = new Set()
+  const required = Array.isArray(requiredFields) ? requiredFields : []
+  const punchRequired = Array.isArray(punchRequiredFields) ? punchRequiredFields : []
+  const sourceRows = Array.isArray(rows) ? rows : []
+  for (let rowIndex = 0; rowIndex < sourceRows.length; rowIndex += 1) {
+    const row = sourceRows[rowIndex]
+    const workDate = row?.workDate
+    const rowUserId = resolveRowUserId({
+      row,
+      fallbackUserId,
+      userMap,
+      userMapKeyField,
+      userMapSourceFields,
+    })
+    let rejected = !rowUserId || !workDate
+    if (!rejected && required.length) {
+      rejected = required.some((field) => {
+        const value = resolveRequiredFieldValue(row, field)
+        return value === undefined || value === null || value === ''
+      })
+    }
+    if (!rejected && punchRequired.length && shouldEnforcePunchRequired(row)) {
+      rejected = punchRequired.some((field) => {
+        const value = resolveRequiredFieldValue(row, field)
+        return value === undefined || value === null || value === ''
+      })
+    }
+    if (rejected) continue
+    const dedupKey = `${rowUserId}:${workDate}`
+    if (seen.has(dedupKey)) continue
+    seen.add(dedupKey)
+    const groupKey = resolveAttendanceGroupKey(row)
+    if (!shouldAssignAttendanceImportGroupMember({
+      groupSync,
+      groupKey,
+      rowUserId,
+      groupIdMap,
+      groupNames,
+      prepareOnly,
+    })) continue
+    const sourceIndex = Number.isInteger(row?.__sourceIndex) ? row.__sourceIndex : rowIndex
+    assignments.push({ userId: rowUserId, workDate, rowIndex: sourceIndex })
+  }
+  return assignments
+}
+
+function importMemberAssignmentDetailOptions(assignments) {
+  const indexesByUserId = new Map()
+  for (const assignment of assignments) {
+    const userId = String(assignment?.userId ?? '').trim()
+    if (!userId) continue
+    const list = indexesByUserId.get(userId) ?? []
+    list.push(assignment.rowIndex)
+    indexesByUserId.set(userId, list)
+  }
+  return {
+    indexesForRejected(rejectedUserIds) {
+      const indexes = []
+      for (const userId of rejectedUserIds) {
+        const rows = indexesByUserId.get(userId)
+        if (rows) indexes.push(...rows)
+      }
+      return indexes
+    },
+  }
+}
+
+async function assertImportGroupMemberAssignmentsActive(client, orgId, assignments) {
+  if (!assignments?.length) return
+  await assertActiveOrgMemberUserIds(
+    client,
+    orgId,
+    assignments.map((assignment) => assignment.userId),
+    importMemberAssignmentDetailOptions(assignments),
+  )
+}
+
+async function insertAttendanceGroupMembers(db, orgId, members, options) {
   if (!members.length) return 0
+  await assertActiveOrgMemberUserIds(
+    db,
+    orgId,
+    members.map((member) => member?.userId),
+    options,
+  )
   const chunkSize = 200
   let inserted = 0
   for (let i = 0; i < members.length; i += chunkSize) {
@@ -19914,6 +20077,56 @@ async function runAnnualLeaveAccrualScheduledTriggerOnce(db, logger = console, o
   return { ran: true, orgs }
 }
 
+// Roster-write gate (#6045 group members, #6047 group managers, schedule-group members,
+// CSV autoAssignMembers). Same active-org predicate as applyAnnualLeaveManualAdjustment
+// below: user_orgs.is_active AND users.is_active in the actor org. Inactive membership, a
+// deactivated user, another org, and a nonexistent id all return no row and fail closed as
+// 404 USER_NOT_IN_ORG. Callers must run this before any INSERT in the same transaction: a
+// rejection throws and writes nothing, including earlier ids in a batch. details are
+// values-free source indexes: [{ code, rejectedCount, indexes }]. Import callers pass
+// indexesForRejected so indexes are source-row positions, not request-array positions.
+const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
+    FROM user_orgs uo
+    JOIN users u ON u.id = uo.user_id
+   WHERE uo.org_id = $1
+     AND uo.user_id = ANY($2::text[])
+     AND uo.is_active = true
+     AND u.is_active = true
+   FOR SHARE OF uo, u`
+
+async function assertActiveOrgMemberUserIds(client, orgId, userIds, options) {
+  const requested = []
+  const seen = new Set()
+  for (const raw of userIds) {
+    const userId = String(raw ?? '').trim()
+    if (!userId || seen.has(userId)) continue
+    seen.add(userId)
+    requested.push(userId)
+  }
+  if (!requested.length) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'userId is required')
+  }
+  const rows = await client.query(ACTIVE_ORG_MEMBER_USER_IDS_SQL, [orgId, requested])
+  const active = new Set(rows.map((row) => String(row.user_id)))
+  const rejected = requested.filter((userId) => !active.has(userId))
+  if (rejected.length) {
+    const indexes = typeof options?.indexesForRejected === 'function'
+      ? options.indexesForRejected(rejected)
+      : requested.flatMap((userId, index) => (active.has(userId) ? [] : [index]))
+    throw new HttpError(
+      404,
+      'USER_NOT_IN_ORG',
+      'Target user is not an active member of this org',
+      [{
+        code: 'USER_NOT_IN_ORG',
+        rejectedCount: indexes.length,
+        indexes,
+      }],
+    )
+  }
+  return requested
+}
+
 // 年假/法定假 L2c: apply an admin manual ± to a user's annual balance via LOT mutation (never event-only).
 // Idempotent on (org_id, source_key) — a replay re-applies nothing. positive → a new annual_manual_adjustment
 // lot + grant event; negative → FIFO-deduct active annual lots + deduct event(s) (reusing deductLeaveBalance);
@@ -25064,7 +25277,21 @@ module.exports = {
       attendanceOrgResolutionShadowMetricsLogStop = startShadowMetricsLoggingV1(logger)
     }
     const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
-    const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
+    const withAttendanceImportPermission = (handler) => withAnyPermission(
+      ['attendance:import', 'attendance:admin'],
+      async (req, res) => {
+        const access = await resolveAttendanceImportActor(req, res)
+        if (!access) return
+        req.attendanceImportAccess = access
+        return handler(req, res)
+      },
+    )
+    function readBoundAttendanceImportOrg(req, res) {
+      const orgId = req.attendanceImportAccess?.orgId
+      if (typeof orgId === 'string' && orgId.length > 0) return orgId
+      rejectUnauthenticatedAttendanceImportOrg(res)
+      return null
+    }
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
@@ -26350,12 +26577,18 @@ module.exports = {
     }
 
     async function resolveAttendanceImportActor(req, res) {
-      const access = await resolveAttendanceSchedulerScopeActor(req, res)
-      if (!access) return null
+      const userId = getAuthenticatedUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+      if (!orgId) return null
       try {
         return {
-          ...access,
-          fullImport: access.fullAdmin || await hasAttendanceImportAccess(access.userId),
+          userId,
+          orgId,
+          fullImport: await hasAttendanceAdminAccess(userId) || await hasAttendanceImportAccess(userId),
         }
       } catch (error) {
         logger.error('Attendance import actor resolution failed', error)
@@ -28181,7 +28414,13 @@ module.exports = {
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
+	      const assignmentRows = []
+	      let asyncSourceIndex = -1
 	      const rowScan = await rowSource.iterateRows((row) => {
+	        asyncSourceIndex += 1
+	        if (payload.groupSync?.autoAssignMembers) {
+	          assignmentRows.push({ ...row, __sourceIndex: asyncSourceIndex })
+	        }
 	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
@@ -28285,6 +28524,34 @@ module.exports = {
 	      })
 	      if (!rowScan.rowCount) {
 	        throw new Error('No rows to preview')
+	      }
+	      const asyncGroupSync = normalizeGroupSyncOptions(
+	        payload.groupSync,
+	        payload.ruleSetId,
+	        payload.timezone,
+	      )
+	      if (asyncGroupSync?.autoAssignMembers) {
+	        const asyncGroupNames = collectAttendanceGroupNames(assignmentRows)
+	        let asyncGroupIdMap = null
+	        if (asyncGroupNames.size && !asyncGroupSync.autoCreate) {
+	          asyncGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+	        }
+	        const asyncMemberAssignments = collectImportGroupMemberAssignmentRows({
+	          rows: assignmentRows,
+	          fallbackUserId: payload.userId ?? requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	          requiredFields,
+	          punchRequiredFields,
+	          groupSync: asyncGroupSync,
+	          groupIdMap: asyncGroupIdMap,
+	          groupNames: asyncGroupNames,
+	          prepareOnly: true,
+	        })
+	        if (asyncMemberAssignments.length) {
+	          await assertImportGroupMemberAssignmentsActive(db, orgId, asyncMemberAssignments)
+	        }
 	      }
 	      const csvWarnings = rowScan.warnings
 
@@ -28542,7 +28809,15 @@ module.exports = {
 	              payload,
 	            })
 	          } catch (error) {
-	            const message = String(error?.message ?? error ?? 'Unknown error')
+	            const message = error instanceof HttpError
+	              ? JSON.stringify({
+	                  code: error.code,
+	                  message: error.message,
+	                  ...(Array.isArray(error.details) && error.details.length > 0
+	                    ? { details: error.details }
+	                    : {}),
+	                })
+	              : String(error?.message ?? error ?? 'Unknown error')
 	            logger.error('Attendance async import preview failed', error)
 	            await updateImportJobProgress({
 	              jobId: rowId,
@@ -28874,6 +29149,7 @@ module.exports = {
 		          }
 		        }
 	        const groupMembersToInsert = new Map()
+	        const importMemberAssignmentRows = []
 		        batchMeta = {
 		          ...(payload.batchMeta ?? {}),
 		          engine: importEngine,
@@ -29312,19 +29588,27 @@ module.exports = {
 		            return true
 	          }
 	          seenRowKeys.add(dedupKey)
-	          const prepareOnlyGroupResolvable = groupKey
-	            && (groupIdMap?.has(groupKey) || (groupSync?.autoCreate && groupNames.has(groupKey)))
-	          if (prepareOnly && groupSync?.autoAssignMembers && prepareOnlyGroupResolvable && rowUserId) {
-	            preparedPlanGroupEffects.push({
-	              kind: 'ensure_member',
-	              groupRef: groupKey,
-	              userId: rowUserId,
-	              firstSourceOrdinal: sourceOrdinal,
-	            })
-	          } else if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-	            const groupEntry = groupIdMap.get(groupKey)
-	            if (groupEntry?.id) {
-	              groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+	          if (shouldAssignAttendanceImportGroupMember({
+	            groupSync,
+	            groupKey,
+	            rowUserId,
+	            groupIdMap,
+	            groupNames,
+	            prepareOnly,
+	          })) {
+	            importMemberAssignmentRows.push({ userId: rowUserId, workDate, rowIndex: sourceOrdinal })
+	            if (prepareOnly) {
+	              preparedPlanGroupEffects.push({
+	                kind: 'ensure_member',
+	                groupRef: groupKey,
+	                userId: rowUserId,
+	                firstSourceOrdinal: sourceOrdinal,
+	              })
+	            } else {
+	              const groupEntry = groupIdMap.get(groupKey)
+	              if (groupEntry?.id) {
+	                groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+	              }
 	            }
 	          }
 
@@ -29883,11 +30167,26 @@ module.exports = {
 	          return true
 	        })
 
+	        const importMemberGateOptions = importMemberAssignmentDetailOptions(importMemberAssignmentRows)
+	        if (importMemberAssignmentRows.length) {
+	          await assertActiveOrgMemberUserIds(
+	            trx,
+	            orgId,
+	            importMemberAssignmentRows.map((assignment) => assignment.userId),
+	            importMemberGateOptions,
+	          )
+	        }
+
 	        await flushRecordUpserts()
 	        await flushImportItems()
 
 		        if (!prepareOnly && groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-	          const groupMembersAdded = await insertAttendanceGroupMembers(trx, orgId, Array.from(groupMembersToInsert.values()))
+	          const groupMembersAdded = await insertAttendanceGroupMembers(
+	            trx,
+	            orgId,
+	            Array.from(groupMembersToInsert.values()),
+	            importMemberGateOptions,
+	          )
 	          if (batchMeta) {
 	            batchMeta.groupMembersAdded = groupMembersAdded
 	            await trx.query(
@@ -31566,7 +31865,8 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/upload-artifact',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const requesterId = getUserId(req)
 	        if (!requesterId) {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -42085,8 +42385,8 @@ module.exports = {
 	    // Per-user field-picker memory (attendance-import-template-prefs design-lock
 	    // §2, RATIFIED 2026-07-07). Governance: the actor is ALWAYS req.user — the
 	    // legacy x-user-id header fallback in getUserId() is deliberately NOT used
-	    // here (personal-views lock §7 Q1 anti-pattern). org stays a legitimate
-	    // client dimension (multi-org admins), mirroring getOrgId().
+	    // here (personal-views lock §7 Q1 anti-pattern). Org is the authenticated
+	    // org only; body, query, and x-org-id cannot select another org.
 	    const getTemplatePrefsActorId = (req) => {
 	      const user = req.user
 	      const raw = user?.id ?? user?.sub ?? user?.userId
@@ -42106,7 +42406,8 @@ module.exports = {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
 	          return
 	        }
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const rows = await db.query(
 	          `SELECT selected_keys FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
 	          [orgId, actorId]
@@ -42128,7 +42429,8 @@ module.exports = {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
 	          return
 	        }
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const raw = req.body?.selectedKeys
 	        if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
 	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must be an array of field keys (or null/[] to clear)' } })
@@ -42179,7 +42481,8 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/upload',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const requesterId = getUserId(req)
 	        if (!requesterId) {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -42246,11 +42549,11 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/prepare',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const access = await assertAttendanceImportPrepareAllowed(req, res)
         if (!access) {
           return
         }
+        const orgId = access.orgId
         const requesterId = access.userId
 
         try {
@@ -42284,9 +42587,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 	        const userId = parsed.data.userId ?? requesterId
 	        if (!userId) {
@@ -42409,10 +42712,29 @@ module.exports = {
           )
           const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
           const groupWarnings = []
+          let previewGroupIdMap = null
           if (groupNames.size && !groupSync?.autoCreate) {
-            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+            previewGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
             for (const [key, name] of groupNames.entries()) {
-              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+              if (!previewGroupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+            }
+          }
+          if (groupSync?.autoAssignMembers) {
+            const importMemberAssignments = collectImportGroupMemberAssignmentRows({
+              rows,
+              fallbackUserId: parsed.data.userId ?? userId,
+              userMap: parsed.data.userMap,
+              userMapKeyField: parsed.data.userMapKeyField,
+              userMapSourceFields: parsed.data.userMapSourceFields,
+              requiredFields,
+              punchRequiredFields,
+              groupSync,
+              groupIdMap: previewGroupIdMap,
+              groupNames,
+              prepareOnly: true,
+            })
+            if (importMemberAssignments.length) {
+              await assertImportGroupMemberAssignmentsActive(db, orgId, importMemberAssignments)
             }
           }
           if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
@@ -42803,7 +43125,7 @@ module.exports = {
           })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -42826,11 +43148,11 @@ module.exports = {
           return
         }
 
-	        const orgId = getOrgId(req)
-        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+	        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
 	        if (!importAccess) {
 	          return
 	        }
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 
 		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
@@ -43108,7 +43430,7 @@ module.exports = {
 	          })
 	        } catch (error) {
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 	          const errorCode = typeof error?.code === 'string' && error.code
@@ -43213,8 +43535,10 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!importAccess) return
+        const orgId = importAccess.orgId
+        const requesterId = importAccess.userId
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
@@ -43287,6 +43611,41 @@ module.exports = {
 	          }
 	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
 
+	          const { rows: previewGateRows } = await resolveImportRows({
+	            payload: parsed.data,
+	            orgId,
+	            fallbackUserId: parsed.data.userId ?? requesterId,
+	          })
+	          const previewGroupSync = normalizeGroupSyncOptions(
+	            parsed.data.groupSync,
+	            parsed.data.ruleSetId,
+	            parsed.data.timezone,
+	          )
+	          if (previewGroupSync?.autoAssignMembers) {
+	            const previewProfile = resolveImportProfileForPayload(parsed.data)
+	            const previewGroupNames = collectAttendanceGroupNames(previewGateRows)
+	            let previewGroupIdMap = null
+	            if (previewGroupNames.size && !previewGroupSync.autoCreate) {
+	              previewGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+	            }
+	            const previewAssignments = collectImportGroupMemberAssignmentRows({
+	              rows: previewGateRows,
+	              fallbackUserId: parsed.data.userId ?? requesterId,
+	              userMap: parsed.data.userMap,
+	              userMapKeyField: parsed.data.userMapKeyField,
+	              userMapSourceFields: parsed.data.userMapSourceFields,
+	              requiredFields: previewProfile?.requiredFields ?? [],
+	              punchRequiredFields: previewProfile?.punchRequiredFields ?? [],
+	              groupSync: previewGroupSync,
+	              groupIdMap: previewGroupIdMap,
+	              groupNames: previewGroupNames,
+	              prepareOnly: true,
+	            })
+	            if (previewAssignments.length) {
+	              await assertImportGroupMemberAssignmentsActive(db, orgId, previewAssignments)
+	            }
+	          }
+
 	          const sanitizedPayload = sanitizeImportJobPayload({
 	            ...parsed.data,
 	            __jobType: 'preview',
@@ -43321,7 +43680,7 @@ module.exports = {
           res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -43366,9 +43725,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         if (!importAccess.fullImport) {
           res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Full attendance import permission required' } })
           return
@@ -43532,7 +43891,7 @@ module.exports = {
 	            }
 	          }
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 
@@ -43546,7 +43905,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/jobs/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const jobId = String(req.params?.id ?? '').trim()
         if (!jobId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'jobId is required' } })
@@ -43580,9 +43940,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 		        const userId = parsed.data.userId ?? requesterId
 		        if (!userId) {
@@ -43755,7 +44115,7 @@ module.exports = {
 
 	      } catch (error) {
 	        if (error instanceof HttpError) {
-	          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	          res.status(error.status).json(attendanceHttpErrorBody(error))
 	          return
 	        }
 	        const errorCode = typeof error?.code === 'string' && error.code
@@ -43795,7 +44155,8 @@ module.exports = {
 	    'GET',
 	    '/api/attendance/integrations',
 	    withAttendanceImportPermission(async (req, res) => {
-	      const orgId = getOrgId(req)
+	      const orgId = readBoundAttendanceImportOrg(req, res)
+	      if (!orgId) return
 	      const { page, pageSize, offset } = parsePagination(req.query)
 	      const status = typeof req.query.status === 'string' ? req.query.status : null
 
@@ -43847,7 +44208,8 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const payload = parsed.data
         const status = payload.status ?? 'active'
         const config = normalizeIntegrationConfig(payload.config ?? {})
@@ -43885,7 +44247,8 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43942,7 +44305,8 @@ module.exports = {
       'DELETE',
       '/api/attendance/integrations/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43974,7 +44338,8 @@ module.exports = {
       'GET',
       '/api/attendance/integrations/:id/runs',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -44023,14 +44388,14 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = req.attendanceImportAccess ?? await resolveAttendanceImportActor(req, res)
+	    if (!importAccess) return
+        const orgId = importAccess.orgId
+        const requesterId = importAccess.userId
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-	    const importAccess = await resolveAttendanceImportActor(req, res)
-	    if (!importAccess) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -44251,7 +44616,7 @@ module.exports = {
 	            }
 	          }
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 	          const errorCode = typeof error?.code === 'string' && error.code
@@ -44283,7 +44648,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -44323,7 +44689,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -44354,7 +44721,8 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/items',
 	      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -44398,7 +44766,8 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/export.csv',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const batchId = normalizeUuidString(req.params.id)
 	        if (!batchId) {
 	          respondInvalidUuid(res)
@@ -44548,11 +44917,8 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        const orgId = getAuthenticatedOrgId(req)
-        if (!orgId) {
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
-          return
-        }
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -46073,7 +46439,10 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
-            for (const userId of new Set(userIds)) {
+            // All-or-nothing: reject the whole batch before any INSERT when any id is not an
+            // active member of this org. A throw rolls the transaction back.
+            const acceptedUserIds = await assertActiveOrgMemberUserIds(trx, orgId, userIds)
+            for (const userId of acceptedUserIds) {
               const rows = await trx.query(
                 `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
                  VALUES ($1, $2, $3, now(), now())
@@ -46094,6 +46463,7 @@ module.exports = {
           })
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
+          if (error instanceof HttpError) throw error
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46235,16 +46605,21 @@ module.exports = {
         try {
           const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
           if (!groupExists) return
-          const rows = await db.query(
-            `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, now(), now())
-             ON CONFLICT (org_id, group_id, user_id, role)
-             DO UPDATE SET updated_at = attendance_group_managers.updated_at
-             RETURNING *`,
-            [orgId, groupId, parsed.data.userId.trim(), role, actorAccess.userId]
-          )
+          const userId = parsed.data.userId.trim()
+          const rows = await db.transaction(async (trx) => {
+            await assertActiveOrgMemberUserIds(trx, orgId, [userId])
+            return trx.query(
+              `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, now(), now())
+               ON CONFLICT (org_id, group_id, user_id, role)
+               DO UPDATE SET updated_at = attendance_group_managers.updated_at
+               RETURNING *`,
+              [orgId, groupId, userId, role, actorAccess.userId]
+            )
+          })
           res.json({ ok: true, data: mapAttendanceGroupManagerRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) throw error
           if (error?.code === '23503') {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
@@ -47283,6 +47658,7 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
+            await assertActiveOrgMemberUserIds(trx, orgId, input.userIds)
             for (const userId of input.userIds) {
               await acquireAttendanceScheduleGroupMemberLock(trx, orgId, groupId, userId)
               const overlapRows = await trx.query(
@@ -47314,7 +47690,7 @@ module.exports = {
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (error?.code === '23505') {

@@ -35,7 +35,9 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_legacy_execution_plans', 'read', 'select', 2, 'compatibility_transport', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_legacy_execution_plan_chunks', 'read', 'select', 1, 'compatibility_transport', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_legacy_terminal_responses', 'read', 'select', 1, 'compatibility_transport', 'private_worker'),
-  entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_jobs', 'write', 'update', 4, 'operational_status', 'private_worker'),
+  // Five job-status updates: the four plan/suspend/complete writes plus
+  // MARK_ROSTER_ORG_FAILED_SQL (USER_NOT_IN_ORG, non-null error).
+  entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_jobs', 'write', 'update', 5, 'operational_status', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_legacy_terminal_responses', 'write', 'insert', 1, 'compatibility_transport', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-legacy-plan-worker-repository.ts', 'mapStoredChunk', 'attendance_import_upload_cleanup_commands', 'write', 'insert', 1, 'operational_status', 'private_worker'),
   entry('packages/core-backend/src/attendance/w4c3a-rollout-control.ts', 'lockJobsBatchesAndItems', 'attendance_import_jobs', 'read', 'select', 1, 'concurrency_control', 'rollout_transition_guard'),
