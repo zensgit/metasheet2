@@ -19,11 +19,15 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
+import ts from 'typescript'
+
+import { SENSITIVE_CREDENTIAL_KEYS } from '../../src/data-adapters/DataSourceManager'
 import {
   ENCRYPTED_STORE_CATALOG,
   ENCRYPTED_STORE_REENTER_HINT,
   probeEncryptedStores,
   runEncryptedStoreProbeAtStartup,
+  type EncryptedStoreCatalogEntry,
   type EncryptedStoreProbeReport,
 } from '../../src/security/encrypted-store-probe'
 import { PluginRuntimeSecurityService } from '../../src/security/plugin-runtime-security-service'
@@ -218,10 +222,81 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     }
   })
 
-  it('blank values are neither encrypted nor plaintext', async () => {
-    const db = fakeDatabase({ 'directory_integrations.config.appSecret': ['   ', null, ''] })
+  it('NULL / empty / whitespace-only values are not stored secrets: counted nowhere, not even in `rows`', async () => {
+    const db = fakeDatabase({ 'directory_integrations.config.appSecret': ['   ', null, '', '\t\n'] })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
-    expect(report.stores[3]).toMatchObject({ rows: 3, encrypted: 0, plaintext: 0, undecryptable: 0 })
+    expect(report.stores[3]).toMatchObject({ rows: 0, encrypted: 0, plaintext: 0, undecryptable: 0 })
+  })
+
+  it('rows = encrypted + plaintext + legacyNotChecked in every store field', async () => {
+    for (const env of [ENV_A, ENV_B]) {
+      const report = await probeEncryptedStores({ query: fakeDatabase(fixture.rows).query, env })
+      for (const s of report.stores) {
+        expect({ field: `${s.store}.${s.field}`, rows: s.rows }).toEqual({
+          field: `${s.store}.${s.field}`, rows: s.encrypted + s.plaintext + (s.legacyNotChecked ?? 0),
+        })
+      }
+    }
+  })
+
+  it('the `enc:` prefix is tested on the string each store\'s READER tests: raw where the reader is raw, trimmed where it trims', async () => {
+    const sealed = (fixture.rows['data_sources.config.credentials.apiKey'] as string[])[0]
+    const padded = ` ${sealed} `
+    const db = fakeDatabase({
+      // DataSourceManager.decryptCredentials / dingtalk destinations / attendance / credential store:
+      // isEncryptedSecretValue(raw) — a leading space makes it plaintext to the reader
+      'data_sources.config.credentials.password': [padded],
+      'dingtalk_group_destinations.secret': [padded],
+      'attendance_integrations.config.appSecret|appsecret|app_secret': [padded],
+      'integration_external_systems.credentials_encrypted': [padded, ` ${sealIntegrationV1('MARKER-probe-pad-v1')}`],
+      'system_configs.value (is_encrypted)': [padded],
+      // directory readers normalizeText() first — the reader decrypts it, so it is encrypted here too
+      'directory_integrations.config.appSecret': [padded],
+      'directory_integrations.config.approvalCardLinkSecret': [padded],
+    })
+    const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
+    const by = Object.fromEntries(report.stores.map((s) => [`${s.store}.${s.field}`, s]))
+    for (const field of [
+      'data_sources.config.credentials.password',
+      'dingtalk_group_destinations.secret',
+      'attendance_integrations.config.appSecret|appsecret|app_secret',
+      'system_configs.value (is_encrypted)',
+    ]) {
+      expect({ field, encrypted: by[field].encrypted, plaintext: by[field].plaintext }).toEqual({ field, encrypted: 0, plaintext: 1 })
+    }
+    expect(by['integration_external_systems.credentials_encrypted']).toMatchObject({ encrypted: 0, plaintext: 2, legacyNotChecked: 0 })
+    for (const field of ['directory_integrations.config.appSecret', 'directory_integrations.config.approvalCardLinkSecret']) {
+      expect({ field, encrypted: by[field].encrypted, undecryptable: by[field].undecryptable, plaintext: by[field].plaintext })
+        .toEqual({ field, encrypted: 1, undecryptable: 0, plaintext: 0 })
+    }
+    expect(ENCRYPTED_STORE_CATALOG.filter((e) => e.prefixOn === 'trimmed').map((e) => e.store)).toEqual([
+      'directory_integrations', 'directory_integrations', 'directory_integrations',
+    ])
+  })
+
+  it('the data_sources catalog fields are EXACTLY DataSourceManager\'s SENSITIVE_CREDENTIAL_KEYS (a new key needs a catalog entry)', () => {
+    const catalogKeys = ENCRYPTED_STORE_CATALOG
+      .filter((e) => e.store === 'data_sources')
+      .map((e) => /^config\.credentials\.(\w+)$/.exec(e.field)?.[1] ?? `<unparsed ${e.field}>`)
+    expect([...catalogKeys].sort()).toEqual([...SENSITIVE_CREDENTIAL_KEYS].sort())
+    // ...and each entry's SQL reads exactly its own key.
+    for (const entry of ENCRYPTED_STORE_CATALOG.filter((e) => e.store === 'data_sources')) {
+      const key = entry.field.slice('config.credentials.'.length)
+      expect(entry.sql.match(/config->'credentials'->>'(\w+)'/g)).toEqual([`config->'credentials'->>'${key}'`, `config->'credentials'->>'${key}'`])
+    }
+  })
+
+  it('the catalog is frozen to the entry: retargeting a statement or a scheme throws (strict mode) and changes nothing', () => {
+    expect(Object.isFrozen(ENCRYPTED_STORE_CATALOG)).toBe(true)
+    const before = ENCRYPTED_STORE_CATALOG.map((e) => e.sql)
+    for (const entry of ENCRYPTED_STORE_CATALOG) {
+      expect(Object.isFrozen(entry)).toBe(true)
+      expect(() => { (entry as { sql: string }).sql = 'DELETE FROM system_configs' }).toThrow(TypeError)
+      expect(() => { (entry as { scheme: string }).scheme = 'platform-enc' }).toThrow(TypeError)
+      expect(() => { (entry as { prefixOn: string }).prefixOn = 'trimmed' }).toThrow(TypeError)
+    }
+    expect(() => { (ENCRYPTED_STORE_CATALOG as EncryptedStoreCatalogEntry[]).push(ENCRYPTED_STORE_CATALOG[0]) }).toThrow(TypeError)
+    expect(ENCRYPTED_STORE_CATALOG.map((e) => e.sql)).toEqual(before)
   })
 
   it('covers EVERY catalog store field, in order, one bounded statement each', async () => {
@@ -277,14 +352,26 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     const db = fakeDatabase({
       'data_sources.config.credentials.password': sqlError(undefined, 'relation "data_sources" does not exist'),
       'data_sources.config.credentials.apiKey': sqlError('28P01', 'column "config" does not exist'),
-      'data_sources.config.credentials.token': sqlError('EPIPE', 'relation does not exist'),
     })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
     expect(report.stores[0]).toMatchObject({ status: 'read_failed' })
     expect(report.stores[0].sqlState).toBeUndefined()
     expect(report.stores[1]).toMatchObject({ status: 'read_failed', sqlState: '28P01' })
-    expect(report.stores[2]).toMatchObject({ status: 'read_failed' })
-    expect(report.stores[2].sqlState).toBeUndefined()
+  })
+
+  it('sqlState is reported only for the exact SQLSTATE shape /^[0-9A-Z]{5}$/', async () => {
+    const cases: Array<[unknown, string | undefined]> = [
+      ['42P01', '42P01'], ['28P01', '28P01'], ['XX000', 'XX000'],
+      ['42p01', undefined], ['42P011', undefined], ['4P01', undefined], ['ECONNRESET', undefined], [42701, undefined], [undefined, undefined],
+    ]
+    for (const [code, expected] of cases) {
+      const error = Object.assign(new Error('relation does not exist'), code === undefined ? {} : { code })
+      const report = await probeEncryptedStores({ query: fakeDatabase({ 'data_sources.config.credentials.token': error }).query, env: ENV_A })
+      const store = report.stores[2]
+      expect({ code, sqlState: store.sqlState }).toEqual({ code, sqlState: expected })
+      // Only the exact 42P01 is table_missing — a lowercase look-alike is just unreadable.
+      expect({ code, status: store.status }).toEqual({ code, status: expected === '42P01' ? 'table_missing' : 'read_failed' })
+    }
   })
 
   it('a query that throws a non-SQLSTATE error fails THAT store only; every other store is still probed', async () => {
@@ -476,14 +563,41 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     await expect(runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger: throwingEverything })).resolves.toBeNull()
   })
 
-  it('every query failing (database down) still resolves, with one summary counting the unreadable store fields', async () => {
+  it('every query failing (database down) still resolves: one summary, and ONE values-free warn naming the unreadable store fields', async () => {
     const logger = captureLogger()
-    const pool = { query: vi.fn(async () => { throw Object.assign(new Error('MARKER-down'), { code: 'ECONNREFUSED' }) }) }
+    const pool = { query: vi.fn(async () => { throw Object.assign(new Error('MARKER-down 203.0.113.9:5432'), { code: 'ECONNREFUSED' }) }) }
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => pool, env: ENV_A, logger })
     expect(report?.totals.unreadable).toBe(11)
     expect(logger.info).toHaveBeenCalledTimes(1)
     expect(logger.info.mock.calls[0][0]).toContain('11 store field(s) unreadable')
-    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    const [message, meta] = logger.warn.mock.calls[0]
+    expect(message).toBe(`Encrypted store probe: 11 store field(s) could not be read, so their values were not checked: ${EXPECTED_STORE_FIELDS.join(', ')}.`)
+    expect(meta).toEqual({
+      unreadable: 11,
+      stores: ENCRYPTED_STORE_CATALOG.map((e) => ({ store: e.store, field: e.field, sqlState: null })),
+    })
+    const serialized = JSON.stringify(logger.warn.mock.calls) + JSON.stringify(logger.info.mock.calls)
+    for (const fragment of ['MARKER', '203.0.113.9', '5432', 'ECONNREFUSED']) expect(serialized).not.toContain(fragment)
+  })
+
+  it('a missing table / column is not a warning; one unreadable store field is, next to the per-store undecryptable warns', async () => {
+    const logger = captureLogger()
+    const db = fakeDatabase({
+      ...fixture.rows,
+      'system_configs.value (is_encrypted)': sqlError('42P01', 'relation missing'),
+      'dingtalk_group_destinations.secret': sqlError('42501', 'MARKER-permission-text'),
+    })
+    await runEncryptedStoreProbeAtStartup({ resolvePool: () => db, env: ENV_B, logger })
+    const unreadableWarns = logger.warn.mock.calls.filter(([message]) => String(message).includes('could not be read'))
+    expect(unreadableWarns).toEqual([[
+      'Encrypted store probe: 1 store field(s) could not be read, so their values were not checked: dingtalk_group_destinations.secret.',
+      { unreadable: 1, stores: [{ store: 'dingtalk_group_destinations', field: 'secret', sqlState: '42501' }] },
+    ]])
+    const undecryptableWarns = logger.warn.mock.calls.filter(([message]) => String(message).includes(ENCRYPTED_STORE_REENTER_HINT))
+    expect(undecryptableWarns).toHaveLength(8) // 10 broken fields minus dingtalk secret (unreadable) and system_configs (missing)
+    expect(logger.warn).toHaveBeenCalledTimes(9)
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('MARKER')
   })
 })
 
@@ -499,5 +613,49 @@ describe('startup wiring in src/index.ts', () => {
     expect(statement?.[2]).toContain('runEncryptedStoreProbeAtStartup({ resolvePool: () => poolManager.get() })')
     expect(statement?.[2]).toMatch(/\.catch\(/)
     expect(indexSource).not.toMatch(/await\s+import\('\.\/security\/encrypted-store-probe'\)/)
+  })
+
+  /**
+   * The index.ts statement itself, executed: its text is cut out of src/index.ts, the dynamic import is
+   * replaced by an injected loader, and it runs with `this.logger` / `poolManager` doubles. Whatever
+   * fails — the module load, the hook, AND the logger inside the .catch — the promise it leaves behind
+   * must resolve, never reject (a rejection there is an unhandled rejection in the server process).
+   */
+  function runIndexStatement(load: () => Promise<unknown>, warn: (message: string) => void, pool: unknown): Promise<unknown> {
+    const indexSource = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/index.ts'), 'utf8')
+    const statement = /void\s+import\('\.\/security\/encrypted-store-probe'\)([\s\S]*?)\r?\n\r?\n/.exec(indexSource)
+    expect(statement).not.toBeNull()
+    const js = ts.transpile(`const __statement = __load()${statement![1]}`, { target: ts.ScriptTarget.ES2020 })
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const run = new Function('__load', 'poolManager', `${js}\nreturn __statement`) as (this: unknown, ...args: unknown[]) => Promise<unknown>
+    return run.call({ logger: { warn } }, load, { get: () => pool })
+  }
+
+  it('the statement never rejects: module load failing, hook throwing, and the logger throwing inside the .catch', async () => {
+    const throwingWarn = vi.fn(() => { throw new Error('log sink down') })
+    await expect(runIndexStatement(() => Promise.reject(new Error('module load failed')), throwingWarn, null)).resolves.toBeUndefined()
+    expect(throwingWarn).toHaveBeenCalledTimes(1)
+    const hookThrows = async () => ({ runEncryptedStoreProbeAtStartup: () => { throw new Error('hook threw') } })
+    await expect(runIndexStatement(hookThrows, throwingWarn, null)).resolves.toBeUndefined()
+    expect(throwingWarn).toHaveBeenCalledTimes(2)
+  })
+
+  it('the statement wires the real hook to poolManager.get()', async () => {
+    const warn = vi.fn()
+    const db = fakeDatabase(fixture.rows)
+    const real = () => import('../../src/security/encrypted-store-probe')
+    const env = { ...process.env }
+    try {
+      Object.assign(process.env, ENV_A)
+      const report = (await runIndexStatement(real, warn, db)) as EncryptedStoreProbeReport
+      expect(report.stores).toHaveLength(EXPECTED_STORE_FIELDS.length)
+      expect(db.statements).toHaveLength(EXPECTED_STORE_FIELDS.length)
+    } finally {
+      for (const key of ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT']) {
+        if (env[key] === undefined) delete process.env[key]
+        else process.env[key] = env[key]
+      }
+    }
+    expect(warn).not.toHaveBeenCalled()
   })
 })

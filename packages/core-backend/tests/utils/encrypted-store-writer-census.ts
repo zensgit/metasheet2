@@ -3,8 +3,8 @@
  * the tree that can SEAL a value for storage, so each one can be pinned to an encrypted-store catalog
  * entry of src/security/encrypted-store-probe.ts (or to a reasoned exemption).
  *
- * TypeScript compiler API, syntax only (no checker), so it reads `.ts` and the plugins' `.cjs` / `.js`
- * alike and never sees comments or string contents. Two kinds of site:
+ * TypeScript compiler API, syntax only (no checker), so it reads `.ts` / `.mts` / `.cts` and the plugins'
+ * `.cjs` / `.js` / `.mjs` alike and never sees comments or string contents. Two kinds of site:
  *   - a REFERENCE to a named sealing writer — a call, a value reference (`xs.map(normalizeStoredSecretValue)`),
  *     a namespace member (`es.encryptStoredSecretValue(…)`), a shorthand property; a local ALIAS of one
  *     introduced by an import / export / destructuring specifier is reported as `<name> (alias)` and its
@@ -12,10 +12,20 @@
  *     an object key, an import specifier) are not references.
  *   - a CALL of a generic sealing primitive — `.encrypt(…)` / `encrypt(…)` (the plugin security service,
  *     credential stores, ConfigService's SecretManager) and `createCipheriv(…)` / `createCipher(…)`
- *     (any re-implementation, like the attendance plugin's copy of the `enc:` format).
+ *     (any re-implementation, like the attendance plugin's copy of the `enc:` format). An alias of one
+ *     introduced by a specifier (`import { createCipheriv as mk }`, `const { encrypt: seal } = security`,
+ *     `const { createCipheriv: mk } = require('node:crypto')`) is reported as `<name> (alias)` and its
+ *     CALLS are reported under the original name.
  *
- * NOT modelled: a writer reached through a dynamic property name, `.call` / `.apply`, a re-export alias
- * consumed in ANOTHER file (the alias site itself is reported), or code outside the scanned roots.
+ * NOT modelled (known blind spots — a site written this way is invisible to the census):
+ *   - a generic primitive captured as a VALUE and called later (`const mk = crypto.createCipheriv`,
+ *     `const seal = security.encrypt.bind(security)`) or invoked through `.call` / `.apply` / `.bind`
+ *     (`security.encrypt.call(security, v)`) — the callee name is then `call` / the local name;
+ *   - a dynamic property name (`store[method](v)`; a string-literal key `store['encrypt'](v)` IS seen);
+ *   - an alias created by a re-export in one file and consumed in ANOTHER file (only the alias site is
+ *     reported), an alias through plain assignment (`const seal = normalizeStoredSecretValue` IS seen
+ *     as a reference, but calls of `seal` are not attributed again);
+ *   - code outside the scanned roots (see listCensusFiles).
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -37,11 +47,11 @@ export interface SealingSite {
   line: number
 }
 
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.cjs', '.mjs'])
 const SKIPPED_DIRECTORIES = new Set(['node_modules', 'dist', 'build', '__tests__', 'tests', 'test', 'fixtures', 'coverage'])
 
-function isScannableFile(name: string): boolean {
-  if (name.endsWith('.d.ts')) return false
+export function isScannableFile(name: string): boolean {
+  if (/\.d\.[cm]?ts$/.test(name)) return false
   if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(name)) return false
   return SOURCE_EXTENSIONS.has(path.extname(name))
 }
@@ -81,16 +91,21 @@ export function listCensusFiles(repoRoot: string): string[] {
 
 function scriptKindOf(file: string): ts.ScriptKind {
   const ext = path.extname(file)
-  if (ext === '.ts') return ts.ScriptKind.TS
+  if (ext === '.ts' || ext === '.mts' || ext === '.cts') return ts.ScriptKind.TS
   if (ext === '.tsx') return ts.ScriptKind.TSX
   return ts.ScriptKind.JS
 }
 
-function calleeName(expression: ts.Expression): string | undefined {
+function unwrapCallee(expression: ts.Expression): ts.Expression {
   let target: ts.Expression = expression
   while (ts.isParenthesizedExpression(target) || ts.isNonNullExpression(target) || ts.isAsExpression(target)) {
     target = target.expression
   }
+  return target
+}
+
+function calleeName(expression: ts.Expression): string | undefined {
+  const target = unwrapCallee(expression)
   if (ts.isIdentifier(target)) return target.text
   if (ts.isPropertyAccessExpression(target)) return target.name.text
   if (ts.isElementAccessExpression(target) && ts.isStringLiteralLike(target.argumentExpression)) {
@@ -139,25 +154,28 @@ export function scanSealingSites(file: string, source: string): SealingSite[] {
   const sites: SealingSite[] = []
   const lineOf = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
 
-  // Pass 1: local aliases of a named writer (`import { x as y }`, `export { x as y }`, `const { x: y } = …`).
+  // Pass 1: local aliases (`import { x as y }`, `export { x as y }`, `const { x: y } = …`) of a named
+  // writer (its references count) or of a generic primitive (its calls count).
   const aliases = new Map<string, string>()
+  const genericAliases = new Map<string, string>()
   const collectAliases = (node: ts.Node): void => {
     if (
       (ts.isImportSpecifier(node) || ts.isExportSpecifier(node) || ts.isBindingElement(node)) &&
       node.propertyName &&
-      ts.isIdentifier(node.propertyName) &&
-      named.has(node.propertyName.text) &&
+      (ts.isIdentifier(node.propertyName) || ts.isStringLiteral(node.propertyName)) &&
+      (named.has(node.propertyName.text) || generic.has(node.propertyName.text)) &&
       ts.isIdentifier(node.name) &&
       node.name.text !== node.propertyName.text
     ) {
-      aliases.set(node.name.text, node.propertyName.text)
-      sites.push({ file, name: `${node.propertyName.text} (alias)`, line: lineOf(node) })
+      const original = node.propertyName.text
+      ;(named.has(original) ? aliases : genericAliases).set(node.name.text, original)
+      sites.push({ file, name: `${original} (alias)`, line: lineOf(node) })
     }
     ts.forEachChild(node, collectAliases)
   }
   collectAliases(sf)
 
-  // Pass 2: references to named writers (or their aliases) and calls of generic primitives.
+  // Pass 2: references to named writers (or their aliases) and calls of generic primitives (or theirs).
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && !isDeclarationPosition(node)) {
       if (named.has(node.text)) sites.push({ file, name: node.text, line: lineOf(node) })
@@ -166,6 +184,9 @@ export function scanSealingSites(file: string, source: string): SealingSite[] {
     if (ts.isCallExpression(node)) {
       const name = calleeName(node.expression)
       if (name && generic.has(name)) sites.push({ file, name, line: lineOf(node) })
+      else if (name && ts.isIdentifier(unwrapCallee(node.expression)) && genericAliases.has(name)) {
+        sites.push({ file, name: genericAliases.get(name) as string, line: lineOf(node) })
+      }
     }
     ts.forEachChild(node, visit)
   }

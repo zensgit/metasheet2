@@ -28,6 +28,7 @@ import { ENCRYPTED_STORE_CATALOG } from '../../src/security/encrypted-store-prob
 import {
   countSealingSites,
   GENERIC_SEALING_CALLS,
+  isScannableFile,
   listCensusFiles,
   NAMED_SEALING_WRITERS,
   scanSealingSites,
@@ -42,6 +43,8 @@ const EXEMPTIONS = {
     'security/encrypted-secrets.ts is the `enc:` primitive itself (encryptStoredSecretValue is called by normalizeStoredSecretValue, createCipheriv by encryptStoredSecretValue); it persists nothing — its callers are pinned individually.',
   'recovery-archive-crypto':
     'Recovery-archive envelope crypto: per-archive DEKs and a custody keyring sealed under its own backup secret, never ENCRYPTION_KEY / ENCRYPTION_SALT, so a platform key change does not affect it (outside #6164).',
+  'recovery-verify-script':
+    'scripts/verify-recovery-manual-checkpoint.mts is an operator verification script: it seals a synthetic capture under a fresh randomBytes(32) key inside its own throwaway database to exercise the prepared-capture store; no platform material, no persisted store of this deployment.',
   'dead-plugin-config-manager':
     'src/plugin/PluginConfigManager.ts has no importer in src/ (the runtime uses core/plugin-config-manager.ts, which encrypts nothing); it would seal plugin_configs.value under a random per-instance key with crypto.createCipher, not platform material.',
   'unwired-security-service-impl':
@@ -98,6 +101,7 @@ const CENSUS: Readonly<Record<string, CensusEntry>> = {
   [`${CS}/multitable/recovery-archive-attachment-crypto.ts :: createCipheriv`]: { count: 1, exempt: 'recovery-archive-crypto' },
   [`${CS}/multitable/recovery-archive-crypto.ts :: createCipheriv`]: { count: 1, exempt: 'recovery-archive-crypto' },
   [`${CS}/multitable/recovery-local-custody.ts :: createCipheriv`]: { count: 1, exempt: 'recovery-archive-crypto' },
+  [`${SCRIPTS}/verify-recovery-manual-checkpoint.mts :: createCipheriv`]: { count: 1, exempt: 'recovery-verify-script' },
   [`${CS}/plugin/PluginConfigManager.ts :: encrypt`]: { count: 1, exempt: 'dead-plugin-config-manager' },
   [`${CS}/plugin/PluginConfigManager.ts :: createCipher`]: { count: 1, exempt: 'dead-plugin-config-manager' },
   [`${CS}/services/SecurityService.ts :: createCipheriv`]: { count: 1, exempt: 'unwired-security-service-impl' },
@@ -124,14 +128,28 @@ function scanTree(read: (rel: string) => string = readRepoFile, extraFiles: stri
   })
 }
 
-/** Census keys whose count differs from the pin (both directions), for a readable failure. */
+const NEW_SITE_HELP =
+  'MORE sealing sites than pinned = a NEW encrypted field or store. Add its entry to ENCRYPTED_STORE_CATALOG ' +
+  '(src/security/encrypted-store-probe.ts) so the probe checks it — or a reasoned EXEMPTION here when it is ' +
+  'not platform material — and only then raise this pin. Bumping the pin alone leaves the new store unprobed.'
+const GONE_SITE_HELP =
+  'FEWER sealing sites than pinned = a writer went away. Lower the pin; if a catalog store lost its last ' +
+  'writer, decide whether its ENCRYPTED_STORE_CATALOG entry should stay (old rows may still hold values).'
+
+/** Census keys whose count differs from the pin (both directions), each with what to do about it. */
 function censusDrift(actual: Record<string, number>): string[] {
   const keys = new Set([...Object.keys(actual), ...Object.keys(PINNED_COUNTS)])
   return [...keys]
     .filter((key) => actual[key] !== PINNED_COUNTS[key])
-    .map((key) => `${key}: pinned ${PINNED_COUNTS[key] ?? 0}, found ${actual[key] ?? 0}`)
+    .map((key) => {
+      const pinned = PINNED_COUNTS[key] ?? 0
+      const found = actual[key] ?? 0
+      return `${key}: pinned ${pinned}, found ${found} — ${found > pinned ? NEW_SITE_HELP : GONE_SITE_HELP}`
+    })
     .sort()
 }
+
+const newSite = (key: string, found = 1) => `${key}: pinned 0, found ${found} — ${NEW_SITE_HELP}`
 
 describe('encrypted-store census: every sealing site is pinned to a probed store or a reasoned exemption', () => {
   let sites: SealingSite[] = []
@@ -140,8 +158,19 @@ describe('encrypted-store census: every sealing site is pinned to a probed store
   })
 
   it('the scanned tree holds exactly the pinned sealing sites (file, writer, count)', () => {
-    expect(censusDrift(countSealingSites(sites))).toEqual([])
+    const drift = censusDrift(countSealingSites(sites))
+    expect(drift, `encrypted-store census drift:\n  ${drift.join('\n  ')}`).toEqual([])
     expect(countSealingSites(sites)).toEqual(PINNED_COUNTS)
+  })
+
+  it('a census drift message says what a higher / lower count means', () => {
+    expect(censusDrift({ ...PINNED_COUNTS, 'probe.ts :: encryptStoredSecretValue': 2 })).toEqual([
+      newSite('probe.ts :: encryptStoredSecretValue', 2),
+    ])
+    expect(newSite('x')).toMatch(/NEW encrypted field or store\. Add its entry to ENCRYPTED_STORE_CATALOG/)
+    const firstKey = Object.keys(PINNED_COUNTS)[0]
+    const { [firstKey]: _gone, ...withoutFirst } = PINNED_COUNTS
+    expect(censusDrift(withoutFirst)).toEqual([`${firstKey}: pinned ${PINNED_COUNTS[firstKey]}, found 0 — ${GONE_SITE_HELP}`])
   })
 
   it('every pinned site has an owner: catalog stores that exist, or an exemption with a reason', () => {
@@ -173,6 +202,8 @@ describe('encrypted-store census: every sealing site is pinned to a probed store
       'plugins/plugin-attendance/index.cjs',
       'plugins/plugin-integration-core/lib/credential-store.cjs',
       'plugins/plugin-integration-core/lib/external-systems.cjs',
+      // .mts / .cts are scanned too (a createCipheriv in a .mts script was invisible before)
+      'packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts',
     ]) {
       expect({ expected, scanned: files.includes(expected) }).toEqual({ expected, scanned: true })
     }
@@ -199,6 +230,22 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     expect(count(`const crypto = require('node:crypto')\nconst c = crypto.createCipheriv('aes-256-gcm', k, iv)`, 'probe.cjs')).toEqual(['createCipheriv'])
     expect(count(`import { createCipheriv } from 'node:crypto'\nconst c = (createCipheriv)('aes-256-gcm', k, iv)`)).toEqual(['createCipheriv'])
     expect(count(`module.exports = { normalizeStoredIntegrationSecretValue }`, 'probe.cjs')).toEqual(['normalizeStoredIntegrationSecretValue'])
+    // aliases of the GENERIC primitives: the alias site, then each call under the original name
+    expect(count(`import { createCipheriv as mk } from 'node:crypto'\nconst c = mk('aes-256-gcm', k, iv)`)).toEqual(['createCipheriv (alias)', 'createCipheriv'])
+    expect(count(`async function f(security) { const { encrypt: seal } = security; return seal('a') }`, 'probe.cjs')).toEqual(['encrypt (alias)', 'encrypt'])
+    expect(count(`const { createCipheriv: mk } = require('node:crypto')\nconst c = (mk)('aes-256-gcm', k, iv)`, 'probe.cjs')).toEqual(['createCipheriv (alias)', 'createCipheriv'])
+    // .mts / .cts sources parse as TypeScript
+    expect(count(`import { createCipheriv } from 'node:crypto'\nexport const c = (k: Buffer, iv: Buffer) => createCipheriv('aes-256-gcm', k, iv)`, 'probe.mts')).toEqual(['createCipheriv'])
+    expect(count(`const crypto = require('node:crypto') as typeof import('node:crypto')\nexport const c = crypto.createCipheriv('aes-256-gcm', k as Buffer, iv)`, 'probe.cts')).toEqual(['createCipheriv'])
+  })
+
+  it('treats .mts / .cts as sources, and every declaration / test file as not', () => {
+    for (const name of ['a.ts', 'a.tsx', 'a.mts', 'a.cts', 'a.js', 'a.cjs', 'a.mjs']) {
+      expect({ name, scanned: isScannableFile(name) }).toEqual({ name, scanned: true })
+    }
+    for (const name of ['a.d.ts', 'a.d.mts', 'a.d.cts', 'a.test.ts', 'a.spec.mts', 'a.test.cjs', 'a.json', 'a.md']) {
+      expect({ name, scanned: isScannableFile(name) }).toEqual({ name, scanned: false })
+    }
   })
 
   it('ignores comments, strings, declarations, object keys and non-sealing calls', () => {
@@ -215,8 +262,8 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     const mutated = `${original}\nimport { normalizeStoredSecretValue as eadmSeal } from '../security/encrypted-secrets'\nexport const eadmProbe = eadmSeal('fixture')\n`
     const drift = censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? mutated : readRepoFile(rel)))))
     expect(drift).toEqual([
-      `${victim} :: normalizeStoredSecretValue (alias): pinned 0, found 1`,
-      `${victim} :: normalizeStoredSecretValue: pinned 0, found 1`,
+      newSite(`${victim} :: normalizeStoredSecretValue (alias)`),
+      newSite(`${victim} :: normalizeStoredSecretValue`),
     ])
   })
 
@@ -224,7 +271,14 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     const newFile = 'plugins/plugin-after-sales/lib/eadm-webhook-secret-store.cjs'
     const source = `'use strict'\nasync function saveWebhookSecret(context, value) {\n  return context.services.security.encrypt(value)\n}\nmodule.exports = { saveWebhookSecret }\n`
     const drift = censusDrift(countSealingSites(scanTree((rel) => (rel === newFile ? source : readRepoFile(rel)), [newFile])))
-    expect(drift).toEqual([`${newFile} :: encrypt: pinned 0, found 1`])
+    expect(drift).toEqual([newSite(`${newFile} :: encrypt`)])
+  })
+
+  it('in-memory mutation: a cipher in a new .mts script turns it red', () => {
+    const newFile = 'packages/core-backend/scripts/eadm-reseal.mts'
+    const source = `import { createCipheriv, randomBytes } from 'node:crypto'\nexport const sealed = createCipheriv('aes-256-gcm', randomBytes(32), randomBytes(12))\n`
+    const drift = censusDrift(countSealingSites(scanTree((rel) => (rel === newFile ? source : readRepoFile(rel)), [newFile])))
+    expect(drift).toEqual([newSite(`${newFile} :: createCipheriv`)])
   })
 
   it('in-memory mutation: a re-implementation of the `enc:` format in core turns it red', () => {
@@ -232,6 +286,6 @@ describe('scanner self-check (synthetic sources, memory only)', () => {
     const original = readRepoFile(victim)
     const mutated = `${original}\nimport crypto from 'node:crypto'\nexport function eadmSeal(key: Buffer, iv: Buffer) { return crypto.createCipheriv('aes-256-gcm', key, iv) }\n`
     const drift = censusDrift(countSealingSites(scanTree((rel) => (rel === victim ? mutated : readRepoFile(rel)))))
-    expect(drift).toEqual([`${victim} :: createCipheriv: pinned 0, found 1`])
+    expect(drift).toEqual([newSite(`${victim} :: createCipheriv`)])
   })
 })

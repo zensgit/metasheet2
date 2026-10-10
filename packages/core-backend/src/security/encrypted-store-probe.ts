@@ -20,6 +20,10 @@
  *     read_failed), and the other stores are still probed. Production with unusable material
  *     (EncryptionMaterialError) reports `material.status = 'unavailable'` and attempts no decrypt.
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
+ *   - Classified the way each store's runtime READER sees the value: the `enc:` / `v1:` prefix is tested
+ *     on the raw string, or on the trimmed one where that reader trims first (entry.prefixOn); NULL and
+ *     whitespace-only values are not stored secrets and count nowhere (rows = encrypted + plaintext +
+ *     legacyNotChecked). The catalog and each entry are frozen.
  *
  * Envelopes (verified against the writers, not assumed):
  *   - 'platform-enc': `enc:` + base64(iv 16 | authTag 16 | AES-256-GCM ciphertext), key =
@@ -60,6 +64,12 @@ export interface EncryptedStoreCatalogEntry {
   /** Which secret of it (a values-free label). */
   readonly field: string
   readonly scheme: EncryptedStoreScheme
+  /**
+   * Which string the `enc:` / `v1:` prefix test sees — the same one this store's runtime reader
+   * tests: 'raw' (the stored string as is, so ` enc:…` is plaintext to the reader and here) or
+   * 'trimmed' (the reader trims first, so ` enc:…` is decrypted by the reader and here).
+   */
+  readonly prefixOn: 'raw' | 'trimmed'
   /** ONE static SELECT returning a single column `value`, bounded by `LIMIT $1`. */
   readonly sql: string
 }
@@ -70,79 +80,108 @@ const MIN_SEALED_PAYLOAD_BYTES = 32
 const DEFAULT_ROW_LIMIT = 10_000
 
 /**
+ * Freeze ONE entry: the array is frozen too, so nothing at runtime can retarget the probe's SQL or
+ * its classification (an assignment throws in strict mode).
+ */
+function catalogEntry(entry: EncryptedStoreCatalogEntry): EncryptedStoreCatalogEntry {
+  return Object.freeze({ ...entry })
+}
+
+/**
  * Every encrypted store. One entry per secret field; the WHERE clauses mirror the runtime readers
- * (data_sources: the rows loadFromDatabase loads; `COALESCE` mirrors the readers' `??` fallbacks).
+ * (data_sources: the rows loadFromDatabase loads; `COALESCE` mirrors the readers' `??` fallbacks),
+ * and so does `prefixOn` (see EncryptedStoreCatalogEntry).
  */
 export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Object.freeze([
-  {
+  // Reader: DataSourceManager.decryptCredentials — isEncryptedSecretValue(v) on the raw value.
+  catalogEntry({
     store: 'data_sources',
     field: 'config.credentials.password',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT config->'credentials'->>'password' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'password' <> '' LIMIT $1`,
-  },
-  {
+  }),
+  catalogEntry({
     store: 'data_sources',
     field: 'config.credentials.apiKey',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT config->'credentials'->>'apiKey' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'apiKey' <> '' LIMIT $1`,
-  },
-  {
+  }),
+  catalogEntry({
     store: 'data_sources',
     field: 'config.credentials.token',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT config->'credentials'->>'token' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'token' <> '' LIMIT $1`,
-  },
-  {
+  }),
+  // Readers: directory-sync parseIntegrationConfig, work-notification-settings decryptStoredText,
+  // approval-card-config resolvers, elearning-notification-dingtalk readSecret — every one trims
+  // (normalizeText) BEFORE decryptStoredSecretValue, so the prefix is tested on the trimmed value.
+  catalogEntry({
     store: 'directory_integrations',
     field: 'config.appSecret',
     scheme: 'platform-enc',
+    prefixOn: 'trimmed',
     sql: `SELECT config->>'appSecret' AS value FROM directory_integrations WHERE config->>'appSecret' <> '' LIMIT $1`,
-  },
-  {
+  }),
+  catalogEntry({
     store: 'directory_integrations',
     field: 'config.workNotificationAgentId|agentId',
     scheme: 'platform-enc',
+    prefixOn: 'trimmed',
     sql: `SELECT COALESCE(config->>'workNotificationAgentId', config->>'agentId') AS value FROM directory_integrations WHERE COALESCE(config->>'workNotificationAgentId', config->>'agentId') <> '' LIMIT $1`,
-  },
-  {
+  }),
+  catalogEntry({
     store: 'directory_integrations',
     field: 'config.approvalCardLinkSecret',
     scheme: 'platform-enc',
+    prefixOn: 'trimmed',
     sql: `SELECT config->>'approvalCardLinkSecret' AS value FROM directory_integrations WHERE config->>'approvalCardLinkSecret' <> '' LIMIT $1`,
-  },
-  {
+  }),
+  // Reader: dingtalk-group-destinations decryptDingTalkDestinationWebhookUrl / …Secret — raw value.
+  catalogEntry({
     store: 'dingtalk_group_destinations',
     field: 'webhook_url',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT webhook_url AS value FROM dingtalk_group_destinations WHERE webhook_url <> '' LIMIT $1`,
-  },
-  {
+  }),
+  catalogEntry({
     store: 'dingtalk_group_destinations',
     field: 'secret',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT secret AS value FROM dingtalk_group_destinations WHERE secret <> '' LIMIT $1`,
-  },
-  {
+  }),
+  // Reader: credential-store.cjs decrypt — isLegacyCiphertext / security.decrypt on the raw value.
+  catalogEntry({
     store: 'integration_external_systems',
     field: 'credentials_encrypted',
     scheme: 'integration-credential',
+    prefixOn: 'raw',
     sql: `SELECT credentials_encrypted AS value FROM integration_external_systems WHERE credentials_encrypted <> '' LIMIT $1`,
-  },
-  {
+  }),
+  // Reader: plugin-attendance normalizeIntegrationConfig — trims only to test emptiness, then
+  // decryptIntegrationSecretValue(String(appSecret)) tests the prefix on the raw value.
+  catalogEntry({
     store: 'attendance_integrations',
     field: 'config.appSecret|appsecret|app_secret',
     scheme: 'platform-enc',
+    prefixOn: 'raw',
     sql: `SELECT COALESCE(config->>'appSecret', config->>'appsecret', config->>'app_secret') AS value FROM attendance_integrations WHERE COALESCE(config->>'appSecret', config->>'appsecret', config->>'app_secret') <> '' LIMIT $1`,
-  },
-  {
+  }),
+  // Reader: ConfigService DatabaseConfigSource -> SecretManager.decryptValue — raw `enc:` test.
+  catalogEntry({
     store: 'system_configs',
     field: 'value (is_encrypted)',
     scheme: 'system-config',
+    prefixOn: 'raw',
     // `value` is text (z20251231 migration) or jsonb (038 migration); it is classified in JS, so no
     // text function is applied to it here.
     sql: `SELECT value FROM system_configs WHERE is_encrypted = true LIMIT $1`,
-  },
-] satisfies EncryptedStoreCatalogEntry[])
+  }),
+])
 
 export type EncryptedStoreProbeStatus = 'ok' | 'table_missing' | 'column_missing' | 'read_failed'
 
@@ -151,7 +190,10 @@ export interface EncryptedStoreProbeResult {
   field: string
   scheme: EncryptedStoreScheme
   status: EncryptedStoreProbeStatus
-  /** Rows read that hold a non-empty value in this field (at most rowLimit). */
+  /**
+   * Values examined: rows = encrypted + plaintext + legacyNotChecked. A NULL or whitespace-only value
+   * is not a stored secret and is not counted anywhere (at most rowLimit rows are read).
+   */
   rows: number
   /** Values sealed under platform material (decrypted when material is available). */
   encrypted: number
@@ -210,20 +252,29 @@ function looksLikeBareSealedPayload(value: string): boolean {
   return Buffer.from(value, 'base64').length >= MIN_SEALED_PAYLOAD_BYTES
 }
 
-function classify(scheme: EncryptedStoreScheme, raw: unknown): Classified {
+/**
+ * One stored value -> one bucket, the way this store's runtime reader sees it:
+ *   - NULL / undefined / whitespace-only: 'empty' — not a stored secret, counted nowhere;
+ *   - a non-string (system_configs.value as jsonb): plaintext configuration;
+ *   - the `enc:` / `v1:` prefix is tested on entry.prefixOn's string (raw or trimmed, per reader);
+ *   - system_configs only: a bare SecretManager payload (strict base64, ≥ iv + authTag, tested on the
+ *     trimmed value) is encrypted too — the envelope rotateKey() writes.
+ */
+function classify(entry: EncryptedStoreCatalogEntry, raw: unknown): Classified {
   if (raw === null || raw === undefined) return { kind: 'empty' }
   // system_configs.value may be jsonb: a non-string JSON value is a plain configuration value.
   if (typeof raw !== 'string') return { kind: 'plaintext' }
-  const value = raw.trim()
-  if (value.length === 0) return { kind: 'empty' }
-  if (value.startsWith(STORED_SECRET_PREFIX)) {
-    return { kind: 'encrypted', payload: value.slice(STORED_SECRET_PREFIX.length) }
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return { kind: 'empty' }
+  const tested = entry.prefixOn === 'trimmed' ? trimmed : raw
+  if (tested.startsWith(STORED_SECRET_PREFIX)) {
+    return { kind: 'encrypted', payload: tested.slice(STORED_SECRET_PREFIX.length) }
   }
-  if (scheme === 'integration-credential' && value.startsWith(LEGACY_INTEGRATION_PREFIX)) {
+  if (entry.scheme === 'integration-credential' && tested.startsWith(LEGACY_INTEGRATION_PREFIX)) {
     return { kind: 'legacy' }
   }
-  if (scheme === 'system-config' && looksLikeBareSealedPayload(value)) {
-    return { kind: 'encrypted', payload: value }
+  if (entry.scheme === 'system-config' && looksLikeBareSealedPayload(trimmed)) {
+    return { kind: 'encrypted', payload: trimmed }
   }
   return { kind: 'plaintext' }
 }
@@ -238,11 +289,15 @@ function decryptsUnder(payload: string, key: Buffer): boolean {
   }
 }
 
-/** A PostgreSQL SQLSTATE: five [0-9A-Z] characters with at least one digit (so `EPIPE` is not one). */
+/**
+ * A PostgreSQL SQLSTATE: exactly five characters from [0-9A-Z]. (A five-letter Node errno such as
+ * EPIPE has that shape too and is then reported as `sqlState`; it still classifies as read_failed —
+ * only 42P01 / 42703 change the status.)
+ */
 function sqlStateOf(error: unknown): string | undefined {
   try {
     const code = (error as { code?: unknown } | null | undefined)?.code
-    return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && /\d/.test(code) ? code : undefined
+    return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : undefined
   } catch {
     return undefined
   }
@@ -281,13 +336,14 @@ async function probeOne(
     const rows = response.rows
     if (rows.length > rowLimit) result.truncated = true
     const examined = rows.length > rowLimit ? rows.slice(0, rowLimit) : rows
-    result.rows = examined.length
     for (const row of examined) {
       const raw = row !== null && typeof row === 'object' ? (row as { value?: unknown }).value : undefined
-      const classified = classify(entry.scheme, raw)
+      const classified = classify(entry, raw)
+      if (classified.kind === 'empty') continue
+      result.rows += 1
       if (classified.kind === 'plaintext') result.plaintext += 1
       else if (classified.kind === 'legacy') result.legacyNotChecked = (result.legacyNotChecked ?? 0) + 1
-      else if (classified.kind === 'encrypted') {
+      else {
         result.encrypted += 1
         if (key && !decryptsUnder(classified.payload, key)) result.undecryptable += 1
       }
@@ -401,6 +457,19 @@ function logReport(logger: EncryptedStoreProbeLogger, report: EncryptedStoreProb
       issues: report.material.issues,
     })
   }
+  // ONE warn for every store field that could not be read (not a missing table / column): its values
+  // were not checked at all. Names and SQLSTATE codes only — never the error text.
+  const unreadable = report.stores.filter((s) => s.status === 'read_failed')
+  if (unreadable.length > 0) {
+    logger.warn(
+      `Encrypted store probe: ${unreadable.length} store field(s) could not be read, so their values were not checked: ` +
+        `${unreadable.map(label).join(', ')}.`,
+      {
+        unreadable: unreadable.length,
+        stores: unreadable.map((s) => ({ store: s.store, field: s.field, sqlState: s.sqlState ?? null })),
+      },
+    )
+  }
   for (const store of report.stores) {
     if (store.undecryptable <= 0) continue
     logger.warn(
@@ -412,9 +481,10 @@ function logReport(logger: EncryptedStoreProbeLogger, report: EncryptedStoreProb
 }
 
 /**
- * Fire-and-forget startup hook for src/index.ts: run the probe once, log one info summary plus one
- * warn per store field with undecryptable values. Never blocks startup (the caller does not await it),
- * never rejects, and returns null without logging when there is no database pool.
+ * Fire-and-forget startup hook for src/index.ts: run the probe once, log one info summary, one warn
+ * per store field with undecryptable values, and one warn listing the store fields that could not be
+ * read. Never blocks startup (the caller does not await it), never rejects, and returns null without
+ * logging when there is no database pool.
  */
 export async function runEncryptedStoreProbeAtStartup(
   deps: EncryptedStoreProbeStartupDeps,

@@ -14,10 +14,10 @@
  *   - every refusal (non-owner, nonexistent, CREDENTIALS_REQUIRED, stale, gone, not re-sealable)
  *     leaves the row byte-identical (same xmin, same row_to_json), and the non-owner / nonexistent
  *     refusals issue NO statement at all;
- *   - (#6164 step 1, last case) the encrypted-store probe's own SELECTs run on real tables in a
- *     READ ONLY session: a credential sealed under the current material opens, one sealed under the
- *     previous material is counted undecryptable, a missing table / column is classified by the real
- *     SQLSTATE, and no row changes.
+ *   - (#6164 step 1, last case) the encrypted-store probe's own SELECTs run in a READ ONLY session on
+ *     real columns of EVERY catalog store: per field, a value sealed under the current material opens
+ *     and one sealed under the previous material is counted undecryptable; a dropped column / table is
+ *     classified by the real SQLSTATE (42703 / 42P01); no row changes.
  *
  * Isolation: every table lives in a throwaway schema (search_path), created from the real
  * migrations and dropped afterwards. Real-DB gate: runs only where DATABASE_URL is configured (the
@@ -59,6 +59,7 @@ import {
 import { up as createDataSourcesTable } from '../../src/db/migrations/20251206000001_create_data_sources_table'
 import { up as addConnectionBinding } from '../../src/db/migrations/zzzz20260902120000_add_integration_connection_binding'
 import { up as addLiveIdBindingLock } from '../../src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock'
+import { up as createDingTalkGroupDestinations } from '../../src/db/migrations/zzzz20260419183000_create_dingtalk_group_destinations'
 import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from '../../src/routes/data-sources'
 import { decryptStoredSecretValue, encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
@@ -514,12 +515,13 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
     expect(await rowFingerprint('rdb-deny01')).toBe(before)
   })
 
-  // #6164 step 1: the encrypted-store probe's own SQL against real tables. Own schema (so the rows of
-  // the cases above do not count), a session forced READ ONLY (any write would fail with 25006 and show
-  // up as read_failed), and real SQLSTATEs for the missing table / missing column classification.
-  it('encrypted-store probe: real SELECTs count one current-sealed and one previous-sealed credential; missing table / column by real SQLSTATE; nothing written', async () => {
+  // #6164 step 1: the encrypted-store probe's own SQL against REAL columns of every catalog store. Own
+  // schema (so the rows of the cases above do not count), a session forced READ ONLY for the probe (any
+  // write would fail with 25006 and show up as read_failed), one value sealed under the CURRENT material
+  // and one under the PREVIOUS material per field, then real SQLSTATEs for a missing column / table.
+  it('encrypted-store probe: every catalog field read from real columns — one current-sealed and one previous-sealed value each; missing column / table by real SQLSTATE; nothing written', async () => {
     const probeSchema = `${SCHEMA}_probe`
-    await admin.query(`CREATE SCHEMA ${probeSchema}`)
+    await admin.query(`CREATE SCHEMA IF NOT EXISTS ${probeSchema}`)
     const setupPool = new Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${probeSchema}`, max: 2 })
     const readOnlyPool = new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -527,59 +529,151 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       max: 2,
     })
     const setupDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: setupPool }) })
+    const env = { NODE_ENV: 'test', ENCRYPTION_KEY: CURRENT.key, ENCRYPTION_SALT: CURRENT.salt }
+    const sealCurrent = (plaintext: string) => encryptStoredSecretValue(plaintext) // the file runs under CURRENT
+    const sealPrevious = (plaintext: string) => {
+      useMaterial(PREVIOUS)
+      try {
+        return encryptStoredSecretValue(plaintext)
+      } finally {
+        useMaterial(CURRENT)
+      }
+    }
+    const sealed: string[] = []
+    const cur = (name: string) => { const v = sealCurrent(`MARKER-probe-${name}-current`); sealed.push(v); return v }
+    const prev = (name: string) => { const v = sealPrevious(`MARKER-probe-${name}-previous`); sealed.push(v); return v }
+    const TABLES = ['data_sources', 'directory_integrations', 'dingtalk_group_destinations', 'integration_external_systems', 'attendance_integrations', 'system_configs']
     try {
-      // The same data_sources migrations beforeAll runs (tenant_id / scope_kind come from the second).
+      // data_sources: the same real migrations beforeAll runs (tenant_id / scope_kind come from the
+      // second). They run BEFORE integration_external_systems exists, as in the cases above.
       await createDataSourcesTable(setupDb)
       await addConnectionBinding(setupDb)
       await addLiveIdBindingLock(setupDb)
-      // webhook_url only: the probe's `secret` read must meet a real 42703.
-      await setupPool.query(`CREATE TABLE dingtalk_group_destinations (id text PRIMARY KEY, webhook_url text NOT NULL)`)
-      const currentSealed = encryptStoredSecretValue(SECRET.newPassword) // the file runs under CURRENT
-      const seed = async (id: string, password: string, active = true, deleted = false) => {
+      // dingtalk_group_destinations: its real migration (zzzz20260419183000), unqualified names only.
+      await createDingTalkGroupDestinations(setupDb)
+      // The other four are minimal column subsets, every listed column with the exact name / type of its
+      // real migration (the probe reads only `config` / `credentials_encrypted` / `value` + `is_encrypted`):
+      //   directory_integrations       src/db/migrations/zzzz20260324150000_create_directory_sync_tables.ts
+      await setupPool.query(`CREATE TABLE IF NOT EXISTS directory_integrations (
+        id uuid PRIMARY KEY, provider text NOT NULL DEFAULT 'dingtalk', name text NOT NULL, corp_id text NOT NULL,
+        config jsonb NOT NULL DEFAULT '{}'::jsonb)`)
+      //   integration_external_systems packages/core-backend/migrations/057_create_integration_core_tables.sql
+      await setupPool.query(`CREATE TABLE IF NOT EXISTS integration_external_systems (
+        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('source', 'target', 'bidirectional')), credentials_encrypted TEXT)`)
+      //   attendance_integrations      src/db/migrations/zzzz20260202093000_create_attendance_integrations.ts
+      await setupPool.query(`CREATE TABLE IF NOT EXISTS attendance_integrations (
+        id uuid PRIMARY KEY, org_id text NOT NULL DEFAULT 'default', name text NOT NULL, type text NOT NULL,
+        config jsonb NOT NULL DEFAULT '{}'::jsonb)`)
+      //   system_configs               src/db/migrations/z20251231_create_system_configs.ts (value text)
+      await setupPool.query(`CREATE TABLE IF NOT EXISTS system_configs (
+        id uuid PRIMARY KEY, key varchar(255) NOT NULL UNIQUE, value text NOT NULL, is_encrypted boolean NOT NULL DEFAULT false)`)
+
+      const seedDataSource = async (id: string, credentials: Record<string, string>, active = true, deleted = false) => {
         await setupPool.query(
           `INSERT INTO data_sources (id, name, type, config, owner_id, workspace_id, tenant_id, scope_kind, is_active, auto_connect, deleted_at, created_at, updated_at)
-           VALUES ($1, $1, 'postgres', $2::jsonb, $3, 'ws-realdb', 'tenant-realdb', 'private', $4, false, $5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-          [id, JSON.stringify({ connection: CONNECTION, credentials: { username: SECRET.username, password } }), OWNER_ID, active, deleted ? '2026-01-02T00:00:00Z' : null],
+           VALUES ($1, $2, 'postgres', $3::jsonb, $4, 'ws-realdb', 'tenant-realdb', 'private', $5, false, $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+          [id, `name-${id}`, JSON.stringify({ connection: CONNECTION, credentials: { username: SECRET.username, ...credentials } }), OWNER_ID, active, deleted ? '2026-01-02T00:00:00Z' : null],
         )
       }
-      await seed('probe-current', currentSealed)
-      await seed('probe-previous', oldPasswordSealed)
-      await seed('probe-plaintext', SECRET.secondPassword)
+      await seedDataSource('probe-current', { password: cur('ds-password'), apiKey: cur('ds-apikey'), token: cur('ds-token') })
+      await seedDataSource('probe-previous', { password: prev('ds-password'), apiKey: prev('ds-apikey'), token: prev('ds-token') })
+      await seedDataSource('probe-plaintext', { password: SECRET.secondPassword })
       // Rows the data-source loader never reads are not counted either.
-      await seed('probe-inactive', oldPasswordSealed, false)
-      await seed('probe-deleted', oldPasswordSealed, true, true)
-      await setupPool.query(`INSERT INTO dingtalk_group_destinations (id, webhook_url) VALUES ('probe-robot', $1)`, [oldApiKeySealed])
-      const fingerprint = async () =>
-        (await setupPool.query(`SELECT string_agg(xmin::text || ':' || row_to_json(d)::text, '|' ORDER BY id) AS f FROM data_sources d`)).rows[0].f +
-        (await setupPool.query(`SELECT string_agg(xmin::text || ':' || row_to_json(g)::text, '|' ORDER BY id) AS f FROM dingtalk_group_destinations g`)).rows[0].f
-      const before = await fingerprint()
+      await seedDataSource('probe-inactive', { password: prev('ds-inactive') }, false)
+      await seedDataSource('probe-deleted', { password: prev('ds-deleted') }, true, true)
+      // directory_integrations: row A all current; row B all previous, its agent id only under the
+      // legacy `agentId` key (the reader's `workNotificationAgentId ?? agentId` fallback = COALESCE).
+      await setupPool.query(
+        `INSERT INTO directory_integrations (id, name, corp_id, config) VALUES
+           ('00000000-0000-4000-8000-0000000000a1', 'probe-dir-a', 'corp-probe-a', $1::jsonb),
+           ('00000000-0000-4000-8000-0000000000b2', 'probe-dir-b', 'corp-probe-b', $2::jsonb)`,
+        [
+          JSON.stringify({ appKey: 'probe-app-key-a', appSecret: cur('dir-secret'), workNotificationAgentId: cur('dir-agent'), approvalCardLinkSecret: cur('dir-card') }),
+          JSON.stringify({ appKey: 'probe-app-key-b', appSecret: prev('dir-secret'), workNotificationAgentId: null, agentId: prev('dir-agent'), approvalCardLinkSecret: prev('dir-card') }),
+        ],
+      )
+      await setupPool.query(
+        `INSERT INTO dingtalk_group_destinations (id, name, webhook_url, secret, created_by) VALUES
+           ('probe-robot-a', 'probe robot a', $1, $2, 'probe-user'), ('probe-robot-b', 'probe robot b', $3, $4, 'probe-user')`,
+        [cur('robot-webhook'), cur('robot-secret'), prev('robot-webhook'), prev('robot-secret')],
+      )
+      await setupPool.query(
+        `INSERT INTO integration_external_systems (id, tenant_id, name, kind, role, credentials_encrypted) VALUES
+           ('probe-ies-a', 'tenant-realdb', 'probe a', 'http', 'source', $1),
+           ('probe-ies-b', 'tenant-realdb', 'probe b', 'http', 'source', $2),
+           ('probe-ies-c', 'tenant-realdb', 'probe c', 'http', 'source', 'v1:AAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAA==:AAAA')`,
+        [cur('ies-credentials'), prev('ies-credentials')],
+      )
+      // attendance_integrations: row A under `appSecret`, row B only under the `app_secret` alias.
+      await setupPool.query(
+        `INSERT INTO attendance_integrations (id, name, type, config) VALUES
+           ('00000000-0000-4000-8000-0000000000c3', 'probe-att-a', 'dingtalk', $1::jsonb),
+           ('00000000-0000-4000-8000-0000000000d4', 'probe-att-b', 'dingtalk', $2::jsonb)`,
+        [JSON.stringify({ appKey: 'probe-att-key-a', appSecret: cur('att-secret') }), JSON.stringify({ appKey: 'probe-att-key-b', app_secret: prev('att-secret') })],
+      )
+      // system_configs: the reader's `enc:` envelope (current) and SecretManager's bare payload
+      // (previous); a non-encrypted row is not read at all.
+      await setupPool.query(
+        `INSERT INTO system_configs (id, key, value, is_encrypted) VALUES
+           ('00000000-0000-4000-8000-0000000000e5', 'probe.secret.a', $1, true),
+           ('00000000-0000-4000-8000-0000000000f6', 'probe.secret.b', $2, true),
+           ('00000000-0000-4000-8000-000000000107', 'probe.plain', '"plain"', false)`,
+        [cur('sys-a'), prev('sys-b').slice('enc:'.length)],
+      )
 
+      const fingerprint = async () => {
+        const parts: string[] = []
+        for (const table of TABLES) {
+          const r = await setupPool.query(`SELECT string_agg(xmin::text || ':' || row_to_json(t)::text, '|' ORDER BY row_to_json(t)::text) AS f FROM ${table} t`)
+          parts.push(`${table}=${r.rows[0].f}`)
+        }
+        return parts.join('\n')
+      }
+      const before = await fingerprint()
       const statements: string[] = []
-      const report = await probeEncryptedStores({
+      const runProbe = () => probeEncryptedStores({
         query: (sql, params) => {
           statements.push(sql)
           return readOnlyPool.query(sql, params)
         },
-        env: { NODE_ENV: 'test', ENCRYPTION_KEY: CURRENT.key, ENCRYPTION_SALT: CURRENT.salt },
+        env,
       })
 
-      const byField = Object.fromEntries(report.stores.map((s) => [`${s.store}.${s.field}`, s]))
-      expect(byField['data_sources.config.credentials.password']).toMatchObject({ status: 'ok', rows: 3, encrypted: 2, undecryptable: 1, plaintext: 1 })
-      expect(byField['data_sources.config.credentials.apiKey']).toMatchObject({ status: 'ok', rows: 0 })
-      expect(byField['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', rows: 1, encrypted: 1, undecryptable: 1 })
-      expect(byField['dingtalk_group_destinations.secret']).toMatchObject({ status: 'column_missing', sqlState: '42703' })
-      for (const missing of ['directory_integrations', 'integration_external_systems', 'attendance_integrations', 'system_configs']) {
-        for (const store of report.stores.filter((s) => s.store === missing)) {
-          expect({ store: `${store.store}.${store.field}`, status: store.status, sqlState: store.sqlState })
-            .toEqual({ store: `${store.store}.${store.field}`, status: 'table_missing', sqlState: '42P01' })
-        }
-      }
-      expect(report.totals).toMatchObject({ encrypted: 3, undecryptable: 2, plaintext: 1, unreadable: 0 })
+      const report = await runProbe()
+      const observed = report.stores.map((s) => [`${s.store}.${s.field}`, s.status, s.rows, s.encrypted, s.undecryptable, s.plaintext, s.legacyNotChecked ?? null])
+      expect(observed).toEqual([
+        ['data_sources.config.credentials.password', 'ok', 3, 2, 1, 1, null],
+        ['data_sources.config.credentials.apiKey', 'ok', 2, 2, 1, 0, null],
+        ['data_sources.config.credentials.token', 'ok', 2, 2, 1, 0, null],
+        ['directory_integrations.config.appSecret', 'ok', 2, 2, 1, 0, null],
+        ['directory_integrations.config.workNotificationAgentId|agentId', 'ok', 2, 2, 1, 0, null],
+        ['directory_integrations.config.approvalCardLinkSecret', 'ok', 2, 2, 1, 0, null],
+        ['dingtalk_group_destinations.webhook_url', 'ok', 2, 2, 1, 0, null],
+        ['dingtalk_group_destinations.secret', 'ok', 2, 2, 1, 0, null],
+        ['integration_external_systems.credentials_encrypted', 'ok', 3, 2, 1, 0, 1],
+        ['attendance_integrations.config.appSecret|appsecret|app_secret', 'ok', 2, 2, 1, 0, null],
+        ['system_configs.value (is_encrypted)', 'ok', 2, 2, 1, 0, null],
+      ])
+      expect(report.material.status).toBe('ok')
+      expect(report.totals).toMatchObject({ encrypted: 22, undecryptable: 11, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
       expect(statements).toHaveLength(report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
       expect(await fingerprint()).toBe(before)
-      const serialized = JSON.stringify(report)
-      for (const secret of [SECRET.newPassword, SECRET.secondPassword, SECRET.oldPassword, SECRET.oldApiKey, currentSealed, oldPasswordSealed]) {
+
+      // Real SQLSTATEs (fixture writes through the setup pool, not the probe): a dropped column -> 42703,
+      // a dropped table -> 42P01; every other store still reads.
+      await setupPool.query(`ALTER TABLE dingtalk_group_destinations DROP COLUMN secret`)
+      await setupPool.query(`DROP TABLE system_configs`)
+      const degraded = await runProbe()
+      const by = Object.fromEntries(degraded.stores.map((s) => [`${s.store}.${s.field}`, s]))
+      expect(by['dingtalk_group_destinations.secret']).toMatchObject({ status: 'column_missing', sqlState: '42703', rows: 0 })
+      expect(by['system_configs.value (is_encrypted)']).toMatchObject({ status: 'table_missing', sqlState: '42P01', rows: 0 })
+      expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
+      expect(degraded.totals).toMatchObject({ encrypted: 18, undecryptable: 9, missing: 2, unreadable: 0 })
+
+      const serialized = JSON.stringify([report, degraded])
+      for (const secret of [...sealed, SECRET.secondPassword, SECRET.username, 'MARKER', CURRENT.key, PREVIOUS.key]) {
         expect(serialized).not.toContain(secret)
       }
     } finally {
