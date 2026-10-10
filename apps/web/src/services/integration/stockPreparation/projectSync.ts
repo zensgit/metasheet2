@@ -83,6 +83,13 @@ export type StockPreparationProjectSyncReason =
   | 'PLAN_READ_FAILED'
   | 'PLAN_READ_FAILED_UNKNOWN'
   | 'PLAN_MALFORMED_RESPONSE'
+  // 一个项目一张备料表 (S2, R-36) — the project-sheet refusals a dry run can meet once the server's
+  // MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED switch is on. Each has a different next step, so
+  // none of them may fall through to 「稍后再试」: retrying fixes none of them.
+  | 'PLAN_PROJECT_SHEET_ABSENT'
+  | 'PLAN_PROJECT_SHEET_ARCHIVED'
+  | 'PLAN_TARGET_NOT_OURS'
+  | 'PLAN_TARGET_SCHEMA_INCOMPLETE'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -103,6 +110,9 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_NO_PLAN'
   | 'WRITE_PARTIAL'
   | 'WRITE_FAILED'
+  // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
+  // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
+  | 'WRITE_NOT_CONFIRMED'
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
@@ -383,6 +393,8 @@ export type StockPreparationProjectSyncVerdict =
   | 'already_up_to_date'
   | 'partial'
   | 'held'
+  // S2: the operator declined the write after the preview. Not `blocked` — nothing refused anything.
+  | 'not_written'
   | 'blocked'
   | 'not_run'
 
@@ -510,10 +522,44 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
  *   anything else — genuinely unclassified. Says so plainly instead of guessing a cause that is not
  *     there.
  */
+/**
+ * 一个项目一张备料表 (S2, R-36) — the project-sheet codes `classifyPlanReadFailureReason` sorts BY CODE
+ * ahead of every status rule (all of them answer 4xx, so a status-only reading would send each to the
+ * wrong sentence: ABSENT/ARCHIVED are 409, the wall is 409, the schema refusal is 422).
+ */
+export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+  STOCK_PREPARATION_PROJECT_ABSENT: 'PLAN_PROJECT_SHEET_ABSENT',
+  STOCK_PREPARATION_PROJECT_ARCHIVED: 'PLAN_PROJECT_SHEET_ARCHIVED',
+  TABLE_ACTION_TARGET_TENANT_MISMATCH: 'PLAN_TARGET_NOT_OURS',
+  TABLE_ACTION_TARGET_OWNER_UNKNOWN: 'PLAN_TARGET_NOT_OURS',
+  TABLE_ACTION_TARGET_UNBOUND: 'PLAN_TARGET_NOT_OURS',
+})
+
+/**
+ * S2 fix round 1 (refuter #4): `TARGET_SCHEMA_INCOMPLETE` is NOT a project-sheet code — the env
+ * sheet answers it too (a deployment whose template columns were deleted). Its project-sheet
+ * sentence (repair the project sheet by re-installing the customer pack) is therefore chosen ONLY
+ * when the run was on a project sheet (`context.projectSheet`, set by the project-sheet flow, i.e. the
+ * server's switch is on and this project resolved to its own sheet). Everywhere else it keeps the
+ * reading it had before S2 — the status rules below (a 422 reads as PLAN_READ_FAILED_UNKNOWN) — so
+ * the switch-off text is unchanged.
+ */
+export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+  TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
+})
+
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
-): 'PLAN_READ_FAILED_FOREIGN_PROJECT' | 'PLAN_READ_FAILED_CONNECTION' | 'PLAN_READ_FAILED' | 'PLAN_READ_UNAUTHENTICATED' | 'PLAN_READ_NOT_PERMITTED' | 'PLAN_READ_FAILED_UNKNOWN' {
+  context: { projectSheet?: boolean } = {},
+): StockPreparationProjectSyncReason {
+  if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
+    return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
+  }
+  if (context.projectSheet === true && errorCode
+    && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS, errorCode)) {
+    return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
+  }
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
   if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
@@ -533,7 +579,7 @@ export function classifyPlanReadFailureReason(
 export function classifyPlanStep(
   index: number,
   plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
-  options: { status?: number; malformed?: boolean; errorCode?: string | null } = {},
+  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
@@ -542,7 +588,7 @@ export function classifyPlanStep(
     const status = options.status ?? 0
     const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null)
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true })
     return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
@@ -592,6 +638,7 @@ export function summarizeProjectSync(
   // where the panel must not say "nothing changed" — see the verdict type's note.
   else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
+  else if (write?.reason === 'WRITE_NOT_CONFIRMED') verdict = 'not_written'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -718,6 +765,23 @@ function missingComponentsFallbackReason(error: unknown): StockPreparationMissin
 // ---------------------------------------------------------------------------
 
 /**
+ * S2 (ADR adr-stock-prep-project-sheets-20261008 §4, R-36) — the ONE optional seam the project-sheet
+ * flow needs inside the run: 「预览『将写入 N 行』→ 确认 → apply」 for a sheet that was just created.
+ * Asked once, after a plan that WOULD write (not held, token in hand) and before the write. Anything
+ * but `true` writes nothing: the write step SKIPs with `WRITE_NOT_CONFIRMED` and the archive is not
+ * attempted. Without the hook the run is exactly what it always was — every existing caller passes none.
+ */
+export interface StockPreparationProjectSyncHooks {
+  confirmWrite?: (planned: NonNullable<StockPreparationProjectSyncReport['planned']>) => Promise<boolean> | boolean
+  /**
+   * S2 fix round 1: the run is on a PROJECT SHEET (the project-sheet flow sets it). Only then does a
+   * refusal code that both sheet kinds can answer (`TARGET_SCHEMA_INCOMPLETE`) read in its
+   * project-sheet wording; see `STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS`.
+   */
+  projectSheet?: boolean
+}
+
+/**
  * Walk the four steps for ONE project number. `onStep` fires after each so the panel can render
  * progress rather than a spinner — a run that stops at the plan must still show the plan's counts.
  *
@@ -728,6 +792,7 @@ export async function runStockPreparationProjectSync(
   api: StockPreparationProjectSyncApi,
   projectNo: string,
   onStep?: (step: StockPreparationProjectSyncStepResult) => void,
+  hooks: StockPreparationProjectSyncHooks = {},
 ): Promise<StockPreparationProjectSyncReport> {
   const steps: StockPreparationProjectSyncStepResult[] = []
   let pendingConfirmCount = 0
@@ -773,6 +838,7 @@ export async function runStockPreparationProjectSync(
       status: statusOf(error),
       malformed: isMalformed(error),
       errorCode: codeOf(error),
+      projectSheet: hooks.projectSheet === true,
     }))
   }
   if (planStep.status !== 'ok') return done()
@@ -828,6 +894,16 @@ export async function runStockPreparationProjectSync(
     record(result(3, 'apply', 'skip', 'WRITE_NO_PLAN', { planStatus: clampToken(plan?.status, STOCK_PREPARATION_DRY_RUN_STATUSES) }))
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
+  }
+  // S2: the preview's yes/no, asked only now — the plan exists and would write. See the hook's type.
+  if (hooks.confirmWrite) {
+    const shown = planned ?? plannedCountsOf(undefined)
+    const go = await hooks.confirmWrite(shown)
+    if (go !== true) {
+      record(result(3, 'apply', 'skip', 'WRITE_NOT_CONFIRMED', { add: shown.add, update: shown.update, inactive: shown.inactive }))
+      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
+      return done()
+    }
   }
 
   let writeOk = false

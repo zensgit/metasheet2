@@ -214,6 +214,47 @@ const ROUTES = [
   // oracle across tenants. Path-addressed by projectNo because the board IS one project; the number
   // never reaches an audit row. See stock-preparation-project-board.cjs.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/board', 'stockPreparationOperatorProjectBoard'],
+  // 一个项目一张备料表 — S1 (ADR adr-stock-prep-project-sheets-20261008 §2 / §4; register R-35) and S4
+  // (§6; register R-38). ALL FIVE answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED, with ZERO IO,
+  // unless MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is the exact literal 'true'.
+  //   GET  target  — the project's registry state (absent / active / archived), its deep-link handles
+  //                  and row counts; OPERATE, same gate and tenant derivation as the board above, so a
+  //                  floor operator can see whether their project has a sheet. `may.*` is computed on
+  //                  the PULL tier (S0): a caller without pull sees `create: false`.
+  //   POST target  — CREATE the project's sheet from the frozen template and register it; PULL tier.
+  //                  This is the named exception to R-11 「stock-prep 档不开 provisioning」 (R-35):
+  //                  only from this entry, only the frozen template, objectId and sheet id derived
+  //                  server-side, an EMPTY closed request body, at most 200 rows per tenant, audited.
+  //                  201 created / 200 already registered; the G1 role grant follows the create.
+  //   GET  project-targets — the tenant's registry rows (handles and enums only); OPERATE.
+  //   POST target/archive  — S4: 归档代替删除 (Q2). active → archived on the REGISTRY ROW ONLY: the
+  //                  sheet is neither soft- nor hard-deleted, its grants, rows, ledger and handoff
+  //                  cursor are untouched. PULL tier; the body is the closed allowlist
+  //                  `{ confirmProjectNo }`, which must repeat the path's project number; audited
+  //                  `project_target_archive` once. Archiving an archived project is a typed 409.
+  //   POST target/restore  — S4: archived → active, same gate, same body, audited
+  //                  `project_target_restore` once; restoring an active project is a typed 409. The
+  //                  200 cap is not re-checked (an archived row already counts against it).
+  // The static `project-targets` segment cannot collide with `projects/:projectNo/...`.
+  ['GET', '/api/integration/stock-preparation/project-targets', 'stockPreparationProjectTargetList'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetGet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/archive', 'stockPreparationProjectTargetArchive'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/restore', 'stockPreparationProjectTargetRestore'],
+  // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
+  // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
+  // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
+  // registry stores them, the overview projects them, nothing audits them (the audit names the columns
+  // changed, never a value). The PATCH body is the closed whitelist of those three keys; an archived
+  // project answers the §6 409. Fix round 1 (R6): the overview is CREATED only by the PULL tier — the
+  // project-target create route and the explicit `ensure` (PULL) — and the OPERATE refresh only projects
+  // into an existing one (409 ABSENT otherwise), under the tenant's overview lock and a 60 s cooldown.
+  // Both are audited `project_overview_refresh`; the overview's G1 READ grant is audited
+  // `project_target_grant`.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsGet'],
+  ['PATCH', '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', 'stockPreparationProjectFieldsUpdate'],
+  ['POST', '/api/integration/stock-preparation/project-overview/refresh', 'stockPreparationProjectOverviewRefresh'],
+  ['POST', '/api/integration/stock-preparation/project-overview/ensure', 'stockPreparationProjectOverviewEnsure'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -223,6 +264,23 @@ const ROUTES = [
   // binding is resolved per request inside the table-action registry, not captured at activation.
   ['GET', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingGet'],
   ['POST', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingSet'],
+  // 备料「成员与权限」— S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6; register R-39). ALL
+  // FOUR answer 404 STOCK_PREP_MEMBERS_PAGE_DISABLED, with ZERO IO, unless STOCK_PREP_MEMBERS_PAGE_ENABLED
+  // is the exact literal 'true'; the WORKBENCH_ADMIN gate runs first. Past both, the host's narrow members
+  // port decides: platform admin or the admitted `stock-prep` delegated admin with a stock-prep scope.
+  //   GET   members                     the four built-in roles (read-only), custom roles, their
+  //                                     scope-visible members, this app's audit (read-only)
+  //   POST  members/custom-roles        create — the id is server-generated (stock-prep_c_<8 hex>); the
+  //                                     body is the closed allowlist { name, permissionCodes }
+  //   PATCH members/custom-roles/:roleId  rename / change a CUSTOM role's stock-prep:* codes
+  //   POST  members/custom-roles/:roleId/project-targets  add project sheets of the caller's own tenant
+  //                                     (registered + active) through G1 — add-only, write level; also
+  //                                     needs MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  // Appoint / revoke / admission are the EXISTING /api/admin/role-delegation/... routes (core-backend).
+  ['GET', '/api/integration/stock-preparation/members', 'stockPreparationMembersRead'],
+  ['POST', '/api/integration/stock-preparation/members/custom-roles', 'stockPreparationMembersCustomRoleCreate'],
+  ['PATCH', '/api/integration/stock-preparation/members/custom-roles/:roleId', 'stockPreparationMembersCustomRoleUpdate'],
+  ['POST', '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets', 'stockPreparationMembersCustomRoleProjectTargets'],
   // B-stage confirmation-decision LEDGER surfaces. Static literal segments precede the bare
   // collection GET so they can never be mis-read as ids. The GET list is the AUTHORITATIVE
   // values-free exception queue of the takeover line (converged ruling); canonical-sheet filter
@@ -234,6 +292,9 @@ const ROUTES = [
   //   ensure                 -> platform admin      (PROVISIONS the ledger table — schema authoring,
   //                                                  which R-11 names as what the operator tier must
   //                                                  not open; unchanged by this PR)
+  //   R-35 NAMED EXCEPTION (S1): the PULL tier may create ONE project's sheet from the frozen template
+  //   through POST …/projects/:projectNo/target above — the only provisioning verb below platform
+  //   admin, bounded as that route's note says. The ledger ensure stays platform admin.
   // Reconcile lives on the table-actions block above and also stays platform-admin: it re-runs the
   // readonly plan as a SOURCE READ and, when B2a is armed, consumes an operation claim. Handing a
   // customer operator the ability to trigger source reads is an owner-level decision, so the default
@@ -463,11 +524,64 @@ const {
   STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+  STOCK_PREP_PULL,
   STOCK_PREP_READ,
   isStockPrepPermissionCode,
   operatorMayRunStockPrepPull,
   satisfiesStockPrepAccess,
 } = require('./stock-preparation-workbench-access.cjs')
+// 一个项目一张备料表 (S1): the switch, the per-project sheet identity, provisioning through the ONE
+// existing create path, the registry overlay the table-action registry applies, and the G1 grant
+// call. The registry STORE itself is injected (services.stockPreparationProjectTargetStore).
+const {
+  PROJECT_SHEETS_ENABLED_ENV: STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV,
+  MAX_PROJECT_TARGETS_PER_TENANT,
+  StockPreparationProjectTargetError,
+  stockPreparationProjectSheetsEnabled,
+  resolveProjectSheetGrantRoleIds,
+  resolveProjectTargetForAction,
+  provisionProjectSheet,
+  grantProjectSheetRoles,
+  projectSheetViewHandles,
+  buildProjectTargetBinding,
+  // S2 (ADR §2 「客户包」): the deployment's customer pack, re-placed onto each project sheet.
+  planProjectSheetCustomerPacks,
+  preflightProjectSheetCustomerPacks,
+  installProjectSheetCustomerPacks,
+} = require('./stock-preparation-project-targets.cjs')
+const {
+  StockPreparationProjectTargetStoreError,
+  // S3: the closed project-fields whitelist (the PUT body's allowlist) and its pure normalizer.
+  PROJECT_FIELD_KEYS: STOCK_PREP_PROJECT_FIELD_KEYS,
+  normalizeProjectFieldsPatch,
+  // S3 fix round 1 (R10): a pull's refusal code as the registry may store it (UNKNOWN for a bad shape).
+  normalizeProjectPullCode,
+} = require('./stock-preparation-project-target-store.cjs')
+// S3 (ADR §5, register R-37): the project overview — the PULL tier's ensure of the host-stamped
+// read-only sheet (+ its G1 READ grant), the bounded projection, the per-event row update, and the
+// stamped lookup the list route hands the home page.
+const {
+  refreshProjectOverview,
+  ensureProjectOverviewSheet,
+  findProjectOverviewSheet,
+  grantProjectOverviewRoles,
+  updateProjectOverviewRow,
+  PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+} = require('./stock-preparation-project-overview.cjs')
+// 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
+// decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
+const {
+  STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS,
+  STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS,
+  STOCK_PREP_MEMBERS_INTERNAL_CODE,
+  STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE,
+  STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
+  STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS,
+  STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE,
+  StockPrepMembersRequestError,
+  normalizeStockPrepMembersProjectNos,
+  stockPrepMembersPageEnabled,
+} = require('./stock-preparation-members.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
 // yet" condition and names the literal fix for each. It reuses the inspection functions the four
 // readiness routes already call — it re-derives no notion of "ready" — and it writes nothing.
@@ -650,7 +764,9 @@ const {
 // The directory's union scan reads the WHOLE bound sheet, and it only runs at all for a caller that
 // passed `?includePullTargets=1`. This is what stops the surfaces that DO pass it — with a refresh
 // button on them — from paying that scan once per click. See the factory's note.
-const { createPullTargetScanCache } = require('./stock-preparation-pull-target-scan.cjs')
+// S1: `scanPullTargetProjects` counts the rows of ONE project's sheet for the GET target read (the
+// board's projection, through the same bounded scan and the same per-registration cache).
+const { createPullTargetScanCache, scanPullTargetProjects } = require('./stock-preparation-pull-target-scan.cjs')
 // 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
 // operator value scope as the directory above and returns a frozen key set (numbers, names, counts,
 // timestamps, handles), never a row value. See the module header.
@@ -876,7 +992,24 @@ const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
     refusalCodes: STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
     portUnavailableCode: 'STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE',
   }),
+  // S1 (ADR §3 「租户墙」): the FOURTH vocabulary, for the table-action routes that never ran the wall
+  // before — dry-run, apply, reconcile, mvp-persist, expansion-start, conflict-policies. They run it
+  // ONLY on a target the project-sheet overlay resolved (`action.projectTarget` present), because
+  // only then is the sheet decided by the tenant; with the switch off not one of them changes.
+  tableAction: Object.freeze({
+    label: 'table action',
+    refusalCodes: Object.freeze({
+      [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'TABLE_ACTION_TARGET_TENANT_MISMATCH',
+      [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'TABLE_ACTION_TARGET_OWNER_UNKNOWN',
+      [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'TABLE_ACTION_TARGET_UNBOUND',
+    }),
+    portUnavailableCode: 'TABLE_ACTION_PROVISIONING_UNAVAILABLE',
+  }),
 })
+
+function assertTableActionTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.tableAction })
+}
 
 function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
   return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.carry })
@@ -1698,6 +1831,10 @@ const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
 const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
+// S5b (R-39): the members routes' closed body allowlists (stock-preparation-members.cjs owns the lists).
+const VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS = new Set(STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS)
+const VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS = new Set(STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS)
+const VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS = new Set(STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS)
 const VALID_C6_WRITE_DRY_RUN_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'maxRows'])
 const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'confirm'])
 // S3-2: instantiate binds to caller-supplied systems by id only. The write profile / credentials
@@ -1715,6 +1852,130 @@ const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS = new S
 // declared target comes from the PACK, and letting a request name one would recreate incident 2 at
 // the API instead of in a chat window.
 const VALID_STOCK_PREPARATION_PREFLIGHT_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
+// S1 一个项目一张备料表: the GET target / list reads take the same two shape-compat keys the board
+// takes (neither steers anything; see the audit-trail note at the top of createHandlers). The POST
+// create body is the EMPTY closed allowlist (`VALID_EMPTY_REQUEST_KEYS`): no base, no name, no field.
+const VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
+// The two S1 audit actions (migration 088), named once so the vocabulary probe and the append
+// cannot drift.
+const STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION = 'project_target_create'
+const STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION = 'project_target_grant'
+// S4 (ADR §6, register R-38): the archive / restore body is ONE key — the typed confirmation — and
+// the two lifecycle actions migration 088 already declared for this slice (no new vocabulary).
+const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set(['confirmProjectNo'])
+const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
+const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
+const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH'
+// S3 (register R-37): the two remaining 088 actions. `project_fields_update` records WHICH of the three
+// O2(a) columns changed (a count map keyed by column name) and never a value; `project_overview_refresh`
+// records counts only.
+const STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION = 'project_fields_update'
+const STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION = 'project_overview_refresh'
+
+/**
+ * S3 fix round 1 (E2): the S3 handlers answer only TYPED refusals. Anything else that escapes them — a
+ * driver error whose message quotes a submitted value (`invalid input syntax for type date: "…"`), a host
+ * error quoting an id — is replaced by ONE fixed code and message with no details, so a submitted
+ * project-field text or a database message never reaches the response. A database without the overview's
+ * `system_kind` column (42703) is its own typed, values-free 503. A typed error (an integer `status` and an
+ * error-code-shaped `code`) passes through as the handler built it.
+ */
+const STOCK_PREPARATION_S3_VALUES_FREE_HANDLERS = new Set([
+  'stockPreparationProjectFieldsGet',
+  'stockPreparationProjectFieldsUpdate',
+  'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
+])
+const STOCK_PREPARATION_S3_TYPED_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,79}$/
+
+function toValuesFreeS3RouteError(error) {
+  if (error instanceof HttpRouteError) return error
+  const status = error && Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : null
+  const code = error && typeof error.code === 'string' ? error.code : null
+  if (status !== null && code !== null && STOCK_PREPARATION_S3_TYPED_CODE_PATTERN.test(code)) return error
+  if (code === '42703') {
+    return new HttpRouteError(503, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED', 'this database cannot serve the project overview yet; nothing was written', { reason: 'column_missing' })
+  }
+  return new HttpRouteError(500, 'STOCK_PREPARATION_PROJECT_ROUTE_FAILED', 'the request could not be completed; nothing in this response describes the submitted values', {})
+}
+
+/**
+ * S3 fix round 1 (R5): an error's code as a per-event overview-update log line may carry it — the code
+ * when it has error-code shape, otherwise the closed word UNKNOWN. Never a message, never a value.
+ */
+function loggableOverviewUpdateCode(error) {
+  const code = error && typeof error.code === 'string' ? error.code : null
+  return code !== null && STOCK_PREPARATION_S3_TYPED_CODE_PATTERN.test(code) ? code : 'UNKNOWN'
+}
+// The PUT body's closed allowlist IS the store's whitelist — one list, not two.
+const VALID_STOCK_PREPARATION_PROJECT_FIELDS_BODY_KEYS = new Set(STOCK_PREP_PROJECT_FIELD_KEYS)
+
+/** S3: the project number of a project-fields request — pure, before any IO. */
+function stockPreparationProjectFieldsProjectNo(req) {
+  const projectNo = firstString(requestParams(req).projectNo)
+  if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+  }
+  return projectNo
+}
+
+/**
+ * S3: what the two project-fields routes answer. The ONE response shape that carries the three free
+ * texts; `may.update` is the state alone (the caller already passed the OPERATE gate).
+ */
+function stockPreparationProjectFieldsResponse(projectNo, fields) {
+  if (!fields) {
+    return { projectNo, status: 'absent', fields: null, updatedAt: null, may: { update: false } }
+  }
+  return {
+    projectNo,
+    status: fields.status,
+    fields: {
+      responsibleLabel: fields.responsibleLabel,
+      note: fields.note,
+      plannedFinishOn: fields.plannedFinishOn,
+    },
+    updatedAt: fields.projectFieldsUpdatedAt,
+    may: { update: fields.status === 'active' },
+  }
+}
+
+/**
+ * S4: the archive / restore REQUEST — pure, no IO, so a malformed or mismatched request costs nothing.
+ * The body is the closed allowlist `{ confirmProjectNo }`; the path's project number must be a plain
+ * project number; the confirmation must repeat it EXACTLY (both sides trimmed the same way, nothing
+ * else folded — no case folding, no prefix match). The refusal names the FIELD and never echoes
+ * either value. Returns the path's project number.
+ */
+function stockPreparationProjectTargetLifecycleRequest(req) {
+  const body = normalizeStockPreparationConfirmBody(
+    requestBody(req),
+    VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS,
+    'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+  )
+  const projectNo = firstString(requestParams(req).projectNo)
+  if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+  }
+  const confirmProjectNo = typeof body.confirmProjectNo === 'string' ? body.confirmProjectNo.trim() : ''
+  if (confirmProjectNo !== projectNo) {
+    throw new HttpRouteError(400, STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE, 'confirmProjectNo must repeat the project number in the path exactly', { field: 'confirmProjectNo' })
+  }
+  return projectNo
+}
+
+/** S4: what archive / restore answer — the row's handles and enums, `may.*` from its new status. */
+function stockPreparationProjectTargetLifecycleResponse(projectNo, row) {
+  return {
+    projectNo,
+    status: row.status,
+    sheetId: row.sheetId,
+    archivedAt: row.archivedAt,
+    restoredAt: row.restoredAt,
+    // The caller passed the PULL gate, so the only thing left to decide is the state.
+    may: { create: false, archive: row.status === 'active', restore: row.status === 'archived' },
+  }
+}
 // SOURCE preflight. `externalSystemId` is the ONE addition, and it is a REGISTERED-SYSTEM SELECTOR,
 // not a connection: it names a row the caller's tenant already owns, and everything about how to
 // reach that row — host, credentials, driver — stays server-held exactly as it is for every other
@@ -3891,6 +4152,188 @@ function requireStockPreparationAudit() {
   // PROPAGATES (the registry does not catch): "the binding table is unreachable" must not be
   // indistinguishable from "no binding exists", because the second one silently resolves the env
   // default — which on a customer deployment is the synthetic demo source.
+  // 一个项目一张备料表 (migration 087): the project-sheet REGISTRY. Optional at REGISTRATION for the
+  // same reason the source-binding store is; the three S1 routes fail closed without it (501), and
+  // the overlay below is wired only when it exists. The resolver reads the switch PER CALL and
+  // answers null while it is off — so a registered deployment with the switch off resolves the env
+  // target byte for byte as it did before S1 (the registry's own test pins that deep-equal).
+  const stockPreparationProjectTargets = services.stockPreparationProjectTargetStore || null
+  function requireStockPreparationProjectTargets() {
+    if (!stockPreparationProjectTargets
+      || typeof stockPreparationProjectTargets.get !== 'function'
+      || typeof stockPreparationProjectTargets.create !== 'function'
+      || typeof stockPreparationProjectTargets.count !== 'function'
+      || typeof stockPreparationProjectTargets.list !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry is not available; project sheets cannot be created or resolved here')
+    }
+    return stockPreparationProjectTargets
+  }
+  // S4: the two lifecycle routes need the store's archive / restore on top of the S1 surface. Kept
+  // apart from the S1 check so an older store binding still serves the S1 routes; the lifecycle
+  // routes fail closed (the same 501) without both methods.
+  function requireStockPreparationProjectTargetLifecycle() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.archive !== 'function' || typeof store.restore !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot archive or restore here')
+    }
+    return store
+  }
+  // S3: the project-fields routes need the store's O2(a) surface; the overview refresh needs the
+  // list, the project-fields map and the count stamp. Same posture as the lifecycle check above: an
+  // older store binding serves the older routes and these fail closed (501).
+  function requireStockPreparationProjectFields() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.getProjectFields !== 'function' || typeof store.updateProjectFields !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot read or write project-level fields here')
+    }
+    return store
+  }
+  function requireStockPreparationProjectOverview() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.listProjectFields !== 'function' || typeof store.recordCounts !== 'function'
+      || typeof store.getProjectFields !== 'function' || typeof store.tryWithOverviewLock !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here')
+    }
+    return store
+  }
+  // S3 fix round 1 (R6): the refresh cooldown, per tenant, in THIS process. Keyed by the VERIFIED tenant
+  // (the operator scope), stamped when a refresh starts and cleared when it fails, so a second click within
+  // PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS answers 200 `fresh: false` with no refresh IO. Per process by
+  // design: a cooldown shared across processes would need a write to decide that nothing should be
+  // written; the tenant's overview lock still serializes refreshes that land on different processes.
+  const projectOverviewRefreshStartedAt = new Map()
+  /**
+   * S3 fix round 1 (R5): ONE project's overview row after an event — best-effort BY CONTRACT. Only with
+   * the project-sheets switch on (switch off: no call, no IO, byte-identical to before); a missing overview
+   * is a no-op inside `updateProjectOverviewRow`; any failure is logged with its CODE only and swallowed —
+   * the registry is the authority and the next refresh heals the overview, so the event that already
+   * happened never answers differently because its projection could not be written.
+   */
+  async function updateProjectOverviewRowBestEffort(tenantId, projectNo, { recount = false } = {}) {
+    if (!stockPreparationProjectSheetsEnabled(process.env)) return null
+    if (!tenantId || !projectNo || !stockPreparationProjectTargets || typeof stockPreparationProjectTargets.tryWithOverviewLock !== 'function') return null
+    try {
+      return await updateProjectOverviewRow({
+        provisioning: getMultitableProvisioning(),
+        recordsApi: getMultitableRecordsApi(),
+        store: stockPreparationProjectTargets,
+        tenantId,
+        projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        projectNo,
+        recount,
+      })
+    } catch (error) {
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep project overview row could not be updated; the event stands and the next refresh heals it', {
+          code: loggableOverviewUpdateCode(error),
+        })
+      }
+      return null
+    }
+  }
+  /**
+   * S3 fix round 1 (R6 / R1): the PULL tier's overview provisioning — ensure-if-absent of the stamped
+   * overview, then the G1 READ grant for the configured roles, each audited. Shared by the explicit
+   * `ensure` route (which surfaces every refusal) and the project-target create route (which calls it
+   * best-effort, see `ensureProjectOverviewBestEffort`).
+   */
+  async function ensureProjectOverviewAndGrant({ audit, tenantId, projectId: targetProjectId, actor }) {
+    const provisioning = getMultitableProvisioning()
+    const sheet = await ensureProjectOverviewSheet({
+      provisioning,
+      projectId: targetProjectId,
+      tenantId,
+      env: process.env,
+    })
+    if (sheet.created) {
+      await audit.append({
+        tenantId,
+        action: STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION,
+        subjectId: sheet.sheetId,
+        mode: 'sheet_created',
+        actor,
+        detail: {
+          viewsCreated: sheet.views && Number.isInteger(sheet.views.created) ? sheet.views.created : 0,
+          ownBaseCreated: sheet.ownBaseCreated === true,
+        },
+      })
+    }
+    // G1 READ on the overview — ON CONFLICT DO NOTHING at the host, so every ensure heals a grant that
+    // failed earlier and never adds a second row. Server-configured roles only; a host refusal propagates.
+    const grant = await grantProjectOverviewRoles({
+      provisioning,
+      projectId: targetProjectId,
+      sheetId: sheet.sheetId,
+      roleIds: resolveProjectSheetGrantRoleIds(process.env),
+      actorId: actor,
+    })
+    if (grant.attempted) {
+      await audit.append({
+        tenantId,
+        action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+        subjectId: sheet.sheetId,
+        mode: grant.granted > 0 ? 'overview_read_granted' : 'overview_read_already_granted',
+        actor,
+        detail: { roleCount: grant.roleCount, granted: grant.granted, alreadyGranted: grant.alreadyGranted },
+      })
+    }
+    return { sheet, grant }
+  }
+  /**
+   * S3 fix round 1 (R6): the project-target create route's leg — the overview is ensured when a project is
+   * registered and the overview is absent. BEST-EFFORT: the create's job is the project sheet; an overview
+   * that cannot be provisioned here (an older host, an unstamped sheet at its id, a role refusal) is logged
+   * by code and left to the explicit `ensure` route, which surfaces the refusal to the puller.
+   */
+  async function ensureProjectOverviewBestEffort({ audit, tenantId, projectId, actor }) {
+    try {
+      const outcome = await ensureProjectOverviewAndGrant({ audit, tenantId, projectId, actor })
+      return { ensured: true, created: outcome.sheet.created === true, code: null }
+    } catch (error) {
+      const code = loggableOverviewUpdateCode(error)
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep project overview could not be ensured with the project sheet; the create stands', { code })
+      }
+      return { ensured: false, created: false, code }
+    }
+  }
+  /**
+   * S3 (ADR §1.2 `last_pull_*`; §5 「最近拉取」): stamp a pull's outcome on the registry row the overlay
+   * resolved. NEVER FAILS THE PULL: the registry row is a projection input, the pull result is the
+   * fact, so a stamp that cannot be written is logged (values-free) and the response stands. A no-op
+   * when no overlay was applied (switch off / env target) or the store cannot stamp.
+   */
+  async function stampProjectPullOutcome(action, tenantId, { outcome, code, missingComponentsCount } = {}) {
+    if (!action || !isPlainObject(action.projectTarget) || !stockPreparationProjectTargets || typeof stockPreparationProjectTargets.recordPullOutcome !== 'function') return
+    // S3 fix round 1 (R10): a refusal whose code does not have error-code shape is recorded as UNKNOWN —
+    // never a throw over a shape, never the shape itself in the registry or the log.
+    const pullCode = normalizeProjectPullCode(code)
+    if (pullCode.mapped && routeLogger && typeof routeLogger.warn === 'function') {
+      routeLogger.warn('[plugin-integration-core] stock-prep pull outcome carried a code without error-code shape; recorded as UNKNOWN')
+    }
+    try {
+      await stockPreparationProjectTargets.recordPullOutcome({
+        tenantId,
+        projectNo: action.projectTarget.projectNo,
+        outcome,
+        code: pullCode.code,
+        ...(Number.isInteger(missingComponentsCount) && missingComponentsCount >= 0 ? { missingComponentsCount } : {}),
+      })
+    } catch (error) {
+      if (routeLogger && typeof routeLogger.warn === 'function') {
+        routeLogger.warn('[plugin-integration-core] stock-prep pull outcome could not be stamped on the project registry; the pull result stands')
+      }
+    }
+  }
+  /** The run's DISTINCT missing-component count, off the result's values-free evidence (the board's number). */
+  function distinctMissingComponentCount(result) {
+    if (!isPlainObject(result)) return undefined
+    if (isPlainObject(result.missingComponents) && Number.isInteger(result.missingComponents.distinctCount)) return result.missingComponents.distinctCount
+    const evidence = isPlainObject(result.evidence) ? result.evidence : {}
+    const dryRunEvidence = isPlainObject(evidence.dryRun) ? evidence.dryRun : evidence
+    const expansion = isPlainObject(dryRunEvidence.expansion) ? dryRunEvidence.expansion : null
+    return expansion && Number.isInteger(expansion.missingComponentDistinctCount) ? expansion.missingComponentDistinctCount : undefined
+  }
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
     resolveSourceBinding: stockPreparationSourceBinding
@@ -3898,6 +4341,22 @@ function requireStockPreparationAudit() {
           const binding = await stockPreparationSourceBinding.get(scope)
           return binding ? binding.externalSystemId : null
         }
+      : null,
+    resolveProjectTarget: stockPreparationProjectTargets
+      ? async ({ tenantId, projectNo, targetPurpose, extensionFieldIds }) => resolveProjectTargetForAction({
+          store: stockPreparationProjectTargets,
+          provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+          // The caller's OWN staging project — the tenant the registry is keyed by. Never a request
+          // projectId: the registry answers for the tenant the lookup was scoped to and nothing else.
+          projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+          tenantId,
+          projectNo,
+          targetPurpose,
+          // S2: the looked-up action's own declared `ext_` band (server config, threaded by the
+          // registry from the normalized action) — never a request field.
+          extensionFieldIds,
+          env: process.env,
+        })
       : null,
   })
   // SERVER-HELD pack allowlist, built once at registration so a malformed deploy-time pack fails
@@ -3954,6 +4413,59 @@ function requireStockPreparationAudit() {
   // report a complete install whose scoping would not be enforced.
   const stockPreparationFieldPermissions = (services && services.stockPreparationFieldPermissions) || null
 
+  // 备料「成员与权限」(S5b, register R-39): the host's NARROW members port (packages/core-backend
+  // services/stock-preparation-members.ts), injected for this plugin only. It owns every decision the
+  // four members routes need — the caller tier (platform admin or the admitted stock-prep delegated
+  // admin), the delegation scope, the three invariants and the audit — so these routes add only the
+  // WORKBENCH_ADMIN gate, the switch, the closed bodies and (for project sheets) the tenant-bound
+  // registry lookup and the G1 call. REQUIRED where used: absent → 501, never a fallback.
+  // Duck-typed to { describe, createCustomRole, updateCustomRole, grantCustomRoleProjectSheets }.
+  const stockPreparationMembers = (services && services.stockPreparationMembers) || null
+  function requireStockPreparationMembers() {
+    if (!stockPreparationMembers
+      || typeof stockPreparationMembers.describe !== 'function'
+      || typeof stockPreparationMembers.createCustomRole !== 'function'
+      || typeof stockPreparationMembers.updateCustomRole !== 'function'
+      || typeof stockPreparationMembers.grantCustomRoleProjectSheets !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_PORT_UNAVAILABLE', 'the stock-prep members port is not available on this host')
+    }
+    return stockPreparationMembers
+  }
+  /** The S5b switch, read PER REQUEST, exact literal only. Every members route refuses before any IO. */
+  function requireMembersPageEnabled() {
+    if (!stockPrepMembersPageEnabled(process.env)) {
+      throw new HttpRouteError(404, STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE, `the stock-prep members page is disabled on this deployment (${STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV} is not 'true')`)
+    }
+  }
+  /**
+   * VALUES-FREE FAILURES on the four members routes (fix round 1, S9). `sendError` answers with
+   * `error.message` verbatim, so an untyped error (a driver's "duplicate key … (id)=(…)", a
+   * dependency's text) would reach the body. Here a TYPED REFUSAL — an integer 4xx status and an
+   * UPPER_SNAKE code, the plugin's own and the host port's — passes as it is; anything else, and any
+   * 5xx, answers a fixed message (and, when untyped, the fixed code STOCK_PREP_MEMBERS_INTERNAL) with
+   * no details. The original stays on `cause` for the route-failure log, which logs codes only.
+   */
+  function membersRouteFailure(error) {
+    const status = error && Number.isInteger(error.status) ? error.status : 0
+    const code = error && typeof error.code === 'string' ? error.code : ''
+    const typed = status >= 400 && status <= 599 && /^[A-Z][A-Z0-9_]{2,80}$/.test(code)
+    if (typed && status < 500) return error
+    const failure = new Error('the stock-prep members request could not be completed')
+    failure.name = 'StockPrepMembersRouteFailure'
+    failure.status = typed ? status : 500
+    failure.code = typed ? code : STOCK_PREP_MEMBERS_INTERNAL_CODE
+    failure.cause = error
+    return failure
+  }
+  /** Runs a members route's body past the gate and the switch, through membersRouteFailure. */
+  async function withMembersFailures(body) {
+    try {
+      return await body()
+    } catch (error) {
+      throw membersRouteFailure(error)
+    }
+  }
+
   // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
   // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
   // governedAi above and for the same reason — the plugin has no `xlsx` dependency of its own (it is
@@ -3987,6 +4499,92 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE', 'stock-preparation handoff store is not available; the handoff cannot be read or advanced here')
     }
     return stockPreparationHandoffStore
+  }
+
+  // ── 一个项目一张备料表 (S1) — the four route-layer helpers ──────────────────────────────────────
+
+  /** The switch, read PER REQUEST, exact literal only. The three S1 routes refuse before any IO. */
+  function requireProjectSheetsEnabled() {
+    if (!stockPreparationProjectSheetsEnabled(process.env)) {
+      throw new HttpRouteError(404, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', `per-project stock-preparation sheets are disabled on this deployment (${STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV} is not 'true')`)
+    }
+  }
+
+  /**
+   * THE WRITE GATE'S SERVER-HELD INPUT (ADR §3 「写入门」). Built ONLY from the overlay marker the
+   * registry stamped on a resolved action — the registry row's objectId and the deployment's env
+   * objectId — never from the request. `undefined` when no overlay was applied (switch off or a
+   * source/readiness lookup), which leaves `assertStockPrepApplySandboxAllowed` byte-identical.
+   */
+  function projectSheetGateFor(action) {
+    if (!action || !isPlainObject(action.projectTarget)) return undefined
+    return {
+      enabled: stockPreparationProjectSheetsEnabled(process.env),
+      registeredProjectObjectId: action.target && typeof action.target.objectId === 'string' ? action.target.objectId : null,
+      deploymentTargetObjectId: typeof action.projectTarget.deploymentTargetObjectId === 'string' ? action.projectTarget.deploymentTargetObjectId : null,
+    }
+  }
+
+  /**
+   * THE STALE-JOB CHECK (fix round 1, R1). A large-BOM job carries the target it was PLANNED against
+   * in its stored snapshot (`actionSnapshot.target`, copied into the checkpoint apply job's `target`),
+   * and the plan / apply-start / apply-run routes work on that snapshot, never on the live binding
+   * (ADR §3). A job started BEFORE the project-sheets switch was flipped therefore carries the
+   * deployment env sheet; once the switch is on the registry answers a DIFFERENT sheet for the same
+   * project, and the write gate's project branch admits only the registry's objectId — the env
+   * snapshot would fall through to the legacy allowlist and keep writing the old mixed sheet. So,
+   * whenever the route's lookup resolved a project sheet (the marker is present: switch on and a
+   * registry row answered), the stored target must name THAT sheet — objectId AND sheetId — or the
+   * job is refused 409 (typed, values-free: booleans only; the operator starts a new expansion). No
+   * marker (switch off, or no overlay) → no-op, so the switch-off path stays byte-identical.
+   */
+  function assertLargeBomJobTargetMatchesProjectTarget(storedTarget, projectAction, which) {
+    if (!projectAction || !isPlainObject(projectAction.projectTarget)) return
+    const registry = isPlainObject(projectAction.target) ? projectAction.target : {}
+    const stored = isPlainObject(storedTarget) ? storedTarget : {}
+    const objectIdMatches = typeof stored.objectId === 'string' && stored.objectId === registry.objectId
+    const sheetIdMatches = typeof stored.sheetId === 'string' && stored.sheetId === registry.sheetId
+    if (objectIdMatches && sheetIdMatches) return
+    throw new HttpRouteError(
+      409,
+      'STOCK_PREPARATION_JOB_TARGET_STALE',
+      'this large-BOM job was planned against a target that is not the project\'s registered stock-preparation sheet; start a new expansion',
+      { field: 'jobId', snapshot: which, objectIdMatches, sheetIdMatches },
+    )
+  }
+
+  /**
+   * THE WALL ON AN OVERLAID TARGET (ADR §3 「租户墙」). A no-op for an action the overlay did not touch
+   * — the env target is deploy-global and these routes never walled it; with the switch on the sheet
+   * is decided by the tenant, so the same `assertStockPreparationTargetBelongsToTenant` the carry,
+   * export and handoff run decides it here, in the table-action vocabulary. The staging project is
+   * derived from the tenant the lookup was scoped to, never from a request projectId.
+   */
+  async function assertResolvedProjectTargetTenancy(action, tenantId) {
+    if (!action || !isPlainObject(action.projectTarget)) return
+    await assertTableActionTargetBelongsToTenant({
+      provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+      targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      target: action.target,
+    })
+  }
+
+  /**
+   * The project number a 结转 decision addresses, read off its `idempotencyKey` exactly as
+   * confirm-writes.cjs reads it (a real key EMBEDS its projectNo; bom-expansion makeIdempotencyKey).
+   * A key that does not parse yields null, which the overlay turns into 400 PROJECT_NO_REQUIRED
+   * while the switch is on and ignores while it is off.
+   */
+  function projectNoFromCarryDecision(decision) {
+    if (!isPlainObject(decision)) return null
+    let parsed = null
+    try {
+      parsed = JSON.parse(decision.idempotencyKey)
+    } catch (error) {
+      parsed = null
+    }
+    if (!isPlainObject(parsed) || parsed.projectNo === undefined || parsed.projectNo === null) return null
+    return firstString(String(parsed.projectNo))
   }
 
   // 通知下一步: the DingTalk seam. INJECTED by the host for this plugin only — the same
@@ -5024,7 +5622,8 @@ function requireStockPreparationAudit() {
       // state, and it must render as "no consumer", not as a 5xx on the whole overview.
       const tableActionBindings = []
       try {
-        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        // S1: SOURCE-only lookup — the overlay never applies (ADR §3 call-site guard).
+        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source' })
         const externalSystemId = action && action.source ? action.source.externalSystemId : null
         if (typeof externalSystemId === 'string' && externalSystemId.trim()) {
           tableActionBindings.push({ actionId: action.actionId, externalSystemId: externalSystemId.trim() })
@@ -6107,7 +6706,14 @@ function requireStockPreparationAudit() {
           tenantPrincipalDirectory,
         })
         : null
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: the project number rides into the lookup so the registry overlay can resolve THIS
+      // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
+      // validates a few lines down; with the switch off the registry ignores it.
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+        targetPurpose: 'write',
+      })))
       // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
       // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
       // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
@@ -6118,6 +6724,8 @@ function requireStockPreparationAudit() {
       // them differ — so this is not a behaviour change; it is the derivation being made unable to
       // drift from the proof.
       const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+      await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
       // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
@@ -6133,45 +6741,59 @@ function requireStockPreparationAudit() {
       // W-5: same stanza, forwarded so a `data-source:sql-readonly` source enforces its two SQL
       // Server read floors for this run (see loadTableActionSourceAdapter / the adapter's read()).
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: dryRunB2aAuthorization })
-      return sendOk(res, await dryRunStockPreparationAction({
-        action,
-        parameters: body.parameters,
-        sourceAdapter,
-        recordsApi: getMultitableRecordsApi(),
-        tokenStore: context.storage,
-        policyStore: context.storage,
-        conflictPolicyReview: body.conflictPolicyReview,
-        // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
-        // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
-        // tenant" a property of the code rather than of the caller's good manners.
-        includeMissingComponents,
-        // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
-        // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
-        // The apply route below resolves it the SAME way so the two agree on the plan revision.
-        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-        // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
-        targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
-        // The source->`ext_` mapping, from server config. null when unconfigured, which
-        // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
-        // Configured: the SAME object the apply route passes, so both routes expand the same rows
-        // and agree on the dry-run revision. It is never request-influenced.
-        extFieldMapping: stockPreparationExtFieldMapping,
-        // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
-        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-        // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
-        // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
-        // gate checks and the tenant whose source is about to be read are one value, not two that
-        // could disagree.
-        b2aTrialRegistry,
-        b2aClaimStore: context.storage,
-        b2aOperationClaim,
-        b2aRunId: dryRunB2aRunId,
-        // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
-        // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
-        b2aSourceObjects: dryRunB2aSourceObjects,
-        tenantId: dryRunTenantId,
-        now: Date.now(),
-      }))
+      // S3 (ADR §5 「谁更新、什么时候更新」: dry-run 结束): the registry row the overlay resolved gets
+      // `last_pull_*` stamped — `previewed` with the run's distinct missing-component count, or
+      // `refused` with the typed code of a run that threw. A stamp that fails never fails the run.
+      let dryRunResult
+      try {
+        dryRunResult = await dryRunStockPreparationAction({
+          action,
+          parameters: body.parameters,
+          sourceAdapter,
+          recordsApi: getMultitableRecordsApi(),
+          tokenStore: context.storage,
+          policyStore: context.storage,
+          conflictPolicyReview: body.conflictPolicyReview,
+          // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+          // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+          // tenant" a property of the code rather than of the caller's good manners.
+          includeMissingComponents,
+          // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
+          // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
+          // The apply route below resolves it the SAME way so the two agree on the plan revision.
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
+          targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
+          // The source->`ext_` mapping, from server config. null when unconfigured, which
+          // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
+          // Configured: the SAME object the apply route passes, so both routes expand the same rows
+          // and agree on the dry-run revision. It is never request-influenced.
+          extFieldMapping: stockPreparationExtFieldMapping,
+          // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
+          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+          // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
+          // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
+          // gate checks and the tenant whose source is about to be read are one value, not two that
+          // could disagree.
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: dryRunB2aRunId,
+          // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+          // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+          b2aSourceObjects: dryRunB2aSourceObjects,
+          tenantId: dryRunTenantId,
+          now: Date.now(),
+        })
+      } catch (error) {
+        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'refused', code: error && error.code })
+        // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo)
+        throw error
+      }
+      await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult) })
+      if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
+      return sendOk(res, dryRunResult)
     },
 
     // B-stage ledger WRITE: repeat the readonly table-action plan server-side and persist ONLY
@@ -6265,7 +6887,16 @@ function requireStockPreparationAudit() {
         )
       }
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      // S1: the project number rides into the lookup (the overlay keys on it); `reconcileProjectNo`
+      // above is the same body field, already shape-checked.
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId,
+        projectNo: reconcileProjectNo,
+        targetPurpose: 'write',
+      }))
+      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+      await assertResolvedProjectTargetTenancy(action, tenantId)
       // B2a entry point (1), RECONCILE half — the gap W-2 closes at this layer.
       //
       // This route re-runs the readonly table-action plan server-side, which means it expands the
@@ -6384,7 +7015,15 @@ function requireStockPreparationAudit() {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)
       const parameters = normalizeActionParameters(body.parameters)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      // S1: the validated project number rides into the lookup (the overlay keys on it).
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId,
+        projectNo: parameters.projectNo,
+        targetPurpose: 'write',
+      }))
+      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+      await assertResolvedProjectTargetTenancy(action, tenantId)
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
@@ -6498,8 +7137,15 @@ function requireStockPreparationAudit() {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: same project-number ride-along as the dry run (the registry overlay keys on it).
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+        targetPurpose: 'write',
+      })))
       const applyTenantId = resolveTenantId(req, {})
+      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+      await assertResolvedProjectTargetTenancy(action, applyTenantId)
       const applyB2aRunId = b2aRunId('table-action-apply')
       // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
       // so a refusal never burns a single-use dry-run token.
@@ -6515,49 +7161,65 @@ function requireStockPreparationAudit() {
       // W-5: same stanza, forwarded — see the dry-run route above for why.
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
-      return sendOk(res, await applyStockPreparationAction({
-        action,
-        parameters: body.parameters,
-        dryRunToken: confirm.dryRunToken,
-        acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
-        acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
-        permission: applyPermissionForUser(user),
-        sourceAdapter,
-        // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
-        // plan and compares revisions, so the two routes must read the bands from one seam.
-        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-        // Same probe input the dry-run route threaded, from the same tenant derivation.
-        targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
-        // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
-        // compares its revision against the token. A mapping on one route and not the other would
-        // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
-        extFieldMapping: stockPreparationExtFieldMapping,
-        // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
-        // decision confirmed/superseded between dry-run and apply changes the recomputed revision
-        // and fails the token check — fail-closed. Production Apply remains off this line entirely
-        // (sandbox/production gates above are untouched).
-        confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-        recordsApi: getMultitableRecordsApi(),
-        tokenStore: context.storage,
-        policyStore: context.storage,
-        // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
-        // Absent (e.g. prod default) → undefined → apply fail-closed.
-        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
-        // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
-        // → sandbox gate (canonical rejected). Request body never supplies it.
-        productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
-        // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
-        // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
-        // right — it does not inherit the dry-run's authorization through the token.
-        b2aTrialRegistry,
-        b2aClaimStore: context.storage,
-        b2aOperationClaim,
-        b2aRunId: applyB2aRunId,
-        // R-02 (contract half): same list as the guard above — see the dry-run route.
-        b2aSourceObjects: applyB2aSourceObjects,
-        tenantId: applyTenantId,
-        now: Date.now(),
-      }))
+      // S3 (ADR §5: apply 结束): the registry row the overlay resolved gets `last_pull_*` stamped —
+      // `applied` with the run's distinct missing-component count, or `refused` with the typed code.
+      let applyResult
+      try {
+        applyResult = await applyStockPreparationAction({
+          action,
+          parameters: body.parameters,
+          dryRunToken: confirm.dryRunToken,
+          acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+          acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
+          permission: applyPermissionForUser(user),
+          sourceAdapter,
+          // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
+          // plan and compares revisions, so the two routes must read the bands from one seam.
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          // Same probe input the dry-run route threaded, from the same tenant derivation.
+          targetFieldExistence: targetFieldExistenceForTenant(applyTenantId),
+          // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
+          // compares its revision against the token. A mapping on one route and not the other would
+          // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+          extFieldMapping: stockPreparationExtFieldMapping,
+          // Same ledger readback the dry-run route consulted, for the same token-parity reason. A
+          // decision confirmed/superseded between dry-run and apply changes the recomputed revision
+          // and fails the token check — fail-closed. Production Apply remains off this line entirely
+          // (sandbox/production gates above are untouched).
+          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+          recordsApi: getMultitableRecordsApi(),
+          tokenStore: context.storage,
+          policyStore: context.storage,
+          // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+          // Absent (e.g. prod default) → undefined → apply fail-closed.
+          sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+          // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
+          // → sandbox gate (canonical rejected). Request body never supplies it.
+          productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+          // S1 (Q6): the project-sheet branch of the sandbox gate, built from the overlay marker and
+          // nothing in the request; undefined when no overlay was applied.
+          projectSheetGate: projectSheetGateFor(action),
+          // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
+          // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
+          // right — it does not inherit the dry-run's authorization through the token.
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: applyB2aRunId,
+          // R-02 (contract half): same list as the guard above — see the dry-run route.
+          b2aSourceObjects: applyB2aSourceObjects,
+          tenantId: applyTenantId,
+          now: Date.now(),
+        })
+      } catch (error) {
+        await stampProjectPullOutcome(action, applyTenantId, { outcome: 'refused', code: error && error.code })
+        // S3 fix round 1 (R5): the project's overview row follows its outcome; best-effort, never the answer.
+        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo)
+        throw error
+      }
+      await stampProjectPullOutcome(action, applyTenantId, { outcome: 'applied', missingComponentsCount: distinctMissingComponentCount(applyResult) })
+      if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(applyTenantId, action.projectTarget.projectNo, { recount: true })
+      return sendOk(res, applyResult)
     },
 
     async tableActionLargeBomExpansionJobStart(req, res) {
@@ -6568,7 +7230,15 @@ function requireStockPreparationAudit() {
       await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS)
       const routeScope = largeBomJobScope(req, { actionId })
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: the project number rides into the lookup; the resolved target then enters the job's
+      // `actionSnapshot`, which plan / apply-start / apply-run reuse byte for byte (ADR §3).
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+        targetPurpose: 'write',
+      })))
+      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+      await assertResolvedProjectTargetTenancy(action, routeScope.tenantId)
       const parameters = normalizeActionParameters(body.parameters)
       const job = await createLargeBomBackgroundExpansionJob({
         storage: context.storage,
@@ -6588,7 +7258,9 @@ function requireStockPreparationAudit() {
     async tableActionLargeBomExpansionJobGet(req, res) {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
+      // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await loadLargeBomBackgroundExpansionJob({
         storage: context.storage,
@@ -6701,6 +7373,22 @@ function requireStockPreparationAudit() {
       })
       assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
+      // R1: the plan reads existing rows FROM THE SNAPSHOT's sheet, so a snapshot that no longer names
+      // the project's registered sheet is refused here, before that read. S4 (ADR §6, R-38): a WRITE
+      // lookup — the plan is the large-BOM lane's preview of a write, exactly as the dry run is the
+      // small lane's, and the §6 table puts 大 BOM with dry-run / apply: an archived project refuses
+      // 409 STOCK_PREPARATION_PROJECT_ARCHIVED here, before the field probe and the existing-row read,
+      // instead of planning a write that apply-start would then refuse. (Was 'read' in S1.)
+      assertLargeBomJobTargetMatchesProjectTarget(
+        action.target,
+        await tableActions.getTableAction({
+          ...routeScope,
+          actionId,
+          projectNo: job.parameters && job.parameters.projectNo,
+          targetPurpose: 'write',
+        }),
+        'expansion',
+      )
       // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
       // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
       await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -6771,7 +7459,9 @@ function requireStockPreparationAudit() {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
+      // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       // THE BAND IS RESOLVED ONCE PER APPLY JOB, HERE — at the moment a human approves it — and is
       // then FROZEN INTO the stored job (same family as planRevision / targetRevision). A checkpoint
@@ -6791,6 +7481,19 @@ function requireStockPreparationAudit() {
         jobId,
       })
       const snapshotAction = assertStockPreparationTargetReady(expansionJob.actionSnapshot)
+      // R1: approval is where a checkpoint apply job is MINTED from the snapshot, so the snapshot must
+      // name the project's registered sheet here — a WRITE lookup (archived → 409 ARCHIVED, absent →
+      // 409 ABSENT) — before the probes below touch the snapshot's sheet and before any job exists.
+      assertLargeBomJobTargetMatchesProjectTarget(
+        snapshotAction.target,
+        await tableActions.getTableAction({
+          ...routeScope,
+          actionId,
+          projectNo: expansionJob.parameters && expansionJob.parameters.projectNo,
+          targetPurpose: 'write',
+        }),
+        'expansion',
+      )
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -6819,7 +7522,9 @@ function requireStockPreparationAudit() {
       await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
+      // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
       const job = await loadLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6836,7 +7541,9 @@ function requireStockPreparationAudit() {
       normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
       const jobId = firstString(requestParams(req).jobId)
       const routeScope = largeBomJobScope(req, { actionId })
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
+      // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
       const pendingJob = await loadLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6854,6 +7561,20 @@ function requireStockPreparationAudit() {
         jobId,
       })
       const runSnapshotAction = assertStockPreparationTargetReady(runExpansionJob.actionSnapshot)
+      // S1 (ADR §3 大 BOM apply-run row): the registry row is RE-CHECKED per chunk — an archived
+      // project refuses 409 here, before the gate and before the chunk write — and the gate's
+      // project-sheet input is built from THAT re-read, never from the stored snapshot alone. With
+      // the switch off the overlay answers nothing and `runProjectAction.projectTarget` is absent.
+      const runProjectAction = await tableActions.getTableAction({
+        ...routeScope,
+        actionId,
+        projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo,
+        targetPurpose: 'write',
+      })
+      // R1: BOTH stored targets — the expansion snapshot the probes below read, and the apply job's
+      // own `target` the chunk writer uses — must name the registered sheet, before any IO on them.
+      assertLargeBomJobTargetMatchesProjectTarget(runSnapshotAction.target, runProjectAction, 'expansion')
+      assertLargeBomJobTargetMatchesProjectTarget(pendingJob.target, runProjectAction, 'apply')
       await tableActionInternals.assertTargetFieldsExist(
         runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
@@ -6876,6 +7597,7 @@ function requireStockPreparationAudit() {
         now: Date.now(),
         route: 'large',
         actionId,
+        projectSheetGate: projectSheetGateFor(runProjectAction),
       })
       // FOS-4b-3-prod P2: post-plan production bound. The plan's clean (add/update) row count is fixed across
       // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
@@ -6917,7 +7639,9 @@ function requireStockPreparationAudit() {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
       normalizeTableActionBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS)
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
+      // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
+      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
       const routeScope = largeBomJobScope(req, { actionId })
       const job = await cancelLargeBomBackgroundExpansionJob({
         storage: context.storage,
@@ -6929,10 +7653,20 @@ function requireStockPreparationAudit() {
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)))
     },
 
+    // S1 (ADR §3, Q3): the three conflict-policy routes take `?projectNo=`. Policies are keyed by the
+    // TARGET (conflict-policies.cjs), so with the switch on they are per project sheet; a request
+    // without the number is refused 400 STOCK_PREPARATION_PROJECT_NO_REQUIRED by the overlay rather
+    // than routed at the old mixed sheet. With the switch off the query key is ignored exactly as
+    // every unknown query key on these routes always was.
     async tableActionConflictPoliciesList(req, res) {
       requireAccess(req, 'read')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(requestQuery(req).projectNo),
+        targetPurpose: 'read',
+      })))
+      await assertResolvedProjectTargetTenancy(action, resolveTenantId(req, {}))
       return sendOk(res, await loadTableScopeConflictPolicies({
         action,
         policyStore: context.storage,
@@ -6942,7 +7676,12 @@ function requireStockPreparationAudit() {
     async tableActionConflictPoliciesSave(req, res) {
       requireAccess(req, 'admin')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(requestQuery(req).projectNo),
+        targetPurpose: 'write',
+      })))
+      await assertResolvedProjectTargetTenancy(action, resolveTenantId(req, {}))
       return sendOk(res, await saveTableScopeConflictPolicies({
         action,
         policyStore: context.storage,
@@ -6954,7 +7693,12 @@ function requireStockPreparationAudit() {
     async tableActionConflictPoliciesDelete(req, res) {
       requireAccess(req, 'admin')
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+        actionId,
+        projectNo: firstString(requestQuery(req).projectNo),
+        targetPurpose: 'write',
+      })))
+      await assertResolvedProjectTargetTenancy(action, resolveTenantId(req, {}))
       return sendOk(res, await deleteTableScopeConflictPolicies({
         action,
         policyStore: context.storage,
@@ -7001,6 +7745,9 @@ function requireStockPreparationAudit() {
         tenantId,
         actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         env: process.env,
+        // S1: the registry, so the preflight can report the switch state and the registered row
+        // count (archived included) — values-free, informational, never a blocker.
+        projectTargetStore: stockPreparationProjectTargets,
       }))
     },
 
@@ -7095,7 +7842,8 @@ function requireStockPreparationAudit() {
       // own text can name a host or a login, so it goes nowhere, and the log gets one closed word.
       let action = null
       try {
-        action = await tableActions.getTableAction({ tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        // S1: SOURCE-only lookup — the overlay never applies (ADR §3 call-site guard).
+        action = await tableActions.getTableAction({ tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source' })
       } catch (error) {
         const notConfigured = error instanceof StockPreparationTableActionError
           && error.code === 'TABLE_ACTION_NOT_CONFIGURED'
@@ -8176,8 +8924,16 @@ function requireStockPreparationAudit() {
       //
       // Resolved BEFORE the ledger pre-flight so a deployment with no configured stock-prep action
       // refuses ahead of any host IO rather than after a read.
+      // S1: the project number is read off the decision's idempotencyKey (the same parse
+      // confirm-writes.cjs re-asserts at write time) so the overlay resolves THIS project's sheet;
+      // an archived project refuses 409 here, before the ledger pre-flight and before any write.
       const carryAction = assertStockPreparationTargetReady(
-        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+        await tableActions.getTableAction({
+          tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo: projectNoFromCarryDecision(input.decision),
+          targetPurpose: 'write',
+        }),
       )
       // ...AND IT MUST BE THE SHEET OF THE CALLER'S OWN TENANT.
       //
@@ -8422,6 +9178,676 @@ function requireStockPreparationAudit() {
       return sendOk(res, result)
     },
 
+    // ── 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008 §2 / §4) ─────────────────
+    //
+    // ORDER: THE PERMISSION GATE FIRST, THEN THE SWITCH, THEN ANY IO. `requireAccess` is a pure read
+    // of the authenticated principal, so a caller below the tier is answered 401 / 403 exactly as on
+    // every other stock-prep route — the switch never turns a permission refusal into a 404, and the
+    // 404 is therefore only ever seen by someone who could use the route if it were on. With the
+    // switch off the routes then stop before any IO (404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED,
+    // closed code), which is what makes S1 shippable in a release that leaves the switch off (§8
+    // R63). The call-site guard pins this order (gate → switch → first await).
+    //
+    // TENANT DERIVATION is the board's: the host-vouched operator scope, never `resolveTenantId`.
+    // The registry is keyed by that tenant, so ABSENT / ACTIVE / ARCHIVED is only ever a fact about
+    // the caller's own tenant.
+
+    async stockPreparationProjectTargetGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = firstString(requestParams(req).projectNo)
+      if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+      }
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const store = requireStockPreparationProjectTargets()
+      const canPull = satisfiesStockPrepAccess(listUserPermissions(user), STOCK_PREP_PULL)
+      const row = await store.get({ tenantId: scope.tenantId, projectNo })
+      if (!row) {
+        return sendOk(res, {
+          projectNo,
+          status: 'absent',
+          sheetId: null,
+          viewId: null,
+          todoViewId: null,
+          rowCount: null,
+          activeRowCount: null,
+          rowCountBounded: null,
+          lastPulledAt: null,
+          lastPullOutcome: null,
+          archivedAt: null,
+          may: { create: canPull, archive: false, restore: false },
+        })
+      }
+      const provisioning = getMultitableProvisioning()
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: row.objectId })
+      // Row facts counted IN THIS PROJECT'S SHEET (pull-target-scan.cjs), through the binding the
+      // overlay would resolve — bounded like the board's count, `null` when the scan cannot run.
+      let rowFacts = null
+      try {
+        const binding = await buildProjectTargetBinding({ provisioning, projectId: targetProjectId, target: row })
+        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: pullTargetScanCache })
+        rowFacts = scan && scan.ready ? scan : null
+      } catch (error) {
+        rowFacts = null
+      }
+      return sendOk(res, {
+        projectNo,
+        status: row.status,
+        sheetId: row.sheetId,
+        viewId: handles.viewId,
+        todoViewId: handles.todoViewId,
+        rowCount: rowFacts ? rowFacts.rowCount : null,
+        activeRowCount: rowFacts ? rowFacts.activeRowCount : null,
+        rowCountBounded: rowFacts ? rowFacts.bounded === true : null,
+        lastPulledAt: row.lastPullAt,
+        lastPullOutcome: row.lastPullOutcome,
+        archivedAt: row.archivedAt,
+        may: {
+          create: false,
+          archive: canPull && row.status === 'active',
+          restore: canPull && row.status === 'archived',
+        },
+      })
+    },
+
+    // CREATE + REGISTER + GRANT. R-35's named exception to R-11: a PULLER provisions ONE sheet, from
+    // the frozen template, with every identifier derived server-side and an EMPTY request body.
+    // Ordering: switch → gate → body/number shape → scope → audit vocabulary probe (migration 088)
+    // → registry read, then ONE of two legs:
+    //   create — customer-pack PLAN + PRE-FLIGHT + tenant-claim door (S2, reads only; every refusal
+    //            decidable without the sheet) → cap (pre-count, so nothing is provisioned past it) →
+    //            provision → customer-pack INSTALL (S2) → register (E1: the store re-checks the cap
+    //            under a per-tenant advisory lock, in the same transaction as its insert) → audit →
+    //            grant → audit;
+    //   replay — grant → audit FIRST (healed whatever the packs do), then the pack heal → audit.
+    // A race partner's insert is arbitrated by the registry's unique index (the store maps 23505
+    // to 409).
+    //
+    // S2 (ADR §2 「客户包」, register R-36): the deployment's customer pack is installed onto the new
+    // sheet BEFORE the registry row is written, and every refusal decidable without the sheet is
+    // asked BEFORE the sheet is provisioned. So a repeating refusal (no field-permission port, a
+    // role deleted on the host, a claimless login for a write-scope pack, a band no pack covers)
+    // provisions nothing; only a genuine mid-install host failure can leave a provisioned,
+    // unregistered sheet — at most ONE per project number (ensure-if-absent by the derived objectId),
+    // reused by the retry, which is the same POST, and not counted by the 200 cap until registered.
+    // The 200 replay heals an already registered sheet the same way.
+    async stockPreparationProjectTargetCreate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      normalizeStockPreparationConfirmBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID')
+      const projectNo = firstString(requestParams(req).projectNo)
+      if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+      }
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargets()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION, '088', tenantId)
+      // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const actor = user.id || user.email
+      const existing = await store.get({ tenantId, projectNo })
+      if (existing && existing.status === 'archived') {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it instead of creating a second one', { field: 'projectNo' })
+      }
+      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+      // G1 — the host grant is ON CONFLICT DO NOTHING, so running it again heals a grant that failed
+      // after the row was registered and never adds a second permission row. Server-configured roles
+      // only; a refusal from the host propagates.
+      const healGrant = async (target) => {
+        const outcome = await grantProjectSheetRoles({
+          provisioning,
+          projectId: targetProjectId,
+          sheetId: target.sheetId,
+          objectId: target.objectId,
+          roleIds: resolveProjectSheetGrantRoleIds(process.env),
+          actorId: actor,
+        })
+        if (outcome.attempted) {
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+            subjectId: target.sheetId,
+            mode: outcome.granted > 0 ? 'granted' : 'already_granted',
+            actor,
+            detail: { roleCount: outcome.roleCount, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
+          })
+        }
+        return outcome
+      }
+      // S2 — WHICH CUSTOMER PACKS THE SHEET MUST CARRY. The DEPLOYMENT's own action, read as an
+      // env-binding probe ('readiness' is never overlaid by the registry): its env target objectId
+      // keys the install ledger, its declared `extensionFieldIds` is the band the packs must cover.
+      // A deployment without the pull action configured has no band and no env object, so there is
+      // nothing to carry over; any OTHER lookup failure propagates before anything is provisioned.
+      // Server config only — the request body is the empty allowlist above.
+      const planPacks = async () => {
+        let deploymentAction = null
+        try {
+          deploymentAction = await tableActions.getTableAction({
+            actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+            tenantId,
+            targetPurpose: 'readiness',
+          })
+        } catch (error) {
+          const code = error && error.code
+          if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+          deploymentAction = null
+        }
+        return planProjectSheetCustomerPacks({
+          tenantId,
+          projectId: targetProjectId,
+          deploymentObjectId: deploymentAction && deploymentAction.target ? deploymentAction.target.objectId : null,
+          extensionFieldIds: deploymentAction ? deploymentAction.extensionFieldIds : undefined,
+          packCatalog: customerPackCatalog,
+          packInstallStore: stockPreparationPackInstalls,
+        })
+      }
+      const installPacks = (plan, objectId) => installProjectSheetCustomerPacks({
+        plan,
+        provisioning,
+        projectId: targetProjectId,
+        tenantId,
+        projectNo,
+        objectId,
+        packInstallStore: stockPreparationPackInstalls,
+        fieldPermissions: stockPreparationFieldPermissions,
+        tenantClaimVerified: scope.tenantClaimVerified === true,
+        logger: routeLogger,
+      })
+      let registered = existing
+      let created = false
+      let provisioned = null
+      let packs = null
+      let grant = null
+      if (registered) {
+        // THE 200 REPLAY. The G1 grant heal runs FIRST and on its own (S2 fix round 1): a pack plan
+        // or install refusal below must not leave the role grant unhealed. Then the pack heal — a
+        // pack missing from the sheet's own ledger, at an older version, or whose `ext_` columns the
+        // field-existence probe no longer finds is (re)installed; one already in place costs no
+        // host write.
+        //
+        // S4 fix round 1 (R-38): the `existing` read above is OUTSIDE the tenant lock, and an archive
+        // can commit after it. So the heal runs inside `withActiveRowLocked`: the registry row is
+        // re-read under the SAME per-tenant advisory lock archive / restore take, an archived row
+        // refuses 409 STOCK_PREPARATION_PROJECT_ARCHIVED before any grant or pack write, and the lock
+        // is held across the heal so an archive arriving meanwhile waits for it.
+        if (typeof store.withActiveRowLocked !== 'function') {
+          throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+        }
+        const healed = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+          const lockedGrant = await healGrant(locked)
+          const replayPlan = await planPacks()
+          const lockedPacks = await installPacks(replayPlan, locked.objectId)
+          return { row: locked, grant: lockedGrant, packs: lockedPacks }
+        })
+        registered = healed.row
+        grant = healed.grant
+        packs = healed.packs
+      } else {
+        // THE CREATE. Every refusal decidable without the sheet comes BEFORE provisioning (S2 fix
+        // round 1, the cap boundary): band coverage, the installer's own sheet-independent
+        // pre-flight per pack, and the tenant-claim door for write-scope packs. See the ordering
+        // note above this handler.
+        const createPlan = await planPacks()
+        await preflightProjectSheetCustomerPacks({
+          plan: createPlan,
+          provisioning,
+          fieldPermissions: stockPreparationFieldPermissions,
+          tenantClaimVerified: scope.tenantClaimVerified === true,
+        })
+        // THE CAP counts archived rows too (§6: an archived sheet is a live sheet).
+        const registeredCount = await store.count({ tenantId })
+        if (registeredCount >= MAX_PROJECT_TARGETS_PER_TENANT) {
+          throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT', `this tenant already has ${MAX_PROJECT_TARGETS_PER_TENANT} registered stock-preparation project sheets (archived included)`, { limit: MAX_PROJECT_TARGETS_PER_TENANT })
+        }
+        // Ensure-if-absent by the DERIVED objectId: a retry after a mid-install failure reuses this
+        // one table, so a project number can never own two.
+        provisioned = await provisionProjectSheet({
+          context,
+          projectId: targetProjectId,
+          tenantId,
+          projectNo,
+          env: process.env,
+        })
+        // S2: INSTALL BEFORE REGISTER — see the ordering note above this handler.
+        packs = await installPacks(createPlan, provisioned.objectId)
+        registered = await store.create({
+          tenantId,
+          projectNo,
+          sheetId: provisioned.sheetId,
+          objectId: provisioned.objectId,
+          createdBy: actor,
+          // E1: the cap is enforced by the store under its lock; this pre-count above only keeps a
+          // sheet from being provisioned for a tenant that is visibly at the cap.
+          maxPerTenant: MAX_PROJECT_TARGETS_PER_TENANT,
+        })
+        created = true
+        await audit.append({
+          tenantId,
+          projectId: projectNo,
+          action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+          subjectId: registered.sheetId,
+          mode: provisioned.created ? 'sheet_created' : 'sheet_adopted',
+          actor,
+          detail: {
+            fillViewCreated: Boolean(provisioned.fillView && provisioned.fillView.created === true),
+            todoViewCreated: provisioned.todoView.created === true,
+            ownBaseSource: provisioned.ownBaseSource || 'unknown',
+          },
+        })
+      }
+      // S2: the pack install is audited under the EXISTING `project_target_create` action (it is
+      // the part of creating the sheet that makes it usable), with its own closed mode — no new
+      // vocabulary migration. Written only when a pack actually landed (installed or reinstalled);
+      // values-free: counts, and the pack ids (deployment slugs) as a version count map.
+      const landedPackCount = packs ? packs.installedPackCount + packs.reinstalledPackCount : 0
+      if (landedPackCount > 0) {
+        const packVersions = {}
+        for (const entry of packs.packs) {
+          if (entry.outcome === 'installed' || entry.outcome === 'reinstalled') packVersions[entry.packId] = entry.packVersion
+        }
+        await audit.append({
+          tenantId,
+          projectId: projectNo,
+          action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+          subjectId: registered.sheetId,
+          mode: 'customer_pack_installed',
+          actor,
+          detail: {
+            installedPackCount: packs.installedPackCount,
+            reinstalledPackCount: packs.reinstalledPackCount,
+            alreadyInstalledPackCount: packs.alreadyInstalledPackCount,
+            notInCatalogPackCount: packs.notInCatalogPackCount,
+            declaredExtensionFieldCount: packs.declaredExtensionFieldCount,
+            createdFieldCount: packs.packs.reduce((total, entry) => total + entry.createdFieldCount, 0),
+            stampedFieldCount: packs.packs.reduce((total, entry) => total + entry.stampedFieldCount, 0),
+            packVersions,
+          },
+        })
+      }
+      // G1 on the CREATE leg — after the registry row exists (the replay leg healed it above).
+      if (!grant) grant = await healGrant(registered)
+      // S3 fix round 1 (R6 / R1 / R5): with a project registered, the PULL tier provisions the read-only
+      // overview if it is absent (+ its G1 READ grant), then this project's overview row is written. Both
+      // best-effort and AFTER every registry lock is released — the create's answer is the project sheet.
+      const overviewOutcome = await ensureProjectOverviewBestEffort({ audit, tenantId, projectId: targetProjectId, actor })
+      await updateProjectOverviewRowBestEffort(tenantId, projectNo, { recount: true })
+      const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: registered.objectId })
+      return sendOk(res, {
+        projectNo,
+        status: registered.status,
+        created,
+        sheetId: registered.sheetId,
+        objectId: registered.objectId,
+        viewId: handles.viewId,
+        todoViewId: handles.todoViewId,
+        grant: {
+          attempted: grant.attempted,
+          skipped: grant.skipped,
+          roleCount: grant.roleCount,
+          granted: grant.granted,
+          alreadyGranted: grant.alreadyGranted,
+        },
+        // S2: what the customer-pack carry-over did, as counts (values-free).
+        customerPacks: {
+          planned: packs ? packs.packs.length : 0,
+          installed: packs ? packs.installedPackCount : 0,
+          reinstalled: packs ? packs.reinstalledPackCount : 0,
+          alreadyInstalled: packs ? packs.alreadyInstalledPackCount : 0,
+          notInCatalog: packs ? packs.notInCatalogPackCount : 0,
+        },
+        ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
+        // S3 fix round 1 (R6): what the overview leg did, values-free (`code` is a closed error code).
+        overview: { ensured: overviewOutcome.ensured, created: overviewOutcome.created, code: overviewOutcome.code },
+      }, created ? 201 : 200)
+    },
+
+    // ── 一个项目一张备料表 S4 (ADR §6, register R-38): ARCHIVE AND RESTORE ───────────────────────────
+    //
+    // 归档代替删除 (Q2). Both routes change ONE registry row (status + its outcome columns) and append
+    // ONE audit row — nothing else. The sheet is never soft- or hard-deleted, renamed or re-granted;
+    // its rows, the confirmation ledger and the handoff cursor are untouched; so neither route makes a
+    // single host call (no provisioning, no records, no grant port). What archiving DOES change is how
+    // every OTHER route resolves this project: the overlay answers 409 ARCHIVED to every write-purpose
+    // lookup and keeps serving reads (§6 route table), and the scheduled pull skips it.
+    //
+    // ORDER, pinned by the call-site guard exactly as for the S1 routes: the PULL gate (S0's tier;
+    // `stock-prep:admin` and the platform admin pass through the ladder) → the switch → the request
+    // (pure: body allowlist + `confirmProjectNo` must repeat the path number) → the host-vouched
+    // scope → the store → the audit vocabulary probe → the transition (one transaction, the tenant's
+    // advisory lock, the row FOR UPDATE, a typed 409 when the precondition fails) → the audit row.
+    //
+    // KNOWN LIMIT, the same as the create's (R-35 (a)): the audit append runs after the transition's
+    // transaction has committed; an append that fails leaves the transition in place, unaudited, and
+    // the request answers the append's error.
+    async stockPreparationProjectTargetArchive(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const projectNo = stockPreparationProjectTargetLifecycleRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargetLifecycle()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const archived = await store.archive({ tenantId, projectNo, actorId: actor })
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION,
+        subjectId: archived.sheetId,
+        mode: 'archived',
+        actor,
+        detail: { fromStatus: 'active', toStatus: 'archived' },
+      })
+      // S3 fix round 1 (R5): the overview row moves to 「已归档」 now, not on the next refresh. Best-effort.
+      await updateProjectOverviewRowBestEffort(tenantId, projectNo)
+      return sendOk(res, stockPreparationProjectTargetLifecycleResponse(projectNo, archived))
+    },
+
+    // RESTORE. archived → active, then the web runs the ordinary re-pull flow (ADR §4: 「恢复并重新拉取」).
+    // No second sheet can appear: the sheet id is derived and archiving never touched the sheet. The
+    // 200 cap is not re-checked — the row was counted while archived (§6).
+    async stockPreparationProjectTargetRestore(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const projectNo = stockPreparationProjectTargetLifecycleRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargetLifecycle()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const restored = await store.restore({ tenantId, projectNo, actorId: actor })
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION,
+        subjectId: restored.sheetId,
+        mode: 'restored',
+        actor,
+        detail: { fromStatus: 'archived', toStatus: 'active' },
+      })
+      // S3 fix round 1 (R5): the overview row leaves 「已归档」 now. Best-effort.
+      await updateProjectOverviewRowBestEffort(tenantId, projectNo)
+      return sendOk(res, stockPreparationProjectTargetLifecycleResponse(projectNo, restored))
+    },
+
+    async stockPreparationProjectTargetList(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const store = requireStockPreparationProjectTargets()
+      const rows = await store.list({ tenantId: scope.tenantId })
+      // S3: the overview's handles for the home page. Fix round 1 (R8b): a handle is issued ONLY for a
+      // sheet the host reports as the STAMPED overview — never for whatever sits at the derived id — so the
+      // home can never open somebody's writable sheet as "the overview". `status` says why there is none:
+      // `absent` (not created yet), `not_stamped` (a sheet the plugin refuses sits at its id),
+      // `unavailable` (an older host, or the lookup failed). One read-only lookup, values-free.
+      let overview = { status: 'unavailable', sheetId: null, activeViewId: null, archivedViewId: null }
+      try {
+        const found = await findProjectOverviewSheet({
+          provisioning: getMultitableProvisioning(),
+          projectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        })
+        overview = found
+          ? { status: 'ready', sheetId: found.sheetId, activeViewId: found.activeViewId, archivedViewId: found.archivedViewId }
+          : { status: 'absent', sheetId: null, activeViewId: null, archivedViewId: null }
+      } catch (error) {
+        const notStamped = error && error.code === 'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED'
+        overview = { status: notStamped ? 'not_stamped' : 'unavailable', sheetId: null, activeViewId: null, archivedViewId: null }
+      }
+      return sendOk(res, {
+        count: rows.length,
+        limit: MAX_PROJECT_TARGETS_PER_TENANT,
+        overview,
+        items: rows.map((row) => ({
+          projectNo: row.projectNo,
+          status: row.status,
+          sheetId: row.sheetId,
+          objectId: row.objectId,
+          createdAt: row.createdAt,
+          archivedAt: row.archivedAt,
+          lastPullAt: row.lastPullAt,
+          lastPullOutcome: row.lastPullOutcome,
+          lastPullCode: row.lastPullCode,
+          rowCount: row.rowCount,
+          activeRowCount: row.activeRowCount,
+          countsBounded: row.countsBounded,
+          // S3: the three remaining bounded counts the overview projects.
+          missingComponentsCount: row.missingComponentsCount,
+          procurementOpenCount: row.procurementOpenCount,
+          warehouseOpenCount: row.warehouseOpenCount,
+          countsAt: row.countsAt,
+        })),
+      })
+    },
+
+    // ── S3 (ADR §5, register R-37): THE O2(a) PROJECT-LEVEL COLUMNS ───────────────────────────────
+    //
+    // 负责人 / 备注 / 计划完成 live in the REGISTRY ROW (migration 087), are read and written ONLY here,
+    // and are projected into the read-only overview on its next refresh. They do not sync to the
+    // material rows and `responsibleLabel` is free text, never a user id and never an authorization
+    // input (ADR §9). ORDER as on every S1/S4 route: gate → switch → pure request checks → scope →
+    // store → (write: audit vocabulary → transition under the tenant lock → ONE audit row that names
+    // the columns changed, never a value).
+    async stockPreparationProjectFieldsGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      const store = requireStockPreparationProjectFields()
+      const fields = await store.getProjectFields({ tenantId: scope.tenantId, projectNo })
+      return sendOk(res, stockPreparationProjectFieldsResponse(projectNo, fields))
+    },
+
+    async stockPreparationProjectFieldsUpdate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const body = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_PROJECT_FIELDS_BODY_KEYS,
+        'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+      )
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      // PURE, before any IO: the whitelist, the caps and the calendar-day shape (422 names the FIELD).
+      normalizeProjectFieldsPatch(body)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectFields()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const updated = await store.updateProjectFields({ tenantId, projectNo, actorId: actor, fields: body })
+      const fields = {}
+      for (const key of updated.changed) fields[key] = 1
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION,
+        subjectId: updated.fields.sheetId,
+        mode: 'updated',
+        actor,
+        // WHICH columns changed, as a count map keyed by column name — never a value.
+        detail: { updatedFieldCount: updated.changed.length, fields },
+      })
+      // S3 fix round 1 (R5): the overview row carries the new texts now. Best-effort.
+      await updateProjectOverviewRowBestEffort(tenantId, projectNo)
+      return sendOk(res, { ...stockPreparationProjectFieldsResponse(projectNo, updated.fields), changed: updated.changed })
+    },
+
+    // ── S3 (ADR §5, register R-37): THE PROJECT OVERVIEW REFRESH (Q5) ─────────────────────────────
+    //
+    // Rebuilds the host-level read-only overview sheet from the registry + the project sheets within
+    // bounds (stock-preparation-project-overview.cjs holds the projection and its bounds). OPERATE (ADR
+    // §5 「OPERATE 档」). Fix round 1 (R6): it NEVER provisions — an absent overview is 409
+    // STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT (the PULL tier creates it: the project-target create route
+    // and `ensure` below); it runs under the tenant's overview lock (R3) and a per-tenant cooldown: within
+    // PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS of a refresh that started, a call answers 200 `fresh: false` with
+    // no refresh IO (past the operator-scope resolution that names the tenant). Fix round 2 (F4): the lock is
+    // a TRY-lock — another overview writer of the tenant running (in this process, or holding the database
+    // lock in another) answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once, nothing done, and the
+    // cooldown stamp is cleared like any refresh that did not complete. Audited `project_overview_refresh`
+    // with counts only.
+    async stockPreparationProjectOverviewRefresh(req, res) {
+      const user = requireAccess(req, STOCK_PREP_OPERATE)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      normalizeStockPreparationConfirmBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REQUEST_INVALID')
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const startedAt = projectOverviewRefreshStartedAt.get(tenantId)
+      const nowMs = Date.now()
+      if (typeof startedAt === 'number' && nowMs - startedAt < PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS) {
+        return sendOk(res, {
+          fresh: false,
+          cooldownSeconds: Math.round(PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS / 1000),
+          retryAfterSeconds: Math.max(1, Math.ceil((PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS - (nowMs - startedAt)) / 1000)),
+        })
+      }
+      projectOverviewRefreshStartedAt.set(tenantId, nowMs)
+      try {
+        const store = requireStockPreparationProjectOverview()
+        await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION, '088', tenantId)
+        // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+        const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+        const actor = user.id || user.email
+        const result = await refreshProjectOverview({
+          provisioning: getMultitableProvisioning(),
+          recordsApi: getMultitableRecordsApi(),
+          store,
+          tenantId,
+          projectId: targetProjectId,
+        })
+        await audit.append({
+          tenantId,
+          action: STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION,
+          subjectId: result.sheetId,
+          mode: 'refreshed',
+          actor,
+          detail: {
+            projectCount: result.projectCount,
+            countedCount: result.countedCount,
+            unreadableCount: result.unreadableCount,
+            boundedCount: result.boundedCount,
+            rowsCreated: result.rowsCreated,
+            rowsUpdated: result.rowsUpdated,
+            rowsUnchanged: result.rowsUnchanged,
+            rowsRemovedDuplicate: result.rowsRemovedDuplicate,
+            rowsRemovedOrphan: result.rowsRemovedOrphan,
+            truncated: result.truncated,
+            ledgerReady: result.ledgerReady,
+          },
+        })
+        return sendOk(res, { fresh: true, ...result })
+      } catch (error) {
+        // A refresh that did not complete is not "fresh": the next click may try again at once.
+        projectOverviewRefreshStartedAt.delete(tenantId)
+        throw error
+      }
+    },
+
+    // ── S3 fix round 1 (R6 / R1): ENSURE THE PROJECT OVERVIEW (PULL) ──────────────────────────────
+    //
+    // The PULL tier's explicit provisioning of the read-only overview (the project-target create route
+    // does the same best-effort): ensure-if-absent of the host-stamped sheet with its two views — refused
+    // BEFORE any write on a host that does not declare the stamp (503) or when an unstamped sheet sits at
+    // its derived id (409 NOT_STAMPED, nothing created) — then the G1 READ grant for the configured roles.
+    // ORDER as on every S1/S4 PULL route: gate → switch → empty body → host-vouched scope → store → audit
+    // vocabulary → ensure → audit → grant → audit. It projects nothing: the OPERATE refresh fills the rows.
+    async stockPreparationProjectOverviewEnsure(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      normalizeStockPreparationConfirmBody(requestBody(req), VALID_EMPTY_REQUEST_KEYS, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REQUEST_INVALID')
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      requireStockPreparationProjectOverview()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION, '088', tenantId)
+      // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+      const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+      const actor = user.id || user.email
+      const { sheet, grant } = await ensureProjectOverviewAndGrant({ audit, tenantId, projectId: targetProjectId, actor })
+      return sendOk(res, {
+        sheetId: sheet.sheetId,
+        created: sheet.created === true,
+        activeViewId: sheet.activeViewId,
+        archivedViewId: sheet.archivedViewId,
+        grant: {
+          attempted: grant.attempted,
+          skipped: grant.skipped,
+          roleCount: grant.roleCount,
+          granted: grant.granted,
+          alreadyGranted: grant.alreadyGranted,
+        },
+      })
+    },
+
     // #3751 MVP W5b (#3890): values-free audit trail read — entries are values-free BY CONSTRUCTION
     // (the store's structural gate refused anything else at append time).
     async stockPreparationAuditList(req, res) {
@@ -8527,8 +9953,9 @@ function requireStockPreparationAudit() {
       const binding = publicPersistedBinding(rawBinding)
 
       const dataSourceAccessibility = await resolveDataSourceAccessibility(req, systems)
+      // S1: SOURCE-only lookup — the overlay never applies (ADR §3 call-site guard).
       const effective = await tableActions
-        .getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        .getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source' })
         .then((action) => action.source, () => null)
 
       // THE ACTION'S OWN KIND IS THE PICKER'S FILTER, and this is the fix for the
@@ -8623,7 +10050,8 @@ function requireStockPreparationAudit() {
       // check against, and binding into that gap is precisely how the footgun above is loaded.
       let requiredKind = null
       try {
-        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        // S1: SOURCE-only lookup — the overlay never applies (ADR §3 call-site guard).
+        const action = await tableActions.getTableAction({ ...listScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source' })
         requiredKind = action.source.kind
       } catch (error) {
         if (error instanceof StockPreparationTableActionError) {
@@ -8679,6 +10107,157 @@ function requireStockPreparationAudit() {
         // Not decoration: the caller is told the change is live so the UI can say so without the
         // front end asserting a backend property on its own authority.
         takesEffectWithoutRestart: true,
+      })
+    },
+
+    // ── 备料「成员与权限」 S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, register R-39) ───
+    //
+    // ORDER, pinned by the members route suite exactly as for the S1/S4 routes: THE WORKBENCH_ADMIN GATE
+    // (a pure read of the principal) → THE SWITCH (404 STOCK_PREP_MEMBERS_PAGE_DISABLED) → the closed
+    // request (pure) → the host's narrow members port, which re-derives the caller from the database
+    // (platform admin, or the admitted `stock-prep` delegated admin with a stock-prep scope) before it
+    // reads or writes anything. The plugin gate is therefore necessary and never sufficient: a
+    // `stock-prep:admin` code holder who is not the delegated admin passes here and is refused there.
+    //
+    // NO TENANT on three of the four: roles and memberships are platform-global, and the port decides
+    // its own visibility (the delegated scope). The project-sheet add DOES resolve the caller's tenant
+    // (the host-vouched operator scope, like every project-target route) because it names project
+    // sheets, and only the caller's OWN tenant's registered, active sheets can be named.
+
+    async stockPreparationMembersRead(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      return withMembersFailures(async () => {
+        normalizeStockPreparationConfirmBody(requestQuery(req), VALID_EMPTY_REQUEST_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const members = requireStockPreparationMembers()
+        return sendOk(res, await members.describe({ actorId: user.id }))
+      })
+    },
+
+    async stockPreparationMembersCustomRoleCreate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const members = requireStockPreparationMembers()
+        const created = await members.createCustomRole({ actorId: user.id, name: body.name, permissionCodes: body.permissionCodes })
+        return sendOk(res, created, 201)
+      })
+    },
+
+    async stockPreparationMembersCustomRoleUpdate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const roleId = firstString(requestParams(req).roleId)
+        const members = requireStockPreparationMembers()
+        const updated = await members.updateCustomRole({
+          actorId: user.id,
+          roleId,
+          ...(Object.prototype.hasOwnProperty.call(body, 'name') ? { name: body.name } : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'permissionCodes') ? { permissionCodes: body.permissionCodes } : {}),
+        })
+        return sendOk(res, updated)
+      })
+    },
+
+    // ADD project sheets to a custom role's scope (§11.5). Add-only: there is no remove route (ADR
+    // §11.7 — a table comes off a role only through the platform's own sheet permissions, G2). Both
+    // switches must be on: this page's, and the project-sheets switch whose registry names the sheets.
+    // The port runs the caller tier and the role checks BEFORE it asks for the targets, so the
+    // registry is read only for an admitted caller and an existing custom role; it then requires every
+    // sheet to be WRITABLE by the grantor, and runs each target's G1 call — the SAME host port the
+    // create route uses (`grantSheetRoleWrite` through plugin-scope: plugin-owned project sheets only,
+    // role subjects only, `spreadsheet:write`, ON CONFLICT DO NOTHING). Each landed call also appends
+    // the plugin audit row `project_target_grant` (mode custom_role_granted / _already_granted) —
+    // BEST-EFFORT (fix round 1, S9): the G1 grant has committed by then, and the host port writes its
+    // own audit row once this call returns, so a failed plugin append is logged (code only) and never
+    // turns a landed grant into a 500 that skips the host's row.
+    async stockPreparationMembersCustomRoleProjectTargets(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      requireProjectSheetsEnabled()
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        let projectNos
+        try {
+          projectNos = normalizeStockPrepMembersProjectNos(body.projectNos)
+        } catch (error) {
+          if (error instanceof StockPrepMembersRequestError) throw new HttpRouteError(400, error.code, error.message, error.details)
+          throw error
+        }
+        const roleId = firstString(requestParams(req).roleId)
+        const members = requireStockPreparationMembers()
+        const actor = user.id
+        const result = await members.grantCustomRoleProjectSheets({
+          actorId: actor,
+          roleId,
+          resolveTargets: async () => {
+            const scope = await resolveOperatorValueScope({
+              user,
+              authenticatedTenantId: req.authenticatedTenantId,
+              explicitTenantIds: collectExplicitTenantIds(req, {}),
+              tenantPrincipalDirectory,
+            })
+            const tenantId = scope.tenantId
+            const store = requireStockPreparationProjectTargets()
+            const audit = requireStockPreparationAudit()
+            await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION, '088', tenantId)
+            const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+            // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+            const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+            const rows = []
+            // Only the CALLER's tenant's registry rows can be named (`store.get` is keyed by the
+            // host-vouched tenant), and only active ones — a write to an archived project's table is a
+            // §6 write-purpose action and refuses like the others.
+            for (const projectNo of projectNos) {
+              const row = await store.get({ tenantId, projectNo })
+              if (!row) {
+                throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'a named project has no registered stock-preparation sheet in your tenant', { field: 'projectNos' })
+              }
+              if (row.status !== 'active') {
+                throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'a named project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNos' })
+              }
+              rows.push({ projectNo, row })
+            }
+            return rows.map(({ projectNo, row }) => ({
+              sheetId: row.sheetId,
+              grant: async () => {
+                const outcome = await grantProjectSheetRoles({
+                  provisioning,
+                  projectId: targetProjectId,
+                  sheetId: row.sheetId,
+                  objectId: row.objectId,
+                  roleIds: [roleId],
+                  actorId: actor,
+                })
+                if (!outcome.attempted) {
+                  throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_GRANT_PORT_UNAVAILABLE', 'the host does not expose the project-sheet grant port here')
+                }
+                try {
+                  await audit.append({
+                    tenantId,
+                    projectId: projectNo,
+                    action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+                    subjectId: row.sheetId,
+                    mode: outcome.granted > 0 ? 'custom_role_granted' : 'custom_role_already_granted',
+                    actor,
+                    detail: { roleId, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
+                  })
+                } catch (auditError) {
+                  if (routeLogger && typeof routeLogger.warn === 'function') {
+                    routeLogger.warn('[plugin-integration-core] stock-prep members grant: plugin audit append failed after the grant landed', {
+                      code: loggableRouteFailureCode(auditError),
+                    })
+                  }
+                }
+                return { granted: outcome.granted > 0 }
+              },
+            }))
+          },
+        })
+        return sendOk(res, result)
       })
     },
 
@@ -8919,6 +10498,26 @@ function requireStockPreparationAudit() {
           ...(firstString(input.resolutionAction) ? { resolutionAction: firstString(input.resolutionAction) } : {}),
         },
       })
+      // S4 (ADR §6 「confirm 裁决 … 同一个 409（不改账本，不发钉钉）」, register R-38). With the
+      // project-sheets switch on, a decision whose LEDGER ROW names an archived project is refused
+      // 409 STOCK_PREPARATION_PROJECT_ARCHIVED and the ledger is not patched. The check runs INSIDE
+      // the write, on the one row the write itself located and is about to patch — keyed by that
+      // row's own project cell and the VERIFIED tenant, never by anything the caller sent — so it
+      // cannot be skipped by a soft lookup that failed or by a project number the audit column's
+      // shape floor drops. The intent row above still lands first, exactly as for every other refusal
+      // of this route ("audit row + error"). A registry read that fails PROPAGATES: with the switch on,
+      // "could not tell whether the project is archived" is not "it is not archived". A row naming no
+      // project, or a project the registry does not hold, is unchanged. Switch off: no hook at all,
+      // so the write is byte-identical to before S4.
+      const assertProjectWritable = stockPreparationProjectSheetsEnabled(process.env)
+        ? async (ledgerProjectNo) => {
+          if (!ledgerProjectNo) return
+          const registered = await requireStockPreparationProjectTargets().get({ tenantId, projectNo: ledgerProjectNo })
+          if (registered && registered.status === 'archived') {
+            throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it before confirming its decisions', { field: 'projectNo' })
+          }
+        }
+        : undefined
       const result = await confirmConfirmationDecision({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -8931,7 +10530,11 @@ function requireStockPreparationAudit() {
         resolvedAuxValue: input.resolvedAuxValue,
         notes: input.notes,
         confirmedBy: user.id || user.email,
+        ...(assertProjectWritable ? { assertProjectWritable } : {}),
       })
+      // S3 fix round 1 (R5): a confirmation changes the project's 「等您拿主意」 count; its overview row
+      // follows (switch on, project known). Best-effort — the confirmation already happened.
+      if (confirmProjectNo) await updateProjectOverviewRowBestEffort(tenantId, confirmProjectNo)
       return sendOk(res, result)
     },
 
@@ -8991,8 +10594,10 @@ function requireStockPreparationAudit() {
       // configuration shared by every tenant on the deployment (`getTableAction` is keyed by
       // actionId alone, and the persisted source binding overrides only the source, never the
       // target), and the only row-level scoping inside it is `projectNo`.
+      // S1: a READ purpose — an archived project's sheet still exports (ADR §6 read-only); the wall
+      // below then runs on the resolved project sheet exactly as it ran on the env target.
       const action = assertStockPreparationTargetReady(
-        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, projectNo, targetPurpose: 'read' }),
       )
       // ...SO THE SHEET MUST BE PROVEN TO BE THE CALLER'S OWN before a single row is read — the SAME
       // wall the 结转 write runs (assertStockPreparationTargetBelongsToTenant, above), answering in
@@ -9138,15 +10743,33 @@ function requireStockPreparationAudit() {
       // the narrow catch because it is a single-project page a reader arrives at deliberately; the
       // landing page is where the whole tier starts, and it must open.
       let boundTarget = null
-      if (includePullTargets) {
+      // S1 (ADR §3.1 Q3): with the switch on the directory's union scan must NOT read the old mixed
+      // sheet, so no bound target is resolved at all — the directory then carries the MVP ledger
+      // projects only, until S2/S3 enumerate the registry rows here. With the switch off this is the
+      // readiness probe it always was (the env target, no overlay).
+      if (includePullTargets && !stockPreparationProjectSheetsEnabled(process.env)) {
         try {
           const boundAction = await tableActions.getTableAction({
             tenantId: scope.tenantId,
             actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+            targetPurpose: 'readiness',
           })
           boundTarget = boundAction && boundAction.target ? boundAction.target : null
         } catch {
           boundTarget = null
+        }
+      }
+      // S3 (ADR §5 「首页与项目查询」): with the switch ON the floor's projects are enumerated from the
+      // project-sheet REGISTRY (one row per registered project, archived flag and bounded counts),
+      // under the same union opt-in the bound-sheet scan rides. Keyed by the VERIFIED tenant. A
+      // registry that cannot be read degrades to "not enumerated" — the landing page must open.
+      let projectTargetRows = null
+      if (includePullTargets && stockPreparationProjectSheetsEnabled(process.env)
+        && stockPreparationProjectTargets && typeof stockPreparationProjectTargets.list === 'function') {
+        try {
+          projectTargetRows = await stockPreparationProjectTargets.list({ tenantId: scope.tenantId })
+        } catch {
+          projectTargetRows = null
         }
       }
       const result = await listOperatorProjectDirectory({
@@ -9156,6 +10779,7 @@ function requireStockPreparationAudit() {
         // which tenant A's caller addresses tenant B's staging project.
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         scope,
+        projectTargets: projectTargetRows,
         // 设计稿 N1, BEHIND THE OPT-IN. The module reads `boundTarget` and `audit` only under this
         // flag, so opting out is one decision here rather than four conditionals spread downstream.
         includePullTargets,
@@ -9548,8 +11172,10 @@ function requireStockPreparationAudit() {
       // the recipients cannot find. Resolved through the SAME seam the export read uses
       // (getTableAction + assertStockPreparationTargetReady), so this route cannot come to a
       // different opinion about where stock-prep rows live than the writer does.
+      // S1: a WRITE purpose — an archived project refuses 409 here, before the probe, the cursor,
+      // the audit row and the DingTalk ping (ADR §6).
       const action = assertStockPreparationTargetReady(
-        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
+        await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, projectNo, targetPurpose: 'write' }),
       )
       // ...BUT THAT SHEET IS DEPLOY-GLOBAL, SO IT MUST BE PROVEN TO BE THE CALLER'S OWN FIRST (#6121).
       //
@@ -9830,14 +11456,20 @@ function requireStockPreparationAudit() {
       // target"; anything else is a real fault and propagates.
       let boundTarget = null
       try {
+        // S1: the project number rides in so the fill-view handle names THIS project's sheet (ADR
+        // §3 看板 row); a READ purpose, so an archived project's board still opens.
         const boundAction = await tableActions.getTableAction({
           tenantId: scope.tenantId,
           actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo,
+          targetPurpose: 'read',
         })
         boundTarget = boundAction && boundAction.target ? boundAction.target : null
       } catch (error) {
         const code = error && error.code ? String(error.code) : ''
-        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+        // S1: a project with no registered sheet yet is the same deployment state as an
+        // unconfigured action for this page — 「表还没建好」, not a failure of the board.
+        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND' && code !== 'STOCK_PREPARATION_PROJECT_ABSENT') throw error
       }
       let outcome
       try {
@@ -10522,6 +12154,8 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
             code: loggableRouteFailureCode(error),
           })
         }
+        // S3 fix round 1 (E2): the S3 handlers answer typed refusals only — see toValuesFreeS3RouteError.
+        if (STOCK_PREPARATION_S3_VALUES_FREE_HANDLERS.has(handlerName)) return sendError(res, toValuesFreeS3RouteError(error))
         return sendError(res, error)
       }
     })

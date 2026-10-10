@@ -156,67 +156,66 @@ function onLinkActionClick(href: string, event: MouseEvent): void {
 <style scoped>
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid #d0d0d0;
-  background: #fff;
+  border-radius: var(--ms-radius-md);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
 }
 
 .attendance__btn--primary {
-  background: #1976d2;
-  border-color: #1976d2;
+  background: var(--ms-color-primary);
+  border-color: var(--ms-color-primary);
   color: #fff;
 }
 
 .attendance__btn--inline {
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: 5px 12px;
+  font-size: 13px;
 }
 
 .attendance__admin-task-home {
   display: grid;
-  gap: 14px;
-  margin-bottom: 16px;
-  padding: 14px 0 16px;
-  border-top: 1px solid #e2e8f0;
-  border-bottom: 1px solid #e2e8f0;
+  gap: var(--ms-space-4);
+  margin-bottom: var(--ms-space-4);
+  min-width: 0;
 }
 
 .attendance__admin-task-home-header {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
+  gap: var(--ms-space-4);
+  align-items: flex-end;
 }
 
 .attendance__admin-task-home-eyebrow {
   display: block;
-  margin-bottom: 4px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  margin-bottom: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-task-home h4 {
   margin: 0;
-  color: #0f172a;
-  font-size: 16px;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-page-title);
+  font-weight: var(--ms-font-weight-title);
+  letter-spacing: -0.02em;
 }
 
 .attendance__admin-task-home-hint {
-  max-width: 300px;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
+  max-width: 320px;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.5;
   text-align: right;
 }
 
 .attendance__admin-task-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--ms-space-4);
 }
 
 .attendance__admin-task-group {
@@ -224,92 +223,100 @@ function onLinkActionClick(href: string, event: MouseEvent): void {
   min-width: 0;
   flex-direction: column;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f8fafc;
+  gap: var(--ms-space-4);
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__admin-task-copy {
   display: grid;
-  gap: 5px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__admin-task-copy-title {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__admin-task-copy strong {
-  color: #1f2937;
-  font-size: 13px;
+  color: var(--ms-text-1);
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-task-status {
   flex: 0 0 auto;
-  padding: 1px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.5;
-  border: 1px solid #cbd5e1;
-  background: #f1f5f9;
-  color: #475569;
+  border: 1px solid var(--ms-border-light);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__admin-task-status--ok {
-  border-color: #86efac;
-  background: #dcfce7;
-  color: #166534;
+  border-color: transparent;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .attendance__admin-task-status--needs_attention {
-  border-color: #fdba74;
-  background: #ffedd5;
-  color: #9a3412;
+  border-color: transparent;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .attendance__admin-task-status--not_configured {
-  border-color: #fcd34d;
-  background: #fef3c7;
-  color: #92400e;
+  border-color: transparent;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .attendance__admin-task-status--failed {
-  border-color: #fca5a5;
-  background: #fee2e2;
-  color: #991b1b;
+  border-color: transparent;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
 .attendance__admin-task-status--unknown {
-  border-color: #cbd5e1;
-  background: #f1f5f9;
-  color: #475569;
+  border-color: var(--ms-border-light);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__admin-task-copy span {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .attendance__admin-task-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__admin-task-action {
   text-decoration: none;
 }
 
+@media (max-width: 960px) {
+  .attendance__admin-task-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
   .attendance__admin-task-home-header {
     flex-direction: column;
+    align-items: flex-start;
   }
 
   .attendance__admin-task-home-hint {

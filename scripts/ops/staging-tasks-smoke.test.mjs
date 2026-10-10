@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 
 import {
   KNOWN_TASK_ID_TABLES,
+  M4_TASK_TABLES,
   STAMP_PATTERN,
   isStampedId,
   jwtSubject,
@@ -726,6 +727,7 @@ const REGCLASS_TABLES = [
 ]
 const SQL = {
   regclass: `SELECT ${REGCLASS_TABLES.map(([table, alias]) => `to_regclass('public.${table}') IS NOT NULL AS ${alias}`).join(', ')}`,
+  m4Regclass: `SELECT ${M4_TASK_TABLES.map((table) => `to_regclass('public.${table}') IS NOT NULL AS ${table}_ok`).join(', ')}`,
   permissions: "SELECT count(*)::int AS n FROM permissions WHERE code IN ('tasks:read', 'tasks:write')",
   identityResidue: `SELECT ${IDENTITY_RESIDUE_COUNTS.map(([alias, table, where]) => `(SELECT count(*)::int FROM ${table} WHERE ${where}) AS ${alias}`).join(', ')}`,
   roles: 'INSERT INTO roles (id, name) VALUES ($1, $1), ($2, $2) ON CONFLICT (id) DO NOTHING',
@@ -776,6 +778,7 @@ function expectedResidue(taskIds = TASK_IDS, tables = KNOWN_TASK_ID_TABLES) {
 
 const expectedPreflight = () => [
   { text: SQL.regclass, params: [] },
+  { text: SQL.m4Regclass, params: [] },
   { text: SQL.permissions, params: [] },
   { text: SQL.identityResidue, params: [SEEDED_USERS, SEEDED_ROLES] },
 ]
@@ -893,7 +896,7 @@ function atStep(step, change) {
 }
 
 // Every assertion the smoke makes on a passing run (its `Assertions passed:` line).
-const HAPPY_PATH_ASSERTIONS = 99
+const HAPPY_PATH_ASSERTIONS = 100
 
 test('HARNESS happy path: gate, P0-A and every M3 step in order, residue enumerated over every task_id table, zero residue, PASS line', async () => {
   const r = await runSmoke()
@@ -1402,7 +1405,7 @@ test('HARNESS a permission catalog without tasks:read/tasks:write refuses before
   assert.notEqual(r.code, 0)
   assert.match(r.out, /  FAIL  permission catalog carries tasks:read and tasks:write \(role_permissions FK precondition\)/)
   assert.match(r.out, /permissions table is missing tasks:read\/tasks:write/)
-  assert.deepEqual(r.sql, expectedPreflight().slice(0, 2), 'nothing is queried after the refusal, nothing is written or deleted')
+  assert.deepEqual(r.sql, expectedPreflight().slice(0, 3), 'nothing is queried after the refusal, nothing is written or deleted')
   assert.deepEqual(r.trace, [])
 })
 
@@ -1424,3 +1427,26 @@ test('HARNESS without supplied tokens and without a dev-token route the smoke re
   assert.deepEqual(r.trace, [], 'no tasks request is made without a token')
   assertFullCleanup(r, 'no dev-token route')
 })
+
+// M4 PR-3a (design §9.2): the task routes of this image read three M4 tables, so a database
+// without the M4 migration must fail preflight by name, before any seed row is written.
+test('preflight lists exactly the three M4 tables the task routes read', () => {
+  assert.deepEqual([...M4_TASK_TABLES], ['task_list_items', 'task_list_members', 'task_user_settings'])
+  const source = readFileSync(script, 'utf8')
+  for (const table of M4_TASK_TABLES) {
+    assert.ok(source.includes(`to_regclass('public.${table}') IS NOT NULL AS ${table}_ok`), `preflight must probe ${table}`)
+  }
+})
+
+for (const table of ['task_list_items', 'task_list_members', 'task_user_settings']) {
+  test(`HARNESS a database without ${table} fails preflight naming the M4 migration; nothing is written or deleted`, async () => {
+    const r = await runSmoke({ pgEnv: { FAKE_PG_MISSING_TABLE: `${table}_ok` } })
+    assert.notEqual(r.code, 0)
+    assert.match(r.out, new RegExp(`M4 task tables do not exist \\(${table}\\): the task routes in this image need the M4 migration`))
+    assert.doesNotMatch(r.out, /TASKS_API_DB_SMOKE_PASS/)
+    assert.ok(!r.sql.some((entry) => entry.text.startsWith('INSERT')), 'no seed row may be written')
+    assert.ok(!r.sql.some((entry) => entry.text.startsWith('DELETE')), 'cleanup must not touch rows this run did not write')
+    assert.deepEqual(r.sql, expectedPreflight().slice(0, 2), 'nothing is queried after the refusal')
+    assert.deepEqual(r.trace, [])
+  })
+}

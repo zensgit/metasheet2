@@ -76,10 +76,11 @@ export interface NodeTimeoutConfig {
   unit?: 'business'
 }
 
-// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
-// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
-// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
-// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry. Byte-mirrors backend
+// HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler node
+// (M4 per-node-type fail-closed registry); `continuous_managers` (OD-L3-6(a)), `prior_node_approver`
+// (K3) and `continuous_dept_heads` (K4) are absent — §1.5 names the latter two "do NOT". G-13 pins
+// this exact set (apps/web/tests/approval-handler-node-authoring.spec.ts).
 export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'static_user',
   'static_role',
@@ -90,10 +91,18 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'manager_at_level',
   // Lock-2 §2.4 (RATIFIED 2026-08-17): the two contact-derived rows are ratified for node types
   // `approval` AND `handler` (corpus C-6; Lock-2 resolves the between-locks gap Lock-3 §1.5 left —
-  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grows the
+  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grew the
   // exact set 7→9 in the SAME slice as the kinds, with the G-13 exact-set tests updated together.
   'form_field_user_manager',
   'form_field_user_dept_head',
+  // Lock-3 §1.5 forward rows (RATIFIED; W1-1d, 2026-10-10), quoted: "Forward rows, conditional on
+  // Lock-1 landing: `user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b)
+  // ADMIT". 9→12, strictly these three. The canvas sub-forms are keyed by KIND inside the shared
+  // approval/handler section (ApprovalGraphNodeConfigEditor.vue), so no new form is needed; the
+  // submit page's requester_choice chooser (ApprovalNewView.vue) reads handler nodes too.
+  'user_group',
+  'requester_choice',
+  'dept_head_at_level',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 // Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
@@ -533,6 +542,20 @@ export interface UnifiedApprovalDTO {
    * a parallel region (length ≥ 2). Absent on linear state.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
+   * (start → cursor), computed server-side from the instance's FROZEN runtime graph with every
+   * viewer-independent check the action endpoint applies to a `return` (cancel-round instance kind,
+   * handler cursor, the cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region,
+   * target on the walker's trail before the cursor); the per-viewer seat checks are NOT folded in
+   * (`nodeOperations.allowReturn` / `canDecideCurrentNode` answer those, and the button still
+   * requires both). `[]` = nothing is legal (hide 退回). `undefined` /
+   * `null` = not computed (an older server, a non-pending instance, a bridged / legacy instance
+   * with no frozen graph, or a graph the server could not walk) — fall back to the client-side
+   * candidate logic, never read absence as empty. Carried by the detail read and by every action
+   * response; never by list rows. Presentation only: the gate's own 409s remain the authority.
+   */
+  returnableNodeKeys?: string[] | null
   /** Lock-5 §2.3 / A-2 — server-resolved effective operations for THIS viewer. Detail read only. */
   nodeOperations?: EffectiveNodeOperations | null
   /**

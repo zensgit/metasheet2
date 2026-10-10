@@ -277,9 +277,9 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
       }, fields)[0]).toMatch(new RegExp(kind))
     }
   })
-  // Lock-2 §2.4: the contact-extension pair IS handler-admitted (unlike K5-b below) — a handler
-  // edit carrying either kind must PASS the roster check (positive control for the 7→9 growth).
-  it('Lock-2 §2.4: a HANDLER node carrying form_field_user_manager / form_field_user_dept_head passes the (now nine-member) handler roster', () => {
+  // Lock-2 §2.4: the contact-extension pair IS handler-admitted — a handler edit carrying either
+  // kind must PASS the roster check (positive control for the 7→9 growth).
+  it('Lock-2 §2.4: a HANDLER node carrying form_field_user_manager / form_field_user_dept_head passes the handler roster', () => {
     const fields = [{ id: 'contact', type: 'user' as const, label: '联系人' }]
     expect(validateApprovalNodeEdits({
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'form_field_user_manager', fieldId: 'contact', level: 1 }] },
@@ -289,14 +289,37 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
     }, fields)).toEqual([])
   })
 
-  // Lock-3 §1.5 deferral invariant: dept_head_at_level (K5-b) is NOT in the handler roster in
-  // this slice (Lock-3's forward ADMIT is a separate follow-up — see
-  // approval-handler-node-authoring.spec.ts's exact-set test). A handler carrying it must fail
-  // closed here too.
-  it('Lock-3 §1.5 deferral: a HANDLER node carrying dept_head_at_level is rejected (not in the seven-member handler roster)', () => {
+  // W1-1d — Lock-3 §1.5 forward rows (RATIFIED), quoted: "`user_group` (K1), `requester_choice`
+  // (K2) and `dept_head_at_level` (K5-b) ADMIT". The preview mirrors the widened
+  // HANDLER_ASSIGNEE_SOURCE_KINDS (9→12): a handler edit carrying any of the three now PASSES the
+  // roster check (before W1-1d, dept_head_at_level and user_group were deferral negatives here).
+  // The per-kind SHAPE rule still applies on a handler exactly as on an approval node — the
+  // malformed-shape controls below are flagged as 配置无效 (shape), never 不支持 (roster), so
+  // passing is the roster's doing, not a blanket handler exemption.
+  it('W1-1d / Lock-3 §1.5: a HANDLER node carrying dept_head_at_level / user_group / requester_choice passes the handler roster; a malformed shape is still flagged', () => {
     expect(validateApprovalNodeEdits({
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 1 }] },
-    })[0]).toMatch(/dept_head_at_level/)
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] },
+    })).toEqual([])
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'dept_head_at_level', level: 0 }] },
+    })[0]).toMatch(/dept_head_at_level）配置无效/)
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: [] }] },
+    })[0]).toMatch(/user_group）配置无效/)
+  })
+  // Lock-3 §1.5 "do NOT" row: continuous_dept_heads (K4) stays OUT of the handler roster — the
+  // negative control proving the W1-1d widening is row-selected, not a blanket handler admission
+  // (flagged as 不支持 = roster, not 配置无效 = shape).
+  it('Lock-1 §K4 / Lock-3 §1.5 "do NOT": a HANDLER node carrying continuous_dept_heads is rejected (not in the handler roster)', () => {
+    expect(validateApprovalNodeEdits({
+      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'continuous_dept_heads', levels: 2 }] },
+    })[0]).toMatch(/continuous_dept_heads）不支持/)
   })
 
   it('Lock-1 §K3: prior_node_approver — a non-empty nodeKey passes; an empty/blank one is flagged (isAssigneeSourceValid mirror site)', () => {
@@ -312,7 +335,7 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
   })
   // Lock-3 §1.5: prior_node_approver (K3) has NO handler row at all (not even a forward ADMIT) —
   // a handler carrying it must fail closed.
-  it('Lock-1 §K3 / Lock-3 §1.5: a HANDLER node carrying prior_node_approver is rejected (not in the seven-member handler roster)', () => {
+  it('Lock-1 §K3 / Lock-3 §1.5: a HANDLER node carrying prior_node_approver is rejected (not in the handler roster)', () => {
     expect(validateApprovalNodeEdits({
       a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'prior_node_approver', nodeKey: 'gate' }] },
     })[0]).toMatch(/prior_node_approver/)
@@ -327,13 +350,6 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
     })[0]).toMatch(/user_group/)
     expect(validateApprovalNodeEdits({
       a: { nodeKey: 'a', assigneeSources: [{ kind: 'user_group', groupIds: ['   '] }] },
-    })[0]).toMatch(/user_group/)
-  })
-  // Lock-3 §1.5: user_group (K1) has NO handler row at all (§2.3 registry: "Node types: approval"
-  // only) — a handler carrying it must fail closed.
-  it('Lock-1 §K1 / Lock-3 §1.5: a HANDLER node carrying user_group is rejected (not in the seven-member handler roster)', () => {
-    expect(validateApprovalNodeEdits({
-      a: { nodeKey: 'a', nodeType: 'handler', assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }] },
     })[0]).toMatch(/user_group/)
   })
 })

@@ -2422,7 +2422,9 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // the very next statement after the gate's null check.
     const resolve = idRoutes.find((h) => h.key === 'POST /api/comments/:commentId/resolve')!
     expect(resolve.middleware).toMatch(/^rbacGuard\('comments', 'write'\)$/)
-    expect(resolve.code).toMatch(/const context = await resolveCommentIdContext\(req, res, commentService, commentId\);\s*if \(!context\)\s*return;\s*await commentService\.resolveComment\(commentId\);/)
+    // S3 fix round 1 (R11): the ONE statement admitted in between is the read-only overview refusal — it can
+    // only refuse more (comment writes on the stock-preparation project overview), never let anything through.
+    expect(resolve.code).toMatch(/const context = await resolveCommentIdContext\(req, res, commentService, commentId\);\s*if \(!context\)\s*return;\s*if \(refuseCommentWriteOnReadOnlySheet\(res, context\)\)\s*return;\s*await commentService\.resolveComment\(commentId\);/)
     expect(resolve.code.match(/\bcommentService\.\w+\(/g)).toEqual(['commentService.resolveComment('])
   })
 

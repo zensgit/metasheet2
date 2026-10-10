@@ -1819,7 +1819,16 @@ async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
     }
   }
 
-  const roleIds = await fetchUserRoleIds(actorId)
+  // This pre-check runs BEFORE the handler's own try/catch and Express 4 does not await handlers: a rejected
+  // role read here used to leave the request unanswered (no 5xx, the client waits for its own timeout).
+  // Answer the fixed 500 through the same helper as every other 500 of this file; the error text goes to the log.
+  let roleIds: string[]
+  try {
+    roleIds = await fetchUserRoleIds(actorId)
+  } catch (error) {
+    sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_CHECK_FAILED', 'Failed to verify delegated role-admin access', error)
+    return null as never
+  }
   const delegableNamespaces = deriveDelegableNamespaces(roleIds)
   if (delegableNamespaces.length === 0) {
     jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')

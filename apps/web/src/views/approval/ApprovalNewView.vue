@@ -139,12 +139,13 @@
           </div>
         </el-card>
 
-        <!-- Lock-1 §K2 (提交人自选): submit-time approver chooser. Rendered only when the
-             loaded template's graph carries a requester_choice node; REQUIRED — handleSubmit
-             blocks until every such node has a mode-satisfying choice. The picker is
-             scope-filtered server-side (members/role scope → userIds/roleIds params on the
-             participant directory search); createApproval re-validates the submitted choice
-             fail-closed either way. -->
+        <!-- Lock-1 §K2 (提交人自选): submit-time chooser. Rendered only when the loaded
+             template's graph carries a requester_choice node — an APPROVAL node (K2) or, since
+             W1-1d (Lock-3 §1.5 forward row "`requester_choice` (K2) … ADMIT"), a HANDLER node;
+             REQUIRED — handleSubmit blocks until every such node has a mode-satisfying choice.
+             The picker is scope-filtered server-side (members/role scope → userIds/roleIds params
+             on the participant directory search); createApproval re-validates the submitted
+             choice fail-closed either way. -->
         <el-card
           v-if="requesterChoiceNodes.length > 0"
           class="approval-new__requester-choice"
@@ -152,7 +153,7 @@
           data-testid="approval-requester-choice"
         >
           <template #header>
-            <span class="approval-new__flow-preview-header">{{ t.chooseApprover }}</span>
+            <span class="approval-new__flow-preview-header">{{ requesterChoiceHeader }}</span>
           </template>
           <el-form label-position="top">
             <el-form-item
@@ -171,7 +172,7 @@
                 :remote-method="(q: string) => searchChoiceCandidates(chooser, q)"
                 :loading="choiceSearchLoading[chooser.nodeKey] === true"
                 class="ms-w-100pct"
-                :placeholder="t.chooserPlaceholder"
+                :placeholder="chooser.nodeType === 'handler' ? t.chooserHandlerPlaceholder : t.chooserPlaceholder"
                 :data-testid="`approval-requester-choice-picker-${chooser.nodeKey}`"
                 @update:model-value="(value: string[] | string | null) => setRequesterChoice(chooser, value)"
                 @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
@@ -1215,19 +1216,26 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
 interface RequesterChoiceChooser {
   nodeKey: string
   nodeName: string
+  // W1-1d: the carrying node's type drives the 审批人 / 办理人 wording only — the payload shape,
+  // the per-node key and the server-side validation are identical for both node types.
+  nodeType: 'approval' | 'handler'
   mode: 'single' | 'multi'
   scope: RequesterChoiceAssigneeSource['scope']
 }
 
-// One chooser row per approval node whose sources include a requester_choice entry (the FIRST
-// such source drives the UI; the server validates the submitted choice against EVERY
-// requester_choice source on the node, so the UI can never under-constrain the create).
+// One chooser row per approval OR handler node whose sources include a requester_choice entry
+// (the FIRST such source drives the UI; the server validates the submitted choice against EVERY
+// requester_choice source on the node, so the UI can never under-constrain the create). Handler
+// nodes since W1-1d — Lock-3 §1.5's forward row ("`requester_choice` (K2) … ADMIT" on a handler):
+// the backend collector keys a handler's choice under its node key and REQUIRES it at create
+// (422 APPROVAL_REQUESTER_CHOICE_REQUIRED), so a submit page that skipped handler nodes would
+// leave the requester unable to satisfy the node at all.
 const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
   const choosers: RequesterChoiceChooser[] = []
   for (const node of graph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources
     if (!Array.isArray(sources)) continue
     const source = sources.find(
@@ -1237,12 +1245,23 @@ const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
       choosers.push({
         nodeKey: node.key,
         nodeName: (node.name && node.name.trim()) || node.key,
+        nodeType: node.type,
         mode: source.mode,
         scope: source.scope,
       })
     }
   }
   return choosers
+})
+
+// W1-1d: the chooser card's header names the role(s) the requester is choosing — 审批人 for
+// approval nodes, 办理人 for handler nodes, both when the route carries both kinds of chooser.
+const requesterChoiceHeader = computed<string>(() => {
+  const hasApproval = requesterChoiceNodes.value.some((chooser) => chooser.nodeType === 'approval')
+  const hasHandler = requesterChoiceNodes.value.some((chooser) => chooser.nodeType === 'handler')
+  if (hasApproval && hasHandler) return t.value.chooseApproverAndHandler
+  if (hasHandler) return t.value.chooseHandler
+  return t.value.chooseApprover
 })
 
 const requesterChoices = reactive<Record<string, string[]>>({})
@@ -1276,9 +1295,12 @@ function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
 
 function chooserItemLabel(chooser: RequesterChoiceChooser): string {
   const mode = chooser.mode === 'multi' ? t.value.chooserMulti : t.value.chooserSingle
+  // W1-1d: a handler row is tagged 办理人 so a requester can tell it from an approver row when a
+  // route carries both (the header alone cannot say which row is which).
+  const roleTag = chooser.nodeType === 'handler' ? `${t.value.chooserHandlerTag} · ` : ''
   return isZh.value
-    ? `${chooser.nodeName}（${mode} · ${chooserScopeLabel(chooser)}）`
-    : `${chooser.nodeName} (${mode} · ${chooserScopeLabel(chooser)})`
+    ? `${chooser.nodeName}（${roleTag}${mode} · ${chooserScopeLabel(chooser)}）`
+    : `${chooser.nodeName} (${roleTag}${mode} · ${chooserScopeLabel(chooser)})`
 }
 
 // raw-id-render fix (2026-08-19): SAME contract as ApprovalUserPicker.vue's `optionLabel` — a
@@ -1748,9 +1770,10 @@ async function handleSubmit() {
   // choice — the server would 422 values-free anyway; this surfaces the actionable message.
   const missingChoice = missingRequesterChoiceNode()
   if (missingChoice) {
+    const isHandlerChoice = missingChoice.nodeType === 'handler'
     ElMessage.warning(isZh.value
-      ? `请为「${missingChoice.nodeName}」选择审批人`
-      : `Choose an approver for "${missingChoice.nodeName}"`)
+      ? `请为「${missingChoice.nodeName}」选择${isHandlerChoice ? '办理人' : '审批人'}`
+      : `Choose ${isHandlerChoice ? 'a handler' : 'an approver'} for "${missingChoice.nodeName}"`)
     return
   }
 

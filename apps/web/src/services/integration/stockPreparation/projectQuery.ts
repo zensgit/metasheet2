@@ -54,7 +54,7 @@ export type StockPrepProjectQueryStatusKey = StockPrepHomeFilterKey
  * 二级筛选「来源」 — which store answered for this project.
  *
  * `both` is a SUBSET of `mvp` and of `pull_target`, not a fourth disjoint bucket: a row the archive
- * and the pull target both know satisfies 「归档过」 and 「自助拉取过」 and 「两者都有」. Stated here
+ * and the pull target both know satisfies 「平台登记」 (Q8: formerly 「归档过」) and 「自助拉取过」 and 「两者都有」. Stated here
  * because the alternative reading (mvp = archive-ONLY) is equally defensible and silently produces a
  * different list; whichever one ships has to be written down where the predicate lives.
  */
@@ -81,6 +81,12 @@ export interface StockPrepProjectQueryRow {
   sources: readonly StockPrepProjectSource[] | null
   /** U2 / N6. `null` may mean 「从未导出」 or 「窗口外」 — see `stockPrepLastExportDisplay`. */
   lastExportAt: string | null
+  /**
+   * S3 (ADR §5 「项目查询」, register R-37): the server's registry says this project's sheet is
+   * archived. Drives the row's 「已归档」 tag and the 含已归档 toggle — NOT a status key (the status
+   * keys are the home page's five; adding one would change the home's chips too).
+   */
+  archived: boolean
 }
 
 function normaliseSources(value: unknown): readonly StockPrepProjectSource[] | null {
@@ -134,8 +140,22 @@ export function buildStockPrepProjectQueryRows(
       origin: card.source,
       sources: row ? normaliseSources(row.sources) : null,
       lastExportAt: row && typeof row.lastExportAt === 'string' ? row.lastExportAt : null,
+      archived: card.archived,
     }
   })
+}
+
+/**
+ * S3 — does this directory carry the registry's `archived` flag at all? TRUE only when at least one
+ * row has it as a boolean (switch on, registry enumerated). With it off the 含已归档 toggle has nothing
+ * to act on and is not offered — the same 「a control over a field nobody answered」 rule as the
+ * 来源 filter above.
+ */
+export function stockPrepProjectQueryArchiveKnown(
+  directory: StockPreparationOperatorDirectory | null,
+): boolean {
+  const projects = Array.isArray(directory?.projects) ? directory!.projects : []
+  return projects.some((project) => typeof project.archived === 'boolean')
 }
 
 /**
@@ -168,6 +188,11 @@ export interface StockPrepProjectQueryFilter {
   source: StockPrepProjectQuerySourceKey
   /** The raw search box contents. Trimmed and case-folded here, never by the caller. */
   search: string
+  /**
+   * S3 「含已归档」 — an INDEPENDENT toggle, default ON (absent = on). Off hides archived rows. Not a
+   * status key (ADR §5): the status keys stay the home page's five.
+   */
+  includeArchived?: boolean
 }
 
 /**
@@ -206,7 +231,9 @@ export function filterStockPrepProjectQueryRows(
   filter: StockPrepProjectQueryFilter,
 ): StockPrepProjectQueryRow[] {
   const needle = filter.search.trim().toLowerCase()
-  return rows.filter((row) => matchesStatus(row, filter.status)
+  const includeArchived = filter.includeArchived !== false
+  return rows.filter((row) => (includeArchived || !row.archived)
+    && matchesStatus(row, filter.status)
     && matchesSource(row, filter.source)
     && matchesSearch(row, needle))
 }
