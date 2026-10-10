@@ -30,6 +30,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { RecoveryConflictError } from '../../src/db/recovery-conflict'
+import { censusFile } from './lib/recovery-census-recorder'
 import {
   STOCK_PREP_BUILTIN_ROLE_IDS,
   STOCK_PREP_CUSTOM_ROLE_ID_PATTERN,
@@ -45,6 +46,8 @@ import {
 } from '../../src/services/stock-preparation-members'
 
 const require = createRequire(import.meta.url)
+// O2 recovery-conflict census: SM-15 is this file's registered leg (tests/unit/lib/recovery-census-table.ts).
+const census = censusFile('stock-preparation-members.test.ts')
 const pluginAccess = require('../../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs') as {
   STOCK_PREP_PERMISSION_CODES: readonly string[]
   satisfiesStockPrepAccess: (permissions: string[], code: string) => boolean
@@ -624,11 +627,12 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(configured.match(/namespace = \$2/g)).toHaveLength(2)
   })
 
-  it('SM-15: a recovery-authority conflict on a role write is the uniform retryable 409', async () => {
+  it('SM-15 [recovery-census:stock-prep-members:role-write]: a recovery-authority conflict on a role write is the uniform retryable 409', async () => {
     const h = harness({ transactionThrows: new RecoveryConflictError(undefined) })
     const error = await refusal(h.port.updateCustomRole({ actorId: PLATFORM_ADMIN, roleId: CUSTOM, permissionCodes: ['stock-prep:read'] }))
     expect([error.status, error.code, error.details]).toEqual([409, 'RECOVERY_AUTHORITY_BUSY', { retryable: true }])
     expect(h.audits).toEqual([])
+    census.record('stock-prep-members:role-write')
   })
 
   it('SM-16: index.ts hands the members port to plugin-integration-core only', () => {
