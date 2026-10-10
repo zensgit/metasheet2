@@ -1940,7 +1940,10 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
 //     app pool like the host binding) never stall an unrelated `SELECT 1` on the app pool beyond a
 //     small bound;
 //   * LR-06 a role editor that commits a platform code while the PATCH waits for the role row: the
-//     PATCH reads the committed codes after the lock and refuses (409 HAS_PLATFORM_CODES).
+//     PATCH reads the committed codes after the lock and refuses (409 HAS_PLATFORM_CODES);
+//   * LR-07 (2) while a members write's transaction is open, the APP pool sees no statement and no
+//     connection other than the transaction's own — create, update, rename and a sheet grant (whose
+//     G1 here runs on the test pool), for the delegated admin and for the platform admin.
 // Synthetic ids, random per run; everything this block creates is removed afterwards.
 // ---------------------------------------------------------------------------------------------
 describeDb('S5b members port — role-row lock redesign (real host wiring, real DB)', () => {
@@ -2295,5 +2298,61 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     console.log(`[S5bl LR-06] PATCH after a role editor committed a platform code → ${result}`)
     expect(result).toBe('409/STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES')
     expect(await roleCodes(roleId)).toEqual(['multitable:write', 'stock-prep:read'])
+  })
+
+  it('LR-07 (2) while a members write\'s transaction is open the app pool sees nothing but that transaction\'s own connection', async () => {
+    const roleId = await createRole('S5bl 己', ['stock-prep:read'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [IN_SCOPE, roleId])
+    await setDelegatedSheetWrite(SHEET, true)
+    const target = appPool as unknown as { query: (...args: unknown[]) => unknown; connect: (...args: unknown[]) => unknown }
+    const originalQuery = target.query
+    const originalConnect = target.connect
+    let open = 0
+    const seen = { query: 0, connect: 0 }
+    target.query = function patchedQuery(this: unknown, ...args: unknown[]) {
+      if (open > 0) seen.query += 1
+      return originalQuery.apply(this, args)
+    }
+    target.connect = function patchedConnect(this: unknown, ...args: unknown[]) {
+      if (open > 0) seen.connect += 1
+      return originalConnect.apply(this, args)
+    }
+    const counted = () => {
+      const deps = createStockPrepMembersHostDeps()
+      return createStockPrepMembersPort({
+        ...deps,
+        transaction: async (fn) => {
+          open += 1
+          try {
+            return await deps.transaction(fn)
+          } finally {
+            open -= 1
+          }
+        },
+      })
+    }
+    const report: string[] = []
+    try {
+      const writes: Array<[string, () => Promise<unknown>]> = [
+        ['create (delegated)', () => counted().createCustomRole({ actorId: DELEGATED, name: 'S5bl 计数', permissionCodes: ['stock-prep:read'] }).then((created) => { createdRoleIds.push((created as { roleId: string }).roleId); return created })],
+        ['update (delegated)', () => counted().updateCustomRole({ actorId: DELEGATED, roleId, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })],
+        ['rename (delegated)', () => counted().updateCustomRole({ actorId: DELEGATED, roleId, name: 'S5bl 己改' })],
+        ['grant (delegated)', () => counted().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET, grant: g1(roleId, SHEET) }] })],
+        ['update (platform admin)', () => counted().updateCustomRole({ actorId: ADMIN, roleId, permissionCodes: ['stock-prep:read'] })],
+      ]
+      for (const [name, run] of writes) {
+        seen.query = 0
+        seen.connect = 0
+        await run()
+        report.push(`${name}: query=${seen.query} connect=${seen.connect}`)
+        expect(seen.query, `${name}: no pool statement while the transaction is open`).toBe(0)
+        // The one connect is the transaction's own (db/pg transaction → pool.connect).
+        expect(seen.connect, `${name}: no second pool connection while the transaction is open`).toBe(1)
+      }
+    } finally {
+      target.query = originalQuery
+      target.connect = originalConnect
+    }
+    console.log(`[S5bl LR-07] app-pool use inside the open members transaction — ${report.join('; ')}`)
   })
 })
