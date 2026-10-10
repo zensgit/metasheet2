@@ -893,6 +893,15 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
 # `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
 # substring of any of them; it matches exactly one file on disk.
+# 备料「成员与权限」S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, register R-39, 2026-10-10):
+# ONE token added, `StockPreparationMembers` — the NEW spec (apps/web/tests/StockPreparationMembers.spec.ts)
+# for members.ts (the four S5b routes' client and the reused delegation routes), the members page, the
+# shell's switch-gated 「成员与权限」 rail item and the SMW-ALIGN block the permission-matrix suite defers
+# to for the four new manifest controls. Substring collision checked in BOTH directions: no existing
+# token is a substring of `StockPreparationMembers` (its neighbours `StockPreparationManagedTableRelabelPanel`
+# / `StockPreparationMappingConfirmView` / `StockPreparationMissingComponents` diverge right after
+# `StockPreparationM`), it is not a substring of any token, and it matches exactly one file on disk.
+#
 # 一个项目一张备料表 S3 (ADR adr-stock-prep-project-sheets-20261008 §5, register R-37, 2026-10-09): ONE
 # token added, `StockPreparationProjectOverview` — the NEW spec (apps/web/tests/
 # StockPreparationProjectOverview.spec.ts) for the project overview and the O2(a) project-level
@@ -1873,6 +1882,7 @@ exec npx vitest run \
   StockPreparationLargeBomPullPanel.spec.ts \
   StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
+  StockPreparationMembers \
   StockPreparationMissingComponents \
   StockPreparationOnboardingReadiness \
   StockPreparationOperatorHome \
