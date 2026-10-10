@@ -17,6 +17,8 @@ import { SimpleCronExpression } from '../../src/services/SchedulerService'
 // NOT mocked below — the admit-user route discriminates these REAL classes with `instanceof` (#6259).
 import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/login-name-rule'
 import { PasswordPolicyError } from '../../src/auth/password-policy-error'
+// NOT mocked below — the admission routes discriminate this REAL class with `instanceof`.
+import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 
 const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
 const DEPROVISION_EVENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -838,7 +840,7 @@ describe('adminDirectoryRouter', () => {
 
   describe('approval-card config (CFG-2)', () => {
     const CARD_STATUS = {
-      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      integration: { id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN', status: 'active' },
       linkSecret: { configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false },
       publicAppUrl: { storedValue: 'https://app.example.com', source: 'stored', envOverrideActive: false },
     }
@@ -851,7 +853,7 @@ describe('adminDirectoryRouter', () => {
         ['put', '/integrations/:integrationId/approval-card-config'],
       ] as const) {
         const response = await invokeRoute(method, path, {
-          params: { integrationId: 'dir-1' },
+          params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
           user: { id: 'user-1' },
         })
         expect(response.statusCode).toBe(403)
@@ -865,7 +867,7 @@ describe('adminDirectoryRouter', () => {
       approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(CARD_STATUS)
 
       const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         user: { id: 'admin-1', role: 'admin' },
       })
 
@@ -882,7 +884,7 @@ describe('adminDirectoryRouter', () => {
     it('returns 404 for an unknown integration', async () => {
       approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(null)
       const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
-        params: { integrationId: 'ghost' },
+        params: { integrationId: 'd1000000-0000-4000-8000-0000000000aa' },
         user: { id: 'admin-1', role: 'admin' },
       })
       expect(response.statusCode).toBe(404)
@@ -891,16 +893,16 @@ describe('adminDirectoryRouter', () => {
     it('saves the public app URL and surfaces validation failures as 400', async () => {
       approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockResolvedValue(CARD_STATUS)
       const ok = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { publicAppUrl: 'https://app.example.com' },
         user: { id: 'admin-1', role: 'admin' },
       })
       expect(ok.statusCode).toBe(200)
-      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).toHaveBeenCalledWith('dir-1', 'https://app.example.com')
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', 'https://app.example.com')
 
       approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockRejectedValue(new Error('publicAppUrl must use http or https'))
       const bad = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { publicAppUrl: 'javascript:alert(1)' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -909,7 +911,7 @@ describe('adminDirectoryRouter', () => {
 
     it('rejects a PUT missing publicAppUrl instead of silently clearing', async () => {
       const response = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: {},
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -930,7 +932,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('lists integrations for admin users', async () => {
-    directoryMocks.listDirectoryIntegrations.mockResolvedValue([{ id: 'dir-1', name: 'DingTalk CN' }])
+    directoryMocks.listDirectoryIntegrations.mockResolvedValue([{ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' }])
 
     const response = await invokeRoute('get', '/integrations', {
       user: { id: 'admin-1', role: 'admin' },
@@ -940,7 +942,7 @@ describe('adminDirectoryRouter', () => {
     expect(directoryMocks.listDirectoryIntegrations).toHaveBeenCalledTimes(1)
     expect(response.body).toMatchObject({
       ok: true,
-      data: { items: [{ id: 'dir-1', name: 'DingTalk CN' }] },
+      data: { items: [{ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' }] },
     })
   })
 
@@ -950,7 +952,7 @@ describe('adminDirectoryRouter', () => {
       available: false,
       unavailableReason: 'missing_agent_id',
       source: 'directory_integration',
-      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active', updatedAt: '2026-05-08T00:00:00.000Z' },
+      integration: { id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN', status: 'active', updatedAt: '2026-05-08T00:00:00.000Z' },
       requirements: {
         appKey: { configured: true, selectedKey: 'directory_integrations.config.appKey' },
         appSecret: { configured: true, selectedKey: 'directory_integrations.config.appSecret' },
@@ -960,19 +962,19 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/dingtalk/work-notification', {
-      query: { integrationId: 'dir-1' },
+      query: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore).toHaveBeenCalledWith('dir-1')
+    expect(workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
     expect(JSON.stringify(response.body)).not.toContain('secret')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
         status: {
           unavailableReason: 'missing_agent_id',
-          integration: { id: 'dir-1' },
+          integration: { id: 'd1000000-0000-4000-8000-000000000001' },
         },
       },
     })
@@ -980,13 +982,13 @@ describe('adminDirectoryRouter', () => {
 
   it('tests DingTalk work notification Agent ID without persisting it', async () => {
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockResolvedValue({
-      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      integration: { id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN', status: 'active' },
       agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
       accessTokenVerified: true,
       notificationSent: false,
     })
 
-    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789' }
     const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
       body: payload,
       user: { id: 'admin-1', role: 'admin' },
@@ -1016,7 +1018,7 @@ describe('adminDirectoryRouter', () => {
     })
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(sendError)
 
-    const payload = { integrationId: 'dir-1', agentId: '123456789', recipientUserId: 'user-1' }
+    const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789', recipientUserId: 'user-1' }
     const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
       body: payload,
       user: { id: 'admin-1', role: 'admin' },
@@ -1043,7 +1045,7 @@ describe('adminDirectoryRouter', () => {
       new Error('DingTalk appSecret is required'),
     )
 
-    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789' }
     const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
       body: payload,
       user: { id: 'admin-1', role: 'admin' },
@@ -1061,7 +1063,7 @@ describe('adminDirectoryRouter', () => {
 
   it('saves DingTalk work notification Agent ID and writes a redacted audit entry', async () => {
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockResolvedValue({
-      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      integration: { id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN', status: 'active' },
       agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
       accessTokenVerified: true,
       notificationSent: false,
@@ -1073,7 +1075,7 @@ describe('adminDirectoryRouter', () => {
       },
     })
 
-    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789' }
     const response = await invokeRoute('put', '/dingtalk/work-notification', {
       body: payload,
       user: { id: 'admin-1', role: 'admin' },
@@ -1084,7 +1086,7 @@ describe('adminDirectoryRouter', () => {
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'update',
       resourceType: 'dingtalk-work-notification-config',
-      resourceId: 'dir-1',
+      resourceId: 'd1000000-0000-4000-8000-000000000001',
       meta: expect.objectContaining({
         agentIdLength: 9,
         agentIdValuePrinted: false,
@@ -1094,7 +1096,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('refreshes scheduler state after creating an integration', async () => {
-    directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+    directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
     const payload = {
       name: 'DingTalk CN',
@@ -1114,15 +1116,15 @@ describe('adminDirectoryRouter', () => {
 
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
-    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('dir-1')
+    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
   })
 
   it('refreshes scheduler state after updating an integration', async () => {
-    directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+    directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
     // Owner P2: a cron-only PUT omits `scheduleTimezone`, which means "keep the saved zone" — so the
     // route must READ that zone to validate the cron in the zone it will actually run in. It no longer
     // guesses UTC, so the saved config has to be readable.
-    directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'dir-1', scheduleTimezone: null })
+    directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'd1000000-0000-4000-8000-000000000001', scheduleTimezone: null })
 
     const payload = {
       name: 'DingTalk CN',
@@ -1133,14 +1135,14 @@ describe('adminDirectoryRouter', () => {
     }
 
     const response = await invokeRoute('put', '/integrations/:integrationId', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: payload,
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
-    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('dir-1')
+    expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
+    expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
   })
 
   // Roadmap §7.8 "Validate cron at save time". Before this, `scheduleCron` flowed straight into the DB with
@@ -1200,7 +1202,7 @@ describe('adminDirectoryRouter', () => {
 
     it('rejects an invalid schedule_cron on update with 400 and never calls updateDirectoryIntegration', async () => {
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { name: 'DingTalk CN', scheduleCron: '60 25 * * *' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -1280,11 +1282,11 @@ describe('adminDirectoryRouter', () => {
       // The saved zone is Asia/Shanghai; the body clears it. `30 2 8 3 *` is reachable in Shanghai but,
       // at this clock, is a normal reachable time in UTC too — so use the DST-gap clock and a zone pair
       // where the verdicts differ: cleared ⇒ UTC ⇒ must NOT be validated against the stale Shanghai value.
-      directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'dir-1', scheduleTimezone: 'Asia/Shanghai' })
-      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'd1000000-0000-4000-8000-000000000001', scheduleTimezone: 'Asia/Shanghai' })
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { name: 'DingTalk CN', scheduleCron: '*/10 * * * *', scheduleTimezone: '' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -1301,7 +1303,7 @@ describe('adminDirectoryRouter', () => {
       directoryMocks.getDirectorySyncScheduleSnapshot.mockRejectedValue(new Error('db down'))
 
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { name: 'DingTalk CN', scheduleCron: '*/10 * * * *' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -1315,7 +1317,7 @@ describe('adminDirectoryRouter', () => {
       directoryMocks.getDirectorySyncScheduleSnapshot.mockRejectedValue(new Error('db down'))
 
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { name: 'DingTalk CN', scheduleCron: '60 25 * * *' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -1327,7 +1329,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     it('accepts a valid schedule_cron on create and passes it through unmodified', async () => {
-      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload = { ...basePayload, scheduleCron: '0 2 * * *' }
       const response = await invokeRoute('post', '/integrations', {
@@ -1345,7 +1347,7 @@ describe('adminDirectoryRouter', () => {
       ['empty string', ''],
       ['whitespace only', '   '],
     ])('allows %s schedule_cron on create (= no schedule) without invoking the validator gate', async (_label, scheduleCron) => {
-      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload: Record<string, unknown> = { ...basePayload }
       if (scheduleCron !== undefined) payload.scheduleCron = scheduleCron
@@ -1360,17 +1362,17 @@ describe('adminDirectoryRouter', () => {
     })
 
     it('allows an empty schedule_cron on update (= clears the schedule)', async () => {
-      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload = { name: 'DingTalk CN', scheduleCron: '' }
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: payload,
         user: { id: 'admin-1', role: 'admin' },
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
     })
   })
 
@@ -1415,7 +1417,7 @@ describe('adminDirectoryRouter', () => {
 
     it('rejects an invalid scheduleTimezone on update with 400 and never calls updateDirectoryIntegration', async () => {
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { name: 'DingTalk CN', scheduleTimezone: 'Mars/OlympusMons' },
         user: { id: 'admin-1', role: 'admin' },
       })
@@ -1430,7 +1432,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     it('accepts a valid IANA zone on create and passes it through unmodified', async () => {
-      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload = { ...basePayload, scheduleCron: '0 2 * * *', scheduleTimezone: 'Asia/Shanghai' }
       const response = await invokeRoute('post', '/integrations', {
@@ -1450,7 +1452,7 @@ describe('adminDirectoryRouter', () => {
       ["'UTC'", 'UTC'],
       ["'Etc/UTC'", 'Etc/UTC'],
     ])('allows %s scheduleTimezone on create (= default UTC) without invoking the validator rejection', async (_label, scheduleTimezone) => {
-      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload: Record<string, unknown> = { ...basePayload }
       if (scheduleTimezone !== undefined) payload.scheduleTimezone = scheduleTimezone
@@ -1465,23 +1467,23 @@ describe('adminDirectoryRouter', () => {
     })
 
     it('allows an empty scheduleTimezone on update (= clears to the default)', async () => {
-      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' })
 
       const payload = { name: 'DingTalk CN', scheduleTimezone: '' }
       const response = await invokeRoute('put', '/integrations/:integrationId', {
-        params: { integrationId: 'dir-1' },
+        params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: payload,
         user: { id: 'admin-1', role: 'admin' },
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
     })
   })
 
   it('delegates sync to the directory service and returns its payload', async () => {
     directoryMocks.syncDirectoryIntegration.mockResolvedValue({
-      integration: { id: 'dir-1', name: 'DingTalk CN' },
+      integration: { id: 'd1000000-0000-4000-8000-000000000001', name: 'DingTalk CN' },
       run: { id: 'run-1', status: 'completed' },
       autoAdmissionOnboardingPackets: [
         {
@@ -1501,16 +1503,16 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.syncDirectoryIntegration).toHaveBeenCalledWith('dir-1', 'admin-1')
+    expect(directoryMocks.syncDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', 'admin-1')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
-        integration: { id: 'dir-1' },
+        integration: { id: 'd1000000-0000-4000-8000-000000000001' },
         run: { id: 'run-1', status: 'completed' },
         autoAdmissionOnboardingPackets: [
           {
@@ -1537,13 +1539,13 @@ describe('adminDirectoryRouter', () => {
     )
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(202)
-    expect(response.body).toMatchObject({ ok: true, data: { accepted: true, runId: 'run-async-1', integrationId: 'dir-1' } })
+    expect(response.body).toMatchObject({ ok: true, data: { accepted: true, runId: 'run-async-1', integrationId: 'd1000000-0000-4000-8000-000000000001' } })
     // The request returned while the sync is still in flight.
     resolveSync({ run: { id: 'run-async-1' } })
   })
@@ -1563,7 +1565,7 @@ describe('adminDirectoryRouter', () => {
     )
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true, runId: requestedRunId },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -1571,14 +1573,14 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(202)
     expect(response.body).toMatchObject({
       ok: true,
-      data: { accepted: true, runId: requestedRunId, integrationId: 'dir-1' },
+      data: { accepted: true, runId: requestedRunId, integrationId: 'd1000000-0000-4000-8000-000000000001' },
     })
     resolveSync({ run: { id: requestedRunId } })
   })
 
   it('rejects a malformed reserved run id before starting a sync', async () => {
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true, runId: 'not-a-uuid' },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -1596,7 +1598,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncRunReplayError(requestedRunId))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true, runId: requestedRunId },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -1607,7 +1609,7 @@ describe('adminDirectoryRouter', () => {
       data: {
         accepted: true,
         runId: requestedRunId,
-        integrationId: 'dir-1',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         replayed: true,
       },
     })
@@ -1618,7 +1620,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectoryNotFoundError('Directory integration not found'))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'missing' },
+      params: { integrationId: 'd1000000-0000-4000-8000-0000000000bb' },
       body: { async: true },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -1638,7 +1640,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-1'))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -1653,7 +1655,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-2'))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       body: { async: true },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -1670,18 +1672,18 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.getDirectorySyncRun.mockResolvedValue({ id: runId, status: 'completed' })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
-      params: { integrationId: 'dir-1', runId },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001', runId },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.getDirectorySyncRun).toHaveBeenCalledWith('dir-1', runId)
+    expect(directoryMocks.getDirectorySyncRun).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', runId)
     expect(response.body).toMatchObject({ ok: true, data: { run: { id: runId, status: 'completed' } } })
   })
 
   it('rejects malformed exact sync run ids before querying', async () => {
     const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
-      params: { integrationId: 'dir-1', runId: 'not-a-uuid' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001', runId: 'not-a-uuid' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -1693,7 +1695,7 @@ describe('adminDirectoryRouter', () => {
   it('requires platform admin for an exact sync run lookup', async () => {
     const runId = '22222222-2222-4222-8222-222222222222'
     const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
-      params: { integrationId: 'dir-1', runId },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001', runId },
       user: { id: 'not-admin' },
     })
 
@@ -1706,7 +1708,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.getDirectorySyncRun.mockResolvedValue(null)
 
     const response = await invokeRoute('get', '/integrations/:integrationId/runs/:runId', {
-      params: { integrationId: 'dir-1', runId },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001', runId },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -1716,7 +1718,7 @@ describe('adminDirectoryRouter', () => {
 
   it('previews a sync without applying it', async () => {
     directoryMocks.previewDirectorySyncIntegration.mockResolvedValue({
-      integrationId: 'dir-1',
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
       integrationName: 'CN',
       departmentsSeen: 3,
       accountsSeen: 12,
@@ -1732,12 +1734,12 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.previewDirectorySyncIntegration).toHaveBeenCalledWith('dir-1')
+    expect(directoryMocks.previewDirectorySyncIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
     // The load-bearing property: previewing must never apply.
     expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
     expect(response.body).toMatchObject({
@@ -1748,7 +1750,7 @@ describe('adminDirectoryRouter', () => {
 
   it('requires platform admin for the preview endpoint', async () => {
     const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'not-admin' },
     })
     expect(response.statusCode).toBe(403)
@@ -1762,7 +1764,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.previewDirectorySyncIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-3'))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -1802,7 +1804,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     const payload = {
-      integrationId: 'dir-1',
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
       name: 'DingTalk CN',
       corpId: 'dingcorp',
       appKey: 'ding-app-key',
@@ -1845,19 +1847,19 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/runs', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { page: '1', pageSize: '10' },
       user: { id: 'user-2', role: 'user' },
     })
 
     expect(response.statusCode).toBe(200)
     expect(rbacMocks.isRbacAdmin).toHaveBeenCalledWith('user-2')
-    expect(directoryMocks.listDirectorySyncRuns).toHaveBeenCalledWith('dir-1', { limit: 10, offset: 0 })
+    expect(directoryMocks.listDirectorySyncRuns).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', { limit: 10, offset: 0 })
   })
 
   it('returns the directory sync schedule snapshot', async () => {
     directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({
-      integrationId: 'dir-1',
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
       syncEnabled: true,
       scheduleCron: '*/15 * * * *',
       cronValid: true,
@@ -1870,17 +1872,17 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/schedule', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.getDirectorySyncScheduleSnapshot).toHaveBeenCalledWith('dir-1')
+    expect(directoryMocks.getDirectorySyncScheduleSnapshot).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
         snapshot: {
-          integrationId: 'dir-1',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           observationStatus: 'awaiting_first_run',
         },
       },
@@ -1891,8 +1893,8 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.listDirectorySyncAlerts.mockResolvedValue({
       items: [
         {
-          id: 'alert-1',
-          integrationId: 'dir-1',
+          id: 'a1000000-0000-4000-8000-000000000001',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           runId: 'run-1',
           level: 'warning',
           code: 'root_department_sparse',
@@ -1909,13 +1911,13 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/alerts', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { page: '1', pageSize: '20', filter: 'pending' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.listDirectorySyncAlerts).toHaveBeenCalledWith('dir-1', { limit: 20, offset: 0 }, 'pending')
+    expect(directoryMocks.listDirectorySyncAlerts).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', { limit: 20, offset: 0 }, 'pending')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
@@ -1932,8 +1934,8 @@ describe('adminDirectoryRouter', () => {
           kind: 'inactive_linked',
           reason: '目录成员已停用，但仍绑定本地用户，需要停权处理。',
           account: {
-            id: 'account-1',
-            integrationId: 'dir-1',
+            id: 'ac000000-0000-4000-8000-000000000001',
+            integrationId: 'd1000000-0000-4000-8000-000000000001',
             externalUserId: '0447654442691174',
             name: '林岚',
             localUser: {
@@ -1954,14 +1956,14 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/review-items', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { page: '1', pageSize: '100', filter: 'inactive_linked' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.listDirectoryReviewItems).toHaveBeenCalledWith(
-      'dir-1',
+      'd1000000-0000-4000-8000-000000000001',
       { limit: 100, offset: 0 },
       'inactive_linked',
     )
@@ -1976,18 +1978,18 @@ describe('adminDirectoryRouter', () => {
 
   it('lists directory accounts for an integration', async () => {
     directoryMocks.listDirectoryIntegrationAccounts.mockResolvedValue({
-      items: [{ id: 'account-1', externalUserId: '0447654442691174' }],
+      items: [{ id: 'ac000000-0000-4000-8000-000000000001', externalUserId: '0447654442691174' }],
       total: 1,
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/accounts', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { page: '1', pageSize: '50', q: '0447' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.listDirectoryIntegrationAccounts).toHaveBeenCalledWith('dir-1', { limit: 50, offset: 0 }, '0447')
+    expect(directoryMocks.listDirectoryIntegrationAccounts).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', { limit: 50, offset: 0 }, '0447')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
@@ -2002,7 +2004,7 @@ describe('adminDirectoryRouter', () => {
       items: [
         {
           id: 'dept-row-1',
-          integrationId: 'dir-1',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           externalDepartmentId: '1',
           parentExternalDepartmentId: null,
           name: '总部',
@@ -2016,12 +2018,12 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/departments', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.listDirectoryIntegrationDepartments).toHaveBeenCalledWith('dir-1')
+    expect(directoryMocks.listDirectoryIntegrationDepartments).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
@@ -2046,12 +2048,12 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).toHaveBeenCalledWith('dir-1')
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
@@ -2064,7 +2066,7 @@ describe('adminDirectoryRouter', () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(false)
 
     const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'user-1', role: 'user' },
     })
 
@@ -2076,7 +2078,7 @@ describe('adminDirectoryRouter', () => {
     alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockRejectedValue(new Error('db unreachable'))
 
     const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -2097,13 +2099,13 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { days: '30' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', 30)
     expect(response.body).toMatchObject({
       ok: true,
       data: { metric: { thresholdDays: 30, count: 2 } },
@@ -2114,17 +2116,17 @@ describe('adminDirectoryRouter', () => {
     alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockResolvedValue({ thresholdDays: 30, count: 0, sample: [] })
 
     await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       query: { days: 'not-a-number' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
-    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', 30)
   })
 
   it('rejects an unauthenticated inactive-linked request (401)', async () => {
     const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
     })
 
     expect(response.statusCode).toBe(401)
@@ -2136,7 +2138,7 @@ describe('adminDirectoryRouter', () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(false)
 
     const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'user-1', role: 'user' },
     })
 
@@ -2148,7 +2150,7 @@ describe('adminDirectoryRouter', () => {
     alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockRejectedValue(new Error('db unreachable'))
 
     const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
-      params: { integrationId: 'dir-1' },
+      params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -2163,46 +2165,46 @@ describe('adminDirectoryRouter', () => {
 
   it('returns a single directory account summary', async () => {
     directoryMocks.getDirectoryAccountSummary.mockResolvedValue({
-      id: 'account-1',
-      integrationId: 'dir-1',
+      id: 'ac000000-0000-4000-8000-000000000001',
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
       name: '林岚',
     })
 
     const response = await invokeRoute('get', '/accounts/:accountId', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.getDirectoryAccountSummary).toHaveBeenCalledWith('account-1')
+    expect(directoryMocks.getDirectoryAccountSummary).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
         account: {
-          id: 'account-1',
-          integrationId: 'dir-1',
+          id: 'ac000000-0000-4000-8000-000000000001',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           name: '林岚',
         },
       },
     })
   })
 
-  it('returns 400 when a single directory account lookup is missing accountId', async () => {
-    directoryMocks.getDirectoryAccountSummary.mockRejectedValue(new DirectoryValidationError('accountId is required'))
-
+  it('returns 400 when a single directory account lookup has a blank accountId, before calling the service', async () => {
     const response = await invokeRoute('get', '/accounts/:accountId', {
       params: { accountId: '   ' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(400)
-    expect(response.body).toMatchObject({
+    expect(response.body).toEqual({
       ok: false,
       error: {
-        code: 'DIRECTORY_ACCOUNT_FAILED',
-        message: 'accountId is required',
+        code: 'DIRECTORY_ACCOUNT_ID_INVALID',
+        message: 'accountId must be a UUID',
+        details: undefined,
       },
     })
+    expect(directoryMocks.getDirectoryAccountSummary).not.toHaveBeenCalled()
   })
 
   it('returns a single directory review item', async () => {
@@ -2210,8 +2212,8 @@ describe('adminDirectoryRouter', () => {
       kind: 'pending_binding',
       reason: '目录成员当前不是已确认绑定状态，建议复核。',
       account: {
-        id: 'account-1',
-        integrationId: 'dir-1',
+        id: 'ac000000-0000-4000-8000-000000000001',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         name: '林岚',
       },
       recommendations: [],
@@ -2230,19 +2232,19 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('get', '/accounts/:accountId/review-item', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.getDirectoryReviewItem).toHaveBeenCalledWith('account-1')
+    expect(directoryMocks.getDirectoryReviewItem).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
         item: {
           kind: 'pending_binding',
           account: {
-            id: 'account-1',
+            id: 'ac000000-0000-4000-8000-000000000001',
           },
         },
       },
@@ -2252,8 +2254,8 @@ describe('adminDirectoryRouter', () => {
   it('binds a directory account to a local user reference', async () => {
     directoryMocks.bindDirectoryAccount.mockResolvedValue({
       account: {
-        id: 'account-1',
-        integrationId: 'dir-1',
+        id: 'ac000000-0000-4000-8000-000000000001',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         corpId: 'dingcorp',
         externalUserId: '0447654442691174',
         localUser: {
@@ -2265,7 +2267,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/bind', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {
         localUserRef: 'alpha@example.com',
         enableDingTalkGrant: true,
@@ -2274,7 +2276,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.bindDirectoryAccount).toHaveBeenCalledWith('account-1', {
+    expect(directoryMocks.bindDirectoryAccount).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001', {
       localUserRef: 'alpha@example.com',
       adminUserId: 'admin-1',
       enableDingTalkGrant: true,
@@ -2283,7 +2285,7 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: {
         account: {
-          id: 'account-1',
+          id: 'ac000000-0000-4000-8000-000000000001',
           externalUserId: '0447654442691174',
         },
       },
@@ -2291,7 +2293,7 @@ describe('adminDirectoryRouter', () => {
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'bind',
       resourceType: 'directory-account-link',
-      resourceId: 'account-1',
+      resourceId: 'ac000000-0000-4000-8000-000000000001',
     }))
   })
 
@@ -2301,7 +2303,7 @@ describe('adminDirectoryRouter', () => {
     )
 
     const response = await invokeRoute('post', '/accounts/:accountId/bind', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {
         localUserRef: 'alpha@example.com',
         enableDingTalkGrant: true,
@@ -2321,8 +2323,8 @@ describe('adminDirectoryRouter', () => {
   it('creates a local user and binds the directory account through manual admission', async () => {
     directoryMocks.admitDirectoryAccountUser.mockResolvedValue({
       account: {
-        id: 'account-1',
-        integrationId: 'dir-1',
+        id: 'ac000000-0000-4000-8000-000000000001',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         corpId: 'dingcorp',
         externalUserId: '0447654442691174',
         localUser: {
@@ -2351,7 +2353,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {
         name: '李青',
         email: 'liqing@example.com',
@@ -2362,7 +2364,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('account-1', {
+    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001', {
       adminUserId: 'admin-1',
       name: '李青',
       email: 'liqing@example.com',
@@ -2375,7 +2377,7 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: {
         account: {
-          id: 'account-1',
+          id: 'ac000000-0000-4000-8000-000000000001',
         },
         user: {
           id: 'user-created',
@@ -2395,7 +2397,7 @@ describe('adminDirectoryRouter', () => {
     )
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {
         name: '李青',
         username: 'liqing',
@@ -2420,7 +2422,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new LoginNameRuleError())
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { name: '测试员', username: '测试员', enableDingTalkGrant: true },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -2443,7 +2445,7 @@ describe('adminDirectoryRouter', () => {
     ]))
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { name: '李青', username: 'liqing', password: '123456Asd', enableDingTalkGrant: true },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -2465,7 +2467,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new Error(LOGIN_NAME_RULE_MESSAGE))
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { name: '测试员', username: '测试员', enableDingTalkGrant: true },
       user: { id: 'admin-1', role: 'admin' },
     })
@@ -2480,8 +2482,8 @@ describe('adminDirectoryRouter', () => {
   it('supports manual admission without email when username or mobile is provided', async () => {
     directoryMocks.admitDirectoryAccountUser.mockResolvedValue({
       account: {
-        id: 'account-1',
-        integrationId: 'dir-1',
+        id: 'ac000000-0000-4000-8000-000000000001',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         corpId: 'dingcorp',
         externalUserId: '0447654442691174',
         localUser: {
@@ -2513,7 +2515,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: {
         name: '李青',
         username: 'liqing',
@@ -2524,7 +2526,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('account-1', {
+    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001', {
       adminUserId: 'admin-1',
       name: '李青',
       email: '',
@@ -2550,8 +2552,8 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
-          id: 'account-1',
-          integrationId: 'dir-1',
+          id: 'ac000000-0000-4000-8000-000000000001',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           corpId: 'dingcorp',
           externalUserId: '0447654442691174',
           localUser: {
@@ -2563,8 +2565,8 @@ describe('adminDirectoryRouter', () => {
       },
       {
         account: {
-          id: 'account-2',
-          integrationId: 'dir-1',
+          id: 'ac000000-0000-4000-8000-000000000002',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           corpId: 'dingcorp',
           externalUserId: '0447654442691175',
           localUser: {
@@ -2580,12 +2582,12 @@ describe('adminDirectoryRouter', () => {
       body: {
         bindings: [
           {
-            accountId: 'account-1',
+            accountId: 'ac000000-0000-4000-8000-000000000001',
             localUserRef: 'alpha@example.com',
             enableDingTalkGrant: true,
           },
           {
-            accountId: 'account-2',
+            accountId: 'ac000000-0000-4000-8000-000000000002',
             localUserRef: 'beta@example.com',
             enableDingTalkGrant: false,
           },
@@ -2597,12 +2599,12 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.batchBindDirectoryAccounts).toHaveBeenCalledWith([
       {
-        accountId: 'account-1',
+        accountId: 'ac000000-0000-4000-8000-000000000001',
         localUserRef: 'alpha@example.com',
         enableDingTalkGrant: true,
       },
       {
-        accountId: 'account-2',
+        accountId: 'ac000000-0000-4000-8000-000000000002',
         localUserRef: 'beta@example.com',
         enableDingTalkGrant: false,
       },
@@ -2614,8 +2616,8 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: {
         items: [
-          { id: 'account-1' },
-          { id: 'account-2' },
+          { id: 'ac000000-0000-4000-8000-000000000001' },
+          { id: 'ac000000-0000-4000-8000-000000000002' },
         ],
       },
     })
@@ -2628,18 +2630,18 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
       succeeded: [
         {
-          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: { id: 'u1', email: 'alpha@example.com' } },
+          account: { id: 'ac000000-0000-4000-8000-000000000001', integrationId: 'd1000000-0000-4000-8000-000000000001', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: { id: 'u1', email: 'alpha@example.com' } },
           previousLocalUser: null,
         },
       ],
-      failed: [{ accountId: 'account-2', error: 'DingTalk account is already bound to another local user' }],
+      failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002', error: 'DingTalk account is already bound to another local user' }],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-bind', {
       body: {
         bindings: [
-          { accountId: 'account-1', localUserRef: 'alpha@example.com' },
-          { accountId: 'account-2', localUserRef: 'beta@example.com' },
+          { accountId: 'ac000000-0000-4000-8000-000000000001', localUserRef: 'alpha@example.com' },
+          { accountId: 'ac000000-0000-4000-8000-000000000002', localUserRef: 'beta@example.com' },
         ],
       },
       user: { id: 'admin-1', role: 'admin' },
@@ -2651,15 +2653,15 @@ describe('adminDirectoryRouter', () => {
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'bind',
-      resourceId: 'account-1',
+      resourceId: 'ac000000-0000-4000-8000-000000000001',
     }))
     expect(response.body).toMatchObject({
       ok: true,
       data: {
-        items: [{ id: 'account-1' }],
+        items: [{ id: 'ac000000-0000-4000-8000-000000000001' }],
         updatedCount: 1,
         failedCount: 1,
-        failed: [{ accountId: 'account-2', error: expect.stringContaining('already bound') }],
+        failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002', error: expect.stringContaining('already bound') }],
       },
     })
   })
@@ -2670,12 +2672,12 @@ describe('adminDirectoryRouter', () => {
   it('answers a batch-bind that commits nothing with the status of its first failure type', async () => {
     directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
       succeeded: [],
-      failed: [{ accountId: 'account-1', error: 'DingTalk account is already bound to another local user' }],
+      failed: [{ accountId: 'ac000000-0000-4000-8000-000000000001', error: 'DingTalk account is already bound to another local user' }],
       failedErrors: [new DirectoryConflictError('DingTalk account is already bound to another local user')],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-bind', {
-      body: { bindings: [{ accountId: 'account-1', localUserRef: 'alpha@example.com' }] },
+      body: { bindings: [{ accountId: 'ac000000-0000-4000-8000-000000000001', localUserRef: 'alpha@example.com' }] },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -2696,8 +2698,8 @@ describe('adminDirectoryRouter', () => {
       succeeded: [
         {
           account: {
-            id: 'account-1',
-            integrationId: 'dir-1',
+            id: 'ac000000-0000-4000-8000-000000000001',
+            integrationId: 'd1000000-0000-4000-8000-000000000001',
             corpId: 'dingcorp',
             externalUserId: '0447654442691174',
             localUser: {
@@ -2727,18 +2729,18 @@ describe('adminDirectoryRouter', () => {
           enableDingTalkGrantApplied: false,
         },
       ],
-      failed: [{ accountId: 'account-2', error: 'User with this username already exists' }],
+      failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002', error: 'User with this username already exists' }],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-admit-users', {
       body: {
-        accountIds: ['account-1', 'account-2'],
+        accountIds: ['ac000000-0000-4000-8000-000000000001', 'ac000000-0000-4000-8000-000000000002'],
       },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.batchAdmitDirectoryAccountUsers).toHaveBeenCalledWith(['account-1', 'account-2'], {
+    expect(directoryMocks.batchAdmitDirectoryAccountUsers).toHaveBeenCalledWith(['ac000000-0000-4000-8000-000000000001', 'ac000000-0000-4000-8000-000000000002'], {
       adminUserId: 'admin-1',
       enableDingTalkGrant: false,
     })
@@ -2758,7 +2760,7 @@ describe('adminDirectoryRouter', () => {
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'bind',
       resourceType: 'directory-account-link',
-      resourceId: 'account-1',
+      resourceId: 'ac000000-0000-4000-8000-000000000001',
       meta: expect.objectContaining({
         enableDingTalkGrant: false,
         enableDingTalkGrantApplied: false,
@@ -2770,7 +2772,7 @@ describe('adminDirectoryRouter', () => {
     expect(response.body).toMatchObject({
       ok: true,
       data: {
-        items: [{ id: 'account-1' }],
+        items: [{ id: 'ac000000-0000-4000-8000-000000000001' }],
         users: [{ id: 'user-1', username: 'dt_0447654442691174_account1' }],
         onboardingPackets: [{
           userId: 'user-1',
@@ -2781,7 +2783,7 @@ describe('adminDirectoryRouter', () => {
         }],
         updatedCount: 1,
         failedCount: 1,
-        failed: [{ accountId: 'account-2', error: expect.stringContaining('username') }],
+        failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002', error: expect.stringContaining('username') }],
         enableDingTalkGrant: false,
         enableDingTalkGrantApplied: false,
         enableDingTalkGrantRequested: false,
@@ -2792,12 +2794,12 @@ describe('adminDirectoryRouter', () => {
   it('answers a batch admission that commits nothing with the status of its first failure type', async () => {
     directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
       succeeded: [],
-      failed: [{ accountId: 'account-1', error: 'User with this username already exists' }],
+      failed: [{ accountId: 'ac000000-0000-4000-8000-000000000001', error: 'User with this username already exists' }],
       failedErrors: [new DirectoryConflictError('User with this username already exists')],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-admit-users', {
-      body: { accountIds: ['account-1'] },
+      body: { accountIds: ['ac000000-0000-4000-8000-000000000001'] },
       user: { id: 'admin-1', role: 'admin' },
     })
 
@@ -2813,33 +2815,33 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({
       succeeded: [
         {
-          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: null },
+          account: { id: 'ac000000-0000-4000-8000-000000000001', integrationId: 'd1000000-0000-4000-8000-000000000001', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: null },
           previousLocalUser: { id: 'u1', email: 'alpha@example.com', name: 'Alpha' },
         },
       ],
-      failed: [{ accountId: 'account-2', error: 'Directory account not found' }],
+      failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002', error: 'Directory account not found' }],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-unbind', {
-      body: { accountIds: ['account-1', 'account-2'] },
+      body: { accountIds: ['ac000000-0000-4000-8000-000000000001', 'ac000000-0000-4000-8000-000000000002'] },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
-    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'unbind', resourceId: 'account-1' }))
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'unbind', resourceId: 'ac000000-0000-4000-8000-000000000001' }))
     expect(response.body).toMatchObject({
       ok: true,
-      data: { updatedCount: 1, failedCount: 1, failed: [{ accountId: 'account-2' }] },
+      data: { updatedCount: 1, failedCount: 1, failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002' }] },
     })
   })
 
   it('unbinds a directory account', async () => {
     directoryMocks.unbindDirectoryAccount.mockResolvedValue({
       account: {
-        id: 'account-1',
+        id: 'ac000000-0000-4000-8000-000000000001',
         externalUserId: '0447654442691174',
-        integrationId: 'dir-1',
+        integrationId: 'd1000000-0000-4000-8000-000000000001',
         corpId: 'dingcorp',
         localUser: null,
       },
@@ -2851,20 +2853,20 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/accounts/:accountId/unbind', {
-      params: { accountId: 'account-1' },
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
       body: { disableDingTalkGrant: true },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.unbindDirectoryAccount).toHaveBeenCalledWith('account-1', {
+    expect(directoryMocks.unbindDirectoryAccount).toHaveBeenCalledWith('ac000000-0000-4000-8000-000000000001', {
       adminUserId: 'admin-1',
       disableDingTalkGrant: true,
     })
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'unbind',
       resourceType: 'directory-account-link',
-      resourceId: 'account-1',
+      resourceId: 'ac000000-0000-4000-8000-000000000001',
       meta: expect.objectContaining({
         disableDingTalkGrant: true,
       }),
@@ -2875,9 +2877,9 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
-          id: 'account-1',
+          id: 'ac000000-0000-4000-8000-000000000001',
           externalUserId: '0447654442691174',
-          integrationId: 'dir-1',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           corpId: 'dingcorp',
           localUser: null,
         },
@@ -2889,9 +2891,9 @@ describe('adminDirectoryRouter', () => {
       },
       {
         account: {
-          id: 'account-2',
+          id: 'ac000000-0000-4000-8000-000000000002',
           externalUserId: '0447654442691175',
-          integrationId: 'dir-1',
+          integrationId: 'd1000000-0000-4000-8000-000000000001',
           corpId: 'dingcorp',
           localUser: null,
         },
@@ -2905,7 +2907,7 @@ describe('adminDirectoryRouter', () => {
 
     const response = await invokeRoute('post', '/accounts/batch-unbind', {
       body: {
-        accountIds: ['account-1', 'account-2'],
+        accountIds: ['ac000000-0000-4000-8000-000000000001', 'ac000000-0000-4000-8000-000000000002'],
         disableDingTalkGrant: true,
       },
       user: { id: 'admin-1', role: 'admin' },
@@ -2913,7 +2915,7 @@ describe('adminDirectoryRouter', () => {
 
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.batchUnbindDirectoryAccounts).toHaveBeenCalledWith(
-      ['account-1', 'account-2'],
+      ['ac000000-0000-4000-8000-000000000001', 'ac000000-0000-4000-8000-000000000002'],
       {
         adminUserId: 'admin-1',
         disableDingTalkGrant: true,
@@ -2924,8 +2926,8 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: {
         items: [
-          { id: 'account-1' },
-          { id: 'account-2' },
+          { id: 'ac000000-0000-4000-8000-000000000001' },
+          { id: 'ac000000-0000-4000-8000-000000000002' },
         ],
       },
     })
@@ -2933,8 +2935,8 @@ describe('adminDirectoryRouter', () => {
 
   it('acknowledges a directory sync alert', async () => {
     directoryMocks.acknowledgeDirectorySyncAlert.mockResolvedValue({
-      id: 'alert-1',
-      integrationId: 'dir-1',
+      id: 'a1000000-0000-4000-8000-000000000001',
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
       runId: 'run-1',
       level: 'warning',
       code: 'root_department_sparse',
@@ -2948,17 +2950,239 @@ describe('adminDirectoryRouter', () => {
     })
 
     const response = await invokeRoute('post', '/alerts/:alertId/ack', {
-      params: { alertId: 'alert-1' },
+      params: { alertId: 'a1000000-0000-4000-8000-000000000001' },
       user: { id: 'admin-1', role: 'admin' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.acknowledgeDirectorySyncAlert).toHaveBeenCalledWith('alert-1', 'admin-1')
+    expect(directoryMocks.acknowledgeDirectorySyncAlert).toHaveBeenCalledWith('a1000000-0000-4000-8000-000000000001', 'admin-1')
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'acknowledge',
       resourceType: 'directory-sync-alert',
-      resourceId: 'alert-1',
+      resourceId: 'a1000000-0000-4000-8000-000000000001',
     }))
+  })
+
+  // Every :integrationId / :accountId / :alertId is a uuid column. A malformed one used to reach Postgres as
+  // `$1::uuid` (22P02) and answer the route's generic 500; now it is refused with 400 after the admin gate.
+  describe('malformed path ids answer 400 after the admin gate, before any service call', () => {
+    const ADMIN = { id: 'admin-1', role: 'admin' }
+    const VALID_PARAMS: Record<string, string> = {
+      integrationId: 'd1000000-0000-4000-8000-000000000001',
+      accountId: 'ac000000-0000-4000-8000-000000000001',
+      alertId: 'a1000000-0000-4000-8000-000000000001',
+      runId: '7e000000-0000-4000-8000-000000000001',
+      eventId: DEPROVISION_EVENT_ID,
+    }
+    const EXPECTED: Record<string, { code: string; message: string }> = {
+      integrationId: { code: 'DIRECTORY_INTEGRATION_ID_INVALID', message: 'integrationId must be a UUID' },
+      accountId: { code: 'DIRECTORY_ACCOUNT_ID_INVALID', message: 'accountId must be a UUID' },
+      alertId: { code: 'DIRECTORY_ALERT_ID_INVALID', message: 'alertId must be a UUID' },
+    }
+    // The deprovision-events route had its own check before this one; it keeps its code.
+    const OWN_CODE: Record<string, string> = {
+      'GET /integrations/:integrationId/deprovision-events': 'DEPROVISION_INTEGRATION_ID_INVALID',
+    }
+    const MALFORMED = [
+      'not-a-uuid',
+      'dir-1',
+      "1' OR '1'='1",
+      'd1000000-0000-4000-8000-00000000000',
+      'd1000000-0000-4000-8000-0000000000011',
+      ' d1000000-0000-4000-8000-000000000001',
+      'd1000000000040008000000000000001',
+      '{d1000000-0000-4000-8000-000000000001}',
+      '',
+    ]
+    const ALL_MOCK_GROUPS = [
+      directoryMocks,
+      schedulerMocks,
+      workNotificationMocks,
+      deprovisionMocks,
+      alertDeliveryMocks,
+      approvalCardConfigMocks,
+      auditMocks,
+    ]
+
+    function paramRoutes(): Array<{ method: 'get' | 'post' | 'put'; path: string; params: string[] }> {
+      const router = adminDirectoryRouter()
+      const out: Array<{ method: 'get' | 'post' | 'put'; path: string; params: string[] }> = []
+      for (const layer of router.stack) {
+        const route = layer.route as { path?: unknown; methods?: Record<string, boolean> } | undefined
+        if (!route || typeof route.path !== 'string') continue
+        const params = Object.keys(EXPECTED).filter((name) => route.path!.toString().includes(`:${name}`))
+        if (params.length === 0) continue
+        for (const [method, on] of Object.entries(route.methods ?? {})) {
+          if (!on) continue
+          if (method !== 'get' && method !== 'post' && method !== 'put') throw new Error(`unexpected method ${method} on ${route.path}`)
+          out.push({ method, path: route.path, params })
+        }
+      }
+      return out
+    }
+
+    function clearAllServiceMocks() {
+      for (const group of ALL_MOCK_GROUPS) {
+        for (const fn of Object.values(group)) (fn as { mockClear?: () => void }).mockClear?.()
+      }
+    }
+
+    function calledServiceMocks(): string[] {
+      const called: string[] = []
+      for (const group of ALL_MOCK_GROUPS) {
+        for (const [name, fn] of Object.entries(group)) {
+          if (((fn as { mock?: { calls: unknown[] } }).mock?.calls.length ?? 0) > 0) called.push(name)
+        }
+      }
+      return called
+    }
+
+    it('is not vacuous: 22 routes carry one of the three ids (15 integration, 1 deprovision-events, 5 account, 1 alert)', () => {
+      const routes = paramRoutes()
+      expect(routes).toHaveLength(22)
+      expect(routes.filter((r) => r.params.includes('integrationId'))).toHaveLength(16)
+      expect(routes.filter((r) => r.params.includes('accountId'))).toHaveLength(5)
+      expect(routes.filter((r) => r.params.includes('alertId'))).toHaveLength(1)
+    })
+
+    it('every such route answers 400 with its code and fixed sentence for each malformed id, and calls nothing', async () => {
+      rbacMocks.isRbacAdmin.mockResolvedValue(true)
+      clearAllServiceMocks()
+      const wrong: string[] = []
+      for (const { method, path, params } of paramRoutes()) {
+        for (const name of params) {
+          for (const bad of MALFORMED) {
+            const response = await invokeRoute(method, path, { params: { ...VALID_PARAMS, [name]: bad }, user: ADMIN })
+            const label = `${method.toUpperCase()} ${path}`
+            const expected = {
+              ok: false,
+              error: {
+                code: OWN_CODE[label] ?? EXPECTED[name].code,
+                message: EXPECTED[name].message,
+                details: undefined,
+              },
+            }
+            if (response.statusCode !== 400 || JSON.stringify(response.body) !== JSON.stringify(expected)) {
+              wrong.push(`${label} ${name}=${JSON.stringify(bad)} → ${response.statusCode} ${JSON.stringify(response.body)}`)
+            }
+          }
+        }
+      }
+      expect(wrong).toEqual([])
+      expect(calledServiceMocks()).toEqual([])
+    })
+
+    it('the admin gate still answers first: 401 without a user, 403 for a non-admin, whatever the id', async () => {
+      rbacMocks.isRbacAdmin.mockResolvedValue(false)
+      for (const { method, path, params } of paramRoutes()) {
+        const malformed = Object.fromEntries(params.map((name) => [name, 'not-a-uuid']))
+        const anonymous = await invokeRoute(method, path, { params: { ...VALID_PARAMS, ...malformed } })
+        expect({ path, status: anonymous.statusCode }).toEqual({ path, status: 401 })
+        const nonAdmin = await invokeRoute(method, path, { params: { ...VALID_PARAMS, ...malformed }, user: { id: 'user-1', role: 'user' } })
+        expect({ path, status: nonAdmin.statusCode }).toEqual({ path, status: 403 })
+      }
+    })
+
+    it('an uppercase uuid passes the shape check and reaches the service as sent', async () => {
+      const upper = 'AC000000-0000-4000-8000-00000000000F'
+      directoryMocks.getDirectoryAccountSummary.mockResolvedValue({ id: upper, integrationId: VALID_PARAMS.integrationId, name: '林岚' })
+
+      const response = await invokeRoute('get', '/accounts/:accountId', {
+        params: { accountId: upper },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.getDirectoryAccountSummary).toHaveBeenCalledWith(upper)
+    })
+  })
+
+  // Admission claims the new user's email / username / mobile as login aliases. One already claimed by another
+  // account used to answer the generic 500; it is a conflict the admin can resolve.
+  describe('admission: a login alias already claimed by another account answers 409', () => {
+    const ADMIN = { id: 'admin-1', role: 'admin' }
+    const ACCOUNT_ID = 'ac000000-0000-4000-8000-000000000001'
+    const CONFLICT = {
+      ok: false,
+      error: {
+        code: 'LOGIN_ALIAS_CONFLICT',
+        message: 'A login identifier is already claimed by another account',
+        details: undefined,
+      },
+    }
+
+    it('single admission: ALIAS_CONFLICT → 409 LOGIN_ALIAS_CONFLICT with the alias service sentence, no audit', async () => {
+      directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new LoginAliasClaimError('ALIAS_CONFLICT', 'email'))
+
+      const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+        params: { accountId: ACCOUNT_ID },
+        body: { name: '林岚', email: 'lin@example.com' },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toEqual(CONFLICT)
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    })
+
+    it('single admission: a failed alias WRITE stays the route fixed 500', async () => {
+      directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new LoginAliasClaimError('ALIAS_WRITE_FAILED', 'email'))
+
+      const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+        params: { accountId: ACCOUNT_ID },
+        body: { name: '林岚', email: 'lin@example.com' },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'DIRECTORY_ADMISSION_FAILED',
+          message: 'Failed to create and bind local user for directory account',
+          details: undefined,
+        },
+      })
+    })
+
+    it('batch admission that committed nothing: the first item\'s ALIAS_CONFLICT → 409 LOGIN_ALIAS_CONFLICT', async () => {
+      directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+        succeeded: [],
+        failed: [{ accountId: ACCOUNT_ID, error: 'A login identifier is already claimed by another account' }],
+        failedErrors: [new LoginAliasClaimError('ALIAS_CONFLICT', 'mobile')],
+      })
+
+      const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+        body: { accountIds: [ACCOUNT_ID] },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toEqual(CONFLICT)
+    })
+
+    it('batch admission that committed nothing: the first item\'s failed alias WRITE stays the route fixed 500', async () => {
+      directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+        succeeded: [],
+        failed: [{ accountId: ACCOUNT_ID, error: 'Failed to claim login alias' }],
+        failedErrors: [new LoginAliasClaimError('ALIAS_WRITE_FAILED', 'email')],
+      })
+
+      const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+        body: { accountIds: [ACCOUNT_ID] },
+        user: ADMIN,
+      })
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'DIRECTORY_BATCH_ADMISSION_FAILED',
+          message: 'Failed to batch create and bind local users for directory accounts',
+          details: undefined,
+        },
+      })
+    })
   })
 })
 
