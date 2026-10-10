@@ -47,7 +47,7 @@ const BARE_ANCHOR_MESSAGE =
   'found a bare local org anchor (a local org anchor with no directory account, department or org membership; '
   + 'an interrupted run or a failed local-directory call on an earlier server version can leave one); nothing was written '
   + '-- on a fresh install, complete it by calling POST /api/admin/directory/local/accounts for the admin manually; '
-  + 'on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step'
+  + 'on an existing deployment, re-run with VERIFY_LOGIN=0 (PowerShell: -VerifyLogin 0) to skip this step'
 
 // The step's three read-only statements, pinned VERBATIM. They are the tenancy guard (gate r1
 // P2-1): any semantic change to either twin must change these literals in the same PR, and the
@@ -349,7 +349,7 @@ for (const { name, run, enabled } of RUNNERS) {
         assert.match(result.output, /found a bare local org anchor \(a local org anchor with no directory account, department or org membership;/)
         assert.match(result.output, /an interrupted run or a failed local-directory call on an earlier server version can leave one/)
         assert.match(result.output, /on a fresh install, complete it by calling POST \/api\/admin\/directory\/local\/accounts for the admin manually/)
-        assert.match(result.output, /on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step/)
+        assert.match(result.output, /on an existing deployment, re-run with VERIFY_LOGIN=0 \(PowerShell: -VerifyLogin 0\) to skip this step/)
         assert.equal(fixture.readSql().filter(chunk => chunk === EXPECTED_POSTCONDITION_SQL).length, 0)
         assert.doesNotMatch(result.output, /skipped: org membership or directory data already exists/)
         assertStepLinesValuesFree(result.output)
@@ -359,6 +359,9 @@ for (const { name, run, enabled } of RUNNERS) {
     }
   })
 
+  // sh reads the VERIFY_LOGIN=0 environment variable; ps1 is driven with -VerifyLogin 0 (its parameter
+  // defaults to '1', so on PowerShell the environment variable alone does not reach it -- which is why
+  // the copy names the PowerShell form explicitly).
   test(`${name}: the escape hatch the bare-anchor copy recommends works -- VERIFY_LOGIN=0 skips the step (exit 0)`, opts, async () => {
     const fixture = makeFixture()
     try {

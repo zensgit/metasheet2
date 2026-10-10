@@ -510,7 +510,7 @@ if ($resolvedVerifyLogin -ne '1') {
       throw "${localOrgLogPrefix}: the read-only leftover-anchor check returned an unexpected shape; nothing was written"
     }
     if ($leftoverCounts -eq '1:0:0:0') {
-      throw "${localOrgLogPrefix}: found a bare local org anchor (a local org anchor with no directory account, department or org membership; an interrupted run or a failed local-directory call on an earlier server version can leave one); nothing was written -- on a fresh install, complete it by calling POST /api/admin/directory/local/accounts for the admin manually; on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step"
+      throw "${localOrgLogPrefix}: found a bare local org anchor (a local org anchor with no directory account, department or org membership; an interrupted run or a failed local-directory call on an earlier server version can leave one); nothing was written -- on a fresh install, complete it by calling POST /api/admin/directory/local/accounts for the admin manually; on an existing deployment, re-run with VERIFY_LOGIN=0 (PowerShell: -VerifyLogin 0) to skip this step"
     }
   }
 
